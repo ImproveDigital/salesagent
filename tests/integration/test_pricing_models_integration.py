@@ -3,7 +3,7 @@
 Tests the full flow: create product with pricing_options → get products → create media buy.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -284,8 +284,8 @@ async def test_create_media_buy_with_cpm_fixed_pricing(setup_tenant_with_pricing
                 budget=10000.0,
             )
         ],
-        start_time="2026-02-01T00:00:00Z",
-        end_time="2026-02-28T23:59:59Z",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        end_time=datetime.now(UTC) + timedelta(days=28),
     )
 
     context = ToolContext(
@@ -330,8 +330,8 @@ async def test_create_media_buy_with_cpm_auction_pricing(setup_tenant_with_prici
                 budget=10000.0,
             )
         ],
-        start_time="2026-02-01T00:00:00Z",
-        end_time="2026-02-28T23:59:59Z",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        end_time=datetime.now(UTC) + timedelta(days=28),
     )
 
     context = ToolContext(
@@ -376,8 +376,8 @@ async def test_create_media_buy_auction_bid_below_floor_fails(setup_tenant_with_
                 budget=10000.0,
             )
         ],
-        start_time="2026-02-01T00:00:00Z",
-        end_time="2026-02-28T23:59:59Z",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        end_time=datetime.now(UTC) + timedelta(days=28),
     )
 
     context = ToolContext(
@@ -420,8 +420,8 @@ async def test_create_media_buy_with_cpcv_pricing(setup_tenant_with_pricing_prod
                 budget=8000.0,  # Above min spend of 5000
             )
         ],
-        start_time="2026-02-01T00:00:00Z",
-        end_time="2026-02-28T23:59:59Z",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        end_time=datetime.now(UTC) + timedelta(days=28),
     )
 
     context = ToolContext(
@@ -465,8 +465,8 @@ async def test_create_media_buy_below_min_spend_fails(setup_tenant_with_pricing_
                 budget=3000.0,  # Below min spend of 5000
             )
         ],
-        start_time="2026-02-01T00:00:00Z",
-        end_time="2026-02-28T23:59:59Z",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        end_time=datetime.now(UTC) + timedelta(days=28),
     )
 
     context = ToolContext(
@@ -509,8 +509,8 @@ async def test_create_media_buy_multi_pricing_choose_cpp(setup_tenant_with_prici
                 budget=15000.0,  # Above min spend of 10000
             )
         ],
-        start_time="2026-02-01T00:00:00Z",
-        end_time="2026-02-28T23:59:59Z",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        end_time=datetime.now(UTC) + timedelta(days=28),
     )
 
     context = ToolContext(
@@ -554,8 +554,8 @@ async def test_create_media_buy_invalid_pricing_model_fails(setup_tenant_with_pr
                 budget=10000.0,
             )
         ],
-        start_time="2026-02-01T00:00:00Z",
-        end_time="2026-02-28T23:59:59Z",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+        end_time=datetime.now(UTC) + timedelta(days=28),
     )
 
     context = ToolContext(
