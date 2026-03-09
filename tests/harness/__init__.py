@@ -5,6 +5,8 @@ Two variants available:
   Requires ``integration_db`` fixture.
 - **Unit**: Full mocking for fast unit tests (backward compat).
 
+Multi-transport testing supported via ``Transport`` enum and ``call_via()``.
+
 Usage (integration — preferred)::
 
     from tests.harness._base import IntegrationEnv
@@ -41,20 +43,41 @@ Usage (unit — backward compat)::
 from tests.harness._identity import make_identity
 from tests.harness._mock_uow import make_mock_uow
 from tests.harness.assertions import assert_envelope, assert_error_result, assert_payload_field
+
+# Creative envs (multi-transport)
 from tests.harness.creative_formats import CreativeFormatsEnv
 from tests.harness.creative_list import CreativeListEnv
 from tests.harness.creative_sync import CreativeSyncEnv
+
+# Delivery envs (domain-specific)
+from tests.harness.delivery_circuit_breaker import CircuitBreakerEnv
+from tests.harness.delivery_poll import DeliveryPollEnv
+from tests.harness.delivery_webhook import WebhookEnv
+
+# Product env
+from tests.harness.product import ProductEnv
+
+# Transport helpers
 from tests.harness.transport import Transport, TransportResult
 
 __all__ = [
+    # Helpers
     "make_identity",
     "make_mock_uow",
-    "CreativeFormatsEnv",
-    "CreativeListEnv",
-    "CreativeSyncEnv",
-    "Transport",
-    "TransportResult",
     "assert_envelope",
     "assert_error_result",
     "assert_payload_field",
+    # Creative envs
+    "CreativeFormatsEnv",
+    "CreativeListEnv",
+    "CreativeSyncEnv",
+    # Delivery envs
+    "CircuitBreakerEnv",
+    "DeliveryPollEnv",
+    "WebhookEnv",
+    # Product env
+    "ProductEnv",
+    # Transport
+    "Transport",
+    "TransportResult",
 ]

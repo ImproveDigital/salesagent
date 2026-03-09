@@ -34,6 +34,11 @@ _UNIT_ENTITY_FILES = [
     "test_media_buy.py",
     "test_creative.py",
     "test_delivery.py",
+    "test_product.py",
+    "test_product_schema_obligations.py",
+    "test_property_list_schema.py",
+    "test_quiet_failure_propagation.py",
+    "test_get_products_impl_coverage.py",
     "test_creative_formats_behavioral.py",
 ]
 

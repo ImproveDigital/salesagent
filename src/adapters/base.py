@@ -176,6 +176,11 @@ class AdServerAdapter(ABC):
     # Subclasses should override with their supported channels
     default_channels: list[str] = []
 
+    # Default delivery measurement provider for products created by this adapter.
+    # Per AdCP spec, delivery_measurement is REQUIRED on all products.
+    # Subclasses should override with their specific measurement provider.
+    default_delivery_measurement: dict[str, str] = {"provider": "publisher"}
+
     # Adapter capabilities - override in subclasses
     capabilities: AdapterCapabilities = AdapterCapabilities()
 
@@ -259,10 +264,28 @@ class AdServerAdapter(ABC):
         adapter-specific constraint violations early. Override in
         subclasses to add adapter-specific validation.
 
+        Default implementation validates pricing model compatibility.
+        Subclasses can override to add adapter-specific checks (e.g., impressions limits).
+
         Returns:
-            List of error messages (empty if valid).
+            List of error messages. Empty list means validation passed.
         """
-        return []
+        errors: list[str] = []
+        supported = self.get_supported_pricing_models()
+
+        if package_pricing_info:
+            for _pkg_id, pricing in package_pricing_info.items():
+                pricing_model = pricing.get("pricing_model", "")
+                if pricing_model and pricing_model.lower() not in supported:
+                    sorted_supported = ", ".join(sorted(s.upper() for s in supported))
+                    errors.append(
+                        f"Adapter does not support '{pricing_model}' pricing. "
+                        f"Supported pricing models: {sorted_supported}. "
+                        f"The requested pricing model ('{pricing_model}') is not available. "
+                        f"Please choose a product with compatible pricing."
+                    )
+
+        return errors
 
     @abstractmethod
     def create_media_buy(

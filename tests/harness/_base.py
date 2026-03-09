@@ -23,7 +23,7 @@ Multi-transport support (subclasses may also override):
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Self
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -72,6 +72,7 @@ class BaseTestEnv:
     """
 
     EXTERNAL_PATCHES: dict[str, str] = {}
+    ASYNC_PATCHES: set[str] = set()  # Names that need AsyncMock (for async functions)
     MODULE: str = ""  # Convenience for unit envs building patch paths
     REST_ENDPOINT: str = ""  # Override in subclass for REST dispatch
     use_real_db: bool = False
@@ -81,10 +82,12 @@ class BaseTestEnv:
         principal_id: str = "test_principal",
         tenant_id: str = "test_tenant",
         dry_run: bool = False,
+        **tenant_overrides: Any,
     ) -> None:
         self._principal_id = principal_id
         self._tenant_id = tenant_id
         self._dry_run = dry_run
+        self._tenant_overrides = tenant_overrides
         self.mock: dict[str, MagicMock] = {}
         self._patchers: list[Any] = []
         self._session: Session | None = None
@@ -111,12 +114,21 @@ class BaseTestEnv:
                 tenant_id=self._tenant_id,
                 protocol=protocol,
                 dry_run=self._dry_run,
+                **self._tenant_overrides,
             )
         return self._identity_cache[protocol]
 
     @property
     def identity(self) -> ResolvedIdentity:
-        """Default identity (protocol='mcp'). Backward-compatible."""
+        """Default identity (protocol='mcp'). Backward-compatible.
+
+        Supports direct override via ``env._identity = ...`` for integration
+        tests that create tenants in the DB and need LazyTenantContext.
+        """
+        # Backward compat: tests may set env._identity directly
+        direct = self.__dict__.get("_identity")
+        if direct is not None:
+            return direct
         from tests.harness.transport import Transport
 
         return self.identity_for(Transport.IMPL)
@@ -305,7 +317,10 @@ class BaseTestEnv:
 
         # 2. Start patches
         for name, target in self.EXTERNAL_PATCHES.items():
-            patcher = patch(target)
+            if name in self.ASYNC_PATCHES:
+                patcher = patch(target, new_callable=AsyncMock)
+            else:
+                patcher = patch(target)
             self.mock[name] = patcher.start()
             self._patchers.append(patcher)
 

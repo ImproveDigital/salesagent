@@ -2831,32 +2831,19 @@ async def _create_media_buy_impl(
 
         # Pre-validate adapter-specific constraints (pricing models, budget limits)
         # This runs regardless of dry_run so adapter restrictions are always enforced.
-        supported_models = adapter.get_supported_pricing_models()
-        if package_pricing_info:
-            for _pkg_id, pricing in package_pricing_info.items():
-                pricing_model = pricing.get("pricing_model", "")
-                if pricing_model and pricing_model not in supported_models:
-                    error_msg = (
-                        f"Adapter does not support '{pricing_model}' pricing. "
-                        f"Supported pricing models: {', '.join(sorted(supported_models))}. "
-                        f"Please choose a product with compatible pricing."
-                    )
-                    if step:
-                        ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=error_msg)
-                    return CreateMediaBuyResult(
-                        response=CreateMediaBuyError(
-                            errors=[Error(code="unsupported_pricing_model", message=error_msg, details=None)],
-                            context=req.context,
-                        ),
-                        status=AdcpTaskStatus.failed.value,
-                    )
-
-        adapter_errors = adapter.validate_media_buy_request(req, packages, start_time, end_time, package_pricing_info)
-        if adapter_errors:
-            error_message = "[" + ", ".join(adapter_errors) + "]"
+        pre_creation_errors: list[str] = adapter.validate_media_buy_request(
+            req, packages, start_time, end_time, package_pricing_info
+        )
+        if isinstance(pre_creation_errors, list) and pre_creation_errors:
+            logger.error(f"[PRE-VALIDATE] Adapter validation failed: {pre_creation_errors}")
             if step:
-                ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=error_message)
-            raise AdCPAdapterError(error_message)
+                ctx_manager.update_workflow_step(
+                    step.step_id, status="failed", error_message="Adapter validation failed"
+                )
+            raise AdCPValidationError(
+                "; ".join(pre_creation_errors),
+                details={"error_code": "ADAPTER_VALIDATION_FAILED"},
+            )
 
         # Dry-run mode: skip adapter call entirely, return simulated response
         # All validation (products, pricing, budgets, creatives) has passed above.

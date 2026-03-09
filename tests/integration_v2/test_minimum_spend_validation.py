@@ -43,7 +43,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from fastmcp.exceptions import ToolError
 from sqlalchemy import delete, select
 
 from src.core.database.database_session import get_db_session
@@ -58,7 +57,6 @@ from src.core.database.models import (
     Tenant,
     TenantAuthConfig,
 )
-from src.core.exceptions import AdCPAdapterError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import CreateMediaBuyRequest
 from src.core.testing_hooks import AdCPTestContext
@@ -468,7 +466,7 @@ class TestMinimumSpendValidation:
 
     # Characterization: locks mock adapter budget limit behavior (no AdCP spec backing)
     async def test_unsupported_currency_rejected(self, setup_test_data):
-        """Test that excessively high budgets are rejected by the adapter (raises ToolError)."""
+        """Test that excessively high budgets are rejected by pre-adapter validation."""
         identity = ResolvedIdentity(
             principal_id="test_principal",
             tenant_id="test_minspend_tenant",
@@ -481,7 +479,7 @@ class TestMinimumSpendValidation:
         end_time = start_time + timedelta(days=7)
 
         # Try to create media buy with excessive budget
-        # $100,000 USD is excessive and will be rejected by adapter
+        # $100,000 USD produces 10M impressions which exceeds the adapter limit
         req = CreateMediaBuyRequest(
             buyer_ref="minspend_test_5",
             brand={"domain": "testbrand.com"},
@@ -496,12 +494,11 @@ class TestMinimumSpendValidation:
             start_time=start_time.isoformat(),
             end_time=end_time.isoformat(),
         )
-        with pytest.raises((ToolError, AdCPAdapterError)) as exc_info:
-            await _create_media_buy_impl(req=req, identity=identity)
+        # Pre-adapter validation raises AdCPValidationError for excessive impressions/budget
+        from src.core.exceptions import AdCPValidationError
 
-        # Verify the error message indicates adapter rejection
-        error_message = str(exc_info.value)
-        assert "PERCENTAGE_UNITS_BOUGHT_TOO_HIGH" in error_message or "Failed to create media buy" in error_message
+        with pytest.raises(AdCPValidationError, match="PERCENTAGE_UNITS_BOUGHT_TOO_HIGH|VALUE_TOO_LARGE"):
+            await _create_media_buy_impl(req=req, identity=identity)
 
     async def test_different_currency_different_minimum(self, setup_test_data):
         """Test that different currencies have different minimums."""
