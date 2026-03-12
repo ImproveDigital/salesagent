@@ -266,15 +266,10 @@ from src.admin.app import create_app  # noqa: E402
 flask_admin_app = create_app()
 admin_wsgi = WSGIMiddleware(flask_admin_app)
 
-# Mount Flask admin at all paths it handles.
-# Order matters: specific routes before catch-all.
-_ADMIN_PATHS = ["/admin", "/static", "/auth", "/api", "/callback", "/logout", "/login", "/signup", "/test"]
-
-for _path in _ADMIN_PATHS:
-    app.mount(_path, admin_wsgi)  # type: ignore[arg-type]  # WSGIMiddleware is a valid ASGI app; starlette/a2wsgi typing mismatch
-
-# Tenant-specific admin: /tenant/{tenant_id}/admin/...
-app.mount("/tenant", admin_wsgi)  # type: ignore[arg-type]  # WSGIMiddleware is a valid ASGI app; starlette/a2wsgi typing mismatch
+# Mount Flask admin at the canonical prefix and at root as a compatibility fallback.
+# The root mount must remain after all FastAPI-native routes.
+app.mount("/admin", admin_wsgi)  # type: ignore[arg-type]  # WSGIMiddleware is a valid ASGI app; starlette/a2wsgi typing mismatch
+app.mount("/", admin_wsgi)  # type: ignore[arg-type]  # WSGIMiddleware is a valid ASGI app; starlette/a2wsgi typing mismatch
 
 
 # ---------------------------------------------------------------------------
