@@ -9,6 +9,7 @@ from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.database_session import get_db_session
 from src.core.database.models import SignalsAgent, Tenant
+from src.core.security.url_validator import check_url_ssrf
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,12 @@ def add_signals_agent(tenant_id):
                 flash("Agent URL is required", "error")
                 return redirect(url_for("signals_agents.add_signals_agent", tenant_id=tenant_id))
 
+            is_safe, ssrf_error = check_url_ssrf(agent_url)
+            if not is_safe:
+                logger.warning("[SECURITY] Signals agent add rejected unsafe URL %r: %s", agent_url, ssrf_error)
+                flash(f"Agent URL is not allowed: {ssrf_error}", "error")
+                return redirect(url_for("signals_agents.add_signals_agent", tenant_id=tenant_id))
+
             if not name:
                 flash("Agent name is required", "error")
                 return redirect(url_for("signals_agents.add_signals_agent", tenant_id=tenant_id))
@@ -196,6 +203,12 @@ def edit_signals_agent(tenant_id, agent_id):
 
             if not agent.agent_url:
                 flash("Agent URL is required", "error")
+                return redirect(url_for("signals_agents.edit_signals_agent", tenant_id=tenant_id, agent_id=agent_id))
+
+            is_safe, ssrf_error = check_url_ssrf(agent.agent_url)
+            if not is_safe:
+                logger.warning("[SECURITY] Signals agent edit rejected unsafe URL %r: %s", agent.agent_url, ssrf_error)
+                flash(f"Agent URL is not allowed: {ssrf_error}", "error")
                 return redirect(url_for("signals_agents.edit_signals_agent", tenant_id=tenant_id, agent_id=agent_id))
 
             if not agent.name:

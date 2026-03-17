@@ -54,21 +54,23 @@ console = Console()
 
 
 def validate_agent_url(url: str | None) -> bool:
-    """Validate agent_url is a valid HTTP(S) URL per AdCP spec.
+    """Validate agent_url is a safe HTTP(S) URL per AdCP spec.
+
+    Rejects private/internal/loopback targets and cloud metadata endpoints
+    in addition to basic scheme and netloc validation.
 
     Args:
         url: URL string to validate
 
     Returns:
-        True if valid HTTP(S) URL, False otherwise
+        True if the URL is a safe, reachable public HTTP(S) endpoint.
     """
     if not url or not isinstance(url, str):
         return False
-    try:
-        result = urlparse(url)
-        return all([result.scheme in ("http", "https"), result.netloc])
-    except Exception:
-        return False
+    from src.core.security.url_validator import check_url_ssrf
+
+    is_safe, _ = check_url_ssrf(url)
+    return is_safe
 
 
 # Tool-specific imports
