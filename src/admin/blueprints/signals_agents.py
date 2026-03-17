@@ -188,6 +188,8 @@ def edit_signals_agent(tenant_id, agent_id):
                 flash("Signals agent not found", "error")
                 return redirect(url_for("signals_agents.list_signals_agents", tenant_id=tenant_id))
 
+            # Assign new form values to ORM object (in-memory only — not yet committed).
+            # The SSRF check below reads agent.agent_url which is now the *submitted* value.
             agent.agent_url = request.form.get("agent_url", "").strip()
             agent.name = request.form.get("name", "").strip()
             agent.enabled = request.form.get("enabled") == "on"
@@ -205,6 +207,7 @@ def edit_signals_agent(tenant_id, agent_id):
                 flash("Agent URL is required", "error")
                 return redirect(url_for("signals_agents.edit_signals_agent", tenant_id=tenant_id, agent_id=agent_id))
 
+            # Validate the newly submitted URL — agent.agent_url is the form value set above.
             is_safe, ssrf_error = check_url_ssrf(agent.agent_url)
             if not is_safe:
                 logger.warning("[SECURITY] Signals agent edit rejected unsafe URL %r: %s", agent.agent_url, ssrf_error)
