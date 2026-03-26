@@ -75,7 +75,6 @@ from adcp.types import (
 # AdCP creative types for schema definitions
 from adcp.types import CreativePolicy as LibraryCreativePolicy
 from adcp.types import FrequencyCap as LibraryFrequencyCap
-from adcp.types import GetSignalsRequest as LibraryGetSignalsRequest
 from adcp.types import GetSignalsResponse as LibraryGetSignalsResponse
 from adcp.types import Measurement as LibraryMeasurement
 from adcp.types import PlatformDeployment as LibraryPlatformDeployment
@@ -1617,6 +1616,12 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest1):
     - packages: use our AdCPPackageUpdate (adds creative_ids)
     - budget: campaign-level budget (not in library — convenience field)
     - today: internal testing field
+
+    Spec fields missing from library codegen (accepted here for forward compatibility):
+    - revision: optimistic concurrency control
+    - canceled: irreversible cancellation flag
+    - cancellation_reason: reason for cancellation
+    - new_packages: mid-flight package additions
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
@@ -1628,7 +1633,14 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest1):
     # Override packages to use our extended type with creative_ids
     packages: list[AdCPPackageUpdate] | None = None  # type: ignore[assignment]
     # Campaign-level budget (not in library spec — convenience field)
-    budget: Budget | None = None
+    # Bare float is accepted so transport wrappers can preserve existing DB currency
+    # when the caller updates only the amount.
+    budget: Budget | float | None = None
+    # Spec fields missing from library codegen — accept for forward compatibility
+    revision: int | None = Field(None, description="Expected current revision for optimistic concurrency")
+    canceled: bool | None = Field(None, description="Cancel the media buy (irreversible)")
+    cancellation_reason: str | None = Field(None, description="Reason for cancellation", max_length=500)
+    new_packages: list[PackageRequest] | None = Field(None, description="New packages to add mid-flight")
     # Internal testing field
     today: date | None = Field(None, exclude=True, description="For testing/simulation only - not part of AdCP spec")
 
@@ -2013,11 +2025,14 @@ class SignalFilters(LibrarySignalFilters):
     pass  # All fields inherited from library
 
 
-# GetSignalsRequest — library changed to RootModel[GetSignalsRequest1 | GetSignalsRequest2] in 3.6.0.
-# RootModel does not support model_config['extra'] or property overrides.
-# Library now includes signal_ids, pagination, signal_spec, max_results directly.
-# Re-export the library type; callers use .signal_spec and .max_results directly.
-GetSignalsRequest = LibraryGetSignalsRequest
+# GetSignalsRequest — library 3.6.0 exports a UnionType (GetSignalsRequest1 | GetSignalsRequest2).
+# GS1: signal_spec required, signal_ids optional (discovery by text).
+# GS2: signal_ids required, signal_spec optional (lookup by ID).
+# We alias to GS1 (text-based discovery) which is our primary use case.
+# This gives us a concrete BaseModel class for construction, model_fields, and mypy.
+from adcp.types.generated_poc.signals.get_signals_request import (  # noqa: E402, F401
+    GetSignalsRequest1 as GetSignalsRequest,
+)
 
 
 class GetSignalsResponse(NestedModelSerializerMixin, LibraryGetSignalsResponse):
