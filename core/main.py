@@ -61,6 +61,7 @@ from adcp.server import (
 from sqlalchemy import select
 
 from core.middleware.admin_mount import AdminWSGIMount
+from src.core.signing import SigningVerifyMiddleware
 from core.platforms.gam import GamPlatform
 from core.platforms.mock import MockSellerPlatform
 from core.proposal.manager import SalesAgentProposalManager
@@ -389,9 +390,14 @@ def main() -> None:
         # WSGI app BEFORE the auth chain fires (Flask owns its own
         # session-cookie auth). Subdomain tenant resolution still runs
         # on every non-admin request.
+        # SigningVerifyMiddleware runs LAST so it only sees buyer-protocol
+        # traffic that AdminWSGIMount didn't carve out — verifies RFC 9421
+        # signatures and stashes verified state on scope["state"]. See
+        # docs/design/signing-non-embedded.md.
         asgi_middleware=[
             (AdminWSGIMount, {"wsgi_app": admin_wsgi}),
             (SubdomainTenantMiddleware, {"router": subdomain_router}),
+            (SigningVerifyMiddleware, {}),
         ],
         context_factory=auth_context_factory,
         allowed_hosts=_allowed_hosts(),

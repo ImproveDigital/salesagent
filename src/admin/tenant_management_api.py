@@ -79,10 +79,12 @@ from src.core.database.embedded_tenant_guard import EmbeddedTenantWriteError
 from src.core.database.models import (
     Account,
     AdapterConfig,
+    AdmittedOperator,
     AdvertiserRoutingRule,
     CurrencyLimit,
     GamAdvertiser,
     MediaBuy,
+    OperatorAdvertiserLink,
     Principal,
     PropertyTag,
     SyncJob,
@@ -805,6 +807,37 @@ def provision_tenant():
                     name=initial_principal_name,
                     platform_mappings=platform_mappings,
                     access_token=f"embedded-mode-no-token:{secrets.token_urlsafe(8)}",
+                    bound_operator_id="embedded_host",
+                )
+            )
+
+        # Auto-install the host product as a single trusted operator. The
+        # cryptographic verifier bypasses these rows entirely (network/header
+        # trust is the embedded-mode boundary); the row exists for audit-trail
+        # consistency with non-embedded tenants. See
+        # docs/design/signing-non-embedded.md "Conceptual model".
+        host_display = req.external_source or "embedded host"
+        embedded_host_brand_json = f"embedded://{tenant_id}/embedded_host"
+        session.add(
+            AdmittedOperator(
+                tenant_id=tenant_id,
+                operator_id="embedded_host",
+                brand_json_url=embedded_host_brand_json,
+                aao_member_slug=req.external_source,
+                house_domain=req.house_domain,
+                display_name=host_display,
+                is_trusted=True,
+                is_active=True,
+            )
+        )
+        if initial_principal_id is not None:
+            session.add(
+                OperatorAdvertiserLink(
+                    tenant_id=tenant_id,
+                    operator_id="embedded_host",
+                    principal_id=initial_principal_id,
+                    billing_mode="operator_bills",
+                    is_active=True,
                 )
             )
 

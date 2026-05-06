@@ -17,13 +17,16 @@ from adcp.types import (
 )
 from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     Adcp,
+    CoversContentDigest,
     Execution,
     GeoMetros,
     GeoPostalAreas,
+    Identity,
     MajorVersion,
     MediaBuy,
     Portfolio,
     PublisherDomain,
+    RequestSigning,
     SupportedProtocol,
     Targeting,
 )
@@ -233,15 +236,66 @@ def _get_adcp_capabilities_impl(
         execution=execution,
     )
 
+    # Build request_signing block from per-tenant policy + identity block from
+    # Tenant.brand_json_url. Both are advisory in 3.x; receivers use them at
+    # onboarding to decide whether to sign and where our JWKS lives.
+    # See docs/design/signing-non-embedded.md.
+    request_signing, identity_block = _build_signing_capability(tenant_id, tenant)
+
     # Build response
     response = GetAdcpCapabilitiesResponse(
         adcp=Adcp(major_versions=[MajorVersion(root=3)]),
         supported_protocols=[SupportedProtocol.media_buy],
         media_buy=media_buy,
+        request_signing=request_signing,
+        identity=identity_block,
         last_updated=datetime.now(UTC),
     )
 
     return response
+
+
+def _build_signing_capability(tenant_id: str, tenant: dict | object) -> tuple[RequestSigning | None, Identity | None]:
+    """Build the ``request_signing`` + ``identity`` capability blocks.
+
+    Returns ``(None, None)`` for tenants with no signing policy row and no
+    ``brand_json_url`` — signing is opt-in; the absence of the blocks signals
+    "bearer auth only" to receivers (the AdCP-3 default).
+    """
+    from src.core.database.database_session import get_db_session
+    from src.core.database.repositories import TenantSigningPolicyRepository
+
+    request_signing: RequestSigning | None = None
+    identity_block: Identity | None = None
+
+    try:
+        with get_db_session() as session:
+            policy = TenantSigningPolicyRepository(session, tenant_id).get()
+            if policy is not None and policy.enabled:
+                digest_policy = CoversContentDigest(policy.covers_digest_policy)
+                request_signing = RequestSigning(
+                    supported=True,
+                    covers_content_digest=digest_policy,
+                    required_for=list(policy.required_for or []),
+                    supported_for=[],
+                )
+    except Exception:
+        # Capability advertisement is best-effort — never break the response
+        # because the signing tables aren't reachable.
+        logger.warning("could not build request_signing capability", exc_info=True)
+
+    brand_json_url: str | None = None
+    if isinstance(tenant, dict):
+        brand_json_url = tenant.get("brand_json_url")
+    else:
+        brand_json_url = getattr(tenant, "brand_json_url", None)
+
+    if brand_json_url:
+        # Identity has extra='allow' on the AdCP schema; brand_json_url is the
+        # additional field per #3690 used by adcp.signing.async_resolve_agent.
+        identity_block = Identity.model_validate({"brand_json_url": brand_json_url})
+
+    return request_signing, identity_block
 
 
 async def get_adcp_capabilities(

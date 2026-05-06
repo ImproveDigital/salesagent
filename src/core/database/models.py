@@ -157,6 +157,12 @@ class Tenant(Base, JSONValidatorMixin):
     # authorize this tenant's agent. Embedded-mode tenants share one
     # (https://interchange.io); self-hosted publishers use their own salesagent.
     public_agent_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Where THIS salesagent operator publishes its own brand.json (under
+    # ``house_domain``, typically ``/.well-known/brand.json``). Surfaced on
+    # ``get_adcp_capabilities → identity.brand_json_url`` so receivers verifying
+    # our outbound signatures resolve through our house_domain.
+    # See docs/design/signing-non-embedded.md.
+    brand_json_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     # Sprint 1.8 buyer-advertiser routing — see
     # docs/design/embedded-mode-sprint-1.8-buyer-advertiser-routing.md.
     # Required-before-activation fallback advertiser. Buys whose
@@ -595,6 +601,12 @@ class Principal(Base, JSONValidatorMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     platform_mappings: Mapped[dict] = mapped_column(JSONType, nullable=False)
     access_token: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # Operator the bearer token attests to. NULL for legacy unsigned principals;
+    # required when the tenant signing policy is enabled. The
+    # (tenant_id, bound_operator_id, principal_id) tuple must exist + be active in
+    # operator_advertiser_link or the verifier rejects with operator_link_disabled.
+    # See docs/design/signing-non-embedded.md.
+    bound_operator_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -613,6 +625,7 @@ class Principal(Base, JSONValidatorMixin):
     __table_args__ = (
         Index("idx_principals_tenant", "tenant_id"),
         Index("idx_principals_token", "access_token"),
+        Index("idx_principals_bound_operator", "tenant_id", "bound_operator_id"),
     )
 
     def get_adapter_id(self, adapter_name: str) -> str | None:
@@ -1129,6 +1142,13 @@ class AuditLog(Base):
     external_org_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     external_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # RFC 9421 signed-request verification trail (PR 2 of signing-non-embedded).
+    # All NULL on rows for unsigned requests and on legacy rows. Populated by
+    # SigningVerifyMiddleware when the verifier accepts a signature.
+    verified_operator_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    verified_agent_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    verified_key_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
     # Relationships
     tenant = relationship("Tenant", back_populates="audit_logs")
 
@@ -1141,6 +1161,12 @@ class AuditLog(Base):
         Index("idx_audit_logs_tenant", "tenant_id"),
         Index("idx_audit_logs_timestamp", "timestamp"),
         Index("idx_audit_logs_strategy", "strategy_id"),
+        Index(
+            "idx_audit_logs_verified_operator",
+            "tenant_id",
+            "verified_operator_id",
+            postgresql_where=text("verified_operator_id IS NOT NULL"),
+        ),
     )
 
 
@@ -2358,4 +2384,170 @@ class WebhookDeliveryLog(Base):
         Index("idx_webhook_log_tenant", "tenant_id"),
         Index("idx_webhook_log_status", "status"),
         Index("idx_webhook_log_created_at", "created_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Signing (non-embedded mode) — operator-trust model
+# ---------------------------------------------------------------------------
+# See docs/design/signing-non-embedded.md. Operators (brand.json publishers) are
+# admitted per tenant; their brand.json + JWKS live at the operator's own
+# house_domain. Cryptographic trust roots through brand.json. Agents speak under
+# the operator's authority and are inherited transitively from brand.json's
+# agents[] list — we don't admit individual agents.
+
+
+class AdmittedOperator(Base):
+    """Operator (brand.json publisher) admitted to a tenant.
+
+    AAO is consulted at admission time for display metadata; brand.json is
+    fetched at verify-time from the operator's own house_domain. AAO is never
+    on the hot verification path.
+    """
+
+    __tablename__ = "admitted_operators"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    operator_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    brand_json_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    aao_member_slug: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    house_domain: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # True for embedded host's interchange — verifier bypasses signature checks.
+    is_trusted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_resolution_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "brand_json_url", name="uq_admitted_operators_brand_json"),
+        Index(
+            "idx_admitted_operators_active",
+            "tenant_id",
+            "is_active",
+            postgresql_where=text("is_active"),
+        ),
+    )
+
+
+class OperatorAdvertiserLink(Base):
+    """(tenant, operator, advertiser) authorization with billing-mode policy."""
+
+    __tablename__ = "operator_advertiser_link"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    operator_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    # operator_bills | agent_billed | disabled
+    billing_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="operator_bills")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "operator_id"],
+            ["admitted_operators.tenant_id", "admitted_operators.operator_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "principal_id"],
+            ["principals.tenant_id", "principals.principal_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "billing_mode IN ('operator_bills', 'agent_billed', 'disabled')",
+            name="chk_operator_advertiser_link_billing_mode",
+        ),
+    )
+
+
+class TenantSigningPolicy(Base):
+    """Per-tenant request-signing policy. One row per tenant."""
+
+    __tablename__ = "tenant_signing_policy"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Master switch — when False the verifier never runs.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # List of AdCP operation names that REQUIRE a signature. Empty list => signing optional.
+    required_for: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list)
+    # required | forbidden | either
+    covers_digest_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="either")
+    max_skew_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    max_window_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "covers_digest_policy IN ('required', 'forbidden', 'either')",
+            name="chk_tenant_signing_policy_digest",
+        ),
+    )
+
+
+class TenantSigningCredential(Base):
+    """Salesagent's own outbound signing key reference.
+
+    Stores a KMS reference (or local PEM file path in dev) plus the cached public
+    JWK so the admin UI can render a copy-paste-ready brand.json snippet for the
+    operator to publish at their house_domain. Private bytes never live in our
+    process for KMS-backed credentials.
+    """
+
+    __tablename__ = "tenant_signing_credentials"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    purpose: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # local_pem | gcp_kms | aws_kms | hashicorp_vault
+    backend: Mapped[str] = mapped_column(String(32), nullable=False)
+    # KMS key resource name OR file path; format depends on backend.
+    backend_ref: Mapped[str] = mapped_column(String(1024), nullable=False)
+    public_jwk: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    key_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    rotated_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "backend IN ('local_pem', 'gcp_kms', 'aws_kms', 'hashicorp_vault')",
+            name="chk_tenant_signing_credentials_backend",
+        ),
+        Index(
+            "idx_tenant_signing_credentials_active",
+            "tenant_id",
+            "purpose",
+            "is_active",
+            postgresql_where=text("is_active"),
+        ),
     )

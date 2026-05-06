@@ -70,6 +70,9 @@ class AuditLogger:
         details: dict[str, Any] | None = None,
         error: str | None = None,
         tenant_id: str | None = None,
+        verified_operator_id: str | None = None,
+        verified_agent_url: str | None = None,
+        verified_key_id: str | None = None,
     ):
         """Log an adapter operation with full audit context.
 
@@ -82,6 +85,12 @@ class AuditLogger:
             details: Additional operation details
             error: Error message if operation failed
             tenant_id: Override tenant ID (uses instance tenant_id if not provided)
+            verified_operator_id: AdmittedOperator the inbound RFC 9421 signature
+                was attributed to (PR 2D of signing-non-embedded). NULL on rows
+                for unsigned requests.
+            verified_agent_url: Agent (within the operator's brand.json) whose
+                JWK matched.
+            verified_key_id: kid from the verified Signature-Input.
         """
         # Use provided tenant_id or fall back to instance tenant_id
         tenant_id = tenant_id or self.tenant_id
@@ -113,6 +122,9 @@ class AuditLogger:
                     error_message=error if not success else None,
                     # Pass dict directly - JSONType column handles serialization
                     details=details or {},
+                    verified_operator_id=verified_operator_id,
+                    verified_agent_url=verified_agent_url,
+                    verified_key_id=verified_key_id,
                 )
                 db_session.add(audit_log)
                 db_session.commit()

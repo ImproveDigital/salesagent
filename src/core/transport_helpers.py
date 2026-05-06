@@ -95,12 +95,30 @@ def resolve_identity_from_context(
     except Exception:
         logger.debug("Could not extract testing context", exc_info=True)
 
-    return resolve_identity(
+    identity = resolve_identity(
         headers=headers,
         require_valid_token=require_valid_token,
         protocol=protocol,
         testing_context=testing_context,
     )
+
+    # If the SigningVerifyMiddleware verified an inbound signature on this
+    # request, fold the verified operator/agent/key state into the identity
+    # so downstream _impl functions and audit-log writers can record it.
+    # See docs/design/signing-non-embedded.md (PR 2B).
+    from src.core.signing.verified_state import get_verified_state
+
+    verified = get_verified_state()
+    if verified is not None:
+        identity = identity.model_copy(
+            update={
+                "verified_operator_id": verified.operator_id,
+                "verified_agent_url": verified.agent_url,
+                "verified_key_id": verified.key_id,
+            }
+        )
+
+    return identity
 
 
 def enrich_identity_with_account(

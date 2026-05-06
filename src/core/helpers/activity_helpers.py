@@ -27,13 +27,22 @@ def log_tool_activity(context: Context | ToolContext | ResolvedIdentity, tool_na
 
     Logs to both:
     - Activity feed (for WebSocket real-time updates)
-    - Audit logs (for persistent dashboard activity feed)
+    - Audit logs (for persistent dashboard activity feed) — including the
+      verified_* RFC 9421 signature trail (PR 2D of signing-non-embedded)
+      when SigningVerifyMiddleware accepted a signature on this request.
     """
     try:
+        verified_operator_id: str | None = None
+        verified_agent_url: str | None = None
+        verified_key_id: str | None = None
+
         # Handle ResolvedIdentity (transport-agnostic)
         if isinstance(context, ResolvedIdentity):
             principal_id: str | None = context.principal_id
             tenant: dict | None = context.tenant
+            verified_operator_id = context.verified_operator_id
+            verified_agent_url = context.verified_agent_url
+            verified_key_id = context.verified_key_id
         # Handle ToolContext directly
         elif isinstance(context, ToolContext):
             principal_id = context.principal_id
@@ -43,6 +52,10 @@ def log_tool_activity(context: Context | ToolContext | ResolvedIdentity, tool_na
             identity = resolve_identity_from_context(context, require_valid_token=False, protocol="mcp")
             principal_id = identity.principal_id if identity else None
             tenant = identity.tenant if identity and isinstance(identity.tenant, dict) else None
+            if identity is not None:
+                verified_operator_id = identity.verified_operator_id
+                verified_agent_url = identity.verified_agent_url
+                verified_key_id = identity.verified_key_id
 
         # Set tenant context if returned
         if tenant:
@@ -92,6 +105,9 @@ def log_tool_activity(context: Context | ToolContext | ResolvedIdentity, tool_na
             adapter_id="mcp_server",
             success=True,
             details=details,
+            verified_operator_id=verified_operator_id,
+            verified_agent_url=verified_agent_url,
+            verified_key_id=verified_key_id,
         )
     except Exception as e:
         logger.debug(f"Error logging tool activity: {e}")

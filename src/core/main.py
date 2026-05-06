@@ -81,6 +81,19 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan_context(app):
     """Handle application startup and shutdown."""
+    # Startup: Bootstrap PgReplayStore (RFC 9421 replay protection).
+    # No-op for deployments where signing isn't enabled — schema creation is
+    # cheap and idempotent, and the store stays cold until verifier middleware
+    # mounts in PR 2 of signing-non-embedded.
+    from src.core.signing import bootstrap_replay_store
+
+    logger.info("Bootstrapping adcp_replay store...")
+    try:
+        bootstrap_replay_store()
+        logger.info("✅ adcp_replay store bootstrapped")
+    except Exception as e:
+        logger.error(f"Failed to bootstrap adcp_replay store: {e}", exc_info=True)
+
     # Startup: Initialize delivery webhook scheduler
     from src.services.delivery_webhook_scheduler import start_delivery_webhook_scheduler
 

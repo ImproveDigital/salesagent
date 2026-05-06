@@ -17,12 +17,16 @@ Usage:
 
 from src.core.database.repositories.account import AccountRepository
 from src.core.database.repositories.adapter_config import AdapterConfigRepository, TenantNotConfiguredError
+from src.core.database.repositories.admitted_operator import AdmittedOperatorRepository
 from src.core.database.repositories.audit_log import AuditLogRepository
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
+from src.core.database.repositories.operator_advertiser_link import OperatorAdvertiserLinkRepository
 from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.sync_job import SyncJobRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
+from src.core.database.repositories.tenant_signing_credentials import TenantSigningCredentialRepository
+from src.core.database.repositories.tenant_signing_policy import TenantSigningPolicyRepository
 from src.core.database.repositories.uow import AccountUoW, MediaBuyUoW, ProductUoW, TenantConfigUoW, WorkflowUoW
 from src.core.database.repositories.webhook_subscription import WebhookSubscriptionRepository
 from src.core.database.repositories.workflow import WorkflowRepository
@@ -31,16 +35,20 @@ __all__ = [
     "AccountRepository",
     "AccountUoW",
     "AdapterConfigRepository",
+    "AdmittedOperatorRepository",
     "AuditLogRepository",
     "TenantNotConfiguredError",
     "CurrencyLimitRepository",
     "MediaBuyRepository",
     "MediaBuyUoW",
+    "OperatorAdvertiserLinkRepository",
     "ProductRepository",
     "ProductUoW",
     "SyncJobRepository",
     "TenantConfigRepository",
     "TenantConfigUoW",
+    "TenantSigningCredentialRepository",
+    "TenantSigningPolicyRepository",
     "WebhookSubscriptionRepository",
     "WorkflowRepository",
     "WorkflowUoW",

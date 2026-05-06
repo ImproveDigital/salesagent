@@ -123,12 +123,18 @@ class AuditLogRepository:
         external_source: str | None = None,
         error_message: str | None = None,
         details: dict[str, Any] | None = None,
+        verified_operator_id: str | None = None,
+        verified_agent_url: str | None = None,
+        verified_key_id: str | None = None,
     ) -> AuditLog:
         """Add an audit log row to the session for this tenant.
 
         Subject metadata (``subject_type``/``subject_id``) and ``actor_type``
         live in the ``details`` JSON column — there are no dedicated columns.
         Read endpoints filter on the same JSON keys.
+
+        ``verified_*`` populate the RFC 9421 signed-request trail (PR 2D of
+        signing-non-embedded). All NULL on rows for unsigned requests.
         """
         merged_details = dict(details or {})
         merged_details.setdefault("subject_type", subject_type)
@@ -147,6 +153,9 @@ class AuditLogRepository:
             external_user_id=external_user_id,
             external_org_id=external_org_id,
             external_source=external_source,
+            verified_operator_id=verified_operator_id,
+            verified_agent_url=verified_agent_url,
+            verified_key_id=verified_key_id,
         )
         self._session.add(entry)
         return entry

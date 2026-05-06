@@ -31,6 +31,12 @@ from tests.factories.media_buy import MediaBuyFactory, MediaPackageFactory
 from tests.factories.metrics import FormatPerformanceMetricsFactory
 from tests.factories.principal import PrincipalFactory
 from tests.factories.product import PricingOptionFactory, ProductFactory
+from tests.factories.signing import (
+    AdmittedOperatorFactory,
+    OperatorAdvertiserLinkFactory,
+    TenantSigningCredentialFactory,
+    TenantSigningPolicyFactory,
+)
 from tests.factories.sync_job import SyncJobFactory
 from tests.factories.user import TenantAuthConfigFactory, UserFactory
 from tests.factories.webhook import PushNotificationConfigFactory, WebhookSubscriptionFactory
@@ -45,12 +51,14 @@ ALL_FACTORIES = [
     AccountFactory,
     AgentAccountAccessFactory,
     AdapterConfigFactory,
+    AdmittedOperatorFactory,
     AuditLogFactory,
     ContextFactory,
     CurrencyLimitFactory,
     GamAdvertiserFactory,
     GAMInventoryFactory,
     ObjectWorkflowMappingFactory,
+    OperatorAdvertiserLinkFactory,
     PropertyTagFactory,
     PublisherPartnerFactory,
     PrincipalFactory,
@@ -65,6 +73,8 @@ ALL_FACTORIES = [
     CreativeAssignmentFactory,
     FormatPerformanceMetricsFactory,
     SyncJobFactory,
+    TenantSigningCredentialFactory,
+    TenantSigningPolicyFactory,
     UserFactory,
     TenantAuthConfigFactory,
     WorkflowStepFactory,
@@ -74,6 +84,7 @@ __all__ = [
     "ALL_FACTORIES",
     "AccountFactory",
     "AdapterConfigFactory",
+    "AdmittedOperatorFactory",
     "AgentAccountAccessFactory",
     "AuditLogFactory",
     "ContextFactory",
@@ -90,6 +101,7 @@ __all__ = [
     "MediaBuyFactory",
     "MediaPackageFactory",
     "ObjectWorkflowMappingFactory",
+    "OperatorAdvertiserLinkFactory",
     "PricingOptionFactory",
     "PrincipalFactory",
     "ProductFactory",
@@ -99,6 +111,8 @@ __all__ = [
     "SyncJobFactory",
     "TenantAuthConfigFactory",
     "TenantFactory",
+    "TenantSigningCredentialFactory",
+    "TenantSigningPolicyFactory",
     "UserFactory",
     "WebhookSubscriptionFactory",
     "WorkflowStepFactory",

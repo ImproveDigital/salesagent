@@ -34,7 +34,14 @@ from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import get_history
 
-from src.core.database.models import AdapterConfig, Tenant
+from src.core.database.models import (
+    AdapterConfig,
+    AdmittedOperator,
+    OperatorAdvertiserLink,
+    Tenant,
+    TenantSigningCredential,
+    TenantSigningPolicy,
+)
 
 
 class EmbeddedTenantWriteError(Exception):
@@ -163,3 +170,23 @@ def _block_adapter_config_update(mapper, connection, target):
 @event.listens_for(AdapterConfig, "before_insert")
 def _block_adapter_config_insert(mapper, connection, target):
     _enforce(mapper, connection, target, op="insert")
+
+
+# Signing infrastructure (signing-non-embedded design) is platform-managed —
+# admitted operators, their links to advertisers, per-tenant signing policy,
+# and the salesagent's own outbound signing credentials. All four are
+# infrastructure surfaces; publisher UI never writes them on embedded tenants.
+for _signing_model in (
+    AdmittedOperator,
+    OperatorAdvertiserLink,
+    TenantSigningPolicy,
+    TenantSigningCredential,
+):
+
+    @event.listens_for(_signing_model, "before_update")
+    def _block_signing_update(mapper, connection, target):
+        _enforce(mapper, connection, target, op="update")
+
+    @event.listens_for(_signing_model, "before_insert")
+    def _block_signing_insert(mapper, connection, target):
+        _enforce(mapper, connection, target, op="insert")
