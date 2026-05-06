@@ -433,9 +433,7 @@ class GAMOrdersManager:
             if impl_config.get("targeted_placement_ids"):
                 if "inventoryTargeting" not in line_item_targeting:
                     line_item_targeting["inventoryTargeting"] = {}
-                line_item_targeting["inventoryTargeting"]["targetedPlacements"] = [
-                    {"placementId": placement_id} for placement_id in impl_config["targeted_placement_ids"]
-                ]
+                line_item_targeting["inventoryTargeting"]["targetedPlacementIds"] = list(impl_config["targeted_placement_ids"])
 
             # Require inventory targeting - no fallback
             if "inventoryTargeting" not in line_item_targeting or not line_item_targeting["inventoryTargeting"]:
