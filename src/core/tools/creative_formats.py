@@ -8,28 +8,21 @@ import logging
 import time
 from typing import TypeVar
 
-from adcp import FormatId
-from adcp.types import Format as AdcpFormat
 from adcp.types import (
-    AssetContentType,
     AudioFormatAsset,
-    ContextObject,
     HtmlFormatAsset,
     ImageFormatAsset,
     TextFormatAsset,
     UrlFormatAsset,
     VideoFormatAsset,
 )
+from adcp.types import Format as AdcpFormat
 from adcp.utils.format_assets import get_format_assets
 
 # TypeVar for Format to preserve subclass type through backward compatibility function
 FormatT = TypeVar("FormatT", bound=AdcpFormat)
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-from pydantic import ValidationError
 
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
-from src.core.tool_context import ToolContext
+from src.core.exceptions import AdCPAuthenticationError
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +46,6 @@ def _ensure_backward_compatible_format(f: FormatT) -> FormatT:
 from src.core.audit_logger import get_audit_logger
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import ListCreativeFormatsRequest, ListCreativeFormatsResponse
-from src.core.validation_helpers import format_validation_error
 
 
 def _infer_asset_type(asset_id: str) -> str:
@@ -196,7 +188,12 @@ def _list_creative_formats_impl(
 
                         # Build assets list using the correct Assets variant per type
                         assets_list: list[
-                            ImageFormatAsset | VideoFormatAsset | AudioFormatAsset | TextFormatAsset | HtmlFormatAsset | UrlFormatAsset
+                            ImageFormatAsset
+                            | VideoFormatAsset
+                            | AudioFormatAsset
+                            | TextFormatAsset
+                            | HtmlFormatAsset
+                            | UrlFormatAsset
                         ] = []
                         for asset_id in template.get("required_assets", []):
                             asset_type = _infer_asset_type(asset_id)
@@ -379,9 +376,16 @@ def _list_creative_formats_impl(
         total_count=total_count,
     )
 
-    # Build creative_agents referrals from registry (POST-S4)
-    from adcp.types import CreativeAgent as AdcpCreativeAgent
+    # Build creative_agents referrals from registry (POST-S4).
+    # ListCreativeFormatsResponse expects ``CreativeAgent`` from the
+    # media_buy module — there are two same-named classes in 4.4 and the
+    # top-level ``adcp.types.CreativeAgent`` resolves to the creative-side
+    # variant, which Pydantic rejects as the wrong model type even though
+    # they're shape-identical.
     from adcp.types import CreativeAgentCapability
+    from adcp.types.generated_poc.media_buy.list_creative_formats_response import (
+        CreativeAgent as AdcpCreativeAgent,
+    )
 
     creative_agents_list: list[AdcpCreativeAgent] | None = None
     try:
@@ -434,84 +438,3 @@ def _list_creative_formats_impl(
     # Always return Pydantic model - MCP wrapper will handle serialization
     # Schema enhancement (if needed) should happen in the MCP wrapper, not here
     return response
-
-
-async def list_creative_formats(
-    format_ids: list[FormatId] | None = None,
-    is_responsive: bool | None = None,
-    name_search: str | None = None,
-    asset_types: list[AssetContentType] | None = None,
-    min_width: int | None = None,
-    max_width: int | None = None,
-    min_height: int | None = None,
-    max_height: int | None = None,
-    context: ContextObject | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-):
-    """List all available creative formats (AdCP spec endpoint).
-
-    MCP tool wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-
-    Args:
-        format_ids: Filter by FormatId objects
-        is_responsive: Filter for responsive formats (True/False)
-        name_search: Search formats by name (case-insensitive partial match)
-        asset_types: Filter by asset content types (e.g., ["image", "video"])
-        min_width: Minimum format width in pixels
-        max_width: Maximum format width in pixels
-        min_height: Minimum format height in pixels
-        max_height: Maximum format height in pixels
-        context: Application-level context per AdCP spec
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with ListCreativeFormatsResponse data
-    """
-    try:
-        # Coerce raw strings to enums at the transport boundary (Pattern #5).
-        # FastMCP normally coerces, but direct callers may pass raw strings.
-        asset_types_strs = (
-            [at.value if isinstance(at, AssetContentType) else str(at) for at in asset_types] if asset_types else None
-        )
-        req = ListCreativeFormatsRequest(
-            format_ids=format_ids,
-            is_responsive=is_responsive,
-            name_search=name_search,
-            asset_types=asset_types_strs,
-            min_width=min_width,
-            max_width=max_width,
-            min_height=min_height,
-            max_height=max_height,
-            context=context,
-        )
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="list_creative_formats request")) from e
-
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    response = _list_creative_formats_impl(req, identity)
-    return ToolResult(content=str(response), structured_content=response)
-
-
-def list_creative_formats_raw(
-    req: ListCreativeFormatsRequest | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> ListCreativeFormatsResponse:
-    """List all available creative formats (raw function for A2A server use).
-
-    Delegates to shared implementation.
-
-    Args:
-        req: Optional request with filter parameters
-        ctx: FastMCP context
-        identity: Pre-resolved identity (if available)
-
-    Returns:
-        ListCreativeFormatsResponse with all available formats
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-    return _list_creative_formats_impl(req, identity)

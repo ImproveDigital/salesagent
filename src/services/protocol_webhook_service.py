@@ -111,7 +111,7 @@ class ProtocolWebhookService:
         # Serialize payload to dict at the delivery boundary (for HMAC signing and JSON send)
         payload_dict: dict[str, Any]
         if isinstance(payload, (Task, TaskStatusUpdateEvent, McpWebhookPayload)):
-            payload_dict = payload.model_dump(mode="json", exclude_none=True)
+            payload_dict = payload.model_dump(mode="json", exclude_none=True)  # type: ignore[union-attr]
         else:
             payload_dict = payload
 

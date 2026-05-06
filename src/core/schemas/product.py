@@ -14,6 +14,7 @@ from adcp.types import Product as LibraryProduct
 from adcp.types import ProductCard as LibraryProductCard
 from adcp.types import ProductCardDetailed as LibraryProductCardDetailed
 from adcp.types import ProductFilters as LibraryFilters
+from adcp.types.generated_poc.core.reporting_capabilities import ReportingCapabilities
 from pydantic import ConfigDict, Field, model_validator
 
 from src.core.config import get_pydantic_extra_mode
@@ -22,6 +23,25 @@ from src.core.schemas._base import (
     NestedModelSerializerMixin,
     SalesAgentBaseModel,
     _upgrade_legacy_format_ids,
+)
+
+# Minimal-but-spec-valid ``ReportingCapabilities`` used as the default for
+# Products that don't have one set on the ORM row. The values are honest
+# baselines every adapter can satisfy:
+#   * ``daily`` reporting + ``impressions`` metric: lowest-common-denominator
+#     reporting all platforms support
+#   * ``date_range`` support: arbitrary ranges are allowed (the alternative,
+#     ``lifetime_only``, is a stricter claim than we can honor)
+#   * ``timezone="UTC"``: the only timezone we guarantee on legacy rows
+# Callers that DO have real capabilities set them via the field — the
+# default only kicks in when nothing is supplied.
+_DEFAULT_REPORTING_CAPABILITIES = ReportingCapabilities(
+    available_reporting_frequencies=["daily"],
+    expected_delay_minutes=0,
+    timezone="UTC",
+    supports_webhooks=False,
+    available_metrics=["impressions"],
+    date_range_support="date_range",
 )
 
 
@@ -77,13 +97,15 @@ class Product(LibraryProduct):
     - Automatic updates when library Product changes
     """
 
-    # Library v4.4.0 made this required; salesagent treats it as optional
-    # (the ORM column is nullable, and historical products predate the field).
-    # Override the inherited field-required semantics with a None default so
-    # ORM → Pydantic conversion of legacy rows doesn't ValidationError. New
-    # products serialize the field when set; the buyer protocol still
-    # surfaces real capabilities to clients that ask.
-    reporting_capabilities: Any | None = Field(default=None)
+    # Library v4.4 made ``reporting_capabilities`` required on Product. Our
+    # ORM column is nullable, and historical products predate the field. Use
+    # a default factory that produces a minimal-but-spec-valid object so:
+    #   * ORM → Pydantic conversion of legacy rows doesn't ValidationError;
+    #   * the SDK's output-schema validator (FastMCP) accepts the response
+    #     (the field is required on the wire, so emitting ``null`` or omitting
+    #     it would fail validation);
+    #   * tenants that fill it in explicitly still surface real capabilities.
+    reporting_capabilities: Any = Field(default_factory=lambda: _DEFAULT_REPORTING_CAPABILITIES.model_copy())
 
     # Internal-only fields (not in AdCP spec)
     implementation_config: dict[str, Any] | None = Field(

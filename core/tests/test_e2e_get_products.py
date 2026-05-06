@@ -42,9 +42,7 @@ def _impl_response_with_one_product(product_id: str = "demo-product") -> GetProd
                     "name": "Demo Product",
                     "description": "A demo product",
                     "delivery_type": "non_guaranteed",
-                    "publisher_properties": [
-                        {"publisher_domain": "example.com", "selection_type": "all"}
-                    ],
+                    "publisher_properties": [{"publisher_domain": "example.com", "selection_type": "all"}],
                     "format_ids": [
                         {
                             "agent_url": "https://creative.adcontextprotocol.org/",
@@ -86,13 +84,13 @@ def mocked_pipeline():
 
     impl_mock = AsyncMock(return_value=_impl_response_with_one_product())
 
-    with patch(
-        "core.stores.accounts.get_db_session", return_value=session
-    ), patch(
-        "core.platforms._delegate._get_products_impl", new=impl_mock
-    ), patch(
-        "core.platforms._delegate.get_tenant_by_id",
-        return_value={"tenant_id": "demo-tenant", "name": "Demo Tenant"},
+    with (
+        patch("core.stores.accounts.get_db_session", return_value=session),
+        patch("core.platforms._delegate._get_products_impl", new=impl_mock),
+        patch(
+            "core.platforms._delegate.get_tenant_by_id",
+            return_value={"tenant_id": "demo-tenant", "name": "Demo Tenant"},
+        ),
     ):
         yield impl_mock
 
@@ -101,9 +99,7 @@ def test_get_products_dispatches_through_framework_handler(mocked_pipeline):
     """A real PlatformHandler dispatch reaches the delegate, which
     forwards to the impl and projects the response onto a wire dict."""
     platform = MockSellerPlatform()
-    handler, _executor, _registry = create_adcp_server_from_platform(
-        platform, auto_emit_completion_webhooks=False
-    )
+    handler, _executor, _registry = create_adcp_server_from_platform(platform, auto_emit_completion_webhooks=False)
 
     req = GetProductsRequest(
         account={"account_id": "demo-tenant:demo"},

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 from adcp.types import CreativeAction
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
 from adcp.types import FormatId as AdcpFormatId
+from adcp.types.generated_poc.core.creative_asset import CreativeAsset
 
 from tests.harness import CreativeListEnv, CreativeSyncEnv
 
@@ -23,45 +23,72 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 
 def _make_creative_asset(**overrides) -> CreativeAsset:
-    """Build a minimal valid CreativeAsset for testing."""
+    """Build a minimal valid CreativeAsset for testing.
+
+    adcp 4.4 made the asset value-side schema strict — image assets need
+    ``asset_type``, ``url``, ``width``, ``height`` at minimum. The default
+    here is a fully-formed image asset; tests that need a different shape
+    pass ``assets=`` explicitly.
+    """
     defaults = {
         "creative_id": "c_test_1",
         "name": "Test Banner",
         "format_id": AdcpFormatId(agent_url=DEFAULT_AGENT_URL, id="display_300x250"),
-        "assets": {"banner": {"url": "https://example.com/banner.png"}},
+        "assets": {
+            "banner": {
+                "asset_type": "image",
+                "url": "https://example.com/banner.png",
+                "width": 300,
+                "height": 250,
+            }
+        },
     }
     defaults.update(overrides)
     return CreativeAsset(**defaults)
 
 
 # ---------------------------------------------------------------------------
-# UC-006-CREATIVE-SCHEMA-COMPLIANCE-10: All 11 asset types accepted through sync
+# UC-006-CREATIVE-SCHEMA-COMPLIANCE-10: AssetVariant types accepted through sync
 # ---------------------------------------------------------------------------
 
 
 class TestAllAssetTypesAcceptedThroughSync:
-    """Each of the 11 asset types must be accepted through _sync_creatives_impl
+    """Each AssetVariant must be accepted through _sync_creatives_impl
     without validation errors and persisted to the database.
 
     Covers: UC-006-CREATIVE-SCHEMA-COMPLIANCE-10
     """
 
-    ASSET_TYPES = [
-        "image",
-        "video",
-        "audio",
-        "text",
-        "markdown",
-        "html",
-        "css",
-        "javascript",
-        "vast",
-        "daast",
-        "promoted_offerings",
+    # adcp 4.4 splits asset-value shape by ``asset_type``: image/video/audio/
+    # vast/daast/url/webhook/catalog all require URL (and image/video need
+    # width+height); text/markdown/html/css/javascript accept ``content``.
+    # The fixture covers the simple-payload shapes — ``catalog`` and
+    # ``webhook`` require deeply-nested structured payloads that this
+    # dict-literal fixture can't construct correctly; rebuild on typed
+    # adcp factories before adding them back.
+    ASSET_TYPES_BY_SHAPE: list[tuple[str, dict]] = [
+        ("image", {"url": "https://example.com/img.png", "width": 300, "height": 250}),
+        ("video", {"url": "https://example.com/vid.mp4", "width": 640, "height": 360}),
+        ("audio", {"url": "https://example.com/aud.mp3"}),
+        ("text", {"content": "test text content"}),
+        ("markdown", {"content": "# heading"}),
+        ("html", {"content": "<div>hi</div>"}),
+        ("css", {"content": ".x{}"}),
+        ("javascript", {"content": "alert(1)"}),
+        # vast/daast are discriminated unions on ``delivery_type`` —
+        # URL-delivered variants must declare ``delivery_type="url"``.
+        ("vast", {"url": "https://example.com/vast.xml", "delivery_type": "url"}),
+        ("daast", {"url": "https://example.com/daast.xml", "delivery_type": "url"}),
+        # adcp 4.4 dropped ``promoted_offerings`` from the AssetVariant
+        # discriminator. ``catalog`` is the closest 4.4 cousin but it
+        # carries a deeply-nested required-field tree that this fixture
+        # doesn't pretend to construct correctly — see beads-???? to
+        # rebuild this test on top of typed adcp factories instead of
+        # dict literals.
     ]
 
-    def test_all_11_asset_types_accepted(self, integration_db):
-        """Sync creatives with each of the 11 asset types through real DB.
+    def test_all_asset_types_accepted(self, integration_db):
+        """Sync creatives with each AssetVariant through real DB.
 
         Covers: UC-006-CREATIVE-SCHEMA-COMPLIANCE-10
         """
@@ -69,26 +96,26 @@ class TestAllAssetTypesAcceptedThroughSync:
             env.setup_default_data()
 
             creatives = []
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, shape in self.ASSET_TYPES_BY_SHAPE:
                 creatives.append(
                     _make_creative_asset(
                         creative_id=f"c_{asset_type}",
                         name=f"Test {asset_type}",
-                        assets={asset_type: {"content": f"test {asset_type} content"}},
+                        assets={asset_type: {"asset_type": asset_type, **shape}},
                     )
                 )
 
             response = env.call_impl(creatives=creatives)
 
-            # All 11 should succeed (created action, no failures)
-            assert len(response.creatives) == len(self.ASSET_TYPES)
+            # Every fixture entry should round-trip (created action, no failures).
+            assert len(response.creatives) == len(self.ASSET_TYPES_BY_SHAPE)
             actions = {r.creative_id: r.action for r in response.creatives}
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, _ in self.ASSET_TYPES_BY_SHAPE:
                 cid = f"c_{asset_type}"
                 assert cid in actions, f"Missing result for creative with {asset_type} asset"
-                assert actions[cid] == CreativeAction.created, (
-                    f"Creative with {asset_type} asset should be created, got {actions[cid]}"
-                )
+                assert (
+                    actions[cid] == CreativeAction.created
+                ), f"Creative with {asset_type} asset should be created, got {actions[cid]}"
 
     def test_asset_data_preserved_through_roundtrip(self, integration_db):
         """Verify that asset data survives the sync -> list round-trip for each type.
@@ -99,11 +126,11 @@ class TestAllAssetTypesAcceptedThroughSync:
             env.setup_default_data()
 
             # Sync one creative with each asset type
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, shape in self.ASSET_TYPES_BY_SHAPE:
                 creative = _make_creative_asset(
                     creative_id=f"c_rt_{asset_type}",
                     name=f"Roundtrip {asset_type}",
-                    assets={asset_type: {"content": f"{asset_type} data"}},
+                    assets={asset_type: {"asset_type": asset_type, **shape}},
                 )
                 response = env.call_impl(creatives=[creative])
                 assert response.creatives[0].action == CreativeAction.created
@@ -113,7 +140,7 @@ class TestAllAssetTypesAcceptedThroughSync:
             list_response = env.call_impl()
 
             returned_ids = {c.creative_id for c in list_response.creatives}
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, _ in self.ASSET_TYPES_BY_SHAPE:
                 cid = f"c_rt_{asset_type}"
                 assert cid in returned_ids, f"Creative with {asset_type} asset not found in list response"
 
@@ -231,9 +258,9 @@ class TestCreativeExtendsListingBase:
             assert len(matched) == 1
 
             # The Creative schema class must extend ListingCreative
-            assert isinstance(matched[0], ListingCreative), (
-                f"Creative in list response must be an instance of listing Creative, got {type(matched[0]).__mro__}"
-            )
+            assert isinstance(
+                matched[0], ListingCreative
+            ), f"Creative in list response must be an instance of listing Creative, got {type(matched[0]).__mro__}"
 
     def test_listing_creative_not_delivery_creative(self, integration_db):
         """Listed creative must NOT be an instance of delivery Creative.
@@ -254,9 +281,9 @@ class TestCreativeExtendsListingBase:
 
             matched = [c for c in list_response.creatives if c.creative_id == "c_not_delivery"]
             assert len(matched) == 1
-            assert not isinstance(matched[0], DeliveryCreative), (
-                "Creative in list response must NOT be an instance of delivery Creative"
-            )
+            assert not isinstance(
+                matched[0], DeliveryCreative
+            ), "Creative in list response must NOT be an instance of delivery Creative"
 
 
 # ---------------------------------------------------------------------------

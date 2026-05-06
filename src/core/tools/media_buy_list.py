@@ -13,15 +13,11 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, cast
 
-from fastmcp.exceptions import ToolError
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-from pydantic import RootModel, ValidationError
+from pydantic import RootModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +49,6 @@ class _PackageData:
     bid_price: Decimal | None
 
 
-from adcp.types import ContextObject
 from adcp.types import MediaBuyStatus
 
 from src.core.auth import get_principal_object
@@ -71,7 +66,6 @@ from src.core.schemas import (
     Snapshot,
     SnapshotUnavailableReason,
 )
-from src.core.validation_helpers import format_validation_error
 
 
 def _get_media_buys_impl(
@@ -211,84 +205,6 @@ def _get_media_buys_impl(
         media_buys=response_media_buys,
         context=req.context,
     )
-
-
-async def get_media_buys(
-    media_buy_ids: list[str] | None = None,
-    status_filter: MediaBuyStatus | list[MediaBuyStatus] | None = None,
-    include_snapshot: bool = False,
-    account: dict | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-):
-    """Get media buys with status, creative approval state, and optional delivery snapshots.
-
-    MCP tool wrapper that resolves identity and delegates to the shared implementation.
-
-    Args:
-        media_buy_ids: Array of publisher media buy IDs to retrieve (optional)
-        status_filter: Filter by status - single status or array of MediaBuyStatus values (optional)
-        include_snapshot: When true, include near-real-time delivery stats per package (default: false)
-        account: Account reference per AdCP 3.x (optional). Legacy account_id is normalized by middleware.
-        context: Application level context object (optional)
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with GetMediaBuysResponse data
-    """
-    try:
-        req = GetMediaBuysRequest(
-            media_buy_ids=media_buy_ids,
-            status_filter=cast(MediaBuyStatus | list[MediaBuyStatus] | None, status_filter),
-            account=account,
-            context=cast(ContextObject | None, context),
-        )
-        # Read identity pre-resolved by MCPAuthMiddleware
-        identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-        response = _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
-        return ToolResult(content=str(response), structured_content=response)
-    except ValidationError as e:
-        raise ToolError(format_validation_error(e, context="get_media_buys request"))
-
-
-def get_media_buys_raw(
-    media_buy_ids: list[str] | None = None,
-    status_filter: MediaBuyStatus | list[MediaBuyStatus] | None = None,
-    include_snapshot: bool = False,
-    account: dict | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """Get media buys (raw function for A2A server use).
-
-    Args:
-        media_buy_ids: Array of publisher media buy IDs to retrieve (optional)
-        status_filter: Filter by status - single status or array of MediaBuyStatus values (optional)
-        include_snapshot: When true, include near-real-time delivery stats per package (default: false)
-        account: Account reference per AdCP 3.x (optional). Legacy account_id is normalized by middleware.
-        context: Application level context (optional)
-        ctx: Context for authentication (used if identity not pre-resolved)
-        identity: Pre-resolved identity (preferred over ctx)
-
-    Returns:
-        GetMediaBuysResponse
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=True, protocol="a2a")
-
-    req = GetMediaBuysRequest(
-        media_buy_ids=media_buy_ids,
-        status_filter=cast(MediaBuyStatus | list[MediaBuyStatus] | None, status_filter),
-        account=account,
-        context=cast(ContextObject | None, context),
-    )
-    return _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
-
-
-# --- Helper functions ---
 
 
 def _fetch_target_media_buys(

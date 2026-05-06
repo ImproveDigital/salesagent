@@ -202,6 +202,9 @@ class TestAuditLogBrandFieldName:
         call_kwargs = mock_logger.log_operation.call_args
         details = call_kwargs.kwargs.get("details") or call_kwargs[1].get("details")
 
-        assert "has_brand" in details, f"Audit log details missing 'has_brand' key: {details}"
+        # PR #24 (Ledger redesign) replaced the ``has_brand`` bool with the
+        # full ``brand_domain`` value — strictly more informative for the
+        # Pipeline grouping that consumes the audit ledger.
+        assert "brand_domain" in details, f"Audit log details missing 'brand_domain' key: {details}"
         assert "has_brand_manifest" not in details, f"Audit log still uses stale 'has_brand_manifest' key: {details}"
-        assert details["has_brand"] is True
+        assert details["brand_domain"] == "nike.com"

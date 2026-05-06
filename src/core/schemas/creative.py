@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from adcp.types import AccountReference as LibraryAccountReference
 from adcp.types import (
+    AiTool,
+    CreativeAction,
     CreativeStatus,
 )
 from adcp.types import FormatId as LibraryFormatId
@@ -26,6 +28,7 @@ from adcp.types import (
 from adcp.types import (
     ListCreativesResponse as LibraryListCreativesResponse,
 )
+from adcp.types import PaginationResponse as LibraryResponsePagination
 from adcp.types import (
     QuerySummary as LibraryQuerySummary,
 )
@@ -35,15 +38,19 @@ from adcp.types import (
 from adcp.types import (
     SyncCreativesRequest as LibrarySyncCreativesRequest,
 )
-from adcp.types import PaginationResponse as LibraryResponsePagination
-from adcp.types import AiTool
-from adcp.types import (
+
+# Pin to the listing-side ``Creative`` (list_creatives_response). The
+# top-level ``adcp.types.Creative`` resolves to the delivery-side type
+# (get_creative_delivery_response) since adcp 4.4 — that variant has only
+# ``creative_id, media_buy_id, format_id, totals, variant_count, variants``
+# and rejects ``tags`` / ``status`` / ``assets`` etc. Our Creative is
+# explicitly a listing-side schema, so we extend the listing variant.
+from adcp.types.generated_poc.creative.list_creatives_response import (
     Creative as LibraryCreative,
 )
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
-from adcp.types import CreativeAction
 from pydantic import (
     ConfigDict,
     Field,
@@ -373,7 +380,7 @@ class SyncCreativeResult(LibrarySyncCreativeResult):
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     # Internal-only fields (not in AdCP spec)
-    status: str | None = Field(
+    status: str | None = Field(  # type: ignore[assignment]
         None, exclude=True, description="Current approval status of the creative (INTERNAL - excluded from responses)"
     )
     review_feedback: str | None = Field(
@@ -384,7 +391,7 @@ class SyncCreativeResult(LibrarySyncCreativeResult):
     changes: list[str] = Field(
         default_factory=list, description="List of field names that were modified (for 'updated' action)"
     )
-    errors: list[str] = Field(default_factory=list, description="Validation or processing errors (for 'failed' action)")
+    errors: list[str] = Field(default_factory=list, description="Validation or processing errors (for 'failed' action)")  # type: ignore[assignment]
     warnings: list[str] = Field(default_factory=list, description="Non-fatal warnings about this creative")
 
     def model_dump(self, **kwargs):
@@ -464,6 +471,16 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
 
     Design decision (salesagent-g3c): error variant never constructed.
     """
+
+    def model_dump(self, **kwargs):
+        """Pattern #4 nested serialization — re-serialize each ``SyncCreativeResult``
+        through its own ``model_dump()`` so the local ``status`` /
+        ``review_feedback`` fields with ``exclude=True`` are dropped.
+        """
+        result = super().model_dump(**kwargs)
+        if "creatives" in result and self.creatives:
+            result["creatives"] = [c.model_dump(**kwargs) for c in self.creatives]
+        return result
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""
@@ -593,7 +610,7 @@ class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResp
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     # Override with local subtypes (each extends its library counterpart)
-    query_summary: QuerySummary = Field(..., description="Summary of the query that was executed")
+    query_summary: QuerySummary = Field(..., description="Summary of the query that was executed")  # type: ignore[assignment]
     pagination: Pagination = Field(..., description="Pagination information for navigating results")
     creatives: list[Creative] = Field(..., description="Array of creative assets")  # type: ignore[assignment]
 

@@ -448,10 +448,7 @@ class TestEmbedBreadcrumbRendering:
             # Jinja HTML-escapes ``&`` to ``&amp;``; the leaf crumb
             # ("Users & Access") renders as a styled span, not a link.
             # The breadcrumb partial marks the leaf with aria-current="page".
-            leaf = (
-                '<span class="breadcrumb-current" aria-current="page">'
-                "Users &amp; Access</span>"
-            )
+            leaf = '<span class="breadcrumb-current" aria-current="page">Users &amp; Access</span>'
             assert leaf in body
             # The crumb container ends with the leaf — no <a> tag immediately
             # before it.

@@ -104,19 +104,3 @@ class TestTransportBoundariesSetTenant:
         """REST auth deps must set tenant ContextVar after resolving identity."""
         source = (PROJECT_ROOT / "src" / "core" / "auth_context.py").read_text()
         assert "set_current_tenant" in source, "REST auth deps must call set_current_tenant() at the transport boundary"
-
-    def test_a2a_boundary_sets_tenant(self):
-        """A2A handler must set tenant ContextVar after resolving identity."""
-        source = (PROJECT_ROOT / "src" / "a2a_server" / "adcp_a2a_server.py").read_text()
-        tree = ast.parse(source)
-
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_resolve_a2a_identity":
-                func_source = ast.get_source_segment(source, node)
-                assert func_source is not None
-                assert "set_current_tenant" in func_source, (
-                    "_resolve_a2a_identity must call set_current_tenant() at the transport boundary"
-                )
-                return
-
-        pytest.fail("_resolve_a2a_identity function not found")

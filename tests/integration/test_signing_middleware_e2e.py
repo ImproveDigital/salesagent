@@ -574,10 +574,10 @@ class TestSigningMiddlewareEndToEnd:
     async def test_disabled_link_rejects_signed_request(self, signing_setup, session):
         """H1 regression: deactivating operator_advertiser_link must stop the
         verifier from admitting signed requests on that link."""
-        from src.core.database.models import OperatorAdvertiserLink
-
         # Disable the link the signing_setup fixture created.
         from sqlalchemy import select
+
+        from src.core.database.models import OperatorAdvertiserLink
 
         link = session.scalars(
             select(OperatorAdvertiserLink).filter_by(

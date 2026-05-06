@@ -20,13 +20,10 @@ from sqlalchemy.exc import IntegrityError
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-from adcp import PushNotificationConfig
-from adcp.types import ContextObject, CreativeAsset, MediaBuyStatus, ReportingWebhook, TargetingOverlay
+from adcp.types import ContextObject, MediaBuyStatus
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from adcp.types import PackageRequest as AdcpPackageRequest
 from adcp.types.aliases import Package as ResponsePackage
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import BaseModel, ValidationError
 from rich.console import Console
 
@@ -98,7 +95,6 @@ from src.core.helpers.creative_helpers import (
     process_and_upload_package_creatives,
 )
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schema_helpers import to_context_object, to_reporting_webhook
 from src.core.schemas import (
     CreateMediaBuyError,
     CreateMediaBuyRequest,
@@ -118,7 +114,6 @@ from src.core.schemas import (
     url as make_url,
 )
 from src.core.testing_hooks import AdCPTestContext, TestingContext, apply_testing_hooks
-from src.core.tool_context import ToolContext
 from src.core.tools.financial_validation import validate_max_daily_package_spend, validate_min_package_budget
 
 # Import get_product_catalog from main (after refactor)
@@ -1395,7 +1390,8 @@ async def _create_media_buy_impl(
     from src.core.helpers.account_provisioning import resolve_account_advertiser
 
     _account_advertiser_id = resolve_account_advertiser(
-        identity, dry_run=False  # dry_run from testing_ctx is resolved later
+        identity,
+        dry_run=False,  # dry_run from testing_ctx is resolved later
     )
     if _account_advertiser_id is not None:
         mappings = dict(principal.platform_mappings or {})
@@ -2724,9 +2720,9 @@ async def _create_media_buy_impl(
                 # Merge dimensions from product's format_ids if request format_ids don't have them
                 # This handles the case where buyer specifies format_id but not dimensions
                 # Build lookup of product format dimensions by (normalized_url, id)
-                product_format_dimensions: dict[tuple[str | None, str], tuple[int | None, int | None, float | None]] = (
-                    {}
-                )
+                product_format_dimensions: dict[
+                    tuple[str | None, str], tuple[int | None, int | None, float | None]
+                ] = {}
                 if pkg_product.format_ids:
                     for fmt in pkg_product.format_ids:
                         agent_url = fmt.agent_url
@@ -3770,189 +3766,6 @@ async def _create_media_buy_impl(
         raise AdCPAdapterError(
             f"Failed to create media buy: {str(e)}", details={"error_code": "MEDIA_BUY_CREATION_ERROR"}
         )
-
-
-async def create_media_buy(
-    brand: Any | None = None,  # BrandReference with domain field - per AdCP v3.6.0 spec
-    packages: list[PackageRequest] | None = None,  # REQUIRED per AdCP spec - Package objects with all fields
-    start_time: str | None = None,  # datetime ISO 8601 or 'asap' - REQUIRED per AdCP spec
-    end_time: str | None = None,  # datetime ISO 8601 - REQUIRED per AdCP spec
-    budget: Any | None = None,  # DEPRECATED: Budget is package-level only per AdCP v2.2.0
-    po_number: str | None = None,
-    product_ids: list[str] | None = None,  # Legacy format conversion
-    start_date: Any | None = None,  # Legacy format conversion
-    end_date: Any | None = None,  # Legacy format conversion
-    total_budget: float | None = None,  # Legacy format conversion
-    targeting_overlay: TargetingOverlay | None = None,
-    pacing: str = "even",
-    daily_budget: float | None = None,
-    creatives: list[CreativeAsset] | None = None,
-    reporting_webhook: ReportingWebhook | None = None,
-    required_axe_signals: list[str] | None = None,
-    enable_creative_macro: bool = False,
-    strategy_id: str | None = None,
-    push_notification_config: PushNotificationConfig | None = None,
-    context: ContextObject | None = None,  # payload-level context
-    ext: Any | None = None,  # AdCP ExtensionObject for custom fields
-    webhook_url: str | None = None,
-    ctx: Context | ToolContext | None = None,
-):
-    """Create a media buy with the specified parameters.
-
-    MCP tool wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-
-    Args:
-        brand: Brand reference with domain field - per AdCP v3.6.0 spec
-        packages: Array of packages with products and budgets (REQUIRED - budgets are at package level per AdCP v2.2.0)
-        start_time: Campaign start time ISO 8601 or 'asap' (REQUIRED)
-        end_time: Campaign end time ISO 8601 (REQUIRED)
-        budget: DEPRECATED - Budget is package-level only per AdCP v2.2.0 (ignored if provided)
-        po_number: Purchase order number (optional)
-        product_ids: Legacy: Product IDs (converted to packages)
-        start_date: Legacy: Start date (converted to start_time)
-        end_date: Legacy: End date (converted to end_time)
-        total_budget: Legacy: Total budget (converted to package budgets)
-        targeting_overlay: Targeting overlay configuration
-        pacing: Pacing strategy (even, asap, daily_budget)
-        daily_budget: Daily_budget limit
-        creatives: Creative assets for the campaign
-        reporting_webhook: Webhook configuration for automated reporting delivery
-        required_axe_signals: Required targeting signals
-        enable_creative_macro: Enable AXE to provide creative_macro signal
-        strategy_id: Optional strategy ID for linking operations
-        push_notification_config: Push notification config dict with url, authentication (AdCP spec)
-        context: Application level context per adcp spec
-        buyer_campaign_ref: Buyer's campaign reference identifier (optional, per AdCP spec)
-        ext: Extension object for custom fields (optional, per AdCP spec)
-        ctx:  FastMCP context (automatically provided) (automatically provided)
-
-    Returns:
-        ToolResult with CreateMediaBuyResponse data
-    """
-    # Construct spec-compliant request object at the boundary — validation happens here
-    # FastMCP already coerced JSON inputs to typed Pydantic models
-    try:
-        req = CreateMediaBuyRequest(
-            brand=brand,
-            packages=packages,
-            start_time=start_time,
-            end_time=end_time,
-            po_number=po_number,
-            reporting_webhook=reporting_webhook,
-            context=context,
-            ext=ext,
-        )
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="request")) from e
-
-    # Read identity and context_id pre-resolved by MCPAuthMiddleware
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
-
-    # Resolve account at transport boundary (before _impl)
-    from src.core.transport_helpers import enrich_identity_with_account
-
-    identity = enrich_identity_with_account(identity, req.account)
-
-    # Serialize PushNotificationConfig model to dict for _impl (which accepts dict|None)
-    pnc_dict = push_notification_config.model_dump() if push_notification_config else None
-    result = await _create_media_buy_impl(
-        req=req, push_notification_config=pnc_dict, identity=identity, context_id=_ctx_id
-    )
-    return ToolResult(content=str(result), structured_content=result)
-
-
-async def create_media_buy_raw(
-    brand: Any | None = None,  # BrandReference with domain field - per AdCP v3.6.0 spec
-    packages: list[Any] | None = None,  # REQUIRED per AdCP spec
-    start_time: Any | None = None,  # datetime | Literal["asap"] | str - REQUIRED per AdCP spec
-    end_time: Any | None = None,  # datetime | str - REQUIRED per AdCP spec
-    budget: Any | None = None,  # DEPRECATED: Budget is package-level only per AdCP v2.2.0
-    po_number: str | None = None,
-    product_ids: list[str] | None = None,  # Legacy format conversion
-    total_budget: float | None = None,  # Legacy format conversion
-    start_date: Any | None = None,  # Legacy format conversion
-    end_date: Any | None = None,  # Legacy format conversion
-    targeting_overlay: dict[str, Any] | None = None,
-    pacing: str = "even",
-    daily_budget: float | None = None,
-    creatives: list[Any] | None = None,
-    reporting_webhook: dict[str, Any] | None = None,
-    required_axe_signals: list[str] | None = None,
-    enable_creative_macro: bool = False,
-    strategy_id: str | None = None,
-    push_notification_config: dict[str, Any] | None = None,
-    context: dict[str, Any] | None = None,  # Application level context per adcp spec
-    buyer_campaign_ref: str | None = None,
-    ext: dict[str, Any] | None = None,  # AdCP ExtensionObject for custom fields
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """Create a new media buy with specified parameters (raw function for A2A server use).
-
-    Delegates to the shared implementation.
-
-    Args:
-        brand: Brand reference with domain field - per AdCP v3.6.0 spec
-        packages: List of media packages (REQUIRED)
-        start_time: Campaign start time ISO 8601 or 'asap' (REQUIRED)
-        end_time: Campaign end time ISO 8601 (REQUIRED)
-        budget: DEPRECATED - Budget is at package level only per AdCP v2.2.0 (ignored if provided)
-        po_number: Purchase order number (optional)
-        product_ids: Legacy: Product IDs (converted to packages)
-        total_budget: Legacy: Total budget (converted to Budget object)
-        start_date: Legacy: Start date (converted to start_time)
-        end_date: Legacy: End date (converted to end_time)
-        targeting_overlay: Additional targeting parameters
-        pacing: Pacing strategy
-        daily_budget: Daily budget limit
-        creatives: Creative assets
-        reporting_webhook: Webhook configuration for automated reporting delivery
-        required_axe_signals: Required signals
-        enable_creative_macro: Enable creative macro
-        strategy_id: Strategy ID
-        push_notification_config: Push notification config for status updates
-        buyer_campaign_ref: Buyer's campaign reference identifier (optional, per AdCP spec)
-        ext: Extension object for custom fields (optional, per AdCP spec)
-        ctx: Context for authentication (deprecated, use identity)
-        identity: Pre-resolved identity (if available)
-
-    Returns:
-        Dict with status and CreateMediaBuyResponse data
-    """
-    # Construct spec-compliant request object at the boundary — validation happens here
-    # A2A server sends dict inputs which Pydantic coerces to typed models
-    try:
-        req = CreateMediaBuyRequest(
-            brand=brand,
-            packages=packages,
-            start_time=start_time,
-            end_time=end_time,
-            po_number=po_number,
-            reporting_webhook=to_reporting_webhook(reporting_webhook),
-            context=to_context_object(context),
-            ext=ext,
-        )
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="request")) from e
-
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=True)
-
-    # Resolve account at transport boundary (before _impl)
-    from src.core.transport_helpers import enrich_identity_with_account
-
-    identity = enrich_identity_with_account(identity, req.account)
-
-    # FIXME(salesagent-v0kb): boundary-completeness — context_id not passed to _impl
-    return await _create_media_buy_impl(
-        req=req,
-        push_notification_config=push_notification_config,
-        identity=identity,
-    )
 
 
 # Unified update tools

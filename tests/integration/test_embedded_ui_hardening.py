@@ -18,7 +18,6 @@ Covered surfaces:
 
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
@@ -236,12 +235,10 @@ class TestSettingsHiddenSectionsOnEmbedded:
         assert active_sections[0] == "business-rules"
 
         # The matching nav item is also .active and points to the same target.
-        active_nav = re.findall(
-            r'<a class="settings-nav-item active" data-section="([^"]+)"', body
-        )
-        assert active_nav == ["business-rules"], (
-            f"Nav-active and section-active must agree; got nav={active_nav}, section={active_sections}"
-        )
+        active_nav = re.findall(r'<a class="settings-nav-item active" data-section="([^"]+)"', body)
+        assert active_nav == [
+            "business-rules"
+        ], f"Nav-active and section-active must agree; got nav={active_nav}, section={active_sections}"
 
     def test_open_default_section_is_account(self, client, open_tenant_id):
         """Mirror of the embedded case for open-instance: Account is the
@@ -254,9 +251,7 @@ class TestSettingsHiddenSectionsOnEmbedded:
         active_sections = re.findall(r'<div id="([^"]+)" class="settings-section active"', body)
         assert active_sections == ["account"], f"Expected only 'account' section .active; got {active_sections}"
 
-        active_nav = re.findall(
-            r'<a class="settings-nav-item active" data-section="([^"]+)"', body
-        )
+        active_nav = re.findall(r'<a class="settings-nav-item active" data-section="([^"]+)"', body)
         assert active_nav == ["account"], f"Expected only 'account' nav .active; got {active_nav}"
 
 
@@ -572,14 +567,14 @@ class TestSyncInventoryHiddenOnEmbedded:
         assert "Sync Inventory" not in body
         # Verify the /inventory route is not linked from the dashboard
         # (other inventory paths like /inventory/browse are allowed).
-        assert f"/tenant/{embedded_tenant_id}/inventory\"" not in body
+        assert f'/tenant/{embedded_tenant_id}/inventory"' not in body
 
-    def test_open_dashboard_keeps_sync_inventory_link(self, client, open_tenant_id):
-        resp = client.get(f"/tenant/{open_tenant_id}")
-        assert resp.status_code == 200, resp.get_data(as_text=True)
-        body = resp.get_data(as_text=True)
-        assert "Sync Inventory" in body
-        assert f"/tenant/{open_tenant_id}/inventory\"" in body
+    # NOTE: The Ledger dashboard redesign (PR #24) removed top-level inventory
+    # nav from the tenant dashboard in favour of the Incoming/Running/Pipeline
+    # editorial layout. The "Sync Inventory" link is no longer surfaced from
+    # the dashboard — publishers reach Sync Inventory via the Settings rail.
+    # The standalone Sync Inventory page (``/tenant/<id>/inventory``) still
+    # works (covered by ``test_open_tenant_renders_sync_controls`` above).
 
 
 # ---------------------------------------------------------------------------
@@ -588,35 +583,16 @@ class TestSyncInventoryHiddenOnEmbedded:
 
 
 class TestPromotedInventoryNav:
-    """Browse Inventory / Targeting Criteria / Inventory Profiles are
-    promoted to top-level nav siblings on the tenant dashboard.
+    """Browse Inventory / Targeting Criteria / Inventory Profiles routes
+    resolve on both embedded and open-instance tenants.
 
-    These three are visible on BOTH embedded and open-instance tenants —
-    publishers need to browse inventory and target criteria when authoring
-    products regardless of who drives sync.
+    The Ledger dashboard redesign (PR #24) replaced the previous
+    "promoted top-level nav siblings" with the Incoming/Running/Pipeline
+    layout, so the dashboard itself no longer surfaces these as buttons.
+    What still must hold: the routes themselves load on both tenant
+    flavours, since publishers still need to browse inventory and pick
+    targeting when authoring products.
     """
-
-    def test_open_tenant_dashboard_shows_three_promoted_links(self, client, open_tenant_id):
-        resp = client.get(f"/tenant/{open_tenant_id}")
-        assert resp.status_code == 200, resp.get_data(as_text=True)
-        body = resp.get_data(as_text=True)
-        assert "Browse Inventory" in body
-        assert "Targeting Criteria" in body
-        assert "Inventory Profiles" in body
-        assert f"/tenant/{open_tenant_id}/inventory/browse" in body
-        assert f"/tenant/{open_tenant_id}/targeting" in body
-        assert f"/tenant/{open_tenant_id}/inventory-profiles/" in body
-
-    def test_embedded_tenant_dashboard_shows_three_promoted_links(self, client, embedded_tenant_id):
-        resp = client.get(f"/tenant/{embedded_tenant_id}")
-        assert resp.status_code == 200, resp.get_data(as_text=True)
-        body = resp.get_data(as_text=True)
-        assert "Browse Inventory" in body
-        assert "Targeting Criteria" in body
-        assert "Inventory Profiles" in body
-        assert f"/tenant/{embedded_tenant_id}/inventory/browse" in body
-        assert f"/tenant/{embedded_tenant_id}/targeting" in body
-        assert f"/tenant/{embedded_tenant_id}/inventory-profiles/" in body
 
     def test_browse_inventory_resolves_on_open_tenant(self, client, open_tenant_id):
         resp = client.get(f"/tenant/{open_tenant_id}/inventory/browse")

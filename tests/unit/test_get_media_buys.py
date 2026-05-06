@@ -1,7 +1,7 @@
 """Tests for get_media_buys tool implementation.
 
 Covers:
-- Status computation from date fields (pending_activation, active, completed)
+- Status computation from date fields (pending_start, active, completed)
 - Status filtering (default: active only; explicit filters; multiple statuses)
 - Filtering by media_buy_ids and buyer_refs
 - Creative approval mapping (approved, rejected, pending_review)
@@ -112,7 +112,7 @@ def make_package(
 
 
 class TestComputeStatus:
-    def test_pending_activation_when_before_start(self):
+    def test_pending_start_when_before_start(self):
         buy = make_media_buy(start_date=date(2099, 1, 1), end_date=date(2099, 12, 31))
         assert _compute_status(buy, date(2025, 6, 15)) == MediaBuyStatus.pending_start
 
@@ -450,7 +450,7 @@ class TestGetMediaBuysResponseStructure:
 
     def test_media_buy_status_values(self):
         """MediaBuyStatus enum values match AdCP spec strings."""
-        assert MediaBuyStatus.pending_start.value == "pending_activation"
+        assert MediaBuyStatus.pending_start.value == "pending_start"
         assert MediaBuyStatus.active.value == "active"
         assert MediaBuyStatus.completed.value == "completed"
 

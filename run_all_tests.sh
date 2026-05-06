@@ -32,7 +32,6 @@ echo "Mode: $MODE | Reports: $RESULTS_DIR/"
 validate_imports() {
     echo "Validating imports..."
     if ! uv run python -c "
-from src.core.tools import get_products_raw, create_media_buy_raw
 from src.core.tools.products import _get_products_impl
 from src.core.tools.media_buy_create import _create_media_buy_impl
 " 2>/dev/null; then

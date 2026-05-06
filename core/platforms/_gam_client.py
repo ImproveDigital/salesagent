@@ -51,25 +51,19 @@ def get_gam_client(tenant_id: str) -> ad_manager.AdManagerClient:
     process lifetime.
     """
     with get_db_session() as session:
-        cfg = session.scalars(
-            select(AdapterConfig).filter_by(tenant_id=tenant_id)
-        ).first()
+        cfg = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
 
     if cfg is None:
         raise ValueError(f"No adapter_config row for tenant {tenant_id!r}")
     if cfg.adapter_type != "google_ad_manager":
-        raise ValueError(
-            f"Tenant {tenant_id!r} adapter_type is {cfg.adapter_type!r}, not google_ad_manager"
-        )
+        raise ValueError(f"Tenant {tenant_id!r} adapter_type is {cfg.adapter_type!r}, not google_ad_manager")
     if not cfg.gam_service_account_json:
         raise ValueError(f"Tenant {tenant_id!r} has no service account JSON configured")
     if not cfg.gam_network_code:
         raise ValueError(f"Tenant {tenant_id!r} has no GAM network code configured")
 
     sa_info: dict[str, Any] = json.loads(cfg.gam_service_account_json)
-    credentials = service_account.Credentials.from_service_account_info(
-        sa_info, scopes=GAM_SCOPES
-    )
+    credentials = service_account.Credentials.from_service_account_info(sa_info, scopes=GAM_SCOPES)
     return ad_manager.AdManagerClient(
         oauth2_client=_ServiceAccountOAuthClient(credentials),
         application_name="salesagent-greenfield-rebuild",

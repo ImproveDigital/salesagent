@@ -134,9 +134,7 @@ def gam_create_advertiser_companyservice(
         existing = company_service.getCompaniesByStatement(statement_builder.ToStatement())
         if existing and getattr(existing, "results", None):
             attach_id = str(existing.results[0]["id"])
-            logger.warning(
-                f"[gam_create_advertiser] name collision on {name!r} — attaching existing id {attach_id}"
-            )
+            logger.warning(f"[gam_create_advertiser] name collision on {name!r} — attaching existing id {attach_id}")
             return attach_id
         raise
 
@@ -169,9 +167,7 @@ def resolve_account_advertiser(
         return None
 
     with get_db_session() as session:
-        account = session.scalars(
-            select(Account).filter_by(tenant_id=tenant_id, account_id=account_id)
-        ).first()
+        account = session.scalars(select(Account).filter_by(tenant_id=tenant_id, account_id=account_id)).first()
         if account is None:
             # Account ref didn't resolve to a row — that's a buyer-side
             # ref-validation failure that's surfaced upstream of here.
@@ -210,12 +206,10 @@ def resolve_account_advertiser(
             network_code = adapter_config.get("network_code")
             if not network_code and tenant.ad_server == "google_ad_manager":
                 # Fall back to AdapterConfig if caller didn't pass it.
-                from src.adapters.gam import AdapterConfig as GamConfig  # noqa: F401  (typing)
+                from src.adapters.gam import AdapterConfig as GamConfig  # type: ignore[attr-defined] # noqa: F401
                 from src.core.database.models import AdapterConfig as AdapterConfigModel
 
-                config_row = session.scalars(
-                    select(AdapterConfigModel).filter_by(tenant_id=tenant_id)
-                ).first()
+                config_row = session.scalars(select(AdapterConfigModel).filter_by(tenant_id=tenant_id)).first()
                 if config_row is None or not config_row.gam_network_code:
                     raise AdCPAccountNotProvisioned(
                         f"Account {account_id!r} requires GAM advertiser provisioning but "
@@ -253,7 +247,9 @@ def _build_advertiser_name(account: Account) -> str:
     domain = (
         brand.get("domain")
         if isinstance(brand, dict)
-        else getattr(brand, "domain", None) if brand is not None else None
+        else getattr(brand, "domain", None)
+        if brand is not None
+        else None
     )
     domain = domain or "unknown"
     if account.billing == "agent" and account.principal_id:

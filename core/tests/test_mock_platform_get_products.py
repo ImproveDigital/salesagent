@@ -40,9 +40,7 @@ def _make_get_products_response(product_id: str = "prod1"):
                     "name": "Test Product",
                     "description": "A product for testing",
                     "delivery_type": "non_guaranteed",
-                    "publisher_properties": [
-                        {"publisher_domain": "example.com", "selection_type": "all"}
-                    ],
+                    "publisher_properties": [{"publisher_domain": "example.com", "selection_type": "all"}],
                     "format_ids": [
                         {
                             "agent_url": "https://creative.adcontextprotocol.org/",
@@ -90,24 +88,22 @@ def test_get_products_delegates_to_impl_and_projects_to_wire(active_tenant_sessi
     and projects the response onto the AdCP wire dict shape."""
     response = _make_get_products_response("prod1")
 
-    with patch(
-        "core.stores.accounts.get_db_session", return_value=active_tenant_session
-    ), patch(
-        "core.platforms._delegate._get_products_impl",
-        new=AsyncMock(return_value=response),
-    ) as mock_impl, patch(
-        "core.platforms._delegate.get_tenant_by_id",
-        return_value={"tenant_id": "test-tenant", "name": "Test Tenant"},
+    with (
+        patch("core.stores.accounts.get_db_session", return_value=active_tenant_session),
+        patch(
+            "core.platforms._delegate._get_products_impl",
+            new=AsyncMock(return_value=response),
+        ) as mock_impl,
+        patch(
+            "core.platforms._delegate.get_tenant_by_id",
+            return_value={"tenant_id": "test-tenant", "name": "Test Tenant"},
+        ),
     ):
         platform = MockSellerPlatform()
         account = platform.accounts.resolve(ref={"account_id": "test-tenant:demo"})
         ctx = make_request_context(account=account, request_id="req-1")
 
-        result = asyncio.run(
-            platform.get_products(
-                req={"brief": "test", "buying_mode": "brief"}, ctx=ctx
-            )
-        )
+        result = asyncio.run(platform.get_products(req={"brief": "test", "buying_mode": "brief"}, ctx=ctx))
 
     # Wire shape — products[] of dicts, not Pydantic models.
     assert "products" in result
@@ -139,11 +135,7 @@ def test_get_products_rejects_missing_tenant_metadata():
     ctx = make_request_context(account=bad_account, request_id="req-2")
 
     with pytest.raises(AdcpError) as exc_info:
-        asyncio.run(
-            platform.get_products(
-                req={"brief": "x", "buying_mode": "brief"}, ctx=ctx
-            )
-        )
+        asyncio.run(platform.get_products(req={"brief": "x", "buying_mode": "brief"}, ctx=ctx))
 
     assert exc_info.value.code == "ACCOUNT_NOT_FOUND"
 

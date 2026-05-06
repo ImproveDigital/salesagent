@@ -124,9 +124,7 @@ def _to_wire(response: Any) -> dict[str, Any]:
     return dict(response)  # last-ditch coerce
 
 
-async def _delegate_get_products(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_get_products(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/products.py:_get_products_impl``."""
     identity = _build_identity(ctx)
     req_model = _coerce_to_request_model(req, GetProductsRequest)
@@ -134,9 +132,7 @@ async def _delegate_get_products(
     return _to_wire(response)
 
 
-async def _delegate_create_media_buy(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_create_media_buy(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/media_buy_create.py:_create_media_buy_impl``.
 
     The impl pulls ``push_notification_config`` off the request itself
@@ -178,9 +174,7 @@ async def _delegate_update_media_buy(
     return _to_wire(response)
 
 
-async def _delegate_sync_creatives(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_sync_creatives(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/creatives/_sync.py:_sync_creatives_impl``.
 
     The impl takes individual kwargs (creatives, assignments,
@@ -209,9 +203,7 @@ async def _delegate_sync_creatives(
     return _to_wire(response)
 
 
-async def _delegate_get_media_buys(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_get_media_buys(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/media_buy_list.py:_get_media_buys_impl``."""
     identity = _build_identity(ctx)
     req_model = _coerce_to_request_model(req, GetMediaBuysRequest)
@@ -219,35 +211,25 @@ async def _delegate_get_media_buys(
     return _to_wire(response)
 
 
-async def _delegate_get_media_buy_delivery(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_get_media_buy_delivery(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/media_buy_delivery.py:_get_media_buy_delivery_impl``."""
     identity = _build_identity(ctx)
     req_model = _coerce_to_request_model(req, GetMediaBuyDeliveryRequest)
-    response = await asyncio.to_thread(
-        _get_media_buy_delivery_impl, req_model, identity
-    )
+    response = await asyncio.to_thread(_get_media_buy_delivery_impl, req_model, identity)
     return _to_wire(response)
 
 
-async def _delegate_list_creative_formats(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_list_creative_formats(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/creative_formats.py:_list_creative_formats_impl``."""
     identity = _build_identity(ctx)
     req_model: Any = None
     if req is not None:
         req_model = _coerce_to_request_model(req, ListCreativeFormatsRequest)
-    response = await asyncio.to_thread(
-        _list_creative_formats_impl, req_model, identity
-    )
+    response = await asyncio.to_thread(_list_creative_formats_impl, req_model, identity)
     return _to_wire(response)
 
 
-async def _delegate_provide_performance_feedback(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_provide_performance_feedback(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Stub — salesagent doesn't yet have a performance-feedback impl.
 
     Required by the v6.0-rc.1 SalesPlatform Protocol; the soft-warn at boot
@@ -271,9 +253,7 @@ async def _delegate_provide_performance_feedback(
     }
 
 
-async def _delegate_list_creatives(
-    req: Any, ctx: RequestContext[Any]
-) -> dict[str, Any]:
+async def _delegate_list_creatives(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/creatives/listing.py:_list_creatives_impl``.
 
     The impl decomposes into individual kwargs (no single request

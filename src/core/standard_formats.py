@@ -153,7 +153,8 @@ def is_standard_agent(agent_url: str) -> bool:
     """
     if not agent_url:
         return False
-    return agent_url.rstrip("/") == STANDARD_AGENT_URL.rstrip("/")
+    # Pydantic AnyUrl is not a str — coerce so .rstrip works regardless.
+    return str(agent_url).rstrip("/") == STANDARD_AGENT_URL.rstrip("/")
 
 
 __all__: list[Any] = [

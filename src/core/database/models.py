@@ -5,7 +5,16 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from adcp.types import BrandReference, CreditLimit, GovernanceAgent, Setup
+from adcp.types import BrandReference, CreditLimit, Setup
+
+# adcp 4.4+ canonicalised the top-level ``GovernanceAgent`` to the request-side
+# variant (``authentication`` required). For storage we want the response-side
+# shape (URL-only) — sellers don't always have credentials at the time the
+# Account row is created. Pin the storage type to the response variant; auth
+# tracking gets its own column when we wire ``check_governance``.
+from adcp.types.generated_poc.account.sync_governance_response import (
+    GovernanceAgent,
+)
 from sqlalchemy import (
     DECIMAL,
     BigInteger,

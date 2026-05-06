@@ -685,31 +685,12 @@ class TestListDatetimeFallback:
 
 # ---------------------------------------------------------------------------
 # Transport Parity Tests — Covers: salesagent-39ic
-# Verify same behavior across IMPL, A2A, and MCP transports
+# Verify same behavior across IMPL and MCP transports
 # ---------------------------------------------------------------------------
 
 
 class TestListTransportParity:
-    """Same behavior across IMPL and A2A transports."""
-
-    def test_a2a_returns_same_as_impl(self, integration_db):
-        """Transport parity: A2A and IMPL return identical results."""
-        with CreativeListEnv() as env:
-            tenant = TenantFactory(tenant_id="test_tenant")
-            principal = PrincipalFactory(tenant=tenant, principal_id="test_principal")
-
-            CreativeFactory(
-                tenant=tenant,
-                principal=principal,
-                creative_id="c_transport",
-                status="approved",
-            )
-
-            impl_response = env.call_impl(status="approved")
-            a2a_response = env.call_a2a(status="approved")
-
-        assert len(impl_response.creatives) == len(a2a_response.creatives)
-        assert impl_response.creatives[0].creative_id == a2a_response.creatives[0].creative_id
+    """Same behavior across IMPL and MCP transports."""
 
     def test_mcp_returns_same_as_impl(self, integration_db):
         """Transport parity: MCP wrapper returns identical results."""

@@ -201,14 +201,6 @@ repos:
         pass_filenames: false
 
 
-      # Validate MCP tool-schema parameter alignment (prevents datetime.combine bugs)
-      - id: mcp-schema-alignment
-        name: MCP tool-schema parameter alignment
-        entry: uv run python scripts/hooks/validate_mcp_schemas.py
-        language: system
-        files: '^(src/core/schemas\.py|src/core/main\.py)$'
-        pass_filenames: false
-
       # Check generated schemas are in sync with JSON schemas
       # NOTE: Removed this hook - script doesn't exist and check_schema_sync.py
       # already validates schema alignment (runs on every commit via adcp-schema-sync)
@@ -299,7 +291,7 @@ repos:
       - id: mypy
         name: mypy
         entry: uv run --extra dev mypy
-        args: [--config-file=mypy.ini]
+        args: [--config-file=mypy.ini, src/]
         language: system
         types: [python]
         pass_filenames: false

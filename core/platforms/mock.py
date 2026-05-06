@@ -50,6 +50,7 @@ from adcp.decisioning.capabilities import (
     MediaBuy,
     SupportedProtocol,
 )
+
 from core.idempotency import get_idempotency_store
 from core.platforms._delegate import (
     _delegate_get_products,
@@ -80,9 +81,7 @@ class MockSellerPlatform(DecisioningPlatform):
         specialisms=["sales-non-guaranteed"],
         adcp=Adcp(
             major_versions=[3],
-            idempotency=IdempotencySupported(
-                supported=True, replay_ttl_seconds=86400
-            ),
+            idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=86400),
         ),
         account=CapabilitiesAccount(supported_billing=["operator"]),
         media_buy=MediaBuy(supported_pricing_models=["cpm"]),
@@ -140,9 +139,7 @@ class MockSellerPlatform(DecisioningPlatform):
                 {
                     "package_id": f"pkg_{i}",
                     "product_id": _first_product_id(pkg),
-                    "pricing_option_id": pkg.get(
-                        "pricing_option_id", "po-cpm-default"
-                    ),
+                    "pricing_option_id": pkg.get("pricing_option_id", "po-cpm-default"),
                     "budget": pkg.get("budget"),
                     "creative_assignments": assignments,
                     "targeting_overlay": pkg.get("targeting_overlay"),
@@ -285,22 +282,14 @@ class MockSellerPlatform(DecisioningPlatform):
                     else getattr(pkg_patch, "targeting_overlay", None)
                 )
                 if overlay is not None:
-                    target["targeting_overlay"] = (
-                        overlay.model_dump() if hasattr(overlay, "model_dump") else overlay
-                    )
-                paused = (
-                    pkg_patch.get("paused")
-                    if isinstance(pkg_patch, dict)
-                    else getattr(pkg_patch, "paused", None)
-                )
+                    target["targeting_overlay"] = overlay.model_dump() if hasattr(overlay, "model_dump") else overlay
+                paused = pkg_patch.get("paused") if isinstance(pkg_patch, dict) else getattr(pkg_patch, "paused", None)
                 if paused is not None:
                     target["paused"] = bool(paused)
 
             # If every package now has creatives, advance from
             # pending_creatives → pending_start.
-            if record["status"] == "pending_creatives" and all(
-                p["creative_assignments"] for p in record["packages"]
-            ):
+            if record["status"] == "pending_creatives" and all(p["creative_assignments"] for p in record["packages"]):
                 record["status"] = "pending_start"
                 record["valid_actions"] = _valid_actions_for("pending_start")
 
@@ -324,9 +313,7 @@ class MockSellerPlatform(DecisioningPlatform):
             "creatives": [
                 {
                     "creative_id": (
-                        c.creative_id
-                        if hasattr(c, "creative_id")
-                        else c.get("creative_id") or _new_creative_id()
+                        c.creative_id if hasattr(c, "creative_id") else c.get("creative_id") or _new_creative_id()
                     ),
                     "action": "created",
                     "status": "approved",
@@ -416,10 +403,7 @@ class MockSellerPlatform(DecisioningPlatform):
 def _get_packages(req: Any) -> list[dict[str, Any]]:
     if hasattr(req, "packages"):
         packages = req.packages or []
-        return [
-            p.model_dump() if hasattr(p, "model_dump") else dict(p)
-            for p in packages
-        ]
+        return [p.model_dump() if hasattr(p, "model_dump") else dict(p) for p in packages]
     if isinstance(req, dict):
         return list(req.get("packages") or [])
     return []
@@ -521,17 +505,13 @@ def _project_media_buy(record: dict[str, Any]) -> dict[str, Any]:
     internal-only fields like ``tenant_id``. ``currency`` and
     ``total_budget`` are required on the get_media_buys media-buy
     schema."""
-    total_budget = sum(
-        float(p.get("budget") or 0) for p in record.get("packages") or []
-    )
+    total_budget = sum(float(p.get("budget") or 0) for p in record.get("packages") or [])
     out = {
         "media_buy_id": record["media_buy_id"],
         "status": record["status"],
         "currency": record.get("currency", "USD"),
         "total_budget": total_budget,
-        "packages": [
-            _project_package(p) for p in record["packages"]
-        ],
+        "packages": [_project_package(p) for p in record["packages"]],
         "valid_actions": record.get("valid_actions") or [],
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
@@ -587,5 +567,3 @@ def _adcp_error(
     if field is not None:
         payload["field"] = field
     return {"adcp_error": payload}
-
-

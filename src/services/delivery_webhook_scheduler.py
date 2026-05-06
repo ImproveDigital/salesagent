@@ -248,7 +248,7 @@ class DeliveryWebhookScheduler:
                 # reaches this branch (outer `is not None` already filtered).
                 if error_codes <= {"media_buy_status_excluded"} and error_codes:
                     logger.info(
-                        "Skipping delivery webhook for media buy %s — current status " "outside reporting window: %s",
+                        "Skipping delivery webhook for media buy %s — current status outside reporting window: %s",
                         media_buy.media_buy_id,
                         [getattr(e, "message", "") for e in delivery_response.errors],
                     )
@@ -277,7 +277,7 @@ class DeliveryWebhookScheduler:
 
             # Set webhook-specific metadata directly on the response model
             # These fields are defined on the library's GetMediaBuyDeliveryResponse
-            delivery_response.notification_type = NotificationType.scheduled
+            delivery_response.notification_type = NotificationType.scheduled  # type: ignore[assignment]
             delivery_response.next_expected_at = next_expected_at
             delivery_response.partial_data = False  # TODO: Check for reporting_delayed status
             delivery_response.unavailable_count = 0  # TODO: Count reporting_delayed/failed deliveries

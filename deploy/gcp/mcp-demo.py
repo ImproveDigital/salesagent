@@ -4,6 +4,7 @@
 Run from the workspace root:
     .context/gcp-deploy/mcp-demo.py
 """
+
 import asyncio
 import json
 import os

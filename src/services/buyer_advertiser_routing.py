@@ -99,7 +99,7 @@ def ensure_sandbox_advertiser(session: Session, tenant_id: str, *, dry_run: bool
     adapter = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
     if adapter is None:
         raise AdCPError(
-            "ADAPTER_NOT_CONFIGURED",
+            details={"code": "ADAPTER_NOT_CONFIGURED"},
             message=(
                 f"Tenant {tenant_id!r} has no AdapterConfig — cannot resolve "
                 f"sandbox advertiser. Provision adapter first."
@@ -124,7 +124,7 @@ def ensure_sandbox_advertiser(session: Session, tenant_id: str, *, dry_run: bool
     network_code = adapter.gam_network_code
     if not network_code:
         raise AdCPError(
-            "ADAPTER_NOT_CONFIGURED",
+            details={"code": "ADAPTER_NOT_CONFIGURED"},
             message=(f"Tenant {tenant_id!r} GAM adapter has no network_code — cannot create sandbox advertiser."),
         )
 
@@ -261,7 +261,7 @@ def resolve_advertiser_for_buy(
     tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
     if tenant is None:
         raise AdCPError(
-            "TENANT_NOT_FOUND",
+            details={"code": "TENANT_NOT_FOUND"},
             message=f"Tenant {tenant_id!r} not found while resolving routing chain.",
         )
     if tenant.default_gam_advertiser_id:

@@ -4,12 +4,9 @@ Validates that:
 - UnifiedAuthMiddleware is a pure ASGI class (not BaseHTTPMiddleware)
 - Old middleware functions are deleted from app.py
 - request.state.auth_context still works for FastAPI routes
-- A2A handler reads from scope["state"] (not deleted _request_auth_token)
 
 beads: salesagent-97pn
 """
-
-import ast
 
 
 class TestUnifiedAuthMiddlewareExists:
@@ -43,76 +40,24 @@ class TestUnifiedAuthMiddlewareExists:
 
 
 class TestOldMiddlewaresDeleted:
-    """Verify old middleware functions are removed from app.py."""
+    """The legacy ``src/app.py`` was deleted with the rest of the legacy stack
+    — these guards are vacuous on the modern stack and remain only to assert
+    the legacy assembly is gone for good.
+    """
 
-    def test_no_auth_context_middleware_function(self):
-        """auth_context_middleware function must not exist in app.py."""
+    def test_legacy_app_py_is_removed(self):
+        """``src/app.py`` must not be reintroduced."""
         import pathlib
 
-        source = (pathlib.Path(__file__).resolve().parents[2] / "src" / "app.py").read_text()
-
-        tree = ast.parse(source)
-        func_names = [node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        assert "auth_context_middleware" not in func_names, (
-            "auth_context_middleware still exists in app.py — should be replaced by UnifiedAuthMiddleware"
+        legacy = pathlib.Path(__file__).resolve().parents[2] / "src" / "app.py"
+        assert not legacy.exists(), (
+            "src/app.py is back — the modern stack uses core/main.py as the "
+            "single Starlette entrypoint; legacy FastAPI assembly stays gone."
         )
 
-    def test_no_a2a_auth_middleware_function(self):
-        """a2a_auth_middleware function must not exist in app.py."""
+    def test_legacy_a2a_server_module_is_removed(self):
+        """``src/a2a_server/`` must not be reintroduced."""
         import pathlib
 
-        source = (pathlib.Path(__file__).resolve().parents[2] / "src" / "app.py").read_text()
-
-        tree = ast.parse(source)
-        func_names = [node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        assert "a2a_auth_middleware" not in func_names, (
-            "a2a_auth_middleware still exists in app.py — should be replaced by UnifiedAuthMiddleware"
-        )
-
-
-class TestA2AHandlerUsesNewContextVar:
-    """Verify A2A handler no longer uses deleted ContextVars."""
-
-    def test_no_request_auth_token_contextvar(self):
-        """_request_auth_token ContextVar must not exist in adcp_a2a_server."""
-        import pathlib
-
-        source = (pathlib.Path(__file__).resolve().parents[2] / "src" / "a2a_server" / "adcp_a2a_server.py").read_text()
-
-        tree = ast.parse(source)
-        # Look for: _request_auth_token: ContextVar = ...
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                # Check targets for _request_auth_token
-                targets = []
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, ast.AnnAssign) and node.target:
-                    targets = [node.target]
-                for target in targets:
-                    if isinstance(target, ast.Name) and target.id == "_request_auth_token":
-                        raise AssertionError(
-                            "_request_auth_token ContextVar still defined in adcp_a2a_server.py — "
-                            "should be deleted (auth is now in unified middleware ContextVar)"
-                        )
-
-    def test_no_request_headers_contextvar(self):
-        """_request_headers ContextVar must not exist in adcp_a2a_server."""
-        import pathlib
-
-        source = (pathlib.Path(__file__).resolve().parents[2] / "src" / "a2a_server" / "adcp_a2a_server.py").read_text()
-
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = []
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, ast.AnnAssign) and node.target:
-                    targets = [node.target]
-                for target in targets:
-                    if isinstance(target, ast.Name) and target.id == "_request_headers":
-                        raise AssertionError(
-                            "_request_headers ContextVar still defined in adcp_a2a_server.py — "
-                            "should be deleted (headers are now in unified middleware ContextVar)"
-                        )
+        legacy = pathlib.Path(__file__).resolve().parents[2] / "src" / "a2a_server"
+        assert not legacy.exists(), "src/a2a_server/ is back — modern A2A is served by adcp.server.serve()."

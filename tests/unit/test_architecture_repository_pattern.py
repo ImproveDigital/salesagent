@@ -36,7 +36,6 @@ IMPL_FILES = [
     "src/core/tools/creatives/_workflow.py",
     "src/core/tools/performance.py",
     "src/core/tools/signals.py",
-    "src/core/tools/task_management.py",
     "src/core/context_manager.py",
     "src/admin/blueprints/creatives.py",
 ]
@@ -111,8 +110,6 @@ INTEGRATION_SESSION_ADD_ALLOWLIST = {
     ("tests/integration/test_creative_review_model.py", "test_get_creative_reviews_filters_by_review_type"),
     ("tests/integration/test_creative_review_model.py", "test_get_creative_reviews_tenant_isolation"),
     ("tests/integration/test_creative_review_model.py", "test_get_creative_with_latest_review_tenant_isolation"),
-    # tests/integration/test_creative_v3.py (multiple classes share setup_tenant name)
-    ("tests/integration/test_creative_v3.py", "setup_tenant"),
     # tests/integration/test_cross_principal_security.py
     ("tests/integration/test_cross_principal_security.py", "setup_test_data"),
     ("tests/integration/test_cross_principal_security.py", "test_cross_tenant_isolation_also_enforced"),
@@ -266,10 +263,6 @@ INTEGRATION_SESSION_ADD_ALLOWLIST = {
     ("tests/integration/test_media_buy_status_scheduler.py", "_create_media_buy"),
     ("tests/integration/test_media_buy_status_scheduler.py", "_create_creative"),
     ("tests/integration/test_media_buy_status_scheduler.py", "_create_creative_assignment"),
-    # tests/integration/test_media_buy_v3.py
-    ("tests/integration/test_media_buy_v3.py", "mb_creatives"),
-    ("tests/integration/test_media_buy_v3.py", "test_unsupported_currency_rejected"),
-    ("tests/integration/test_media_buy_v3.py", "test_ownership_mismatch_rejected"),
     # tests/integration/test_mock_adapter_publisher_sync.py
     ("tests/integration/test_mock_adapter_publisher_sync.py", "mock_tenant"),
     ("tests/integration/test_mock_adapter_publisher_sync.py", "publisher_partner"),
@@ -385,12 +378,6 @@ INTEGRATION_SESSION_ADD_ALLOWLIST = {
     ("tests/integration/conftest.py", "create_test_product_with_pricing"),
     ("tests/integration/conftest.py", "authenticated_admin_session"),
     ("tests/integration/conftest.py", "test_tenant_with_data"),
-    # tests/integration/test_a2a_error_responses.py
-    ("tests/integration/test_a2a_error_responses.py", "test_tenant"),
-    ("tests/integration/test_a2a_error_responses.py", "test_principal"),
-    # tests/integration/test_a2a_skill_invocation.py
-    ("tests/integration/test_a2a_skill_invocation.py", "test_update_media_buy_skill"),
-    ("tests/integration/test_a2a_skill_invocation.py", "test_list_authorized_properties_skill"),
     # tests/integration/test_admin_ui_data_validation.py
     ("tests/integration/test_admin_ui_data_validation.py", "test_products_list_no_duplicates_with_pricing_options"),
     ("tests/integration/test_admin_ui_data_validation.py", "test_principals_list_no_duplicates_with_relationships"),
@@ -403,14 +390,6 @@ INTEGRATION_SESSION_ADD_ALLOWLIST = {
     ("tests/integration/test_create_media_buy_roundtrip.py", "setup_test_tenant"),
     # tests/integration/test_create_media_buy_v24.py
     ("tests/integration/test_create_media_buy_v24.py", "setup_test_tenant"),
-    # tests/integration/test_creative_lifecycle_mcp.py
-    ("tests/integration/test_creative_lifecycle_mcp.py", "setup_test_data"),
-    ("tests/integration/test_creative_lifecycle_mcp.py", "test_sync_creatives_upsert_existing_creative"),
-    ("tests/integration/test_creative_lifecycle_mcp.py", "test_list_creatives_with_media_buy_assignments"),
-    ("tests/integration/test_creative_lifecycle_mcp.py", "test_validate_creatives_missing_required_fields"),
-    # tests/integration/test_error_paths.py
-    ("tests/integration/test_error_paths.py", "test_tenant_minimal"),
-    ("tests/integration/test_error_paths.py", "test_tenant_with_principal"),
     # tests/integration/test_gam_automation_focused.py
     ("tests/integration/test_gam_automation_focused.py", "test_tenant_data"),
     # tests/integration/test_get_products_database_integration.py — migrated to factories
@@ -499,6 +478,33 @@ INTEGRATION_SESSION_ADD_ALLOWLIST = {
     # FIXME(salesagent-e2e-admin-factories): migrate e2e seed helpers to factories.
     ("tests/e2e/test_gam_lifecycle.py", "_seed_lifecycle_test_data"),
     ("tests/e2e/test_gam_lifecycle.py", "_persist_media_buy"),
+    # ── pre-existing inline session.add() in integration helpers (CI-only entries) ──
+    # Surfaced after the legacy-test deletion shrank the allowlist's overlap.
+    # FIXME(salesagent-e2e-admin-factories): migrate to factory fixtures.
+    ("tests/integration/test_account_provisioning.py", "_make_tenant"),
+    ("tests/integration/test_account_provisioning.py", "_make_account"),
+    ("tests/integration/test_account_provisioning.py", "test_billing_agent_advertiser_name_includes_principal"),
+    ("tests/integration/test_buyer_advertiser_routing.py", "tenant_id_factory"),
+    ("tests/integration/test_buyer_advertiser_routing.py", "_add_rule"),
+    ("tests/integration/test_buyer_advertiser_routing.py", "_make"),
+    ("tests/integration/test_buyer_routing_page.py", "_insert_tenant"),
+    ("tests/integration/test_buyer_routing_page.py", "_add_gam_advertiser"),
+    ("tests/integration/test_buyer_routing_page.py", "_add_routing_rule"),
+    ("tests/integration/test_buyer_routing_page.py", "_add_account"),
+    ("tests/integration/test_embed_breadcrumbs.py", "_insert_render_tenant"),
+    ("tests/integration/test_embedded_ui_hardening.py", "_insert_tenant"),
+    ("tests/integration/test_managed_mode_auth_bypass.py", "managed_tenant"),
+    (
+        "tests/integration/test_managed_mode_auth_bypass.py",
+        "test_open_instance_tenant_on_managed_deployment_uses_oauth",
+    ),
+    ("tests/integration/test_setup_checklist_service.py", "_make_tenant"),
+    ("tests/integration/test_sync_accounts_premap.py", "_make_tenant"),
+    ("tests/integration/test_sync_accounts_premap.py", "_ensure_principal"),
+    (
+        "tests/integration/test_sync_accounts_premap.py",
+        "test_existing_pre_mapped_account_stays_active_on_sync",
+    ),
 }
 
 

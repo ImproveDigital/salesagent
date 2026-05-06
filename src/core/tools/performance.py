@@ -8,12 +8,9 @@ import logging
 from typing import Any
 
 from adcp.types import ContextObject
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import ValidationError
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError, AdCPValidationError
-from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -125,66 +122,3 @@ def _update_performance_index_impl(
         detail=f"Performance index updated for {len(req.performance_data)} products",
         context=req.context,
     )
-
-
-async def update_performance_index(
-    media_buy_id: str,
-    performance_data: list[dict[str, Any]],
-    webhook_url: str | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-):
-    """Update performance index data for a media buy.
-
-    MCP tool wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-
-    Args:
-        media_buy_id: ID of the media buy to update
-        performance_data: List of performance data objects
-        webhook_url: URL for async task completion notifications (AdCP spec, optional)
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with UpdatePerformanceIndexResponse data
-    """
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    response = _update_performance_index_impl(media_buy_id, performance_data, context, identity)
-    return ToolResult(content=str(response), structured_content=response)
-
-
-def update_performance_index_raw(
-    media_buy_id: str,
-    performance_data: list[dict[str, Any]],
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """Update performance data for a media buy (raw function for A2A server use).
-
-    Delegates to the shared implementation.
-
-    Args:
-        media_buy_id: The ID of the media buy to update performance for
-        performance_data: List of performance data objects
-        ctx: Context for authentication
-        identity: Pre-resolved identity (if available)
-
-    Returns:
-        UpdatePerformanceIndexResponse
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=True)
-    return _update_performance_index_impl(media_buy_id, performance_data, context, identity)
-
-
-# --- Human-in-the-Loop Task Queue Tools ---
-# DEPRECATED workflow functions moved to src/core/helpers/workflow_helpers.py and imported above
-
-# Removed get_pending_workflows - replaced by admin dashboard workflow views
-
-# Removed assign_task - assignment handled through admin UI workflow management
-
-# Dry run logs are now handled by the adapters themselves

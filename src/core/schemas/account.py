@@ -6,12 +6,14 @@ All classes are re-exported from ``src.core.schemas`` for backward compatibility
 beads: salesagent-x79
 """
 
+import uuid
+
+from adcp.types import Account as LibraryAccountDomain
 from adcp.types import ListAccountsRequest as LibraryListAccountsRequest
 from adcp.types import ListAccountsResponse as LibraryListAccountsResponse
 from adcp.types import SyncAccountsRequest as LibrarySyncAccountsRequest
 from adcp.types.aliases import SyncAccountsSuccessResponse as LibrarySyncAccountsSuccess
-from adcp.types import Account as LibraryAccountDomain
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from src.core.config import get_pydantic_extra_mode
 from src.core.schemas._base import NestedModelSerializerMixin
@@ -49,11 +51,23 @@ class ListAccountsRequest(LibraryListAccountsRequest):
 class SyncAccountsRequest(LibrarySyncAccountsRequest):
     """Extends library SyncAccountsRequest.
 
-    Library provides: accounts, delete_missing, dry_run,
+    Library provides: accounts, delete_missing, dry_run, idempotency_key,
     push_notification_config, context, ext.
+
+    adcp 4.4.3 made ``idempotency_key`` required. Auto-default to a fresh
+    UUID so pre-v3 callers (and most internal tests) keep working without
+    minting a key by hand.
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    idempotency_key: str = Field(
+        default_factory=lambda: f"idem_{uuid.uuid4()}",
+        description="Client-generated unique key. Auto-defaults to a fresh UUID when omitted.",
+        min_length=16,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9_.:-]{16,255}$",
+    )
 
 
 # ---------------------------------------------------------------------------

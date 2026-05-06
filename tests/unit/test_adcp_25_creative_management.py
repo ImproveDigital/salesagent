@@ -244,7 +244,14 @@ class TestUpdateMediaBuyCreativeAssignments:
                     "creative_id": "new_c1",
                     "name": "New Creative",
                     "format_id": {"agent_url": "https://example.com/", "id": "display_300x250"},
-                    "assets": {"banner": {"url": "https://example.com/banner.png", "width": 300, "height": 250}},
+                    "assets": {
+                        "banner": {
+                            "asset_type": "image",
+                            "url": "https://example.com/banner.png",
+                            "width": 300,
+                            "height": 250,
+                        }
+                    },
                     "weight": 75,
                     "placement_ids": ["pl_1"],
                 },
@@ -415,21 +422,22 @@ class TestSyncCreativesErrorCases:
     def test_sync_creatives_request_validates_creative_structure(self):
         """Creatives must have required fields per AdCP spec.
 
-        Spec requires: creative_id, format_id, assets
+        adcp 4.4 made ``format_id`` optional on the Creative listing model
+        (formats can be inferred from assets); ``name`` is the load-bearing
+        required field that the spec still enforces.
         """
         from pydantic import ValidationError
 
         from src.core.schemas import Creative
 
-        # Missing format_id should fail
+        # Missing required ``name`` field should fail
         with pytest.raises(ValidationError) as exc_info:
             Creative(
                 creative_id="test",
-                name="Test",
+                # name missing
                 assets={"banner": {"url": "https://example.com/banner.png", "asset_type": "image"}},
-                # format_id missing
             )
-        assert "format" in str(exc_info.value).lower()
+        assert "name" in str(exc_info.value).lower()
 
 
 class TestListCreativesErrorCases:

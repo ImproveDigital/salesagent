@@ -558,18 +558,24 @@ def mcp_server(integration_db):
         raise RuntimeError(f"Failed to parse DATABASE_URL: {postgres_url}")
 
     env = os.environ.copy()
+    # core.main.main() reads ADCP_PORT (or PORT) — keep ADCP_SALES_PORT
+    # set too for backwards-compat consumers, but ADCP_PORT is what
+    # core.main actually binds.
     env["ADCP_SALES_PORT"] = str(port)
+    env["ADCP_PORT"] = str(port)
     env["DATABASE_URL"] = server_db_url
     env["DB_TYPE"] = "postgresql"
     env["ADCP_TESTING"] = "true"
     env["PYTHONUNBUFFERED"] = "1"  # Force unbuffered output for better debugging
 
-    # Start the server process using mcp.run() instead of uvicorn directly
-    server_script = f"""
+    # Start the unified MCP+A2A server via the new entrypoint.
+    # ``core.main.main()`` reads ``ADCP_PORT`` (already set in env above)
+    # and binds uvicorn to that port.
+    server_script = """
 import sys
 sys.path.insert(0, '.')
-from src.core.main import mcp
-mcp.run(transport='http', host='0.0.0.0', port={port})
+from core.main import main
+main()
 """
 
     process = subprocess.Popen(

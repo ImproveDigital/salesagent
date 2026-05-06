@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from adcp import Format
 
 from src.core.standard_formats import (
@@ -90,9 +89,7 @@ class TestRegistryShortCircuit:
 
         registry = CreativeAgentRegistry()
 
-        with patch.object(
-            registry, "get_formats_for_agent", new=AsyncMock(return_value=[])
-        ) as mock_network:
+        with patch.object(registry, "get_formats_for_agent", new=AsyncMock(return_value=[])) as mock_network:
             fmt = asyncio.run(registry.get_format(STANDARD_AGENT_URL, "display_300x250"))
             assert fmt is not None
             assert fmt.format_id.id == "display_300x250"
@@ -106,12 +103,8 @@ class TestRegistryShortCircuit:
 
         registry = CreativeAgentRegistry()
 
-        with patch.object(
-            registry, "get_formats_for_agent", new=AsyncMock(return_value=[])
-        ) as mock_network:
-            fmt = asyncio.run(
-                registry.get_format("https://creative.example.com", "display_300x250")
-            )
+        with patch.object(registry, "get_formats_for_agent", new=AsyncMock(return_value=[])) as mock_network:
+            fmt = asyncio.run(registry.get_format("https://creative.example.com", "display_300x250"))
             assert fmt is None  # mocked to empty
             mock_network.assert_called_once()
 
@@ -122,8 +115,6 @@ class TestRegistryShortCircuit:
 
         registry = CreativeAgentRegistry()
 
-        with patch.object(
-            registry, "get_formats_for_agent", new=AsyncMock(return_value=[])
-        ) as mock_network:
+        with patch.object(registry, "get_formats_for_agent", new=AsyncMock(return_value=[])) as mock_network:
             asyncio.run(registry.get_format(STANDARD_AGENT_URL, "exotic_unknown_format"))
             mock_network.assert_called_once()

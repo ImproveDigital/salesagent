@@ -8,15 +8,11 @@ import logging
 import time
 import uuid
 
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-
 from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
-from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
-from adcp.types import SignalPricingOption
+from adcp.types.generated_poc.core.vendor_pricing_option import VendorPricingOption
 
 from src.core.auth import get_principal_object
 from src.core.resolved_identity import ResolvedIdentity
@@ -30,10 +26,14 @@ from src.core.schemas import (
 from src.core.testing_hooks import AdCPTestContext
 
 
-def _cpm_pricing_option(cpm: float, currency: str = "USD") -> list[SignalPricingOption]:
-    """Build a single-element pricing_options list for a CPM signal."""
+def _cpm_pricing_option(cpm: float, currency: str = "USD") -> list[VendorPricingOption]:
+    """Build a single-element pricing_options list for a CPM signal.
+
+    adcp 4.4.3 unified signal pricing onto the shared VendorPricingOption
+    discriminated union (model='cpm' is VendorPricingOption7 = cpm + pricing_option_id).
+    """
     return [
-        SignalPricingOption.model_validate(
+        VendorPricingOption.model_validate(
             {"pricing_option_id": f"cpm_{currency.lower()}", "model": "cpm", "cpm": cpm, "currency": currency}
         )
     ]
@@ -65,6 +65,11 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
     # Sample signals for demonstration using local types (extend AdCP library types)
     sample_signals = [
         Signal(
+            signal_id={
+                "source": "agent",
+                "agent_url": "https://salesagent.adcontextprotocol.org/signals",
+                "id": "auto_intenders_q1_2025",
+            },
             signal_agent_segment_id="auto_intenders_q1_2025",
             name="Auto Intenders Q1 2025",
             description="Users actively researching new vehicles in Q1 2025",
@@ -75,6 +80,11 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(3.0),
         ),
         Signal(
+            signal_id={
+                "source": "agent",
+                "agent_url": "https://salesagent.adcontextprotocol.org/signals",
+                "id": "luxury_travel_enthusiasts",
+            },
             signal_agent_segment_id="luxury_travel_enthusiasts",
             name="Luxury Travel Enthusiasts",
             description="High-income individuals interested in premium travel experiences",
@@ -85,6 +95,11 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(5.0),
         ),
         Signal(
+            signal_id={
+                "source": "agent",
+                "agent_url": "https://salesagent.adcontextprotocol.org/signals",
+                "id": "sports_content",
+            },
             signal_agent_segment_id="sports_content",
             name="Sports Content Pages",
             description="Target ads on sports-related content",
@@ -95,6 +110,11 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(1.5),
         ),
         Signal(
+            signal_id={
+                "source": "agent",
+                "agent_url": "https://salesagent.adcontextprotocol.org/signals",
+                "id": "finance_content",
+            },
             signal_agent_segment_id="finance_content",
             name="Finance & Business Content",
             description="Target ads on finance and business content",
@@ -105,6 +125,11 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(2.0),
         ),
         Signal(
+            signal_id={
+                "source": "agent",
+                "agent_url": "https://salesagent.adcontextprotocol.org/signals",
+                "id": "urban_millennials",
+            },
             signal_agent_segment_id="urban_millennials",
             name="Urban Millennials",
             description="Millennials living in major metropolitan areas",
@@ -115,6 +140,11 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(1.8),
         ),
         Signal(
+            signal_id={
+                "source": "agent",
+                "agent_url": "https://salesagent.adcontextprotocol.org/signals",
+                "id": "pet_owners",
+            },
             signal_agent_segment_id="pet_owners",
             name="Pet Owners",
             description="Households with dogs or cats",
@@ -149,9 +179,12 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             if req.filters.data_providers and signal.data_provider not in req.filters.data_providers:
                 continue
 
-            # Filter by max_cpm (using signal's first pricing option CPM)
-            if req.filters.max_cpm is not None and signal.pricing and signal.pricing.cpm > req.filters.max_cpm:
-                continue
+            # Filter by max_cpm against the first pricing option (adcp 4.4
+            # replaced the singleton ``pricing`` field with ``pricing_options``).
+            if req.filters.max_cpm is not None and signal.pricing_options:
+                first_cpm = signal.pricing_options[0].cpm
+                if first_cpm is not None and first_cpm > req.filters.max_cpm:
+                    continue
 
             # Filter by min_coverage_percentage
             if (
@@ -169,25 +202,6 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
     # Signals are already constructed as local types (extending library types),
     # so no conversion needed — pass directly to response.
     return GetSignalsResponse(signals=signals, errors=None, context=req.context)
-
-
-async def get_signals(req: GetSignalsRequest, context: Context | ToolContext | None = None):
-    """Optional endpoint for discovering available signals (audiences, contextual, etc.)
-
-    MCP tool wrapper that delegates to the shared implementation.
-
-    Args:
-        req: Request containing query parameters for signal discovery
-        context: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with GetSignalsResponse data
-    """
-    from src.core.transport_helpers import resolve_identity_from_context
-
-    identity = resolve_identity_from_context(context, require_valid_token=False)
-    response = await _get_signals_impl(req, identity)
-    return ToolResult(content=str(response), structured_content=response)
 
 
 async def _activate_signal_impl(
@@ -290,85 +304,3 @@ async def _activate_signal_impl(
             errors=[Error(code="ACTIVATION_ERROR", message=str(e))],
             context=context,
         )
-
-
-async def activate_signal(
-    signal_agent_segment_id: str,
-    campaign_id: str = None,
-    media_buy_id: str = None,
-    context: dict | None = None,  # payload-level context
-    ctx: Context | ToolContext | None = None,
-):
-    """Activate a signal for use in campaigns.
-
-    MCP tool wrapper that delegates to the shared implementation.
-
-    Args:
-        signal_agent_segment_id: Universal signal identifier to activate
-        campaign_id: Optional campaign ID to activate signal for
-        media_buy_id: Optional media buy ID to activate signal for
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with ActivateSignalResponse data
-    """
-    from src.core.transport_helpers import resolve_identity_from_context
-
-    identity = resolve_identity_from_context(ctx)
-    response = await _activate_signal_impl(signal_agent_segment_id, campaign_id, media_buy_id, context, identity)
-    return ToolResult(content=str(response), structured_content=response)
-
-
-async def get_signals_raw(
-    req: GetSignalsRequest,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> GetSignalsResponse:
-    """Optional endpoint for discovering available signals (raw function for A2A server use).
-
-    Delegates to the shared implementation.
-
-    Args:
-        req: Request containing query parameters for signal discovery
-        ctx: FastMCP context (automatically provided)
-        identity: Pre-resolved identity (preferred over ctx)
-
-    Returns:
-        GetSignalsResponse containing matching signals
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-    return await _get_signals_impl(req, identity)
-
-
-async def activate_signal_raw(
-    signal_agent_segment_id: str,
-    campaign_id: str = None,
-    media_buy_id: str = None,
-    context: dict | None = None,  # payload-level context
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> ActivateSignalResponse:
-    """Activate a signal for use in campaigns (raw function for A2A server use).
-
-    Delegates to the shared implementation.
-
-    Args:
-        signal_agent_segment_id: Universal signal identifier to activate
-        campaign_id: Optional campaign ID to activate signal for
-        media_buy_id: Optional media buy ID to activate signal for
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-        identity: Pre-resolved identity (preferred over ctx)
-
-    Returns:
-        ActivateSignalResponse with activation status
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx)
-    return await _activate_signal_impl(signal_agent_segment_id, campaign_id, media_buy_id, context, identity)

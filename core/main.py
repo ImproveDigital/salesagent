@@ -61,7 +61,8 @@ from adcp.server import (
 from sqlalchemy import select
 
 from core.middleware.admin_mount import AdminWSGIMount
-from src.core.signing import SigningVerifyMiddleware
+from core.middleware.scheduler_lifespan import SchedulerLifespanMiddleware
+from core.middleware.spec_defaults import SpecDefaultsMiddleware
 from core.platforms.gam import GamPlatform
 from core.platforms.mock import MockSellerPlatform
 from core.proposal.manager import SalesAgentProposalManager
@@ -69,6 +70,7 @@ from core.stores.accounts import SalesagentAccountStore
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal as PrincipalRow
 from src.core.database.models import Tenant as TenantRow
+from src.core.signing import SigningVerifyMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -221,14 +223,31 @@ def _build_proposal_managers() -> dict[str, SalesAgentProposalManager]:
 
 
 def build_router() -> LazyPlatformRouter:
+    from adcp.types.generated_poc.bundled.protocol.get_adcp_capabilities_response import Features
+
+    from src.core.tools.capabilities import IDEMPOTENCY_REPLAY_TTL_SECONDS
+
     capabilities = DecisioningCapabilities(
         specialisms=["sales-non-guaranteed"],
         adcp=Adcp(
             major_versions=[3],
-            idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=86400),
+            idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=IDEMPOTENCY_REPLAY_TTL_SECONDS),
         ),
         account=CapabilitiesAccount(supported_billing=["operator"]),
-        media_buy=MediaBuy(supported_pricing_models=["cpm"]),
+        media_buy=MediaBuy(
+            supported_pricing_models=["cpm"],
+            # inline_creative_management: sync_creatives / list_creatives
+            # tools land creatives synchronously without a separate review
+            # round-trip.
+            #
+            # property_list_filtering is intentionally NOT declared here.
+            # ``_get_products_impl`` does its own property-list filtering,
+            # but declaring the capability tells the SDK to route through
+            # its own ``PropertyListFetcher`` plug — and we don't ship one,
+            # so SDK boot fails fast (``no PropertyListFetcher was
+            # wired``). Declare when we wire that plug.
+            features=Features(inline_creative_management=True),
+        ),
         supported_protocols=[SupportedProtocol.media_buy],
     )
     # ProposalManager is wired per-tenant. Today every active tenant
@@ -254,6 +273,24 @@ def build_router() -> LazyPlatformRouter:
     # validate_idempotency_wiring composition).
     router._adcp_idempotency_external = True
     return router
+
+
+async def _start_schedulers() -> None:
+    """Boot background schedulers when the ASGI server comes up."""
+    from src.services.delivery_webhook_scheduler import start_delivery_webhook_scheduler
+    from src.services.media_buy_status_scheduler import start_media_buy_status_scheduler
+
+    await start_delivery_webhook_scheduler()
+    await start_media_buy_status_scheduler()
+
+
+async def _stop_schedulers() -> None:
+    """Stop background schedulers on shutdown."""
+    from src.services.delivery_webhook_scheduler import stop_delivery_webhook_scheduler
+    from src.services.media_buy_status_scheduler import stop_media_buy_status_scheduler
+
+    await stop_media_buy_status_scheduler()
+    await stop_delivery_webhook_scheduler()
 
 
 DEFAULT_DEV_TENANT_SUBDOMAINS: tuple[str, ...] = (
@@ -334,6 +371,158 @@ def _allowed_hosts() -> list[str]:
     return base
 
 
+def _serve_kwargs(
+    *,
+    include_scheduler: bool,
+    include_subdomain_routing: bool = True,
+) -> dict:
+    """Build the kwargs dict shared by :func:`main` and :func:`build_app`.
+
+    Centralising the kwargs keeps the production server and the test
+    harness on the same wiring — auth, admin mount, CORS, validation,
+    etc. The hooks that diverge between production and in-process tests:
+
+    * ``include_scheduler``: production runs background schedulers via
+      :class:`SchedulerLifespanMiddleware`; tests skip them so background
+      polling doesn't race the test DB lifecycle.
+    * ``include_subdomain_routing``: production resolves the tenant from
+      the ``Host`` header via :class:`SubdomainTenantMiddleware` (and
+      404s on unknown hosts); tests rely on the bearer-token chain to
+      scope identity to a tenant, so the host check would only get in
+      the way of arbitrary test base URLs.
+    """
+    router = build_router()
+
+    # Mount Flask admin alongside MCP + A2A so one binary owns every
+    # surface. WSGIMiddleware bridges it to ASGI; AdminWSGIMount
+    # dispatches a known set of path prefixes (/admin, /static, /auth,
+    # /tenant, etc.) to it before the inner serve() dispatcher routes
+    # the rest to A2A.
+    from src.admin.app import create_app as _create_admin_app
+
+    admin_wsgi = WSGIMiddleware(_create_admin_app())
+
+    asgi_middleware: list = [
+        (AdminWSGIMount, {"wsgi_app": admin_wsgi}),
+        # SpecDefaultsMiddleware backfills wire fields the spec marks as
+        # required but instructs sellers to default for pre-v3 clients
+        # (e.g. GetProductsRequest.buying_mode → 'brief'). Sits *outside*
+        # the SDK validation boundary so the defaults land before the
+        # typed-dispatcher rejects the payload.
+        (SpecDefaultsMiddleware, {}),
+    ]
+    if include_subdomain_routing:
+        subdomain_router = build_subdomain_router()
+        asgi_middleware.append(
+            (SubdomainTenantMiddleware, {"router": subdomain_router}),
+        )
+    if include_scheduler:
+        asgi_middleware.append(
+            (
+                SchedulerLifespanMiddleware,
+                {
+                    "startups": [_start_schedulers],
+                    "shutdowns": [_stop_schedulers],
+                },
+            )
+        )
+    # SigningVerifyMiddleware verifies RFC 9421 signatures on inbound
+    # buyer-protocol traffic and stashes verified state on
+    # ``scope["state"]``. AdminWSGIMount runs first so the admin paths
+    # short-circuit before signing inspects them; this entry runs LAST
+    # so it only sees buyer-protocol traffic. See
+    # docs/design/signing-non-embedded.md.
+    asgi_middleware.append((SigningVerifyMiddleware, {}))
+
+    port = int(os.environ.get("ADCP_PORT") or os.environ.get("PORT") or 3001)
+
+    return {
+        "router": router,
+        "name": "salesagent-core",
+        "port": port,
+        "transport": "both",
+        # PSA fires buyer-protocol webhooks via
+        # ``src/services/protocol_webhook_service.py`` itself (the in-house
+        # path also covers signing for non-embedded tenants). Auto-emit on
+        # the SDK side would double-fire.
+        "auto_emit_completion_webhooks": False,
+        # Bearer-token auth wraps both MCP and A2A legs.
+        "auth": BearerTokenAuth(
+            validate_token=_validate_token,
+            header_name="x-adcp-auth",
+            bearer_prefix_required=False,
+        ),
+        "asgi_middleware": asgi_middleware,
+        "context_factory": auth_context_factory,
+        "allowed_hosts": _allowed_hosts(),
+        "allowed_origins": [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:8000").split(",")],
+        "streaming_responses": os.environ.get("ADCP_STREAMING_RESPONSES", "false").lower() == "true",
+        "enable_debug_endpoints": os.environ.get("ADCP_ENABLE_DEBUG_ENDPOINTS", "false").lower() == "true",
+        "enable_dns_rebinding_protection": (os.environ.get("ADCP_DNS_REBINDING_PROTECTION", "true").lower() == "true"),
+    }
+
+
+def build_app():
+    """Build the unified MCP+A2A ASGI app for in-process tests.
+
+    Mirrors :func:`main`'s production wiring (auth, admin mount,
+    subdomain routing, CORS, validation) but does NOT bind a uvicorn
+    socket and does NOT install the scheduler lifespan — schedulers
+    run real DB polling that races with test fixtures.
+
+    Routes the unified app the same way production does: MCP at
+    ``/mcp``, A2A at ``/`` (host root), Flask admin via WSGI middleware.
+    Tests drive it through ``httpx.ASGITransport`` (or Starlette's
+    ``TestClient``) for end-to-end transport verification without
+    standing up a server.
+
+    The Flask admin and scheduler imports happen inside this function
+    to keep import-time side effects minimal — call sites that only
+    need the production server (or vice versa) don't pay the other
+    surface's import cost.
+    """
+    # Build the handler ourselves so we can hand it to the SDK's
+    # private app-builder. The decisioning.serve() one-shot wrapper
+    # binds uvicorn; we want the ASGI app without the socket.
+    from adcp.decisioning.serve import create_adcp_server_from_platform
+    from adcp.server.serve import _apply_asgi_middleware, _build_mcp_and_a2a_app
+
+    kwargs = _serve_kwargs(include_scheduler=False, include_subdomain_routing=False)
+    router = kwargs.pop("router")
+    asgi_middleware = kwargs.pop("asgi_middleware")
+    auto_emit = kwargs.pop("auto_emit_completion_webhooks")
+
+    handler, _executor, _registry = create_adcp_server_from_platform(
+        router,
+        auto_emit_completion_webhooks=auto_emit,
+    )
+
+    # _build_mcp_and_a2a_app accepts a subset of serve()'s kwargs.
+    # Filter the ones the inner builder takes; the rest are uvicorn /
+    # debug-endpoint concerns that don't apply to the in-process app.
+    build_kwargs = {
+        "name": kwargs["name"],
+        "port": kwargs["port"],
+        "host": "127.0.0.1",
+        "instructions": None,
+        "test_controller": None,
+        "context_factory": kwargs["context_factory"],
+        "streaming_responses": kwargs["streaming_responses"],
+        "allowed_hosts": kwargs["allowed_hosts"],
+        "allowed_origins": kwargs["allowed_origins"],
+        # Tests use arbitrary base URLs (testserver, default.localhost,
+        # 127.0.0.1, etc.); production's host allowlist isn't useful in
+        # this context. Disable explicitly so requests to e.g.
+        # ``http://testserver/mcp/`` aren't rejected before the tool
+        # dispatcher runs.
+        "enable_dns_rebinding_protection": False,
+        "auth": kwargs["auth"],
+    }
+
+    app = _build_mcp_and_a2a_app(handler, **build_kwargs)
+    return _apply_asgi_middleware(app, asgi_middleware)
+
+
 def main() -> None:
     """Boot the unified salesagent server.
 
@@ -345,84 +534,9 @@ def main() -> None:
     """
     logging.basicConfig(level=logging.INFO)
 
-    port = int(os.environ.get("ADCP_PORT") or os.environ.get("PORT") or 3001)
-
-    router = build_router()
-    subdomain_router = build_subdomain_router()
-
-    # Mount Flask admin alongside MCP + A2A so one binary owns every
-    # surface. The Flask app is unchanged from the legacy stack —
-    # WSGIMiddleware bridges it to ASGI, AdminWSGIMount dispatches a
-    # known set of path prefixes (/admin, /static, /auth, /tenant, etc.)
-    # to it before the inner serve() dispatcher routes the rest to A2A.
-    from src.admin.app import create_app as _create_admin_app
-
-    admin_wsgi = WSGIMiddleware(_create_admin_app())
-
-    serve(
-        router,
-        name="salesagent-core",
-        port=port,
-        # MCP at /mcp, A2A at / on one Starlette binary. context_factory
-        # and asgi_middleware are shared.
-        transport="both",
-        # PSA fires buyer-protocol webhooks via
-        # ``src/services/protocol_webhook_service.py`` itself (the in-house
-        # path also covers signing for non-embedded tenants). Auto-emit on
-        # the SDK side would double-fire. See bokelley/salesagent#6 for
-        # the planned migration to ``PgWebhookDeliverySupervisor``.
-        auto_emit_completion_webhooks=False,
-        # ``auth=BearerTokenAuth(...)`` (PR #566 / salesagent task #33)
-        # wires the bearer-token middleware on BOTH the MCP and A2A
-        # legs from one config. Replaces the prior ScopedAuthMiddleware
-        # workaround that ran the MCP-only BearerTokenAuthMiddleware
-        # against /mcp/* and left A2A unauthenticated. A2A's public
-        # agent-card discovery at /.well-known/agent-card.json stays
-        # reachable; A2A messaging endpoints now require the same
-        # x-adcp-auth token MCP does.
-        auth=BearerTokenAuth(
-            validate_token=_validate_token,
-            header_name="x-adcp-auth",
-            bearer_prefix_required=False,
-        ),
-        # AdminWSGIMount stays as ASGI middleware — it short-circuits
-        # /admin/*, /static/*, /auth/*, /tenant/*, etc. to the Flask
-        # WSGI app BEFORE the auth chain fires (Flask owns its own
-        # session-cookie auth). Subdomain tenant resolution still runs
-        # on every non-admin request.
-        # SigningVerifyMiddleware runs LAST so it only sees buyer-protocol
-        # traffic that AdminWSGIMount didn't carve out — verifies RFC 9421
-        # signatures and stashes verified state on scope["state"]. See
-        # docs/design/signing-non-embedded.md.
-        asgi_middleware=[
-            (AdminWSGIMount, {"wsgi_app": admin_wsgi}),
-            (SubdomainTenantMiddleware, {"router": subdomain_router}),
-            (SigningVerifyMiddleware, {}),
-        ],
-        context_factory=auth_context_factory,
-        allowed_hosts=_allowed_hosts(),
-        # CORS at the SDK level — the legacy stack used FastAPI's
-        # CORSMiddleware against ``ALLOWED_ORIGINS``. Same env, same
-        # default (``http://localhost:8000``).
-        allowed_origins=[o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:8000").split(",")],
-        # Streaming responses: the SDK can keep the HTTP connection open
-        # for long-running A2A tasks (delivery polls, async media-buy
-        # creation). Default off for backwards compat with non-streaming
-        # buyers; flip via env once we've validated buyer SDKs handle it.
-        streaming_responses=os.environ.get("ADCP_STREAMING_RESPONSES", "false").lower() == "true",
-        # Debug endpoints surface internal state (route map, traffic
-        # counts, handler registry). Off by default — flip with
-        # ``ADCP_ENABLE_DEBUG_ENDPOINTS=true`` for local debugging.
-        enable_debug_endpoints=os.environ.get("ADCP_ENABLE_DEBUG_ENDPOINTS", "false").lower() == "true",
-        # DNS-rebinding protection rejects requests whose Host header
-        # isn't on the allow-list. ``allowed_hosts`` already feeds the
-        # check; this flag explicitly enables/disables enforcement.
-        # Default ON (the SDK's safe default); a deployment behind a
-        # cloud LB / WAF that already validates Host can set
-        # ``ADCP_DNS_REBINDING_PROTECTION=false`` to skip the second
-        # check.
-        enable_dns_rebinding_protection=(os.environ.get("ADCP_DNS_REBINDING_PROTECTION", "true").lower() == "true"),
-    )
+    kwargs = _serve_kwargs(include_scheduler=True)
+    router = kwargs.pop("router")
+    serve(router, **kwargs)
 
 
 if __name__ == "__main__":

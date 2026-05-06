@@ -3250,13 +3250,16 @@ class TestProductV36FieldContract:
         schema = convert_product_model_to_schema(m)
         dump = schema.model_dump()
 
-        # None-valued optional fields should be omitted from dump
+        # None-valued optional fields should be omitted from dump.
+        # ``reporting_capabilities`` is no longer in this list — adcp 4.4
+        # made it required on the wire, so the schema now defaults to a
+        # minimal-but-spec-valid object instead of None when the ORM row
+        # has none. The default is verified separately.
         absent_fields = [
             "channels",
             "product_card",
             "product_card_detailed",
             "placements",
-            "reporting_capabilities",
             "catalog_match",
             "catalog_types",
             "conversion_tracking",
@@ -3265,6 +3268,11 @@ class TestProductV36FieldContract:
         ]
         for field in absent_fields:
             assert field not in dump, f"Null field '{field}' should not appear in model_dump"
+
+        # reporting_capabilities now defaults to a minimal valid object,
+        # not None.
+        assert "reporting_capabilities" in dump
+        assert dump["reporting_capabilities"]["timezone"] == "UTC"
 
     def test_v36_product_in_get_products_response(self):
         """Product with v3.6 fields serializes correctly inside GetProductsResponse."""

@@ -12,9 +12,7 @@ import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
-
-from adcp import PushNotificationConfig
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Financial policy constants (F-05)
@@ -24,18 +22,10 @@ from adcp import PushNotificationConfig
 #: Configurable via MAX_CAMPAIGN_BUDGET_USD env var; default 10,000,000.
 MAX_CAMPAIGN_BUDGET: Decimal = Decimal(os.environ.get("MAX_CAMPAIGN_BUDGET_USD", "10000000"))
 
-from adcp.types import Error
-from adcp.types import ContextObject
-from adcp.types import TargetingOverlay
-from adcp.types import CreativeAction
-from adcp.types import PackageUpdate as UpdatePackage
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-from pydantic import ValidationError
+from adcp.types import CreativeAction, Error
 from sqlalchemy import select
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPValidationError
-from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +39,6 @@ from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AffectedPackage,
-    Budget,
     UpdateMediaBuyError,
     UpdateMediaBuyRequest,
     UpdateMediaBuySuccess,
@@ -60,7 +49,6 @@ from src.core.tools.financial_validation import (
     validate_max_daily_package_spend,
     validate_min_package_budget,
 )
-from src.core.validation_helpers import format_validation_error
 
 
 def _verify_principal(media_buy_id: str, context: "ResolvedIdentity", repo: MediaBuyRepository) -> None:
@@ -620,8 +608,11 @@ def _update_media_buy_impl(
                             )
 
                     # Validate creative formats against package product formats
-                    # Get package and product to check supported formats
-                    from src.core.database.models import Product
+                    # Get package and product to check supported formats.
+                    # Aliased as ModelProduct to avoid colliding with the schema
+                    # Product class (the import-collision guard rejects bare
+                    # select-of-Product to keep model/schema queries unambiguous).
+                    from src.core.database.models import Product as ModelProduct
 
                     db_package = uow.media_buys.get_package(actual_media_buy_id, pkg_update.package_id)
 
@@ -634,8 +625,9 @@ def _update_media_buy_impl(
 
                     if product_id:
                         # Get product to check supported formats
-                        product_stmt = select(Product).where(
-                            Product.tenant_id == tenant["tenant_id"], Product.product_id == product_id
+                        product_stmt = select(ModelProduct).where(
+                            ModelProduct.tenant_id == tenant["tenant_id"],
+                            ModelProduct.product_id == product_id,
                         )
                         product = session.scalars(product_stmt).first()
 
@@ -800,7 +792,9 @@ def _update_media_buy_impl(
                     # Check for sync errors
                     failed_creatives = [r for r in sync_response.creatives if r.action == CreativeAction.failed]
                     if failed_creatives:
-                        error_msgs = [f"{r.creative_id}: {', '.join(r.errors or [])}" for r in failed_creatives]
+                        error_msgs = [
+                            f"{r.creative_id}: {', '.join(str(e) for e in (r.errors or []))}" for r in failed_creatives
+                        ]
                         error_msg = f"Failed to sync creatives: {'; '.join(error_msgs)}"
                         response_data = UpdateMediaBuyError(
                             errors=[Error(code="creative_sync_failed", message=error_msg)],
@@ -1265,237 +1259,3 @@ def _update_media_buy_impl(
         )
 
     return final_response
-
-
-def _build_update_request(
-    media_buy_id: str | None = None,
-    paused: bool | None = None,
-    flight_start_date: str | None = None,
-    flight_end_date: str | None = None,
-    budget: float | None = None,
-    currency: str | None = None,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    pacing: str | None = None,
-    daily_budget: float | None = None,
-    packages: list | None = None,
-    push_notification_config: Any = None,
-    context: Any = None,
-    reporting_webhook: Any = None,
-    ext: Any = None,
-) -> UpdateMediaBuyRequest:
-    """Build UpdateMediaBuyRequest from flat parameters.
-
-    Handles deprecated field mapping and budget object construction.
-    Used by both MCP wrapper and A2A raw function.
-    """
-    # Handle deprecated field names
-    effective_start = start_time or flight_start_date
-    effective_end = end_time or flight_end_date
-
-    # Preserve bare float budgets when no extra budget metadata is provided.
-    # This lets _impl reuse the existing media buy currency instead of forcing USD
-    # at the transport boundary.
-    budget_obj: Budget | float | None = None
-    if budget is not None:
-        if currency is None and pacing is None and daily_budget is None:
-            budget_obj = float(budget)
-        else:
-            pacing_val: Literal["even", "asap", "daily_budget"] = "even"
-            if pacing == "asap":
-                pacing_val = "asap"
-            elif pacing == "daily_budget":
-                pacing_val = "daily_budget"
-            budget_obj = Budget(
-                total=budget,
-                currency=currency or "USD",
-                pacing=pacing_val,
-                daily_cap=daily_budget,
-                auto_pause_on_budget_exhaustion=None,
-            )
-
-    # Build request with only non-None values (strict validation in dev mode)
-    request_params: dict[str, Any] = {}
-    if media_buy_id is not None:
-        request_params["media_buy_id"] = media_buy_id
-    if paused is not None:
-        request_params["paused"] = paused
-    if effective_start is not None:
-        request_params["start_time"] = effective_start
-    if effective_end is not None:
-        request_params["end_time"] = effective_end
-    if budget_obj is not None:
-        request_params["budget"] = budget_obj
-    if packages is not None:
-        request_params["packages"] = packages
-    if push_notification_config is not None:
-        request_params["push_notification_config"] = push_notification_config
-    if context is not None:
-        request_params["context"] = context
-    if reporting_webhook is not None:
-        request_params["reporting_webhook"] = reporting_webhook
-    if ext is not None:
-        request_params["ext"] = ext
-
-    try:
-        req = UpdateMediaBuyRequest(**request_params)
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="update_media_buy request")) from e
-
-    # BR-RULE-022: reject empty updates (no updatable fields beyond identifier)
-    if not req.has_updatable_fields():
-        raise AdCPValidationError(
-            "Update request must include at least one updatable field "
-            "(paused, start_time, end_time, packages, budget, "
-            "push_notification_config, reporting_webhook, context, ext)"
-        )
-
-    return req
-
-
-async def update_media_buy(
-    media_buy_id: str | None = None,
-    paused: bool = None,
-    flight_start_date: str = None,
-    flight_end_date: str = None,
-    budget: float = None,
-    currency: str = None,
-    targeting_overlay: TargetingOverlay | None = None,
-    start_time: str = None,
-    end_time: str = None,
-    pacing: str = None,
-    daily_budget: float = None,
-    packages: list[UpdatePackage] | None = None,
-    creatives: list = None,
-    push_notification_config: PushNotificationConfig | None = None,
-    context: ContextObject | None = None,  # payload-level context
-    reporting_webhook: Any | None = None,  # AdCP ReportingWebhook
-    ext: Any | None = None,  # AdCP ExtensionObject for custom fields
-    ctx: Context | ToolContext | None = None,
-):
-    """Update a media buy with campaign-level and/or package-level changes.
-
-    MCP tool wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-
-    Args:
-        media_buy_id: Media buy ID to update (required)
-        paused: True to pause campaign, False to resume (adcp 2.12.0+)
-        flight_start_date: Change start date (if not started)
-        flight_end_date: Extend or shorten campaign
-        budget: Update total budget
-        currency: Update currency (ISO 4217)
-        targeting_overlay: Update global targeting
-        start_time: Update start datetime
-        end_time: Update end datetime
-        pacing: Pacing strategy (even, asap, daily_budget)
-        daily_budget: Daily spend cap across all packages
-        packages: Package-specific updates
-        creatives: Add new creatives
-        push_notification_config: Push notification config for async notifications (AdCP spec, optional)
-        context: Application-level context per adcp spec
-        reporting_webhook: Webhook configuration for automated reporting delivery (optional, per AdCP spec)
-        ext: Extension object for custom fields (optional, per AdCP spec)
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with UpdateMediaBuyResponse data
-    """
-    # Construct spec-compliant request at the boundary — no model_dump needed
-    # FastMCP already coerced JSON inputs to typed Pydantic models
-    req = _build_update_request(
-        media_buy_id=media_buy_id,
-        paused=paused,
-        flight_start_date=flight_start_date,
-        flight_end_date=flight_end_date,
-        budget=budget,
-        currency=currency,
-        start_time=start_time,
-        end_time=end_time,
-        pacing=pacing,
-        daily_budget=daily_budget,
-        packages=packages,
-        push_notification_config=push_notification_config,
-        context=context,
-        reporting_webhook=reporting_webhook,
-        ext=ext,
-    )
-    # Read identity and context_id pre-resolved by MCPAuthMiddleware
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    _ctx_id = (await ctx.get_state("context_id")) if isinstance(ctx, Context) else None
-    response = _update_media_buy_impl(req=req, identity=identity, context_id=_ctx_id)
-    return ToolResult(content=str(response), structured_content=response)
-
-
-def update_media_buy_raw(
-    media_buy_id: str | None = None,
-    paused: bool = None,
-    flight_start_date: str = None,
-    flight_end_date: str = None,
-    budget: float = None,
-    currency: str = None,
-    targeting_overlay: dict = None,
-    start_time: str = None,
-    end_time: str = None,
-    pacing: str = None,
-    daily_budget: float = None,
-    packages: list = None,
-    creatives: list = None,
-    push_notification_config: dict = None,
-    context: dict | None = None,  # payload-level context
-    reporting_webhook: dict | None = None,  # AdCP ReportingWebhook
-    ext: dict | None = None,  # AdCP ExtensionObject for custom fields
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """Update an existing media buy (raw function for A2A server use).
-
-    Delegates to the shared implementation.
-
-    Args:
-        media_buy_id: The ID of the media buy to update (required)
-        paused: True to pause campaign, False to resume (adcp 2.12.0+)
-        flight_start_date: Change start date
-        flight_end_date: Change end date
-        budget: Update total budget
-        currency: Update currency
-        targeting_overlay: Update targeting
-        start_time: Update start datetime
-        end_time: Update end datetime
-        pacing: Pacing strategy
-        daily_budget: Daily budget cap
-        packages: Package updates
-        creatives: Creative updates
-        push_notification_config: Push notification config for status updates
-        context: Application level context per adcp spec
-        reporting_webhook: Webhook configuration for automated reporting delivery
-        ext: Extension object for custom fields (optional, per AdCP spec)
-        ctx: Context for authentication (deprecated, use identity)
-        identity: Pre-resolved identity (if available)
-
-    Returns:
-        UpdateMediaBuyResponse
-    """
-    req = _build_update_request(
-        media_buy_id=media_buy_id,
-        paused=paused,
-        flight_start_date=flight_start_date,
-        flight_end_date=flight_end_date,
-        budget=budget,
-        currency=currency,
-        start_time=start_time,
-        end_time=end_time,
-        pacing=pacing,
-        daily_budget=daily_budget,
-        packages=packages,
-        push_notification_config=push_notification_config,
-        context=context,
-        reporting_webhook=reporting_webhook,
-        ext=ext,
-    )
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=True)
-    # FIXME(salesagent-v0kb): boundary-completeness — context_id not passed to _impl
-    return _update_media_buy_impl(req=req, identity=identity)

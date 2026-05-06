@@ -101,6 +101,16 @@ def build_adcp_media_buy_request(
     # Per AdCP spec: Package requires product_id (singular) and pricing_option_id
     request: dict[str, Any] = {
         "brand": brand,  # AdCP 3.6.0: BrandReference with domain
+        # adcp 4.4 made these required at the wire boundary. The buyer is
+        # responsible for both — idempotency_key for retry-safe dedupe and
+        # account for billing routing. Real buyers must supply them; the
+        # builder generates a fresh UUID and an account natural-key derived
+        # from the brand so test e2e flows behave like real callers.
+        "idempotency_key": f"e2e-{uuid.uuid4()}",
+        "account": {
+            "brand": brand,
+            "operator": brand.get("domain", "testbrand.com") if isinstance(brand, dict) else "testbrand.com",
+        },
         "packages": [
             {
                 "product_id": (
@@ -179,10 +189,26 @@ def build_sync_creatives_request(
         "dry_run": dry_run,
         "validation_mode": validation_mode,
         "delete_missing": delete_missing,
+        # adcp 4.4 made idempotency_key required at the wire boundary —
+        # real buyers must generate one for retry-safe dedupe. Tests
+        # follow the same contract so the SDK validator accepts the call
+        # without server-side autogen.
+        "idempotency_key": f"e2e-sync-{uuid.uuid4()}",
     }
 
     if assignments:
-        request["assignments"] = assignments
+        # adcp 4.4 changed Assignment from a dict
+        # ``{creative_id: [package_id, ...]}`` to a flat list of
+        # ``Assignment`` objects ``{creative_id, package_id, weight?, placement_ids?}``.
+        # Accept the legacy dict shape for caller convenience and explode
+        # it to the 4.4 list shape — eventually callers should pass the
+        # list themselves and this branch can go.
+        if isinstance(assignments, dict):
+            request["assignments"] = [
+                {"creative_id": cid, "package_id": pid} for cid, pids in assignments.items() for pid in pids
+            ]
+        else:
+            request["assignments"] = assignments
 
     if creative_ids:
         request["creative_ids"] = creative_ids
@@ -196,6 +222,9 @@ def build_sync_creatives_request(
     return request
 
 
+_DEFAULT_FORMAT_AGENT_URL = "https://creative.adcontextprotocol.org/"
+
+
 def build_creative(
     creative_id: str,
     format_id: str | dict[str, Any],
@@ -203,38 +232,49 @@ def build_creative(
     asset_url: str,
     click_through_url: str | None = None,
     status: str = "processing",
+    asset_type: str = "url",
+    width: int | None = None,
+    height: int | None = None,
 ) -> dict[str, Any]:
     """
-    Build a valid AdCP V2.4 creative object with assets.
+    Build a valid AdCP creative object with assets.
 
     Args:
         creative_id: Unique creative identifier
-        format_id: Format ID - either string (legacy) or FormatId dict with agent_url and id
+        format_id: Format ID — either a string (wrapped to FormatReference using
+            the AdCP creative-agent default agent_url) or a full FormatReference dict.
         name: Human-readable creative name
         asset_url: URL to the creative asset (converted to assets structure)
         click_through_url: Optional click-through destination
-        status: Creative status (default: processing). Valid: processing, approved, rejected, pending_review, archived
+        status: Creative status (default: processing).
+        asset_type: AssetVariant discriminator. Defaults to ``url`` because that
+            shape requires only ``url``. Pass ``image`` etc. and supply width+height
+            when testing dimension-bearing variants.
+        width / height: Required when ``asset_type == "image"`` or ``"video"``.
 
     Returns:
-        Valid AdCP V2.4 Creative dict with assets
+        Valid AdCP Creative dict with assets.
     """
-    # Build assets structure based on format type
-    # For display formats, use image asset
-    # For video formats, use video asset
-    # Default to image for now
-    assets: dict[str, Any] = {
-        "primary": {
-            "asset_type": "image",
-            "url": asset_url,
-        }
-    }
+    # Normalise format_id from string (pre-4.4 shape) to FormatReference.
+    if isinstance(format_id, str):
+        format_id = {"agent_url": _DEFAULT_FORMAT_AGENT_URL, "id": format_id}
+
+    primary_asset: dict[str, Any] = {"asset_type": asset_type, "url": asset_url}
+    if asset_type in ("image", "video"):
+        if width is None or height is None:
+            raise ValueError(
+                f"build_creative(asset_type={asset_type!r}) requires width and height — "
+                f"AdCP 4.4 makes them required on image/video asset variants."
+            )
+        primary_asset["width"] = width
+        primary_asset["height"] = height
 
     creative: dict[str, Any] = {
         "creative_id": creative_id,
         "format_id": format_id,
         "name": name,
-        "content_uri": asset_url,  # Required top-level URL field per AdCP spec
-        "assets": assets,
+        "content_uri": asset_url,
+        "assets": {"primary": primary_asset},
         "status": status,
     }
 

@@ -11,20 +11,17 @@ Handles delivery metrics reporting including:
 import logging
 from datetime import UTC, date, datetime, timedelta
 from math import floor
-from typing import Any, cast
+from typing import Any
 
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-from pydantic import RootModel, ValidationError
+from pydantic import RootModel
 from rich.console import Console
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
-from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 console = Console()
 
-from adcp.types import ContextObject, Error, MediaBuyStatus
+from adcp.types import Error, MediaBuyStatus
 
 # adcp 3.6.0: Use schemas.ReportingPeriod (extends creative ReportingPeriod) for adapter compat.
 # The media-buy-specific ReportingPeriod has identical fields (start, end) but different identity.
@@ -50,7 +47,6 @@ from src.core.schemas import (
     ReportingPeriod as MediaBuyReportingPeriod,
 )
 from src.core.testing_hooks import AdCPTestContext, DeliverySimulator, TimeSimulator, apply_testing_hooks
-from src.core.validation_helpers import format_validation_error
 
 
 def _is_circuit_breaker_open(tenant_id: str) -> bool:
@@ -606,129 +602,6 @@ def _get_media_buy_delivery_impl(
             )
 
     return response
-
-
-async def get_media_buy_delivery(
-    media_buy_ids: list[str] | None = None,
-    status_filter: MediaBuyStatus | list[MediaBuyStatus] | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    reporting_dimensions: dict[str, Any] | None = None,
-    attribution_window: dict[str, Any] | None = None,
-    include_package_daily_breakdown: bool | None = None,
-    account: dict[str, Any] | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-):
-    """Get delivery data for media buys.
-
-    AdCP-compliant implementation of get_media_buy_delivery tool.
-
-    Args:
-        media_buy_ids: Array of publisher media buy IDs to get delivery data for (optional)
-        status_filter: Filter by status - single status or array of MediaBuyStatus enums (optional)
-        start_date: Start date for reporting period in YYYY-MM-DD format (optional)
-        end_date: End date for reporting period in YYYY-MM-DD format (optional)
-        reporting_dimensions: Request dimensional breakdowns (optional)
-        attribution_window: Attribution window configuration (optional)
-        include_package_daily_breakdown: Include daily breakdown per package (optional)
-        account: Account reference for multi-account scenarios (optional)
-        context: Application level context object (ContextObject)
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with GetMediaBuyDeliveryResponse data
-    """
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-
-    # Handle account resolution at boundary (same as sync_creatives pattern)
-    if account is not None and identity is not None:
-        from adcp.types import AccountReference as LibraryAccountReference
-
-        from src.core.transport_helpers import enrich_identity_with_account
-
-        account_ref = LibraryAccountReference(**account) if isinstance(account, dict) else account
-        identity = enrich_identity_with_account(identity, account_ref)
-
-    # Create AdCP-compliant request object
-    try:
-        req = GetMediaBuyDeliveryRequest(
-            media_buy_ids=media_buy_ids,
-            status_filter=cast(MediaBuyStatus | list[MediaBuyStatus] | None, status_filter),
-            start_date=start_date,
-            end_date=end_date,
-            reporting_dimensions=reporting_dimensions,
-            attribution_window=attribution_window,
-            include_package_daily_breakdown=include_package_daily_breakdown,
-            context=cast(ContextObject | None, context),
-        )
-
-        response = _get_media_buy_delivery_impl(req, identity)
-
-        return ToolResult(content=str(response), structured_content=response)
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="get_media_buy_delivery request"))
-
-
-def get_media_buy_delivery_raw(
-    media_buy_ids: list[str] | None = None,
-    status_filter: MediaBuyStatus | list[MediaBuyStatus] | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    reporting_dimensions: dict[str, Any] | None = None,
-    attribution_window: dict[str, Any] | None = None,
-    include_package_daily_breakdown: bool | None = None,
-    account: dict[str, Any] | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """Get delivery metrics for media buys (raw function for A2A server use).
-
-    Args:
-        media_buy_ids: Array of publisher media buy IDs to get delivery data for (optional)
-        status_filter: Filter by status - single status or array of MediaBuyStatus enums (optional)
-        start_date: Start date for reporting period in YYYY-MM-DD format (optional)
-        end_date: End date for reporting period in YYYY-MM-DD format (optional)
-        reporting_dimensions: Request dimensional breakdowns (optional)
-        attribution_window: Attribution window configuration (optional)
-        include_package_daily_breakdown: Include daily breakdown per package (optional)
-        account: Account reference for multi-account scenarios (optional)
-        context: Application level context (ContextObject)
-        ctx: Context for authentication
-        identity: Pre-resolved identity (preferred over ctx)
-
-    Returns:
-        GetMediaBuyDeliveryResponse with delivery metrics
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx)
-
-    # Handle account resolution at boundary (same as sync_creatives pattern)
-    if account is not None and identity is not None:
-        from adcp.types import AccountReference as LibraryAccountReference
-
-        from src.core.transport_helpers import enrich_identity_with_account
-
-        account_ref = LibraryAccountReference(**account) if isinstance(account, dict) else account
-        identity = enrich_identity_with_account(identity, account_ref)
-
-    # Create request object
-    req = GetMediaBuyDeliveryRequest(
-        media_buy_ids=media_buy_ids,
-        status_filter=cast(MediaBuyStatus | list[MediaBuyStatus] | None, status_filter),
-        start_date=start_date,
-        end_date=end_date,
-        reporting_dimensions=reporting_dimensions,
-        attribution_window=attribution_window,
-        include_package_daily_breakdown=include_package_daily_breakdown,
-        context=cast(ContextObject | None, context),
-    )
-
-    # Call the implementation
-    return _get_media_buy_delivery_impl(req, identity)
 
 
 def _resolve_delivery_status_filter(

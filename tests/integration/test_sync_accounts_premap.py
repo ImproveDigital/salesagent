@@ -299,9 +299,7 @@ class TestPendingProvisionStatus:
                     brand={"domain": "cocacola.com"},
                     billing="operator",
                     sandbox=False,
-                    platform_mappings={
-                        "google_ad_manager": {"advertiser_id": "12345"}
-                    },
+                    platform_mappings={"google_ad_manager": {"advertiser_id": "12345"}},
                 )
             )
             session.commit()

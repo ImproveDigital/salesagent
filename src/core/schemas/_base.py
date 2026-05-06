@@ -1,3 +1,4 @@
+import uuid
 import warnings
 from datetime import date, datetime
 
@@ -11,12 +12,14 @@ if TYPE_CHECKING:
 
 from adcp import Error
 from adcp.types import AccountReference as LibraryAccountReference
-from adcp.types import CreateMediaBuyRequest as LibraryCreateMediaBuyRequest
 from adcp.types import (
+    ContextObject,
     DeliveryStatus,  # noqa: F401 — used by Snapshot below
+    MediaBuyStatus,
     PriceGuidance,  # Replaces local PriceGuidance class
     PricingModel,  # Replaces local PricingModel enum (lowercase members: .cpm, .cpc, etc.)
 )
+from adcp.types import CreateMediaBuyRequest as LibraryCreateMediaBuyRequest
 
 # Import main request/response types from stable API
 from adcp.types import Format as LibraryFormat
@@ -42,7 +45,6 @@ from adcp.types.aliases import (
 from adcp.types.aliases import (
     UpdateMediaBuySuccessResponse as AdCPUpdateMediaBuySuccess,
 )
-from adcp.types import ContextObject, MediaBuyStatus
 from adcp.types.base import AdCPBaseModel as LibraryAdCPBaseModel
 
 from src.core.config import get_pydantic_extra_mode
@@ -1989,8 +1991,9 @@ class GetSignalsResponse(NestedModelSerializerMixin, LibraryGetSignalsResponse):
 class ActivateSignalRequest(LibraryActivateSignalRequest):
     """Extends library ActivateSignalRequest with local extension fields.
 
-    Library provides: signal_agent_segment_id, deployments, context, ext.
-    Local extensions: campaign_id, media_buy_id (unused in impl, kept for API compat).
+    Library provides: signal_agent_segment_id, deployments, idempotency_key,
+    context, ext. Local extensions: campaign_id, media_buy_id (unused in impl,
+    kept for API compat).
 
     NOTE: ActivateSignalResponse is NOT migrated — library uses RootModel
     discriminated union (success|error) which is fundamentally incompatible
@@ -1998,6 +2001,17 @@ class ActivateSignalRequest(LibraryActivateSignalRequest):
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    # adcp 4.4.3 made idempotency_key required. Per spec it's "client-generated"
+    # but pre-v3 callers (and most internal tests) don't set it; auto-generate
+    # so the contract is preserved without forcing every caller to mint a UUID.
+    idempotency_key: str = Field(
+        default_factory=lambda: f"idem_{uuid.uuid4()}",
+        description="Client-generated unique key. Auto-defaults to a fresh UUID when omitted.",
+        min_length=16,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9_.:-]{16,255}$",
+    )
 
     # Extension fields (not in library spec)
     campaign_id: str | None = Field(None, description="Optional campaign ID to activate signal for")
@@ -2115,8 +2129,12 @@ PROPERTY_ERROR_MESSAGES = {
 
 # --- Authorized Properties (AdCP Spec) ---
 # Use library types directly - all fields inherited from AdCP spec
-# V3: Property uses property-specific Identifier, not generic Identifier
-from adcp.types import Identifier as PropertySpecificIdentifier
+# V3: Property uses property-specific Identifier, not generic Identifier.
+# adcp 4.4 ships two ``Identifier`` classes — the generic re-export at
+# ``adcp.types`` and the property-specific one used by ``Property``. The
+# inheritance guard ``test_property_identifier_is_library_type`` requires
+# the property-specific shape.
+from adcp.types.generated_poc.core.property import Identifier as PropertySpecificIdentifier
 
 PropertyIdentifier: TypeAlias = PropertySpecificIdentifier  # Property-specific identifier
 Property: TypeAlias = LibraryProperty

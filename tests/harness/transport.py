@@ -1,11 +1,20 @@
 """Transport enum and TransportResult for multi-transport behavioral tests.
 
-Defines the four dispatch transports (IMPL, A2A, REST, MCP) and a frozen
-result container that separates transport-specific envelope from shared payload.
+Defines the dispatch transports (IMPL, MCP) and a frozen result
+container that separates transport-specific envelope from shared payload.
+
+A2A is no longer dispatched in-process — the framework's
+``adcp.server.serve(transport="a2a")`` owns that surface, exercised
+end-to-end by storyboards in ``core/tests/storyboards/``.
+
+REST is no longer a transport — the legacy FastAPI app was deleted in
+the kill-nginx cutover. Tools are now reachable only through MCP and
+A2A (the two protocols AdCP defines), plus the IMPL shortcut for
+business-logic tests that don't need the transport boundary.
 
 Usage::
 
-    result = env.call_via(Transport.REST, creatives=[...])
+    result = env.call_via(Transport.MCP, creatives=[...])
     assert result.is_success
     assert result.payload.creatives[0].action == CreativeAction.created
 """
@@ -23,16 +32,12 @@ class Transport(str, Enum):
     """Dispatch transports for behavioral tests."""
 
     IMPL = "impl"  # Direct _impl() call
-    A2A = "a2a"  # _raw() A2A wrapper
-    REST = "rest"  # FastAPI TestClient → route → _raw() → _impl()
-    MCP = "mcp"  # Mock Context → MCP wrapper → _impl()
+    MCP = "mcp"  # httpx ASGITransport → FastMCP wrapper → _impl()
 
 
 # Maps Transport → ResolvedIdentity.protocol value
 TRANSPORT_PROTOCOL: dict[Transport, str] = {
     Transport.IMPL: "mcp",  # _impl doesn't inspect protocol; keep default
-    Transport.A2A: "a2a",
-    Transport.REST: "rest",
     Transport.MCP: "mcp",
 }
 

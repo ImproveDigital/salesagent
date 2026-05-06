@@ -12,12 +12,12 @@ Covers:
 from __future__ import annotations
 
 import pytest
-from adcp.types.generated_poc.core.format import (
-    Accessibility,
+from adcp.types import (
+    HtmlFormatAsset,
     ImageFormatAsset,
     VideoFormatAsset,
-    HtmlFormatAsset,
 )
+from adcp.types.generated_poc.core.format import Accessibility
 from adcp.types.generated_poc.enums.wcag_level import WcagLevel
 
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest

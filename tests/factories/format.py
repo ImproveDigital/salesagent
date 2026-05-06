@@ -28,14 +28,15 @@ from __future__ import annotations
 import factory
 from adcp.types import (
     AudioFormatAsset,
+    Dimensions,
     HtmlFormatAsset,
     ImageFormatAsset,
     MarkdownFormatAsset,
+    Renders,
     Responsive,
     TextFormatAsset,
     VideoFormatAsset,
 )
-from adcp.types import Dimensions, Renders
 
 from src.core.schemas import Format, FormatId
 

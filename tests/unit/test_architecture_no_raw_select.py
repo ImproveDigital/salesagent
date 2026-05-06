@@ -72,6 +72,8 @@ ORM_MODEL_NAMES = _discover_orm_model_names()
 #
 # FIXME(salesagent-xw7): migrate each of these to repository calls
 ALLOWLIST: set[tuple[str, str]] = {
+    # ── Signing middleware (PR #39 — needs TenantRepository.get_for_signing) ──
+    ("src/core/signing/middleware.py", "_resolve_policy_context_sync"),
     # ── Adapters ──
     # create_line_items removed — uses pre-loaded template param (salesagent-zj9)
     ("src/adapters/gam/managers/sync.py", "_get_recent_sync"),
@@ -260,6 +262,8 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/domain_access.py", "remove_authorized_email"),
     ("src/admin/services/business_activity_service.py", "get_business_activities"),
     ("src/admin/services/dashboard_service.py", "get_tenant"),
+    ("src/admin/services/dashboard_service.py", "_load_tenant"),
+    ("src/admin/services/dashboard_service.py", "_activity_ledger"),
     ("src/admin/services/media_buy_readiness_service.py", "get_readiness_state"),
     ("src/admin/sync_api.py", "get_sync_history"),
     ("src/admin/sync_api.py", "get_sync_stats"),
@@ -377,10 +381,6 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/core/tools/media_buy_create.py", "_create_media_buy_impl"),
     ("src/core/tools/media_buy_create.py", "execute_approved_media_buy"),
     ("src/core/tools/media_buy_list.py", "_fetch_creative_approvals"),
-    ("src/core/tools/media_buy_update.py", "_update_media_buy_impl"),
-    # ── Routes ──
-    ("src/routes/health.py", "debug_db_state"),
-    ("src/routes/health.py", "debug_root_logic"),
     # ── Services ──
     ("src/services/auth_config_service.py", "delete_oidc_config"),
     ("src/services/auth_config_service.py", "disable_oidc"),

@@ -63,9 +63,7 @@ def invalidate_adagents_cache(publisher_domain: str | None = None) -> None:
         _ADAGENTS_CACHE.pop(publisher_domain, None)
 
 
-async def fetch_brand_properties(
-    house_domain: str, *, force_refresh: bool = False
-) -> list[dict[str, Any]]:
+async def fetch_brand_properties(house_domain: str, *, force_refresh: bool = False) -> list[dict[str, Any]]:
     """Fetch the publisher's authoritative property list from
     ``https://{house_domain}/.well-known/brand.json``.
 
@@ -91,9 +89,7 @@ async def fetch_brand_properties(
         # document (super-set), so we reuse the fetcher.
         adagents = await fetch_adagents(house_domain)
     except Exception as exc:
-        logger.warning(
-            "AAO: brand.json fetch failed for %s: %s", house_domain, exc, exc_info=True
-        )
+        logger.warning("AAO: brand.json fetch failed for %s: %s", house_domain, exc, exc_info=True)
         raise AAOLookupError(f"brand.json fetch failed for {house_domain!r}: {exc}") from exc
 
     # The publisher is themselves the authorized agent in this view —
@@ -139,9 +135,7 @@ async def is_agent_authorized_by_publisher(
         try:
             adagents = await fetch_adagents(publisher_domain)
         except Exception as exc:
-            logger.info(
-                "AAO: adagents.json fetch failed for %s: %s", publisher_domain, exc
-            )
+            logger.info("AAO: adagents.json fetch failed for %s: %s", publisher_domain, exc)
             return False, f"adagents.json fetch failed: {exc}"
         _ADAGENTS_CACHE[publisher_domain] = (now, adagents)
 

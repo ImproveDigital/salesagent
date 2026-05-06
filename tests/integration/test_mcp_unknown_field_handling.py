@@ -1,9 +1,9 @@
-"""Integration tests for transport compat handling (MCP + REST).
+"""Integration tests for MCP transport compat handling.
 
 Environment-aware: dev mode rejects unknown fields (fail loudly),
 production mode strips them (forward compatible).
 
-Deprecated field translation works in both modes on all transports.
+Deprecated field translation works in both modes.
 """
 
 import os
@@ -89,31 +89,3 @@ class TestMcpProductionMode:
                     bogus_param=123,
                 )
             assert result is not None
-
-
-class TestRestCompat:
-    """REST transport: RestCompatMiddleware normalizes JSON body before Pydantic."""
-
-    def test_deprecated_field_translated_via_rest(self, integration_db):
-        """brand_manifest in REST body is translated to brand before route handler."""
-        from tests.harness.product import ProductEnv
-        from tests.harness.transport import Transport
-
-        with ProductEnv(tenant_id=TENANT_ID) as env:
-            _create_tenant_with_product()
-            result = env.call_via(
-                Transport.REST,
-                brand_manifest="https://acme.com/.well-known/brand.json",
-                brief="test ads",
-            )
-            assert result.is_success
-
-    def test_known_fields_work_via_rest(self, integration_db):
-        """Standard REST call with known fields succeeds."""
-        from tests.harness.product import ProductEnv
-        from tests.harness.transport import Transport
-
-        with ProductEnv(tenant_id=TENANT_ID) as env:
-            _create_tenant_with_product()
-            result = env.call_via(Transport.REST, brief="test ads")
-            assert result.is_success

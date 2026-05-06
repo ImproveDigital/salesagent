@@ -15,7 +15,7 @@ from tests.harness.transport import Transport
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
 CUSTOM_AGENT_URL = "https://custom-dco.example.com"
@@ -199,7 +199,7 @@ class TestAdapterFormatsMerged:
                 session.commit()
 
             env.set_registry_formats([agent_format])
-            response = env.call_a2a()
+            response = env.call_impl()
 
         assert isinstance(response, ListCreativeFormatsResponse)
 

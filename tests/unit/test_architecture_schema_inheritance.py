@@ -220,6 +220,20 @@ class TestSchemaInheritance:
             ("UpdateMediaBuyRequest", "end_time"),  # datetime|None (library uses AwareDatetime)
             ("UpdateMediaBuyRequest", "packages"),  # list[AdCPPackageUpdate] (local subclass type)
             ("UpdateMediaBuyRequest", "start_time"),  # datetime|Literal["asap"]|None (wider type)
+            # adcp 4.4 made these fields required at the library level. Salesagent
+            # resolves identity at the transport boundary (ResolvedIdentity) and
+            # the impl is idempotent at the DB layer regardless of caller key, so
+            # we keep them optional with None defaults for backward-compat.
+            ("CreateMediaBuyRequest", "idempotency_key"),
+            ("UpdateMediaBuyRequest", "account"),
+            ("UpdateMediaBuyRequest", "idempotency_key"),
+            ("SyncCreativesRequest", "idempotency_key"),
+            ("ActivateSignalRequest", "idempotency_key"),
+            ("SyncAccountsRequest", "idempotency_key"),
+            # Schema overrides for partial-construction tolerance / wider types
+            ("Creative", "variants"),
+            ("Product", "reporting_capabilities"),
+            ("SyncCreativeResult", "status"),
         }
 
         violations = []

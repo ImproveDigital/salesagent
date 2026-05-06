@@ -13,8 +13,6 @@ Updated for adcp 3.12:
 - buyer_refs removed from GetMediaBuyDeliveryRequest
 """
 
-from unittest.mock import Mock, patch
-
 import pytest
 from pydantic import ValidationError
 
@@ -291,11 +289,3 @@ class TestMCPToolMinimalCalls:
             assert len(signals_request.countries) == 1
         except Exception as e:
             pytest.fail(f"GetSignalsRequest creation failed: {e}")
-
-
-@pytest.fixture
-def mock_testing_setup():
-    """Setup common mocks for MCP tool testing."""
-    with patch("src.core.main.get_audit_logger") as mock_audit:
-        mock_audit.return_value.log_operation = Mock()
-        yield mock_audit

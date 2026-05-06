@@ -7,8 +7,8 @@ Covers:
 from __future__ import annotations
 
 import pytest
-from adcp.types import ImageFormatAsset, VideoFormatAsset
-from adcp.types import Dimensions, Renders
+from adcp.types import Dimensions, ImageFormatAsset, Renders, VideoFormatAsset
+
 from src.core.schemas import Format, FormatId, ListCreativeFormatsResponse
 from tests.factories import TenantFactory
 from tests.harness import CreativeFormatsEnv
@@ -18,7 +18,7 @@ AGENT_URL = "https://creative.adcontextprotocol.org"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 
 def _make_format(

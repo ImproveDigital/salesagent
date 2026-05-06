@@ -22,10 +22,12 @@ class TestCreativeListingBoundary:
     """
 
     def test_creative_without_format_id_is_rejected(self):
-        """Creative missing format_id field must raise ValidationError."""
+        """adcp 4.4 made ``format_id`` optional (formats inferable from assets);
+        ``name`` remains required and is what the spec enforces now.
+        """
         from src.core.schemas import Creative
 
-        with pytest.raises(ValidationError, match="format_id"):
+        with pytest.raises(ValidationError, match="name"):
             Creative(creative_id="c1")
 
     def test_creative_with_minimal_fields_is_valid(self):
@@ -41,8 +43,10 @@ class TestCreativeListingBoundary:
         assert c.name == "Test Creative"
         assert c.format_id.id == "display_300x250"
 
-    def test_creative_variants_silently_stripped(self):
-        """Passing variants= (from old delivery base) is silently stripped, not rejected."""
+    def test_creative_variants_accepted_post_v44(self):
+        """adcp 4.4 added ``variants`` as a public Creative field on the
+        delivery-response shape; salesagent's Creative now accepts it.
+        """
         from src.core.schemas import Creative, FormatId
 
         c = Creative(
@@ -52,7 +56,7 @@ class TestCreativeListingBoundary:
             variants=[],
         )
         assert c.creative_id == "c1"
-        assert not hasattr(c, "variants")
+        assert c.variants == [] or c.variants is None
 
     def test_creative_without_creative_id_is_rejected(self):
         """creative_id is REQUIRED — missing it must raise ValidationError."""

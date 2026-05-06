@@ -27,7 +27,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 # V3: Consolidated pricing types - CpmAuctionPricingOption/CpmFixedRatePricingOption → CpmPricingOption
 # Use fixed_price for fixed-rate, floor_price for auction
 from adcp import CpmPricingOption
-from adcp.types.generated_poc.core.signal_pricing_option import SignalPricingOption
 
 from src.core.schemas import (
     Budget,
@@ -467,7 +466,17 @@ class TestSignalSchemaContract:
 
     def test_signal_adcp_contract_compliance(self, validator):
         """Test Signal schema AdCP spec compliance."""
+        from adcp.types.generated_poc.core.vendor_pricing_option import VendorPricingOption
+
         test_data = {
+            # adcp 4.4 added the universal SignalId discriminated identifier and
+            # made it required. ``source='agent' + agent_url + id`` matches the
+            # signals-agent shape we mint.
+            "signal_id": {
+                "source": "agent",
+                "agent_url": "https://signals.example.com",
+                "id": "signal_contract_test",
+            },
             "signal_agent_segment_id": "signal_contract_test",
             "name": "Signal Contract Test",
             "description": "Testing signal contract compliance",
@@ -477,8 +486,10 @@ class TestSignalSchemaContract:
             "deployments": [
                 SignalDeployment(platform="test_platform", is_live=True, type="platform", scope="platform-wide")
             ],
+            # 4.4 unified signal pricing onto the shared VendorPricingOption
+            # discriminated union (model='cpm' = VendorPricingOption7).
             "pricing_options": [
-                SignalPricingOption.model_validate(
+                VendorPricingOption.model_validate(
                     {"pricing_option_id": "cpm_usd", "cpm": 3.50, "currency": "USD", "model": "cpm"}
                 )
             ],
@@ -486,6 +497,7 @@ class TestSignalSchemaContract:
 
         # AdCP spec required fields for signals
         adcp_spec_fields = {
+            "signal_id",
             "signal_agent_segment_id",
             "name",
             "description",

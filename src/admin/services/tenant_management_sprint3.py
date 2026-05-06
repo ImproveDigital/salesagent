@@ -200,7 +200,7 @@ def workflow_to_summary(
     return WorkflowSummary(
         workflow_id=step.step_id,
         workflow_type=workflow_type(step),
-        status=map_workflow_status(step),  # type: ignore[arg-type]
+        status=map_workflow_status(step),
         subject_type=subject_type,
         subject_id=subject_id,
         created_at=step.created_at,
@@ -249,7 +249,7 @@ def _decision_from_dict(payload: dict) -> WorkflowDecision:
         decision = "approve"
     return WorkflowDecision(
         decided_at=decided_at,
-        decision=decision,  # type: ignore[arg-type]
+        decision=decision,
         decided_by_email=payload.get("decided_by_email"),
         decided_by_source=payload.get("decided_by_source") or "management_api",
         notes=payload.get("notes"),
@@ -308,7 +308,7 @@ def record_workflow_decision(
 
     return WorkflowDecision(
         decided_at=decided_at,
-        decision=decision,  # type: ignore[arg-type]
+        decision=decision,
         decided_by_email=decided_by_email,
         decided_by_source=decided_by_source,
         notes=notes,
@@ -404,7 +404,7 @@ def compute_pacing(buy: MediaBuy) -> str | None:
     started always return None per the spec.
     """
     today = datetime.now(UTC).date()
-    if buy.start_date is None or buy.start_date > today:
+    if buy.start_date is None or buy.start_date > today:  # type: ignore[operator]
         return None
     # Stub: when delivered metrics land, replace with the real ratio.
     return None
@@ -433,7 +433,7 @@ def audit_to_entry(row: AuditLog) -> AuditLogEntry:
         action=row.operation,
         subject_type=subject_type,
         subject_id=subject_id,
-        actor_type=actor_type,  # type: ignore[arg-type]
+        actor_type=actor_type,
         actor_email=None,  # AuditLog has no local-user email column today
         external_user_email=row.external_user_email,
         external_user_id=row.external_user_id,

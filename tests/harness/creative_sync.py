@@ -71,7 +71,6 @@ class CreativeSyncEnv(IntegrationEnv):
         "config": "src.core.config.get_config",
     }
     DEFAULT_AGENT_URL = "https://creative.test.example.com"
-    REST_ENDPOINT = "/api/v1/creatives/sync"
 
     def _configure_mocks(self) -> None:
         """Set up happy-path defaults for external mocks."""
@@ -187,21 +186,6 @@ class CreativeSyncEnv(IntegrationEnv):
 
         return _sync_creatives_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> SyncCreativesResponse:
-        """Call sync_creatives_raw (A2A wrapper) with real DB.
-
-        Note: uses _raw() path instead of _run_a2a_handler because the real
-        A2A handler's _handle_sync_creatives_skill constructs CreativeAsset
-        from raw dicts, which fails validation (assets field required).
-        That handler bug needs a separate fix.
-        """
-        from src.core.tools.creatives.sync_wrappers import sync_creatives_raw
-
-        self._commit_factory_data()
-        kwargs.setdefault("identity", self.identity)
-        kwargs.setdefault("creatives", [])
-        return sync_creatives_raw(**kwargs)
-
     def call_mcp(self, **kwargs: Any) -> SyncCreativesResponse:
         """Call sync_creatives via Client(mcp) — full pipeline dispatch.
 
@@ -209,30 +193,3 @@ class CreativeSyncEnv(IntegrationEnv):
         """
         kwargs.setdefault("creatives", [])
         return self._run_mcp_client("sync_creatives", SyncCreativesResponse, **kwargs)
-
-    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert kwargs to SyncCreativesBody shape for REST POST."""
-        # The REST body expects 'creatives' as list[dict], matching SyncCreativesBody
-        body: dict[str, Any] = {}
-        if "creatives" in kwargs:
-            creatives = kwargs["creatives"]
-            # Convert Pydantic models to dicts if needed
-            body["creatives"] = [c.model_dump(mode="json") if hasattr(c, "model_dump") else c for c in creatives]
-        if "assignments" in kwargs and kwargs["assignments"] is not None:
-            body["assignments"] = kwargs["assignments"]
-        if "creative_ids" in kwargs and kwargs["creative_ids"] is not None:
-            body["creative_ids"] = kwargs["creative_ids"]
-        if "delete_missing" in kwargs:
-            body["delete_missing"] = kwargs["delete_missing"]
-        if "dry_run" in kwargs:
-            body["dry_run"] = kwargs["dry_run"]
-        if "validation_mode" in kwargs:
-            body["validation_mode"] = kwargs["validation_mode"]
-        if "account" in kwargs and kwargs["account"] is not None:
-            account = kwargs["account"]
-            body["account"] = account.model_dump(mode="json") if hasattr(account, "model_dump") else account
-        return body
-
-    def parse_rest_response(self, data: dict[str, Any]) -> SyncCreativesResponse:
-        """Parse REST JSON into SyncCreativesResponse."""
-        return SyncCreativesResponse(**data)

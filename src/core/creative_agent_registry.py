@@ -27,7 +27,6 @@ from adcp import ADCPMultiAgentClient, ListCreativeFormatsRequest
 from adcp.exceptions import ADCPAuthenticationError, ADCPConnectionError, ADCPError, ADCPTimeoutError
 from adcp.types import AssetContentType as AssetType
 from adcp.types import Error as AdCPResponseError
-from adcp.types import ImageFormatAsset as Assets  # legacy alias used in this module
 from yarl import URL
 
 from src.core.exceptions import AdCPAdapterError

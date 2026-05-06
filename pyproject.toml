@@ -245,8 +245,9 @@ ignore-comments = true
 ignore-signatures = true
 
 # ─── uv source overrides ──────────────────────────────────────────────────────
-# adcp is pinned to the v4.4.0 git tag (PyPI direct downloads are blocked by
-# safe-chain's minimum-package-age check; the git tag points at the same
-# commit as the PyPI release).
+# adcp is pinned to the v4.4.1 git tag — that release pins a2a-sdk to >=1.0.2
+# which fixes the protobuf 5.x incompat in proto_utils.py (field.is_repeated).
+# v4.4.2 regressed the pin back to <1.0.2; avoid it until v4.4.3+ ships with
+# the corrected pin.
 [tool.uv.sources]
-adcp = { git = "https://github.com/adcontextprotocol/adcp-client-python.git", tag = "v4.4.0" }
+adcp = { git = "https://github.com/adcontextprotocol/adcp-client-python.git", tag = "v4.4.3" }

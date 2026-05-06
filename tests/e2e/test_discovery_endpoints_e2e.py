@@ -96,52 +96,6 @@ class TestListCreativeFormatsE2E:
             )
 
 
-class TestListAuthorizedPropertiesE2E:
-    """E2E tests for the list_authorized_properties discovery endpoint."""
-
-    @pytest.mark.asyncio
-    async def test_list_authorized_properties_returns_response(self, docker_services_e2e, live_server, test_auth_token):
-        """
-        Calling list_authorized_properties returns a valid response with publisher_domains.
-
-        The CI environment may not have PublisherPartner rows, so publisher_domains
-        may be empty. We validate the response structure regardless.
-        """
-        headers = {
-            "x-adcp-auth": test_auth_token,
-            "x-adcp-tenant": "ci-test",
-        }
-        transport = StreamableHttpTransport(url=f"{live_server['mcp']}/mcp/", headers=headers)
-
-        async with Client(transport=transport) as client:
-            result = await client.call_tool("list_authorized_properties", {})
-            data = parse_tool_result(result)
-
-            assert "publisher_domains" in data, (
-                f"Response must contain 'publisher_domains' key, got: {sorted(data.keys())}"
-            )
-            assert isinstance(data["publisher_domains"], list), "publisher_domains must be a list"
-
-    @pytest.mark.asyncio
-    async def test_list_authorized_properties_context_echo(self, docker_services_e2e, live_server, test_auth_token):
-        """
-        Context passed in the request is echoed back in the response (AdCP spec requirement).
-        """
-        headers = {
-            "x-adcp-auth": test_auth_token,
-            "x-adcp-tenant": "ci-test",
-        }
-        transport = StreamableHttpTransport(url=f"{live_server['mcp']}/mcp/", headers=headers)
-
-        async with Client(transport=transport) as client:
-            test_context = {"e2e": "list_authorized_properties", "session": "test-456"}
-            result = await client.call_tool(
-                "list_authorized_properties",
-                {"context": test_context},
-            )
-            data = parse_tool_result(result)
-
-            assert "publisher_domains" in data, "Response must contain publisher_domains"
-            assert data.get("context") == test_context, (
-                f"Context should be echoed back. Expected {test_context}, got {data.get('context')}"
-            )
+# list_authorized_properties was removed from the AdCP spec in 4.4.x; the
+# replacement surface is list_property_lists / get_property_list. Tests for
+# the old tool are deleted rather than skipped — see #25.

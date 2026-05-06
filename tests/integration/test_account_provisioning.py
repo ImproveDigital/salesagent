@@ -137,9 +137,7 @@ class TestResolveAccountAdvertiser:
         assert resolve_account_advertiser(identity) == "12345"
         assert stub_gam_create == []  # No GAM call needed — advertiser was mapped
 
-    def test_pending_provision_with_auto_provision_creates_advertiser(
-        self, integration_db, stub_gam_create
-    ):
+    def test_pending_provision_with_auto_provision_creates_advertiser(self, integration_db, stub_gam_create):
         tid = _make_tenant(auto_provision=True)
         aid = _make_account(tid, status="pending_provision", advertiser_id=None)
         identity = _identity(tenant_id=tid, account_id=aid)
@@ -149,9 +147,7 @@ class TestResolveAccountAdvertiser:
         # row + no caller-supplied config, the resolver short-circuits to
         # AdCPAccountNotProvisioned ("no gam_network_code"). Pass the config
         # explicitly to exercise the success path.
-        result = resolve_account_advertiser(
-            identity, adapter_config={"network_code": "12345"}
-        )
+        result = resolve_account_advertiser(identity, adapter_config={"network_code": "12345"})
         assert result == "stub_advertiser_1"
         assert stub_gam_create == ["accuweather.com × cocacola.com"]
 
@@ -192,9 +188,7 @@ class TestResolveAccountAdvertiser:
 
         assert resolve_account_advertiser(identity) is None
 
-    def test_billing_agent_advertiser_name_includes_principal(
-        self, integration_db, stub_gam_create
-    ):
+    def test_billing_agent_advertiser_name_includes_principal(self, integration_db, stub_gam_create):
         tid = _make_tenant(auto_provision=True)
         aid = f"acct_{uuid.uuid4().hex[:8]}"
         with get_db_session() as session:
@@ -214,9 +208,7 @@ class TestResolveAccountAdvertiser:
             session.commit()
         identity = _identity(tenant_id=tid, account_id=aid)
 
-        result = resolve_account_advertiser(
-            identity, adapter_config={"network_code": "12345"}
-        )
+        result = resolve_account_advertiser(identity, adapter_config={"network_code": "12345"})
         assert result == "stub_advertiser_1"
         # Name template embeds the buyer agent for billing=agent.
         assert stub_gam_create == ["accuweather.com × cocacola.com (scope3-buyer)"]

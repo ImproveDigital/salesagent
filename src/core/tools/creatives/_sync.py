@@ -6,9 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from adcp import PushNotificationConfig
-from adcp.types import ContextObject
-from adcp.types import CreativeAsset
-from adcp.types import CreativeAction
+from adcp.types import ContextObject, CreativeAction, CreativeAsset
 from pydantic import BaseModel
 
 from src.core.database.repositories.uow import CreativeUoW
@@ -24,6 +22,12 @@ from ._validation import _get_field, _validate_creative_input, check_provenance_
 from ._workflow import _audit_log_sync, _create_sync_workflow_steps, _send_creative_notifications
 
 logger = logging.getLogger(__name__)
+
+
+# Re-export for backward compat — single inference rule lives in
+# ``src.core.schemas._asset_type_compat`` so the production sync path and
+# the ``CreativeAsset.__init__`` patch agree.
+from src.core.schemas._asset_type_compat import infer_asset_types as _infer_asset_types  # noqa: E402
 
 
 def _sync_creatives_impl(
@@ -156,6 +160,7 @@ def _sync_creatives_impl(
                     # Default required fields for raw dicts missing them
                     creative_data = raw_creative.copy()
                     creative_data.setdefault("assets", {})
+                    creative_data["assets"] = _infer_asset_types(creative_data["assets"])
                     creative = CreativeAsset(**creative_data)
                 else:
                     creative = CreativeAsset.model_validate(raw_creative, from_attributes=True)

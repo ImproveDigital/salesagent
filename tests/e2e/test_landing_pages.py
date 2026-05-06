@@ -209,32 +209,9 @@ class TestAuthOptionalEndpoints:
             result = await client.call_tool("list_creative_formats", {})
             assert result is not None, "list_creative_formats should return a result"
 
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_list_authorized_properties_without_auth(self, live_server):
-        """list_authorized_properties should be reachable without authentication via domain routing."""
-        transport = StreamableHttpTransport(
-            url=f"{live_server['mcp']}/mcp/",
-            headers={"Host": "test-custom-domain.example.com"},
-        )
-        try:
-            async with Client(transport=transport) as client:
-                result = await client.call_tool("list_authorized_properties", {})
-                assert result is not None
-        except Exception:
-            pass
-
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_list_authorized_properties_with_auth(self, live_server, test_auth_token):
-        """list_authorized_properties should work with authentication."""
-        transport = StreamableHttpTransport(
-            url=f"{live_server['mcp']}/mcp/",
-            headers={"x-adcp-auth": test_auth_token, "x-adcp-tenant": "ci-test"},
-        )
-        async with Client(transport=transport) as client:
-            result = await client.call_tool("list_authorized_properties", {})
-            assert result is not None, "list_authorized_properties should return a result"
+    # list_authorized_properties was removed from the AdCP spec in 4.4.x;
+    # replaced by list_property_lists / get_property_list. Tests for the old
+    # tool are deleted (see #25).
 
     @pytest.mark.asyncio
     @pytest.mark.integration

@@ -288,9 +288,13 @@ class TestCreativeSyncDataPreservation:
                 }
             )
 
-            # User-provided assets (ImageAsset adds alt_text/format/provenance defaults after parsing)
+            # User-provided assets after parsing (ImageAsset adds
+            # alt_text/format/provenance defaults; the
+            # ``_asset_type_compat`` patch backfills ``asset_type='image'``
+            # from the ``url+width+height`` shape).
             user_assets = {
                 "banner_image": {
+                    "asset_type": "image",
                     "url": "https://user-creative.example.com/banner.png",
                     "width": 300,
                     "height": 250,

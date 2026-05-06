@@ -320,9 +320,9 @@ class TestGAMRealMediaBuyLifecycle:
                 assignments={creative_id: [first_package_id]},
                 identity=identity,
             )
-            assert any(
-                c.creative_id == creative_id for c in (sync_resp.creatives or [])
-            ), f"Synced creative {creative_id} missing from response: {sync_resp}"
+            assert any(c.creative_id == creative_id for c in (sync_resp.creatives or [])), (
+                f"Synced creative {creative_id} missing from response: {sync_resp}"
+            )
 
             with get_db_session() as session:
                 cr = session.scalars(
@@ -345,5 +345,5 @@ class TestGAMRealMediaBuyLifecycle:
             assert not delivery_resp.errors, f"delivery errors: {delivery_resp.errors}"
             deliveries = delivery_resp.media_buy_deliveries or []
             assert media_buy_id in [d.media_buy_id for d in deliveries], (
-                f"Expected {media_buy_id} in delivery response, got " f"{[d.media_buy_id for d in deliveries]}"
+                f"Expected {media_buy_id} in delivery response, got {[d.media_buy_id for d in deliveries]}"
             )

@@ -513,7 +513,9 @@ def _run_sync_thread(
         # Mirror completion onto the companion custom_targeting row when
         # /refresh fanned one out — same lifecycle, bundled work.
         if targeting_sync_id is not None:
-            _mark_sync_complete(targeting_sync_id, {"bundled_with": sync_id, "summary": "custom_targeting synced as part of inventory"})
+            _mark_sync_complete(
+                targeting_sync_id, {"bundled_with": sync_id, "summary": "custom_targeting synced as part of inventory"}
+            )
         logger.info(f"[{sync_id}] Sync completed successfully")
 
         # Invalidate inventory tree cache after successful sync

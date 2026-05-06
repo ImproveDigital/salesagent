@@ -34,7 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.core.database.database_session import get_db_session
-from src.core.database.models import AdapterConfig, GamAdvertiser, SyncJob, Tenant
+from src.core.database.models import AdapterConfig, GamAdvertiser, SyncJob
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ def sync_advertisers(
             )
             session.add(job)
         else:
-            job = session.scalars(select(SyncJob).filter_by(sync_id=sync_id)).first()
+            job = session.scalars(select(SyncJob).filter_by(sync_id=sync_id)).first()  # type: ignore[assignment]
             if job is None:
                 raise ValueError(f"SyncJob {sync_id!r} not found")
             job.status = "running"
@@ -265,8 +265,7 @@ def sync_advertisers(
             # marking every cached row inactive on a transient empty
             # response would silently empty the Buyer Routing picker.
             logger.warning(
-                "[%s] GAM returned zero advertisers; preserving cache "
-                "(soft-delete sweep skipped)",
+                "[%s] GAM returned zero advertisers; preserving cache (soft-delete sweep skipped)",
                 sync_id,
             )
             upserted, soft_deleted = 0, 0
@@ -276,7 +275,7 @@ def sync_advertisers(
     except Exception as exc:  # pragma: no cover - error-path tested separately
         logger.error("[%s] advertisers sync failed: %s", sync_id, exc, exc_info=True)
         with get_db_session() as session:
-            job = session.scalars(select(SyncJob).filter_by(sync_id=sync_id)).first()
+            job = session.scalars(select(SyncJob).filter_by(sync_id=sync_id)).first()  # type: ignore[assignment]
             if job is not None:
                 job.status = "failed"
                 job.completed_at = datetime.now(UTC)
@@ -292,7 +291,7 @@ def sync_advertisers(
         "total_seen": len(advertisers),
     }
     with get_db_session() as session:
-        job = session.scalars(select(SyncJob).filter_by(sync_id=sync_id)).first()
+        job = session.scalars(select(SyncJob).filter_by(sync_id=sync_id)).first()  # type: ignore[assignment]
         if job is not None:
             job.status = "completed"
             job.completed_at = datetime.now(UTC)

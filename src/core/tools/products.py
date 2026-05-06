@@ -9,27 +9,22 @@ import os
 import time
 from typing import Any, cast
 
-from adcp import FormatId, ProductFilters
+from adcp import FormatId
 from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
-from adcp.types import BrandReference, ContextObject, PropertyListReference, PushNotificationConfig
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-from pydantic import ValidationError
+from adcp.types import PropertyListReference
 
 from src.adapters import get_adapter_default_channels
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import get_principal_object
 from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schema_helpers import create_get_products_request
 from src.core.schemas import (
     GetProductsResponse,
     Product,  # Extends library Product
 )
 from src.core.testing_hooks import AdCPTestContext
-from src.core.tool_context import ToolContext
-from src.core.validation_helpers import format_validation_error, safe_parse_json_field
+from src.core.validation_helpers import safe_parse_json_field
 from src.services.policy_check_service import PolicyCheckService, PolicyStatus
 
 logger = logging.getLogger(__name__)
@@ -769,7 +764,7 @@ async def _get_products_impl(
     # make this lookup go through the Account record directly.
     elapsed_ms = int((time.time() - start_time) * 1000)
     operator = (
-        req.account.operator
+        req.account.operator  # type: ignore[union-attr]
         if getattr(req, "account", None) and getattr(req.account, "operator", None)
         else principal_id
     )
@@ -792,116 +787,6 @@ async def _get_products_impl(
     )
 
     return resp
-
-
-async def get_products(
-    brand: BrandReference | None = None,
-    brief: str = "",
-    adcp_version: str = "1.0.0",
-    filters: ProductFilters | None = None,
-    property_list: dict | None = None,
-    push_notification_config: PushNotificationConfig | None = None,
-    context: ContextObject | None = None,  # payload-level context
-    ctx: Context | ToolContext | None = None,
-):
-    """Get available products matching the brief.
-
-    MCP tool wrapper aligned with adcp v3.6.0 spec.
-
-    Args:
-        brand: Brand reference per adcp 3.6.0. Example: BrandReference(domain="acme.com")
-        brief: Brief description of the advertising campaign or requirements (optional)
-        adcp_version: Client's AdCP version (default: 1.0.0). V3+ clients get clean responses.
-        filters: Structured filters for product discovery (optional)
-        property_list: Property list reference for filtering by buyer's property list (optional)
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-        push_notification_config: Optional webhook configuration (accepted, ignored by this operation)
-
-    Returns:
-        ToolResult with human-readable text and structured data
-    """
-    # Build request object for shared implementation
-    try:
-        req = create_get_products_request(
-            brief=brief,
-            brand=brand,
-            filters=filters,
-            property_list=property_list,
-            context=context,
-        )
-
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="get_products request")) from e
-    except ValueError as e:
-        # Convert ValueError from helper to ToolError with clear message
-        raise AdCPValidationError(f"Invalid get_products request: {e}") from e
-
-    # Read identity pre-resolved by MCPAuthMiddleware
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-
-    # Call shared implementation
-    # Note: GetProductsRequest is now a flat class (not RootModel), so pass req directly
-    response = await _get_products_impl(req, identity)
-
-    # Return ToolResult with human-readable text and structured data
-    response_dict = response.model_dump(mode="json")
-    # Apply v2.x backward-compat fields only for pre-3.0 clients
-    from src.core.version_compat import apply_version_compat
-
-    response_dict = apply_version_compat("get_products", response_dict, adcp_version)
-    return ToolResult(content=str(response), structured_content=response_dict)
-
-
-async def get_products_raw(
-    brief: str,
-    brand: dict[str, Any] | BrandReference | None = None,
-    min_exposures: int | None = None,
-    filters: dict | None = None,
-    property_list: dict | None = None,
-    strategy_id: str | None = None,
-    context: dict | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> GetProductsResponse:
-    """Get available products matching the brief.
-
-    Raw function without @mcp.tool decorator for A2A server use.
-    Returns a clean GetProductsResponse model — v2 compat is applied
-    at the caller's boundary (A2A handler), not here.
-
-    Args:
-        brief: Brief description of the advertising campaign or requirements
-        brand: Brand reference per adcp 3.6.0 (BrandReference or dict with domain).
-               Dict is accepted since A2A passes JSON-deserialized dicts.
-        min_exposures: Minimum impressions needed for measurement validity (optional)
-        filters: Structured filters for product discovery (optional)
-        property_list: Property list reference for filtering by buyer's property list (optional)
-        strategy_id: Optional strategy ID for linking operations (optional)
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-        identity: Resolved identity from transport boundary (preferred over ctx)
-
-    Returns:
-        GetProductsResponse containing matching products
-    """
-    # Resolve identity from transport context if not provided
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-
-    # Create request object - adcp library validates schema
-    req = create_get_products_request(
-        brief=brief or "",
-        brand=brand,
-        filters=filters,
-        property_list=property_list,
-        context=context,
-    )
-
-    # Call shared implementation
-    return await _get_products_impl(req, identity)
 
 
 def get_product_catalog(tenant_id: str | None = None) -> list[Product]:

@@ -74,7 +74,6 @@ class TestA2AProtocolCompliance:
             "sync_creatives",
             "list_creatives",
             "list_creative_formats",
-            "list_authorized_properties",
         }
 
         async with AdCPSchemaValidator(offline_mode=False) as validator:

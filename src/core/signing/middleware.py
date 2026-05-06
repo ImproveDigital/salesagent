@@ -291,7 +291,7 @@ class SigningVerifyMiddleware:
         # couldn't even look up the tenant — treat as "no policy known" (no
         # required_for, no enforcement).
         policy_enabled = bool(ctx and ctx.get("policy_enabled"))
-        required_for: frozenset[str] = ctx.get("required_for") if ctx else frozenset()
+        required_for: frozenset[str] = ctx.get("required_for") if ctx else frozenset()  # type: ignore[assignment]
         is_embedded = bool(ctx and ctx.get("is_embedded"))
         binding = ctx.get("binding") if ctx else None
         is_trusted = bool(binding and binding.get("is_trusted"))
@@ -534,7 +534,7 @@ class SigningVerifyMiddleware:
         # so a signed-but-wrong-tag request still matches the spec checklist.
         capability = VerifierCapability(
             supported=True,
-            covers_content_digest=binding.get("covers_digest", "either"),  # type: ignore[arg-type]
+            covers_content_digest=binding.get("covers_digest", "either"),
             required_for=binding.get("required_for", frozenset()),
             supported_for=frozenset(),
         )

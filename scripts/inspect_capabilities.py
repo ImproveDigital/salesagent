@@ -16,6 +16,7 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 # Make sure src/ is importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -73,7 +74,7 @@ def _ensure_seed() -> None:
                 authorized_emails=["test@example.com"],
                 authorized_domains=["example.com"],
                 human_review_required=False,
-                admin_token="capinspect_admin",
+                admin_token=f"capinspect_{uuid4().hex[:8]}",  # generated dev stub, not a credential
                 created_at=now,
                 updated_at=now,
             )

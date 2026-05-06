@@ -10,10 +10,14 @@ class TestCriticalImports:
 
     @pytest.mark.smoke
     def test_main_module_imports(self):
-        """Test that main.py can be imported."""
-        from src.core import main
+        """Modern entrypoint: ``core.main`` builds the LazyPlatformRouter and serves
+        MCP/A2A from one Starlette binary. The legacy ``src/core/main.py`` FastMCP
+        server was removed alongside the rest of the legacy stack.
+        """
+        import core.main
 
-        assert hasattr(main, "mcp")
+        assert callable(core.main.main)
+        assert callable(core.main.build_router)
 
     @pytest.mark.smoke
     def test_schemas_import(self):
@@ -128,7 +132,8 @@ class TestProjectStructure:
         base_dir = Path(__file__).parent.parent.parent
 
         critical_files = [
-            "src/core/main.py",
+            "core/main.py",
+            "core/platforms/_delegate.py",
             "src/core/schemas/__init__.py",
             "src/core/database/models.py",
             "src/core/database/database_session.py",

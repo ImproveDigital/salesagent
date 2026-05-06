@@ -11,10 +11,6 @@ import logging
 import time
 from typing import Any
 
-from adcp.types import ContextObject
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-
 from src.core.audit_logger import get_audit_logger
 from src.core.database.repositories.uow import TenantConfigUoW
 from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError
@@ -22,7 +18,6 @@ from src.core.helpers import log_tool_activity
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import ListAuthorizedPropertiesRequest, ListAuthorizedPropertiesResponse
 from src.core.testing_hooks import AdCPTestContext
-from src.core.tool_context import ToolContext
 from src.core.validation_helpers import safe_parse_json_field
 
 logger = logging.getLogger(__name__)
@@ -195,60 +190,3 @@ def _list_authorized_properties_impl(
             f"Failed to list authorized properties: {str(e)}",
             details={"error_code": "PROPERTIES_ERROR"},
         )
-
-
-async def list_authorized_properties(
-    publisher_domains: list[str] | None = None,
-    property_tags: list[str] | None = None,
-    webhook_url: str | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-):
-    """List all properties this agent is authorized to represent (AdCP spec endpoint).
-
-    MCP wrapper that accepts individual parameters per AdCP spec and
-    constructs a ListAuthorizedPropertiesRequest for the shared implementation.
-
-    Args:
-        publisher_domains: Filter to specific publisher domains.
-        property_tags: Filter by property tags (salesagent extension).
-        webhook_url: URL for async task completion notifications (AdCP spec, optional).
-        context: Application-level context per AdCP spec.
-        ctx: FastMCP context for authentication.
-
-    Returns:
-        ToolResult with human-readable text and structured data.
-    """
-    req = ListAuthorizedPropertiesRequest(
-        publisher_domains=publisher_domains,
-        property_tags=property_tags,
-        context=context,
-    )
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    response = _list_authorized_properties_impl(req, identity)
-
-    return ToolResult(content=str(response), structured_content=response)
-
-
-def list_authorized_properties_raw(
-    req: "ListAuthorizedPropertiesRequest" = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> "ListAuthorizedPropertiesResponse":
-    """List all properties this agent is authorized to represent (raw function for A2A server use).
-
-    Delegates to shared implementation.
-
-    Args:
-        req: Optional request with filter parameters
-        ctx: FastMCP context
-        identity: Pre-resolved identity (if available)
-
-    Returns:
-        ListAuthorizedPropertiesResponse with authorized properties
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-    return _list_authorized_properties_impl(req, identity)

@@ -16,6 +16,9 @@ from src.admin.blueprints.adapters import adapters_bp
 from src.admin.blueprints.api import api_bp
 from src.admin.blueprints.auth import auth_bp, init_oauth
 from src.admin.blueprints.authorized_properties import authorized_properties_bp
+
+# from src.admin.blueprints.tasks import tasks_bp  # Disabled - tasks eliminated in favor of workflow system
+from src.admin.blueprints.buyer_routing import buyer_routing_bp
 from src.admin.blueprints.core import core_bp
 from src.admin.blueprints.creative_agents import creative_agents_bp
 from src.admin.blueprints.creatives import creatives_bp
@@ -33,9 +36,6 @@ from src.admin.blueprints.publisher_partners import publisher_partners_bp
 from src.admin.blueprints.schemas import schemas_bp
 from src.admin.blueprints.settings import settings_bp, tenant_management_settings_bp
 from src.admin.blueprints.signals_agents import signals_agents_bp
-
-# from src.admin.blueprints.tasks import tasks_bp  # Disabled - tasks eliminated in favor of workflow system
-from src.admin.blueprints.buyer_routing import buyer_routing_bp
 from src.admin.blueprints.tenants import tenants_bp
 from src.admin.blueprints.users import users_bp
 from src.admin.blueprints.workflows import workflows_bp

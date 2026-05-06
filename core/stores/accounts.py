@@ -25,11 +25,13 @@ from adcp.decisioning import AdcpError
 from adcp.decisioning.context import AuthInfo
 from adcp.decisioning.types import Account
 from adcp.server import current_tenant
-from adcp.server.auth import current_principal, current_tenant as auth_current_tenant
+from adcp.server.auth import current_principal
+from adcp.server.auth import current_tenant as auth_current_tenant
 from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
-from src.core.database.models import Principal as PrincipalRow, Tenant
+from src.core.database.models import Principal as PrincipalRow
+from src.core.database.models import Tenant
 
 
 class SalesagentAccountStore:
@@ -47,11 +49,7 @@ class SalesagentAccountStore:
         ref: dict[str, Any] | None = None,
         auth_info: AuthInfo | None = None,
     ) -> Account[dict[str, Any]]:
-        tenant_id = (
-            self._tenant_from_principal()
-            or self._tenant_from_subdomain()
-            or self._tenant_from_ref(ref)
-        )
+        tenant_id = self._tenant_from_principal() or self._tenant_from_subdomain() or self._tenant_from_ref(ref)
         if tenant_id is None or not self._tenant_exists(tenant_id):
             raise AdcpError(
                 "ACCOUNT_NOT_FOUND",

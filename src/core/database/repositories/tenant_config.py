@@ -76,4 +76,4 @@ class TenantConfigRepository:
                 Principal.principal_id.in_(principal_ids),
             )
         ).all()
-        return dict(rows)
+        return dict(rows)  # type: ignore[arg-type]

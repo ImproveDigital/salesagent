@@ -36,21 +36,6 @@ class TestAuthContextStateKey:
             "AUTH_CONTEXT_STATE_KEY constant must be defined in src.core.auth_context"
         )
 
-    def test_context_builder_uses_constant(self):
-        """context_builder.py must import and use AUTH_CONTEXT_STATE_KEY."""
-        source = (PROJECT_ROOT / "src" / "a2a_server" / "context_builder.py").read_text()
-        assert "AUTH_CONTEXT_STATE_KEY" in source, "context_builder.py must use AUTH_CONTEXT_STATE_KEY constant"
-
-    def test_handler_uses_constant(self):
-        """adcp_a2a_server.py must import and use AUTH_CONTEXT_STATE_KEY."""
-        source = (PROJECT_ROOT / "src" / "a2a_server" / "adcp_a2a_server.py").read_text()
-        assert "AUTH_CONTEXT_STATE_KEY" in source, "adcp_a2a_server.py must use AUTH_CONTEXT_STATE_KEY constant"
-
-    def test_helpers_use_constant(self):
-        """a2a_helpers.py must import and use AUTH_CONTEXT_STATE_KEY."""
-        source = (PROJECT_ROOT / "tests" / "a2a_helpers.py").read_text()
-        assert "AUTH_CONTEXT_STATE_KEY" in source, "tests/a2a_helpers.py must use AUTH_CONTEXT_STATE_KEY constant"
-
 
 class TestNoRelativePathOpens:
     """Test files must not use relative open('src/...') paths."""
@@ -61,7 +46,6 @@ class TestNoRelativePathOpens:
             "tests/unit/test_unified_auth_middleware.py",
             "tests/unit/test_shared_header_util.py",
             "tests/unit/test_media_buy_tenant_context.py",
-            "tests/unit/test_a2a_call_context_builder.py",
             "tests/unit/test_no_duplicate_auth_functions.py",
             "tests/unit/test_lazy_tenant_no_contextvar_mutation.py",
         ],

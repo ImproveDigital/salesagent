@@ -70,7 +70,7 @@ def main() -> None:
             sz = _get(s, "size") or {}
             if _get(sz, "width") and _get(sz, "height"):
                 sizes.append(f"{_get(sz, 'width')}x{_get(sz, 'height')}")
-        print(f"  id={_get(au, 'id')}  name={_get(au, 'name')}  " f"sizes={','.join(sizes) or '(none)'}")
+        print(f"  id={_get(au, 'id')}  name={_get(au, 'name')}  sizes={','.join(sizes) or '(none)'}")
 
 
 if __name__ == "__main__":

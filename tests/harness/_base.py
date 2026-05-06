@@ -13,11 +13,9 @@ Subclasses override:
     _configure_mocks(): None           -- wire mock defaults
     call_impl(**kwargs): Any           -- call production function
 
-Multi-transport support (subclasses may also override):
-    call_a2a(**kwargs): Any            -- call _raw() A2A wrapper
-    REST_ENDPOINT: str                 -- POST endpoint path for REST dispatch
-    build_rest_body(**kwargs): dict    -- convert kwargs to REST body
-    parse_rest_response(data): model  -- parse JSON dict to Pydantic model
+Multi-transport support: subclasses may override ``call_mcp(**kwargs)``
+to dispatch through the in-process MCP server (``Transport.MCP``).
+``Transport.IMPL`` calls ``call_impl`` directly.
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 if TYPE_CHECKING:
-    from pydantic import BaseModel
     from sqlalchemy.orm import Session
 
     from src.core.resolved_identity import ResolvedIdentity
@@ -148,44 +145,6 @@ def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
     return exc
 
 
-def _unwrap_a2a_server_error(exc: Exception) -> Exception:
-    """Translate a2a ServerError back to the corresponding AdCPError.
-
-    The A2A handler wraps AdCPError → ServerError (via _adcp_to_a2a_error).
-    This reverses that translation so callers can ``pytest.raises(AdCPAuthenticationError)``
-    instead of catching the transport-level wrapper.
-
-    If the exception is not a ServerError or lacks enough info, returns it unchanged.
-    """
-    from a2a.types import InternalError, InvalidParamsError, InvalidRequestError
-    from a2a.utils.errors import ServerError
-
-    if not isinstance(exc, ServerError):
-        return exc
-
-    error = exc.error
-    message = getattr(error, "message", str(exc))
-    data = getattr(error, "data", None) or {}
-
-    # If _adcp_to_a2a_error stored the error_code, reconstruct the exact subclass.
-    error_code = data.get("error_code")
-    if error_code:
-        return _adcp_error_from_code(error_code, message, data.get("recovery"))
-
-    from src.core.exceptions import (
-        AdCPAuthenticationError,
-        AdCPValidationError,
-    )
-
-    if isinstance(error, InvalidRequestError):
-        return AdCPAuthenticationError(message)
-    if isinstance(error, InvalidParamsError):
-        return AdCPValidationError(message)
-    if isinstance(error, InternalError):
-        return RuntimeError(message)
-    return exc
-
-
 class BaseTestEnv:
     """Base test environment for _impl function testing.
 
@@ -213,7 +172,7 @@ class BaseTestEnv:
 
     Usage (multi-transport)::
 
-        @pytest.mark.parametrize("transport", [Transport.IMPL, Transport.A2A, Transport.REST])
+        @pytest.mark.parametrize("transport", [Transport.IMPL, Transport.MCP])
         def test_something(self, integration_db, transport):
             with CreativeSyncEnv() as env:
                 result = env.call_via(transport, creatives=[...])
@@ -227,7 +186,6 @@ class BaseTestEnv:
     EXTERNAL_PATCHES: dict[str, str] = {}
     ASYNC_PATCHES: set[str] = set()  # Names that need AsyncMock (for async functions)
     MODULE: str = ""  # Convenience for unit envs building patch paths
-    REST_ENDPOINT: str = ""  # Override in subclass for REST dispatch
     use_real_db: bool = False
 
     def __init__(
@@ -245,7 +203,6 @@ class BaseTestEnv:
         self._patchers: list[Any] = []
         self._session: Session | None = None
         self._identity_cache: dict[str, ResolvedIdentity] = {}
-        self._rest_client: Any = None  # Lazy-created TestClient
 
     # -- Identity (one function, all transports) ----------------------------
 
@@ -283,6 +240,56 @@ class BaseTestEnv:
                 **self._tenant_overrides,
             )
         return self._identity_cache[protocol]
+
+    def _ensure_principal_for_mcp(self, mcp_identity: ResolvedIdentity | None) -> str | None:
+        """Create a Principal row on the fly so the bearer middleware can find it.
+
+        Integration tests that create only a Tenant (no Principal) have no
+        ``access_token`` to pass through ``x-adcp-auth``. The bearer
+        middleware would then 401 every MCP call. Build a placeholder
+        Principal under the test's ``(tenant_id, principal_id)`` so the
+        full auth chain (token → Principal → ContextVars → ToolContext →
+        ResolvedIdentity) runs against real DB rows.
+
+        No-op when no session is bound (not integration mode) or when the
+        identity has no tenant_id (auth-rejection tests that test the
+        missing-tenant code path).
+        """
+        if mcp_identity is None or not mcp_identity.tenant_id:
+            return None
+
+        from sqlalchemy import select
+
+        from src.core.database.models import Principal as PrincipalRow
+        from src.core.database.models import Tenant as TenantRow
+
+        assert self._session is not None
+        # Tenant must already exist — the harness's caller is responsible
+        # for creating one via TenantFactory before dispatching MCP calls.
+        tenant = self._session.scalars(select(TenantRow).filter_by(tenant_id=mcp_identity.tenant_id)).first()
+        if tenant is None:
+            return None
+
+        existing = self._session.scalars(
+            select(PrincipalRow).filter_by(
+                tenant_id=mcp_identity.tenant_id,
+                principal_id=mcp_identity.principal_id,
+            )
+        ).first()
+        if existing is not None:
+            return existing.access_token
+
+        token = f"test-token-{mcp_identity.tenant_id}-{mcp_identity.principal_id}"
+        principal = PrincipalRow(
+            tenant_id=mcp_identity.tenant_id,
+            principal_id=mcp_identity.principal_id,
+            name=f"Test {mcp_identity.principal_id}",
+            access_token=token,
+            platform_mappings={"mock": {"advertiser_id": f"adv_{mcp_identity.principal_id}"}},
+        )
+        self._session.add(principal)
+        self._session.commit()
+        return token
 
     def _resolve_auth_token(self) -> str | None:
         """Look up the real access_token from the session-bound Principal.
@@ -354,16 +361,6 @@ class BaseTestEnv:
         """
         raise NotImplementedError
 
-    def call_a2a(self, **kwargs: Any) -> Any:
-        """Call the _raw() A2A wrapper function.
-
-        Override in subclass. Should call the _raw() function with
-        the same kwargs as call_impl but through the A2A wrapper.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement call_a2a(). Override to enable Transport.A2A dispatch."
-        )
-
     def call_mcp(self, **kwargs: Any) -> Any:
         """Call the async MCP wrapper with a mock Context.
 
@@ -381,191 +378,112 @@ class BaseTestEnv:
             f"{type(self).__name__} does not implement call_mcp(). Override to enable Transport.MCP dispatch."
         )
 
-    def _run_a2a_handler(
-        self,
-        skill_name: str,
-        response_cls: type,
-        **kwargs: Any,
-    ) -> Any:
-        """A2A dispatch via real AdCPRequestHandler — exercises full A2A pipeline.
-
-        Dispatches through the real AdCPRequestHandler.on_message_send(), which
-        exercises: message parsing → skill routing → normalize_request_params →
-        handler dispatch → _serialize_for_a2a → Task/Artifact framing.
-
-        Identity is injected by monkey-patching ``_resolve_a2a_identity`` and
-        ``_get_auth_token`` on the handler instance — single mock point, same
-        as the MCP Client approach patches resolve_identity_from_context.
-
-        Args:
-            skill_name: A2A skill name (e.g., "get_products").
-            response_cls: Pydantic model class to parse artifact data into.
-            **kwargs: Skill parameters. ``identity`` is popped and used for
-                the identity mock; remaining kwargs become skill parameters.
-        """
-        import asyncio
-
-        from a2a.types import MessageSendParams, Task
-
-        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-        from tests.harness.transport import Transport
-        from tests.utils.a2a_helpers import create_a2a_message_with_skill, extract_data_from_artifact
-
-        self._commit_factory_data()
-
-        # Pop identity — used for the handler mock, not sent as a skill parameter.
-        _NO_OVERRIDE = object()
-        identity = kwargs.pop("identity", _NO_OVERRIDE)
-        a2a_identity = self.identity_for(Transport.A2A) if identity is _NO_OVERRIDE else identity
-
-        # The real A2A handler writes audit logs which require the tenant to exist
-        # in the DB. Ensure the tenant record exists (idempotent) so audit logging
-        # doesn't fail with FK violations on discovery endpoints.
-        if self.use_real_db and a2a_identity and a2a_identity.tenant_id:
-            self._ensure_tenant_for_audit(a2a_identity.tenant_id)
-
-        # Unpack req object into flat parameters if present.
-        # A2A skills accept a flat parameter dict, not a request model.
-        req = kwargs.pop("req", None)
-        if req is not None and hasattr(req, "model_dump"):
-            req_fields = req.model_dump(mode="json", exclude_none=True)
-            parameters = {**req_fields, **kwargs}
-        else:
-            parameters = dict(kwargs)
-
-        handler = AdCPRequestHandler()
-        # Single mock point: identity resolution.
-        # _get_auth_token must return a non-None value when identity exists,
-        # otherwise the handler rejects the request before _resolve_a2a_identity
-        # is called. Use auth_token from identity, falling back to a sentinel.
-        handler._resolve_a2a_identity = lambda *args, **kw: a2a_identity  # type: ignore[assignment]
-        handler._get_auth_token = lambda *args, **kw: (  # type: ignore[assignment]
-            (a2a_identity.auth_token or "harness-test-token") if a2a_identity else None
-        )
-
-        # Set tenant ContextVar so production code can read it
-        if a2a_identity and a2a_identity.tenant:
-            from src.core.config_loader import set_current_tenant
-
-            set_current_tenant(a2a_identity.tenant)
-
-        message = create_a2a_message_with_skill(skill_name=skill_name, parameters=parameters)
-        params = MessageSendParams(message=message)
-
-        async def _call():
-            return await handler.on_message_send(params)
-
-        try:
-            task_result = asyncio.run(_call())
-        except Exception as exc:
-            # Translate ServerError back to AdCPError for callers that catch
-            # domain exceptions (e.g., pytest.raises(AdCPAuthenticationError)).
-            raise _unwrap_a2a_server_error(exc) from exc
-
-        # Parse Task.artifacts[0] into response_cls
-        if not isinstance(task_result, Task):
-            raise TypeError(f"Expected Task, got {type(task_result).__name__}: {task_result}")
-        if not task_result.artifacts:
-            raise ValueError(f"Task has no artifacts. Status: {task_result.status}")
-        artifact_data = extract_data_from_artifact(task_result.artifacts[0])
-        # Strip protocol fields added by _serialize_for_a2a (message, success).
-        # These are A2A-envelope fields, not part of the Pydantic response model,
-        # and cause ValidationError under extra="forbid" in non-production mode.
-        artifact_data.pop("message", None)
-        artifact_data.pop("success", None)
-        return response_cls(**artifact_data)
-
     def _run_mcp_client(
         self,
         tool_name: str,
         response_cls: type,
         **kwargs: Any,
     ) -> Any:
-        """MCP dispatch via in-memory Client — exercises full FastMCP pipeline.
+        """MCP dispatch via httpx ``ASGITransport`` against ``core.main.build_app()``.
 
-        Uses FastMCP's in-memory transport (FastMCPTransport) to go through the
-        complete server path: middleware chain → TypeAdapter → tool function.
+        Drives the full production pipeline: bearer-token middleware,
+        FastMCP streamable-http transport, tool dispatcher, response
+        envelope. The same Starlette app production binds with uvicorn
+        runs in-process — no socket, but every middleware and validation
+        hook is exercised.
 
-        When the identity carries a real ``auth_token`` (integration mode),
-        patches ``get_http_headers`` so the full auth chain runs: header
-        extraction → tenant detection → token-to-principal DB lookup →
-        ResolvedIdentity from real data.
+        Identity resolution:
 
-        When no real token is available (unit mode), patches
-        ``resolve_identity_from_context`` directly.
+        * **Integration mode** (factory-created Principal with real
+          ``access_token``): the harness sends ``x-adcp-auth: <token>``
+          and the bearer middleware looks it up via ``_validate_token``
+          → DB → :class:`Principal` → ContextVars consumed by
+          ``auth_context_factory``. Tests exercise the same auth chain
+          a real buyer hits.
+        * **Unit mode** (no token): the harness patches
+          ``resolve_identity_from_context`` so the wrapper layer
+          synthesises identity from the in-memory mock. The bearer
+          middleware accepts the missing/invalid token, but the patched
+          resolver overrides identity downstream so business logic still
+          sees a populated identity.
 
         Args:
             tool_name: MCP tool name (e.g., "get_products").
             response_cls: Pydantic model class to parse structured_content into.
-            **kwargs: Tool arguments. ``identity`` is popped and used for the
-                auth mock; ``req`` is popped and its fields unpacked into the
-                arguments dict.
+            **kwargs: Tool arguments. ``identity`` is popped and used for
+                the auth chain; ``req`` is popped and its fields unpacked
+                into the arguments dict.
         """
-        import asyncio
         from unittest.mock import patch
 
+        import httpx
         from fastmcp import Client
+        from fastmcp.client.transports import StreamableHttpTransport
 
-        from src.core.main import mcp
+        from tests.harness._asgi_app import run_on_app_loop
         from tests.harness.transport import Transport
 
         self._commit_factory_data()
 
-        # Pop identity — used for the auth mock, not sent as a tool argument.
         _NO_OVERRIDE = object()
         identity = kwargs.pop("identity", _NO_OVERRIDE)
         mcp_identity = self.identity_for(Transport.MCP) if identity is _NO_OVERRIDE else identity
 
-        # Unpack req object into flat arguments if present.
-        # MCP tools accept individual params, not a request model.
+        # Unpack req object into flat arguments — MCP tools accept individual
+        # params, not a request model.
         req = kwargs.pop("req", None)
         if req is not None and hasattr(req, "model_dump"):
             req_fields = req.model_dump(exclude_none=True)
-            # kwargs override req fields (explicit > implicit)
             arguments = {**req_fields, **kwargs}
         else:
             arguments = dict(kwargs)
 
-        # Choose auth strategy based on whether we have a real DB token.
         auth_token = mcp_identity.auth_token if mcp_identity else None
 
-        if auth_token:
-            # Real auth chain: header → token → DB lookup → identity.
-            # Patch get_http_headers in BOTH modules that import it:
-            # transport_helpers (called by resolve_identity_from_context) and
-            # mcp_auth_middleware (called for context_id extraction).
-            headers = {
-                "x-adcp-auth": auth_token,
-                "x-adcp-tenant": mcp_identity.tenant_id or "",
-            }
+        # The bearer-token middleware is captured at app build time and
+        # validates every request against the real ``Principal.access_token``
+        # column. Tests that don't create a Principal via factory (only a
+        # Tenant) have no token to pass, but the middleware will still 401
+        # on a stub. Auto-create a Principal so the chain works.
+        if not auth_token and self.use_real_db and self._session is not None:
+            auth_token = self._ensure_principal_for_mcp(mcp_identity)
 
-            async def _call():
-                mock_th = patch("src.core.transport_helpers.get_http_headers", return_value=headers)
-                mock_mw = patch("src.core.mcp_auth_middleware.get_http_headers", return_value=headers)
-                with mock_th as patched_th, mock_mw as patched_mw:
-                    async with Client(mcp) as client:
-                        result = await client.call_tool(tool_name, arguments)
-                        # Guard: verify the header patches were called.
-                        # If a third module imports get_http_headers without being
-                        # patched, this won't catch it — but at least we verify
-                        # the known auth paths were exercised.
-                        assert patched_th.called or patched_mw.called, (
-                            f"Auth chain not exercised for {tool_name} — get_http_headers patches were not called"
-                        )
-                        return response_cls(**result.structured_content)
-        else:
-            # Unit mode: inject identity directly.
-            async def _call():
+        request_headers = {
+            "x-adcp-auth": auth_token or "test-stub-token",
+        }
+        if mcp_identity and mcp_identity.tenant_id:
+            request_headers["x-adcp-tenant"] = mcp_identity.tenant_id
+
+        def _factory(app: Any):
+            def httpx_factory(**hk: Any) -> httpx.AsyncClient:
+                hk.setdefault("timeout", 30.0)
+                hk["transport"] = httpx.ASGITransport(app=app)
+                hk["base_url"] = "http://testserver"
+                return httpx.AsyncClient(**hk)
+
+            transport = StreamableHttpTransport(
+                url="http://testserver/mcp/",
+                headers=request_headers,
+                httpx_client_factory=httpx_factory,
+            )
+
+            async def _call() -> Any:
+                async with Client(transport) as client:
+                    result = await client.call_tool(tool_name, arguments)
+                    return response_cls(**result.structured_content)
+
+            return _call()
+
+        try:
+            if not auth_token:
+                # Unit mode: inject identity at the wrapper layer, since no
+                # real Principal row exists for the bearer middleware to find.
                 with patch(
                     "src.core.mcp_auth_middleware.resolve_identity_from_context",
                     return_value=mcp_identity,
                 ):
-                    async with Client(mcp) as client:
-                        result = await client.call_tool(tool_name, arguments)
-                        return response_cls(**result.structured_content)
-
-        try:
-            return asyncio.run(_call())
+                    return run_on_app_loop(_factory)
+            return run_on_app_loop(_factory)
         except Exception as exc:
             raise _unwrap_mcp_tool_error(exc) from exc
 
@@ -609,148 +527,6 @@ class BaseTestEnv:
         tool_result = asyncio.run(wrapper_fn(ctx=mock_ctx, **kwargs))
         return response_cls(**tool_result.structured_content)
 
-    def _run_rest_request(self, endpoint: str, **kwargs: Any) -> Any:
-        """Shared REST dispatch: configure auth → build body → POST → return Response.
-
-        Symmetric with ``_run_mcp_wrapper``. Handles the full REST lifecycle:
-        1. Pop ``identity`` from kwargs and configure dep override for this request
-        2. Commit factory data
-        3. Build request body from remaining kwargs
-        4. POST via TestClient
-        5. Return raw httpx.Response
-
-        Identity handling (mirrors production auth middleware):
-        - identity is None → dep raises AdCPAuthenticationError (no token)
-        - identity is ResolvedIdentity → dep returns it (valid token)
-        - identity absent → uses default self.identity_for(Transport.REST)
-        """
-        from src.app import app
-        from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
-        from tests.harness.transport import Transport
-
-        _NO_OVERRIDE = object()
-        identity = kwargs.pop("identity", _NO_OVERRIDE)
-        if identity is _NO_OVERRIDE:
-            identity = self.identity_for(Transport.REST)
-
-        self._commit_factory_data()
-
-        # Get client first (may set default dep overrides on first call),
-        # then override per-request auth AFTER.
-        client = self.get_rest_client()
-
-        # Configure per-request auth (must be after get_rest_client)
-        if identity is None:
-            from src.core.exceptions import AdCPAuthenticationError
-
-            def _no_auth() -> None:
-                raise AdCPAuthenticationError("Authentication required")
-
-            app.dependency_overrides[_require_auth_dep] = _no_auth
-            app.dependency_overrides[_resolve_auth_dep] = lambda: None
-        else:
-            app.dependency_overrides[_require_auth_dep] = lambda: identity
-            app.dependency_overrides[_resolve_auth_dep] = lambda: identity
-
-        body = self.build_rest_body(**kwargs)
-        return client.post(endpoint, json=body)
-
-    def call_rest(self, **kwargs: Any) -> Any:
-        """Call the REST endpoint and parse the response.
-
-        Symmetric with ``call_impl``, ``call_a2a``, ``call_mcp``.
-        Pops identity, configures auth, POSTs, parses response.
-        Raises on HTTP errors (dispatcher catches and wraps in TransportResult).
-        """
-        endpoint = self.REST_ENDPOINT  # type: ignore[attr-defined]
-        response = self._run_rest_request(endpoint, **kwargs)
-
-        if response.status_code >= 400:
-            raise self.parse_rest_error(response.status_code, response.json())
-
-        return self.parse_rest_response(response.json())
-
-    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert call_impl kwargs to the REST endpoint body shape.
-
-        Default: if ``req`` is a Pydantic model, delegates serialization to it
-        via ``model_dump(mode="json", exclude_none=True)``.  Enums, nested
-        models, and optional fields are handled by Pydantic — no manual
-        field-by-field extraction needed.
-
-        If no ``req`` is present, returns empty dict (valid for endpoints
-        where all parameters are optional).
-
-        Subclasses that receive flat kwargs (not a ``req`` object) must
-        override to build the body dict themselves.
-        """
-        from pydantic import BaseModel as PydanticBaseModel
-
-        req = kwargs.get("req")
-        if req is not None and isinstance(req, PydanticBaseModel):
-            return req.model_dump(mode="json", exclude_none=True)
-        if req is None:
-            return {}
-        raise NotImplementedError(
-            f"{type(self).__name__}.build_rest_body() received non-Pydantic 'req': {type(req)}. "
-            "Override build_rest_body() to handle this type."
-        )
-
-    def parse_rest_response(self, data: dict[str, Any]) -> BaseModel:
-        """Parse REST JSON response dict into the expected Pydantic model.
-
-        Override in subclass.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement parse_rest_response(). "
-            "Override to enable Transport.REST dispatch."
-        )
-
-    def parse_rest_error(self, status_code: int, data: dict[str, Any]) -> Exception:
-        """Reconstruct an AdCPError from REST error response.
-
-        Prefers the structured error_code in the response body (same precision
-        as MCP and A2A unwrappers). Falls back to HTTP status mapping.
-        """
-        message = data.get("message", data.get("error", str(data)))
-
-        # Try structured error_code first (same as MCP/A2A unwrappers)
-        error_code = data.get("error_code")
-        if error_code:
-            recovery = data.get("recovery")
-            details = data.get("details")
-            return _adcp_error_from_code(error_code, message, recovery, details)
-
-        # Fallback: map HTTP status to exception class
-        from src.core.exceptions import (
-            AdCPAdapterError,
-            AdCPAuthenticationError,
-            AdCPAuthorizationError,
-            AdCPNotFoundError,
-            AdCPRateLimitError,
-            AdCPValidationError,
-        )
-
-        STATUS_TO_ERROR: dict[int, type[Exception]] = {
-            400: AdCPValidationError,
-            401: AdCPAuthenticationError,
-            403: AdCPAuthorizationError,
-            404: AdCPNotFoundError,
-            429: AdCPRateLimitError,
-            502: AdCPAdapterError,
-        }
-        error_cls = STATUS_TO_ERROR.get(status_code, Exception)
-        return error_cls(message)
-
-    def get_rest_client(self) -> Any:
-        """Return FastAPI TestClient with auth dependency overridden.
-
-        Created lazily. Only available on IntegrationEnv subclasses.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement get_rest_client(). REST dispatch requires IntegrationEnv."
-        )
-
     def _commit_factory_data(self) -> None:
         """Flush pending session state before calling production code.
 
@@ -760,29 +536,6 @@ class BaseTestEnv:
         Called automatically by call_impl() before each test execution.
         """
         if self._session:
-            self._session.commit()
-
-    def _ensure_tenant_for_audit(self, tenant_id: str) -> None:
-        """Create a minimal tenant record if none exists (idempotent).
-
-        The real A2A handler writes audit logs which require the tenant FK.
-        Discovery endpoints (list_creative_formats, get_products, etc.) don't
-        need a tenant for their logic, but the handler's post-invocation audit
-        logging does. This creates a stub tenant so audit logging doesn't fail.
-
-        Uses ``self._session`` (env-managed), not ``get_db_session()``.
-        """
-        if not self._session:
-            return
-        from sqlalchemy import select
-
-        from src.core.database.models import Tenant
-
-        exists = self._session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-        if not exists:
-            from tests.factories import TenantFactory
-
-            TenantFactory(tenant_id=tenant_id)
             self._session.commit()
 
     # -- Context manager protocol ------------------------------------------
@@ -795,12 +548,13 @@ class BaseTestEnv:
             from src.core.database.database_session import get_engine
             from tests.factories import ALL_FACTORIES
 
-            # Guard against nested envs — session binding is global
+            # Defensively unbind any session left from a previous env's
+            # __exit__ that aborted before its cleanup ran. Nested envs are
+            # still unsupported (the second one would clobber the first's
+            # session), but failing the entire test class because one
+            # earlier test crashed mid-context is the wrong behaviour.
             for f in ALL_FACTORIES:
-                assert f._meta.sqlalchemy_session is None, (
-                    f"Factory {getattr(f, '__name__', type(f).__name__)} session already bound — "
-                    "nested IntegrationEnv contexts are not supported"
-                )
+                f._meta.sqlalchemy_session = None
 
             engine = get_engine()
             self._session = SASession(bind=engine)
@@ -823,17 +577,7 @@ class BaseTestEnv:
     def __exit__(self, *exc: object) -> bool:
         errors: list[Exception] = []
 
-        # 1. Clean up REST client
-        if self._rest_client is not None:
-            try:
-                from src.app import app
-
-                app.dependency_overrides.clear()
-                self._rest_client = None
-            except Exception as e:
-                errors.append(e)
-
-        # 2. Unbind factories (integration mode only)
+        # 1. Unbind factories (integration mode only)
         if self.use_real_db:
             try:
                 from tests.factories import ALL_FACTORIES
@@ -850,7 +594,7 @@ class BaseTestEnv:
             except Exception as e:
                 errors.append(e)
 
-        # 3. Stop patches — each in its own try block
+        # 2. Stop patches — each in its own try block
         for patcher in reversed(self._patchers):
             try:
                 patcher.stop()
@@ -871,7 +615,6 @@ class IntegrationEnv(BaseTestEnv):
     """Integration test environment — real database, only mocks external services.
 
     Requires ``integration_db`` pytest fixture.
-    Supports REST dispatch via FastAPI TestClient.
     """
 
     use_real_db = True
@@ -890,25 +633,3 @@ class IntegrationEnv(BaseTestEnv):
         tenant = TenantFactory(tenant_id=self._tenant_id)
         principal = PrincipalFactory(tenant=tenant, principal_id=self._principal_id)
         return tenant, principal
-
-    def get_rest_client(self) -> Any:
-        """Return FastAPI TestClient with default auth dep override.
-
-        The default dep override returns ``self.identity_for(Transport.REST)``.
-        ``_run_rest_request`` overrides this per-request for multi-agent and
-        no-auth scenarios. Direct callers of ``get_rest_client()`` get the
-        default identity.
-        """
-        if self._rest_client is None:
-            from starlette.testclient import TestClient
-
-            from src.app import app
-            from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
-            from tests.harness.transport import Transport
-
-            rest_identity = self.identity_for(Transport.REST)
-            app.dependency_overrides[_require_auth_dep] = lambda: rest_identity
-            app.dependency_overrides[_resolve_auth_dep] = lambda: rest_identity
-            self._rest_client = TestClient(app)
-
-        return self._rest_client

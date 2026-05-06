@@ -46,13 +46,13 @@ class TestSharedHeaderUtil:
             "resolved_identity.py still defines its own _get_header_case_insensitive — should import from http_utils"
         )
 
-    def test_app_py_imports_from_http_utils(self):
-        """app.py should import from http_utils, not define its own copy."""
-        source = (_PROJECT_ROOT / "src" / "app.py").read_text()
+    def test_main_py_imports_from_http_utils(self):
+        """``core/main.py`` should import from http_utils, not define its own copy."""
+        source = (_PROJECT_ROOT / "core" / "main.py").read_text()
 
         tree = ast.parse(source)
 
         func_names = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
         assert "_get_header_case_insensitive" not in func_names, (
-            "app.py still defines its own _get_header_case_insensitive — should import from http_utils"
+            "core/main.py still defines its own _get_header_case_insensitive — should import from http_utils"
         )

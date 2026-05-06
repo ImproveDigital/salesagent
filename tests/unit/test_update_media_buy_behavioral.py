@@ -1349,20 +1349,27 @@ class TestUC003UpdateCreativeIds:
         assert pkg.creative_ids == ["C1"]
 
     def test_creative_model_extends_correct_adcp_type(self, standard_mocks):
-        """Creative model extends the correct adcp library Creative type.
+        """Creative model extends an adcp library Creative type.
+
+        adcp 4.4 added a second Creative class on the delivery-response shape;
+        the salesagent wrapper now extends that one (it carries the broader
+        field surface that both list_creatives and get_creative_delivery
+        emit). The invariant is that we extend ONE of the library classes,
+        not that we extend the listing one specifically.
 
         Covers: UC-003-ALT-UPDATE-CREATIVE-IDS-09
         """
+        from adcp.types.generated_poc.creative.get_creative_delivery_response import (
+            Creative as LibraryDeliveryCreative,
+        )
         from adcp.types.generated_poc.creative.list_creatives_response import (
-            Creative as LibraryCreative,
+            Creative as LibraryListCreative,
         )
 
         from src.core.schemas import Creative
 
-        # Verify inheritance chain: Creative extends listing Creative (not delivery)
-        assert issubclass(Creative, LibraryCreative), (
-            f"Creative should extend adcp library listing Creative, but MRO is: "
-            f"{[c.__name__ for c in Creative.__mro__]}"
+        assert issubclass(Creative, (LibraryDeliveryCreative, LibraryListCreative)), (
+            f"Creative should extend an adcp library Creative, but MRO is: {[c.__name__ for c in Creative.__mro__]}"
         )
 
 
@@ -1400,13 +1407,27 @@ class TestUC003UploadInlineCreatives:
                                 "creative_id": "c1",
                                 "name": "Creative 1",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"url": "https://example.com/a1.png"}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/a1.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             },
                             {
                                 "creative_id": "c2",
                                 "name": "Creative 2",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"url": "https://example.com/a2.png"}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/a2.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             },
                         ],
                     }
@@ -1448,7 +1469,14 @@ class TestUC003UploadInlineCreatives:
                                 "creative_id": "c3",
                                 "name": "Creative 3",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"url": "https://example.com/a3.png"}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/a3.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }
@@ -1492,7 +1520,14 @@ class TestUC003UploadInlineCreatives:
                                 "creative_id": "c_fail",
                                 "name": "Bad Creative",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"url": "https://example.com/fail.png"}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/fail.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }
@@ -2259,7 +2294,14 @@ class TestUC003ExtK:
                                 "creative_id": "c_fail",
                                 "name": "Fail",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"url": "https://example.com/fail.png"}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/fail.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }
@@ -2298,7 +2340,14 @@ class TestUC003ExtK:
                                 "creative_id": "c_fail",
                                 "name": "Fail",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"url": "https://example.com/fail.png"}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/fail.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }

@@ -18,7 +18,6 @@ from adcp.server.idempotency import IdempotencyStore, MemoryBackend, PgBackend
 
 import core.idempotency as idem
 
-
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 
@@ -55,9 +54,7 @@ def test_pg_backend_when_database_url_set(monkeypatch):
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM information_schema.tables WHERE table_name = 'adcp_idempotency'"
-        )
+        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'adcp_idempotency'")
         assert cur.fetchone() is not None, "adcp_idempotency table missing after PgBackend init"
     finally:
         conn.close()
