@@ -675,6 +675,7 @@ class MockAdServer(AdServerAdapter):
 
         order_name_template = "{campaign_name|brand_name} - {media_buy_id} - {date_range}"  # Default
         tenant_gemini_key = None
+        auto_naming_enabled = True
         try:
             with get_db_session() as db_session:
                 if tenant_id and tenant_id != "unknown":
@@ -683,13 +684,22 @@ class MockAdServer(AdServerAdapter):
                         if tenant_obj.order_name_template:
                             order_name_template = tenant_obj.order_name_template
                         tenant_gemini_key = tenant_obj.gemini_api_key
+                        auto_naming_enabled = tenant_obj.auto_naming_enabled
         except Exception:
             # Database not available (e.g., in unit tests) - use default template
             logger.debug("Could not load tenant config from DB, using defaults", exc_info=True)
 
         # Build context and apply template
         context = build_order_name_context(
-            request, packages, start_time, end_time, tenant_gemini_key=tenant_gemini_key, media_buy_id=media_buy_id
+            request,
+            packages,
+            start_time,
+            end_time,
+            tenant_gemini_key=tenant_gemini_key,
+            media_buy_id=media_buy_id,
+            template=order_name_template,
+            auto_naming_enabled=auto_naming_enabled,
+            tenant_id=tenant_id,
         )
         print(
             f"[NAMING DEBUG] template={repr(order_name_template)}, has_promoted_offering={('promoted_offering' in context)}"

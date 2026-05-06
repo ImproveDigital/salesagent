@@ -171,14 +171,34 @@ def _get_media_buy_delivery_impl(
         assert uow.media_buys is not None
         repo = uow.media_buys
 
-        target_media_buys = _get_target_media_buys(req, principal_id, repo, reference_date)
+        # Track buys excluded by the status filter so we can distinguish them
+        # from "truly not in the DB" — buyers polling delivery on a future-dated
+        # buy were getting "media_buy_not_found" which is misleading.
+        excluded_by_status: list[tuple[str, str]] = []
+        target_media_buys = _get_target_media_buys(
+            req, principal_id, repo, reference_date, excluded_out=excluded_by_status
+        )
 
         # Diff requested IDs vs found IDs to report missing ones (salesagent-mexj)
         not_found_errors: list[Error] = []
         found_ids = {buy_id for buy_id, _ in target_media_buys}
+        excluded_status_by_id = dict(excluded_by_status)
         if req.media_buy_ids:
             for requested_id in req.media_buy_ids:
-                if requested_id not in found_ids:
+                if requested_id in found_ids:
+                    continue
+                if requested_id in excluded_status_by_id:
+                    actual_status = excluded_status_by_id[requested_id]
+                    not_found_errors.append(
+                        Error(
+                            code="media_buy_status_excluded",
+                            message=(
+                                f"Media buy {requested_id} exists but its current status "
+                                f"'{actual_status}' is excluded by the requested status_filter"
+                            ),
+                        )
+                    )
+                else:
                     not_found_errors.append(
                         Error(code="media_buy_not_found", message=f"Media buy {requested_id} not found")
                     )
@@ -759,7 +779,15 @@ def _get_target_media_buys(
     principal_id: str,
     repo: MediaBuyRepository,
     reference_date: date,
+    excluded_out: list[tuple[str, str]] | None = None,
 ) -> list[tuple[str, MediaBuy]]:
+    """Return matched (media_buy_id, MediaBuy) tuples after status filtering.
+
+    When ``excluded_out`` is provided, populate it with ``(media_buy_id, current_status)``
+    for each buy that exists for this principal but was filtered out by the
+    requested ``status_filter``. Lets the caller emit accurate errors —
+    "exists but excluded by filter" vs. "truly not in the DB".
+    """
     # Resolve status_filter to a set of internal status strings.
     # Internal statuses: ready, active, paused, completed, failed
     # AdCP MediaBuyStatus: pending_activation, active, paused, completed
@@ -817,6 +845,8 @@ def _get_target_media_buys(
 
         if current_status in filter_statuses:
             target_media_buys.append((buy.media_buy_id, buy))
+        elif excluded_out is not None:
+            excluded_out.append((buy.media_buy_id, current_status))
 
     return target_media_buys
 

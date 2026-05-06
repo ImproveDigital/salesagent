@@ -8,7 +8,37 @@ from typing import Any
 from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
+from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import CreateMediaBuyRequest
+from src.core.testing_hooks import AdCPTestContext
+
+
+def make_lifecycle_identity(
+    tenant_dict: dict[str, Any],
+    principal_id: str,
+    *,
+    test_session_id: str = "lifecycle-test",
+) -> ResolvedIdentity:
+    """Build a ResolvedIdentity matching what the transport boundary produces.
+
+    ``test_session_id`` is set so ``_create_media_buy_impl`` skips
+    ``validate_setup_complete()`` — the ``sample_tenant`` fixture doesn't
+    seed Publisher House Domain / Public Agent URL, and validating those
+    is out of scope for the lifecycle tests. (Tracked separately as a
+    fixture-completeness follow-up.)
+    """
+    return ResolvedIdentity(
+        principal_id=principal_id,
+        tenant_id=tenant_dict["tenant_id"],
+        tenant=tenant_dict,
+        protocol="mcp",
+        testing_context=AdCPTestContext(
+            dry_run=False,
+            mock_time=None,
+            jump_to_event=None,
+            test_session_id=test_session_id,
+        ),
+    )
 
 
 def _future(days: int = 1) -> datetime:

@@ -102,6 +102,10 @@ class Tenant(Base, JSONValidatorMixin):
     line_item_name_template: Mapped[str | None] = mapped_column(
         String(500), nullable=True, server_default="{order_name} - {product_name}"
     )
+    # When False, skip the AI naming agent even if {auto_name} is in the
+    # template — caller falls back to the brand name. Lets tenants without a
+    # Gemini key opt out without rewriting templates.
+    auto_naming_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     # Measurement providers configuration
     # Structure: {"providers": ["Provider 1", "Provider 2"], "default": "Provider 1"}

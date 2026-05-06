@@ -72,6 +72,8 @@ def generate_auto_name(
     tenant_ai_config=None,
     tenant_gemini_key: str | None = None,  # Deprecated: use tenant_ai_config
     max_length: int = 150,
+    auto_naming_enabled: bool = True,
+    tenant_id: str | None = None,  # Used only for log clarity
 ) -> str:
     """Generate AI-powered order name using Pydantic AI.
 
@@ -83,6 +85,10 @@ def generate_auto_name(
         tenant_ai_config: Tenant's AI configuration (TenantAIConfig or dict)
         tenant_gemini_key: Deprecated - Tenant's Gemini API key
         max_length: Maximum length for generated name
+        auto_naming_enabled: When False, skip AI entirely and return the
+            fallback name. Lets tenants opt out of AI-generated names without
+            having to remove ``{auto_name}`` from their template.
+        tenant_id: Tenant ID for log messages — purely cosmetic.
 
     Returns:
         AI-generated name, or falls back to brand_name if AI unavailable
@@ -103,9 +109,23 @@ def generate_auto_name(
             "api_key": tenant_gemini_key,
         }
 
+    if not auto_naming_enabled:
+        logger.debug(
+            "auto_naming_enabled=False for tenant %s, returning fallback name",
+            tenant_id or "<unknown>",
+        )
+        return _get_fallback_name(request)
+
     # Check if AI is enabled
     if not factory.is_ai_enabled(effective_config):
-        logger.debug("No AI configuration available, falling back to brand_name")
+        logger.warning(
+            "Order name template uses {auto_name} but no Gemini API key is "
+            "configured for tenant %s. Set tenant.ai_config.api_key (or the "
+            "GEMINI_API_KEY env var), set tenant.auto_naming_enabled=False, or "
+            "remove {auto_name} from the order_name_template. Falling back to "
+            "brand name.",
+            tenant_id or "<unknown>",
+        )
         return _get_fallback_name(request)
 
     try:
@@ -227,6 +247,9 @@ def build_order_name_context(
     tenant_ai_config=None,
     tenant_gemini_key: str | None = None,  # Deprecated: use tenant_ai_config
     media_buy_id: str | None = None,
+    template: str | None = None,
+    auto_naming_enabled: bool = True,
+    tenant_id: str | None = None,
 ) -> dict:
     """Build context dictionary for order name template.
 
@@ -238,20 +261,33 @@ def build_order_name_context(
         tenant_ai_config: Tenant's AI configuration (TenantAIConfig or dict)
         tenant_gemini_key: Deprecated - Tenant's Gemini API key
         media_buy_id: Media buy identifier for template substitution
+        template: Order name template, used to skip the AI agent when
+            ``{auto_name}`` is not referenced. When ``None`` the legacy
+            always-call behavior is preserved (kept for backward compat).
+        auto_naming_enabled: Tenant-level toggle; when False, never invoke AI.
+        tenant_id: Tenant id for log messages.
 
     Returns:
         Dictionary of variables available for template substitution
     """
-    # Generate auto_name if template uses it (lazy evaluation via dict access is fine)
-    # Note: This gets called only if {auto_name} is in the template
-    auto_name = generate_auto_name(
-        request=request,
-        packages=packages,
-        start_time=start_time,
-        end_time=end_time,
-        tenant_ai_config=tenant_ai_config,
-        tenant_gemini_key=tenant_gemini_key,
-    )
+    # Only invoke the AI agent when the template actually references
+    # {auto_name}. Otherwise the call is wasted work AND surfaces noisy
+    # warnings when the tenant has no Gemini key configured but doesn't use
+    # auto-naming. Templates use {variable} or {var1|var2|...} syntax.
+    template_uses_auto_name = template is None or "auto_name" in (template or "")
+    if template_uses_auto_name:
+        auto_name = generate_auto_name(
+            request=request,
+            packages=packages,
+            start_time=start_time,
+            end_time=end_time,
+            tenant_ai_config=tenant_ai_config,
+            tenant_gemini_key=tenant_gemini_key,
+            auto_naming_enabled=auto_naming_enabled,
+            tenant_id=tenant_id,
+        )
+    else:
+        auto_name = _get_fallback_name(request)
 
     # Extract brand name from brand (BrandReference)
     brand_name = _extract_brand_name(request)

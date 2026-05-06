@@ -615,7 +615,8 @@ class GoogleAdManager(AdServerAdapter):
                 order_currency = pricing.get("currency", "USD")
                 break  # All packages have same currency
 
-        # Get tenant's Gemini key for auto_name generation
+        # Get tenant's Gemini key + auto-naming toggle for auto_name generation
+        auto_naming_enabled = True
         try:
             from src.core.database.database_session import get_db_session
             from src.core.database.models import Tenant
@@ -627,13 +628,22 @@ class GoogleAdManager(AdServerAdapter):
                 tenant_obj = db_session.scalars(tenant_stmt).first()
                 if tenant_obj:
                     tenant_gemini_key = tenant_obj.gemini_api_key
+                    auto_naming_enabled = tenant_obj.auto_naming_enabled
         except sqlalchemy.exc.SQLAlchemyError as e:
             logger.warning(f"Could not load tenant Gemini key: {e}")
 
         # Generate a pre-order media_buy_id for naming (GAM order_id replaces this in the response)
         pre_order_id = f"gam_{uuid.uuid4().hex[:8]}"
         context = build_order_name_context(
-            request, packages, start_time, end_time, tenant_gemini_key=tenant_gemini_key, media_buy_id=pre_order_id
+            request,
+            packages,
+            start_time,
+            end_time,
+            tenant_gemini_key=tenant_gemini_key,
+            media_buy_id=pre_order_id,
+            template=order_name_template,
+            auto_naming_enabled=auto_naming_enabled,
+            tenant_id=self.tenant_id,
         )
         base_order_name = apply_naming_template(order_name_template, context)
 

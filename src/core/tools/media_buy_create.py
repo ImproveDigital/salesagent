@@ -21,14 +21,10 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 from adcp import PushNotificationConfig
+from adcp.types import ContextObject, CreativeAsset, MediaBuyStatus, ReportingWebhook, TargetingOverlay
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
-from adcp.types import MediaBuyStatus
-from adcp.types.aliases import Package as ResponsePackage
-from adcp.types import ContextObject
-from adcp.types import CreativeAsset
-from adcp.types import ReportingWebhook
-from adcp.types import TargetingOverlay
 from adcp.types import PackageRequest as AdcpPackageRequest
+from adcp.types.aliases import Package as ResponsePackage
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 from pydantic import BaseModel, ValidationError
@@ -1329,7 +1325,15 @@ async def _create_media_buy_impl(
 
     # Warn if unsupported reporting_webhook frequency is requested
     if req.reporting_webhook:
-        raw_freq = str(getattr(req.reporting_webhook, "reporting_frequency", None) or "daily").lower()
+        freq_attr = getattr(req.reporting_webhook, "reporting_frequency", None)
+        # Enums (ReportingFrequency.daily) format as "ReportingFrequency.daily"
+        # via str(), which is unhelpful in logs. Prefer .value for the wire form.
+        if freq_attr is None:
+            raw_freq = "daily"
+        elif hasattr(freq_attr, "value"):
+            raw_freq = str(freq_attr.value).lower()
+        else:
+            raw_freq = str(freq_attr).lower()
         if raw_freq != "daily":
             logger.warning(
                 "CreateMediaBuy requested reporting webhook frequency '%s', "
@@ -2720,9 +2724,9 @@ async def _create_media_buy_impl(
                 # Merge dimensions from product's format_ids if request format_ids don't have them
                 # This handles the case where buyer specifies format_id but not dimensions
                 # Build lookup of product format dimensions by (normalized_url, id)
-                product_format_dimensions: dict[
-                    tuple[str | None, str], tuple[int | None, int | None, float | None]
-                ] = {}
+                product_format_dimensions: dict[tuple[str | None, str], tuple[int | None, int | None, float | None]] = (
+                    {}
+                )
                 if pkg_product.format_ids:
                     for fmt in pkg_product.format_ids:
                         agent_url = fmt.agent_url

@@ -21,8 +21,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from adcp import Format
 from adcp.types import FormatId as LibraryFormatId
+
+# Use the salesagent-extended Format (adds internal platform_config / category /
+# requirements fields). The GAM adapter reads format_obj.platform_config for
+# creative-placeholder configuration; constructing the library Format directly
+# would leave those attributes missing. See Critical Pattern #1 in CLAUDE.md.
+from src.core.schemas import Format
 
 # Reference creative agent — every salesagent deployment defaults to it
 # regardless of tenant config. See CreativeAgentRegistry.DEFAULT_AGENT.

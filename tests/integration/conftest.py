@@ -29,6 +29,14 @@ from tests.integration.migration_helpers import parse_postgres_url
 # It is available here via tests/conftest.py -> from tests.conftest_db import *
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register integration-suite markers."""
+    config.addinivalue_line(
+        "markers",
+        "requires_gam: requires real GAM credentials — skip when env vars absent",
+    )
+
+
 def cleanup_tenant(tenant_id: str) -> None:
     """Delete tenant and all dependent data (correct FK order)."""
     with get_db_session() as session:

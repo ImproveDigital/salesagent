@@ -13,8 +13,7 @@ from typing import Any
 
 from adcp import create_mcp_webhook_payload
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
-from adcp.types import McpWebhookPayload
-from adcp.types import NotificationType
+from adcp.types import McpWebhookPayload, NotificationType
 from sqlalchemy import func, select
 
 from src.core.database.database_session import get_db_session
@@ -239,9 +238,25 @@ class DeliveryWebhookScheduler:
                 return
 
             if delivery_response.errors is not None:
-                logger.warning(
-                    f"`Couldn't get media_delivery` for {media_buy.media_buy_id}. We have recieved error in the result. Result is {delivery_response.model_dump()}"
-                )
+                # media_buy_status_excluded is expected for not-yet-started or
+                # paused buys — the delivery query filters by status_filter and
+                # those buys legitimately have nothing to report yet. Log at
+                # info-level so operators don't see false alarms.
+                error_codes = {getattr(e, "code", None) for e in delivery_response.errors}
+                # `<=` so a single status_excluded buy + any other unrelated
+                # error escalates back to WARNING. Empty error_codes never
+                # reaches this branch (outer `is not None` already filtered).
+                if error_codes <= {"media_buy_status_excluded"} and error_codes:
+                    logger.info(
+                        "Skipping delivery webhook for media buy %s — current status " "outside reporting window: %s",
+                        media_buy.media_buy_id,
+                        [getattr(e, "message", "") for e in delivery_response.errors],
+                    )
+                else:
+                    logger.warning(
+                        f"Couldn't get media_delivery for {media_buy.media_buy_id}. "
+                        f"Errors in result: {delivery_response.model_dump()}"
+                    )
                 return
 
             # Get sequence number for this webhook (get max sequence + 1)

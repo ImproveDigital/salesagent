@@ -16,6 +16,7 @@ from src.core.database.models import (
     CurrencyLimit,
     GamAdvertiser,
     GAMInventory,
+    ProductInventoryMapping,
     PropertyTag,
     PublisherPartner,
     Tenant,
@@ -97,6 +98,26 @@ class AdapterConfigFactory(factory.alchemy.SQLAlchemyModelFactory):
     tenant_id = LazyAttribute(lambda o: o.tenant.tenant_id)
     adapter_type = "mock"
 
+    @classmethod
+    def _create(cls, model_class: type, *args: Any, **kwargs: Any) -> Any:
+        """Encrypt-and-persist GAM service-account JSON when supplied.
+
+        The ``gam_service_account_json`` model property is an encrypted
+        column with a custom setter (``encrypt_api_key``). Tests can pass
+        plaintext JSON via the ``gam_service_account_json_plaintext`` kwarg
+        and let the factory encrypt it at rest — instead of building, mutating,
+        and re-adding the row from the test body (the test architecture rule
+        documented in ``tests/CLAUDE.md``).
+        """
+        plaintext = kwargs.pop("gam_service_account_json_plaintext", None)
+        instance = super()._create(model_class, *args, **kwargs)
+        if plaintext:
+            instance.gam_service_account_json = plaintext
+            session = cls._meta.sqlalchemy_session
+            if session is not None:
+                session.commit()
+        return instance
+
 
 class GAMInventoryFactory(factory.alchemy.SQLAlchemyModelFactory):
     class Meta:
@@ -132,6 +153,20 @@ class PropertyTagFactory(factory.alchemy.SQLAlchemyModelFactory):
     tag_id = Sequence(lambda n: f"tag_{n:04d}")
     name = LazyAttribute(lambda o: f"Tag {o.tag_id}")
     description = LazyAttribute(lambda o: f"Description for {o.name}")
+
+
+class ProductInventoryMappingFactory(factory.alchemy.SQLAlchemyModelFactory):
+    """Maps a product to a GAM ad unit / placement."""
+
+    class Meta:
+        model = ProductInventoryMapping
+        sqlalchemy_session = None
+        sqlalchemy_session_persistence = "commit"
+
+    tenant_id = "test_tenant"
+    product_id = "test_product"
+    inventory_type = "AD_UNIT"
+    inventory_id = Sequence(lambda n: f"au_{n:04d}")
 
 
 class GamAdvertiserFactory(factory.alchemy.SQLAlchemyModelFactory):
