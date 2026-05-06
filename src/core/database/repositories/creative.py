@@ -282,6 +282,32 @@ class CreativeRepository:
             )
         ).first()
 
+    def admin_mark_approved(
+        self,
+        creative_id: str,
+        *,
+        approved_by: str,
+        approved_at: datetime | None = None,
+    ) -> Creative | None:
+        """Mark a creative approved (admin use — no principal filter).
+
+        Mirrors the inline write in
+        ``src/admin/blueprints/creatives.py::approve_creative``. Centralises
+        the (status, approved_at, approved_by) field set so callers — admin
+        UI route, integration tests simulating approval — can't drift.
+
+        Returns the updated Creative, or None if not found in this tenant.
+        Does NOT commit; the caller / UoW commits at the boundary.
+        """
+        creative = self.admin_get_by_id(creative_id)
+        if creative is None:
+            return None
+        creative.status = "approved"
+        creative.approved_at = approved_at or datetime.now(UTC)
+        creative.approved_by = approved_by
+        self._session.flush()
+        return creative
+
     def admin_list_all(self) -> list[Creative]:
         """Get all creatives for the tenant ordered by status then date (admin use)."""
         return list(

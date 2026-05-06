@@ -77,3 +77,44 @@ class TenantConfigRepository:
             )
         ).all()
         return dict(rows)  # type: ignore[arg-type]
+
+    # ------------------------------------------------------------------
+    # Approval-policy writes
+    # Lifecycle / approval tests need to flip these per scenario; admin
+    # UI flows will eventually call the same helpers (today they mutate
+    # the ORM object directly inside a Flask request).
+    # ------------------------------------------------------------------
+
+    def set_approval_mode(self, mode: str) -> Tenant | None:
+        """Set tenant.approval_mode within this tenant.
+
+        Valid values: ``auto-approve`` / ``require-human`` / ``ai-powered``.
+        Returns the updated Tenant, or None if the tenant row is missing.
+        Does NOT commit; the caller / UoW commits at the boundary.
+        """
+        valid = {"auto-approve", "require-human", "ai-powered"}
+        if mode not in valid:
+            raise ValueError(
+                f"approval_mode must be one of {sorted(valid)!r}, got {mode!r}"
+            )
+        tenant = self.get_tenant()
+        if tenant is None:
+            return None
+        tenant.approval_mode = mode
+        self._session.flush()
+        return tenant
+
+    def set_human_review_required(self, required: bool) -> Tenant | None:
+        """Toggle tenant.human_review_required within this tenant.
+
+        When True, ``_create_media_buy_impl`` returns ``status='submitted'``
+        and creates a workflow_step instead of executing the adapter. The
+        approval execute path then promotes status to ``active``.
+        Returns the updated Tenant, or None if the tenant row is missing.
+        """
+        tenant = self.get_tenant()
+        if tenant is None:
+            return None
+        tenant.human_review_required = required
+        self._session.flush()
+        return tenant

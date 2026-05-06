@@ -35,7 +35,11 @@ from tests.integration.media_buy_helpers import (
     _get_tenant_dict as _tenant_dict,
 )
 from tests.integration.media_buy_helpers import (
+    admin_mark_creative_approved,
+    force_media_buy_status,
     make_lifecycle_identity,
+    set_tenant_approval_mode,
+    set_tenant_human_review_required,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db, pytest.mark.asyncio]
@@ -175,16 +179,11 @@ class TestCreativeApprovalAsync:
         """Default approval_mode='require-human' → creative status=pending_review on
         sync; admin approval transitions to status=approved."""
         from src.core.database.models import Creative as DBCreative
-        from src.core.database.models import Tenant as TenantModel
         from src.core.tools.creatives._sync import _sync_creatives_impl
 
         # Force the tenant to require human approval (default in DB but
         # be explicit so this test is independent of fixture defaults).
-        with get_db_session() as session:
-            t = session.scalars(select(TenantModel).where(TenantModel.tenant_id == sample_tenant["tenant_id"])).first()
-            assert t is not None
-            t.approval_mode = "require-human"
-            session.commit()
+        set_tenant_approval_mode(sample_tenant["tenant_id"], "require-human")
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
         # _sync_creatives_impl reads approval_mode straight from the dict.
@@ -227,25 +226,11 @@ class TestCreativeApprovalAsync:
                 f"Expected pending_review, got {row.status}. sync response status={synced.status}"
             )
 
-        # Simulate admin approval (the Flask route writes status='approved' +
-        # approved_at/approved_by; we test the same end state by writing
-        # via the production CreativeRepository.update_status_to_approved
-        # path used by the human-review record creation.)
-        from datetime import UTC
-        from datetime import datetime as _dt
-
-        with get_db_session() as session:
-            row = session.scalars(
-                select(DBCreative).where(
-                    DBCreative.creative_id == creative_id,
-                    DBCreative.tenant_id == tenant_dict["tenant_id"],
-                )
-            ).first()
-            assert row is not None
-            row.status = "approved"
-            row.approved_at = _dt.now(UTC)
-            row.approved_by = "test_admin"
-            session.commit()
+        # Simulate admin approval through the same repository method the
+        # admin Flask route uses (CreativeRepository.admin_mark_approved).
+        admin_mark_creative_approved(
+            tenant_dict["tenant_id"], creative_id, approved_by="test_admin"
+        )
 
         with get_db_session() as session:
             row = session.scalars(
@@ -268,7 +253,6 @@ class TestMediaBuyApprovalAsync:
         """tenant.human_review_required=True → create_media_buy returns
         status='submitted'; execute_approved_media_buy transitions to active."""
         from src.core.database.models import MediaBuy as DBMediaBuy
-        from src.core.database.models import Tenant as TenantModel
         from src.core.database.models import WorkflowStep
         from src.core.schemas import CreateMediaBuyRequest
         from src.core.tools.media_buy_create import (
@@ -276,11 +260,7 @@ class TestMediaBuyApprovalAsync:
             execute_approved_media_buy,
         )
 
-        with get_db_session() as session:
-            t = session.scalars(select(TenantModel).where(TenantModel.tenant_id == sample_tenant["tenant_id"])).first()
-            assert t is not None
-            t.human_review_required = True
-            session.commit()
+        set_tenant_human_review_required(sample_tenant["tenant_id"], True)
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
         identity = make_lifecycle_identity(
@@ -472,13 +452,7 @@ class TestDeliveryWebhookFires:
             # The scheduler's delivery query filters status_filter=[active, completed].
             # A freshly-created mock buy lands in pending_activation/pending_creatives;
             # force-promote so the delivery lookup includes it.
-            from src.core.database.models import MediaBuy as DBMediaBuy
-
-            with get_db_session() as session:
-                mb = session.scalars(select(DBMediaBuy).where(DBMediaBuy.media_buy_id == media_buy_id)).first()
-                assert mb is not None
-                mb.status = "active"
-                session.commit()
+            force_media_buy_status(tenant_dict["tenant_id"], media_buy_id, "active")
 
             # Force-trigger the scheduler (bypasses 24h dedupe + frequency check).
             scheduler = DeliveryWebhookScheduler()
