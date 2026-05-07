@@ -1,5 +1,6 @@
 """SQLAlchemy models for database schema."""
 
+import json
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -37,6 +38,20 @@ from sqlalchemy.sql import func
 
 from src.core.database.json_type import JSONType
 from src.core.json_validators import JSONValidatorMixin
+
+# Minimal-but-spec-valid baseline for ``Product.reporting_capabilities`` per
+# adcp 4.4. The same value is used as both the SQL ``server_default`` (for
+# raw INSERTs) and the Python-side ``default`` (for in-memory ORM
+# construction); deriving the SQL default from this dict via ``json.dumps``
+# guarantees the two paths cannot drift.
+PRODUCT_REPORTING_CAPABILITIES_DEFAULT: dict = {
+    "available_reporting_frequencies": ["daily"],
+    "expected_delay_minutes": 0,
+    "timezone": "UTC",
+    "supports_webhooks": False,
+    "available_metrics": ["impressions"],
+    "date_range_support": "date_range",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -364,8 +379,17 @@ class Product(Base, JSONValidatorMixin):
     product_card_detailed: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     # Type hint: list of placement dicts (each with placement_id, name, description, format_ids)
     placements: Mapped[list[dict] | None] = mapped_column(JSONType, nullable=True)
-    # Type hint: reporting capabilities dict
-    reporting_capabilities: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: reporting capabilities dict (AdCP 4.4: required on wire)
+    # ``default`` populates the attribute on Python-side construction (in-memory
+    # models, factory helpers); ``server_default`` covers DB INSERTs that bypass
+    # the ORM (raw SQL, legacy clients). Both derive from the same dict
+    # constant so they cannot drift.
+    reporting_capabilities: Mapped[dict] = mapped_column(
+        JSONType,
+        nullable=False,
+        default=lambda: dict(PRODUCT_REPORTING_CAPABILITIES_DEFAULT),
+        server_default=text(f"'{json.dumps(PRODUCT_REPORTING_CAPABILITIES_DEFAULT)}'::jsonb"),
+    )
 
     # AdCP 3.6.0 product fields
     property_targeting_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

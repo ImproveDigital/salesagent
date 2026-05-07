@@ -29,6 +29,7 @@ from src.core.database.models import Product as ProductModel
 from src.core.database.models import Tenant
 from src.core.schemas import Product as ProductSchema
 from src.core.testing_hooks import TestingContext, apply_testing_hooks
+from tests.helpers.adcp_factories import create_test_reporting_capabilities
 from tests.utils.database_helpers import create_tenant_with_timestamps
 
 
@@ -251,6 +252,7 @@ class TestMCPToolRoundtripValidation:
                 "is_custom": db_product.is_custom or False,
                 "publisher_properties": publisher_properties,
                 "pricing_options": [pricing_kwargs],  # Use plain dict, not PricingOption object
+                "reporting_capabilities": db_product.reporting_capabilities or create_test_reporting_capabilities(),
             }
             schema_product = ProductSchema(**product_data)
             schema_products.append(schema_product)
@@ -390,6 +392,7 @@ class TestMCPToolRoundtripValidation:
                 "is_custom": db_product.is_custom or False,
                 "publisher_properties": publisher_properties,
                 "pricing_options": [pricing_kwargs],  # Use plain dict, not PricingOption object
+                "reporting_capabilities": db_product.reporting_capabilities or create_test_reporting_capabilities(),
             }
             schema_product = ProductSchema(**product_data)
             schema_products.append(schema_product)
@@ -460,6 +463,7 @@ class TestMCPToolRoundtripValidation:
                     "is_fixed": True,  # Required in adcp 2.4.0+
                 }
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         # Step 1: Convert to dict (what the tool does before testing hooks)
@@ -525,6 +529,7 @@ class TestMCPToolRoundtripValidation:
                     "is_fixed": False,  # Required in adcp 2.4.0+
                 }
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         # Roundtrip through internal format
@@ -575,6 +580,7 @@ class TestMCPToolRoundtripValidation:
             "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"selection_type": "by_id", "publisher_domain": "example.com", "property_ids": ["all_inventory"]}
@@ -604,6 +610,7 @@ class TestMCPToolRoundtripValidation:
             "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"selection_type": "by_id", "publisher_domain": "example.com", "property_ids": ["all_inventory"]}
@@ -646,6 +653,7 @@ class TestMCPToolRoundtripPatterns:
                     "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
                     "delivery_type": "guaranteed",
                     "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+                    "reporting_capabilities": create_test_reporting_capabilities(),
                     "is_custom": False,
                     "publisher_properties": [
                         {
@@ -678,6 +686,7 @@ class TestMCPToolRoundtripPatterns:
                     ],
                     "delivery_type": "non_guaranteed",
                     "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+                    "reporting_capabilities": create_test_reporting_capabilities(),
                     "is_custom": True,
                     "publisher_properties": [
                         {
@@ -707,6 +716,7 @@ class TestMCPToolRoundtripPatterns:
                     "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_728x90"}],
                     "delivery_type": "non_guaranteed",
                     "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+                    "reporting_capabilities": create_test_reporting_capabilities(),
                     "is_custom": False,
                     "publisher_properties": [
                         {
@@ -774,6 +784,7 @@ class TestMCPToolRoundtripPatterns:
             ],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"selection_type": "by_id", "publisher_domain": "example.com", "property_ids": ["all_inventory"]}

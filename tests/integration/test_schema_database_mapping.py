@@ -19,7 +19,7 @@ from src.core.database.models import PricingOption as DBPricingOption
 from src.core.database.models import Product as ProductModel
 from src.core.schemas import Principal as PrincipalSchema
 from src.core.schemas import Product
-from tests.helpers.adcp_factories import create_test_db_product
+from tests.helpers.adcp_factories import create_test_db_product, create_test_reporting_capabilities
 from tests.utils.database_helpers import (
     create_tenant_with_timestamps,
 )
@@ -242,9 +242,9 @@ class TestSchemaFieldMapping:
             db_columns = {column.name for column in model_class.__table__.columns}
 
             for field in required_fields:
-                assert field in db_columns, (
-                    f"Required field '{field}' missing from {model_class.__name__} database model"
-                )
+                assert (
+                    field in db_columns
+                ), f"Required field '{field}' missing from {model_class.__name__} database model"
 
     def test_pydantic_model_field_access_patterns(self):
         """Test patterns for safely accessing Pydantic model fields."""
@@ -272,6 +272,7 @@ class TestSchemaFieldMapping:
                 }
             ],
             "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
         }
 
         product = Product(**product_data)
@@ -408,6 +409,7 @@ class TestSchemaFieldMapping:
                     }
                 ],
                 "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+                "reporting_capabilities": create_test_reporting_capabilities(),
             }
 
             # This should succeed without validation errors
@@ -416,7 +418,7 @@ class TestSchemaFieldMapping:
                 assert validated_product.product_id == "validation_test_001"
                 # adcp 2.14.0+ uses RootModel wrapper - access via .root
                 pricing = validated_product.pricing_options[0]
-                pricing_inner = pricing.root if hasattr(pricing, "root") else pricing
+                pricing_inner = pricing.root if hasattr(pricing, "root") else pricing  # noqa: rootmodel
                 assert pricing_inner.rate == 7.25
                 assert pricing_inner.pricing_model == "cpm"
             except Exception as e:
@@ -456,6 +458,7 @@ class TestFieldAccessPatterns:
                 }
             ],
             "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
         }
 
         product = Product(**product_data)
@@ -509,6 +512,7 @@ class TestFieldAccessPatterns:
                 }
             ],
             "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
         }
 
         product = Product(**product_data)

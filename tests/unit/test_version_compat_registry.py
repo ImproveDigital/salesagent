@@ -16,6 +16,7 @@ from src.core.schemas import GetProductsResponse, Product
 from tests.helpers.adcp_factories import (
     create_test_format_id,
     create_test_publisher_properties_by_tag,
+    create_test_reporting_capabilities,
 )
 
 
@@ -42,6 +43,7 @@ def _make_response(fixed_price: float | None = None, floor_price: float | None =
         delivery_measurement={"provider": "test", "notes": "test"},
         publisher_properties=[create_test_publisher_properties_by_tag()],
         pricing_options=[cpm],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
     return GetProductsResponse(products=[product])
 

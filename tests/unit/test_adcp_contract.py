@@ -277,7 +277,11 @@ class TestAdCPContract:
         )
 
         # Create pricing option using library discriminated union format
-        from tests.helpers.adcp_factories import create_test_cpm_pricing_option, create_test_publisher_properties_by_tag
+        from tests.helpers.adcp_factories import (
+            create_test_cpm_pricing_option,
+            create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
+        )
 
         pricing_option = create_test_cpm_pricing_option(
             pricing_option_id="cpm_usd_fixed",
@@ -303,6 +307,7 @@ class TestAdCPContract:
                 "provider": "test_provider",
                 "notes": "Test measurement",
             },  # Required per AdCP spec
+            "reporting_capabilities": create_test_reporting_capabilities(),  # Required per AdCP 4.4
         }
 
         # Should be convertible to AdCP schema
@@ -338,7 +343,11 @@ class TestAdCPContract:
         )
 
         # Use library discriminated union format
-        from tests.helpers.adcp_factories import create_test_cpm_pricing_option, create_test_publisher_properties_by_tag
+        from tests.helpers.adcp_factories import (
+            create_test_cpm_pricing_option,
+            create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
+        )
 
         model_dict = {
             "product_id": model.product_id,
@@ -362,6 +371,7 @@ class TestAdCPContract:
                 "provider": "test_provider",
                 "notes": "Test measurement",
             },  # Required per AdCP spec
+            "reporting_capabilities": create_test_reporting_capabilities(),  # Required per AdCP 4.4
         }
 
         schema = ProductSchema(**model_dict)
@@ -438,6 +448,7 @@ class TestAdCPContract:
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
             create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
         )
 
         # Test guaranteed product with estimated_exposures
@@ -459,6 +470,7 @@ class TestAdCPContract:
             publisher_properties=[
                 create_test_publisher_properties_by_tag(publisher_domain="test.com")
             ],  # Required per AdCP spec
+            reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
         )
 
         # Verify AdCP-compliant response includes PR #79 fields
@@ -487,6 +499,7 @@ class TestAdCPContract:
             publisher_properties=[
                 create_test_publisher_properties_by_tag(publisher_domain="test.com")
             ],  # Required per AdCP spec
+            reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
         )
 
         adcp_response = non_guaranteed_product.model_dump()
@@ -525,6 +538,7 @@ class TestAdCPContract:
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
             create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
         )
 
         # Test with publisher_properties (AdCP-compliant approach using factory)
@@ -549,6 +563,7 @@ class TestAdCPContract:
                     "price_guidance": {"floor": 1.0, "p50": 5.0},
                 }
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
         )
 
         adcp_response = product_with_properties.model_dump()
@@ -578,6 +593,7 @@ class TestAdCPContract:
                         rate=10.0,
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
                 # Missing publisher_properties
             )
 
@@ -705,6 +721,7 @@ class TestAdCPContract:
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
             create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
         )
 
         # AdCP specifies exactly these two values
@@ -730,6 +747,7 @@ class TestAdCPContract:
                         rate=10.0,
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
             )
             # delivery_type is an enum, check its value
             assert product.delivery_type.value in valid_delivery_types
@@ -754,6 +772,7 @@ class TestAdCPContract:
                         rate=10.0,
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
             )
 
     def test_adcp_response_excludes_internal_fields(self):
@@ -761,6 +780,7 @@ class TestAdCPContract:
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
             create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
         )
 
         products = [
@@ -783,6 +803,7 @@ class TestAdCPContract:
                         rate=10.0,
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
             )
         ]
 
@@ -1772,6 +1793,7 @@ class TestAdCPContract:
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
             create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
         )
 
         product = ProductModel(
@@ -1795,6 +1817,7 @@ class TestAdCPContract:
                     rate=10.0,
                 )
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
         )
 
         # Create response with products
@@ -2590,6 +2613,7 @@ class TestAdCPContract:
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
             create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
         )
 
         # Valid: publisher_properties using factory
@@ -2608,6 +2632,7 @@ class TestAdCPContract:
                     rate=10.0,
                 )
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
         )
         assert len(product_with_properties.publisher_properties) == 1
         # publisher_properties is a discriminated union with RootModel wrapper (adcp 2.14.0+)
@@ -2635,6 +2660,7 @@ class TestAdCPContract:
                         rate=10.0,
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
                 # Missing publisher_properties - should fail
             )
 
@@ -2810,6 +2836,7 @@ class TestProductV36FieldContract:
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
             create_test_publisher_properties_by_tag,
+            create_test_reporting_capabilities,
         )
 
         # adcp 3.10: delivery_measurement is now optional (was required in 3.6-3.9)
@@ -2821,6 +2848,7 @@ class TestProductV36FieldContract:
             delivery_type="guaranteed",
             publisher_properties=[create_test_publisher_properties_by_tag()],
             pricing_options=[create_test_cpm_pricing_option()],
+            reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
             # delivery_measurement intentionally omitted — now optional per adcp 3.10
         )
         assert product.delivery_measurement is None
@@ -2959,29 +2987,21 @@ class TestProductV36FieldContract:
         assert dump["placements"][0]["name"] == "Top Banner"
         assert dump["placements"][1]["placement_id"] == "sidebar"
 
-    # --- reporting_capabilities (required on the wire per adcp 4.4.0+) ---
+    # --- reporting_capabilities (REQUIRED per adcp 4.4) ---
 
-    def test_reporting_capabilities_present_when_omitted(self):
-        """When ``reporting_capabilities`` is not provided, the local Product
-        schema's default factory must populate a valid block.
+    def test_reporting_capabilities_required(self):
+        """reporting_capabilities is required per adcp 4.4 — omitting it raises ValidationError.
 
-        adcp v4.4.0 made the field required upstream. ``exclude_none=True``
-        (the buyer-protocol default) would silently strip a ``None`` value,
-        causing #71 — the SDK rejects the response only at the buyer's edge.
-        The schema's default_factory (src/core/schemas/product.py:108) keeps
-        the wire shape valid for legacy rows that lack the column.
+        Closes the loophole that caused #71: previously the schema overrode the
+        library's required field with a None-default, so legacy DB rows with a
+        null column silently produced wire responses missing the field. The DB
+        column is now NOT NULL with a server_default (migration c8404b483cf3)
+        and the schema inherits the library's required-on-wire constraint.
         """
-        # Construct without reporting_capabilities — exercise the default factory.
-        defaults = self._make_base_product().__dict__.copy()
-        defaults.pop("reporting_capabilities", None)
-        from src.core.schemas import Product
+        from pydantic import ValidationError
 
-        product = Product(**{k: v for k, v in defaults.items() if not k.startswith("_")})
-        dump = product.model_dump(mode="json", exclude_none=True)
-        assert "reporting_capabilities" in dump, (
-            "reporting_capabilities is required on the wire (adcp 4.4.0+); "
-            "the local Product default_factory must produce a valid block."
-        )
+        with pytest.raises(ValidationError, match="reporting_capabilities"):
+            self._make_base_product(reporting_capabilities=None)
 
     def test_reporting_capabilities_present_when_set(self):
         """reporting_capabilities appears in model_dump with correct structure."""
@@ -3233,7 +3253,17 @@ class TestProductV36FieldContract:
         m.product_card = None
         m.product_card_detailed = None
         m.placements = None
-        m.reporting_capabilities = None
+        # AdCP 4.4: reporting_capabilities is required on the wire and the ORM
+        # column is now NOT NULL with a server_default (migration c8404b483cf3).
+        # Mock the post-migration state by providing the same baseline.
+        m.reporting_capabilities = {
+            "available_reporting_frequencies": ["daily"],
+            "expected_delay_minutes": 0,
+            "timezone": "UTC",
+            "supports_webhooks": False,
+            "available_metrics": ["impressions"],
+            "date_range_support": "date_range",
+        }
         m.is_custom = False
         m.property_targeting_allowed = None
         m.signal_targeting_allowed = None
@@ -3260,10 +3290,6 @@ class TestProductV36FieldContract:
         dump = schema.model_dump()
 
         # None-valued optional fields should be omitted from dump.
-        # ``reporting_capabilities`` is no longer in this list — adcp 4.4
-        # made it required on the wire, so the schema now defaults to a
-        # minimal-but-spec-valid object instead of None when the ORM row
-        # has none. The default is verified separately.
         absent_fields = [
             "channels",
             "product_card",
@@ -3278,8 +3304,7 @@ class TestProductV36FieldContract:
         for field in absent_fields:
             assert field not in dump, f"Null field '{field}' should not appear in model_dump"
 
-        # reporting_capabilities now defaults to a minimal valid object,
-        # not None.
+        # reporting_capabilities is required (adcp 4.4) — must be present.
         assert "reporting_capabilities" in dump
         assert dump["reporting_capabilities"]["timezone"] == "UTC"
 

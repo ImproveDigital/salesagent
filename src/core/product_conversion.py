@@ -367,8 +367,9 @@ def convert_product_model_to_schema(product_model, adapter_type: str | None = No
         product_data["product_card_detailed"] = product_model.product_card_detailed
     if product_model.placements:
         product_data["placements"] = product_model.placements
-    if product_model.reporting_capabilities:
-        product_data["reporting_capabilities"] = product_model.reporting_capabilities
+    # AdCP 4.4 made reporting_capabilities required. The ORM column is NOT NULL
+    # with a server_default (migration c8404b483cf3), so this is always populated.
+    product_data["reporting_capabilities"] = product_model.reporting_capabilities
 
     # Default is_custom to False if not set
     product_data["is_custom"] = product_model.is_custom if product_model.is_custom else False

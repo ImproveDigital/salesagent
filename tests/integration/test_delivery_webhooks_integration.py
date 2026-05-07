@@ -25,6 +25,7 @@ from src.core.database.models import (
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.testing_hooks import AdCPTestContext
 from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+from tests.helpers.adcp_factories import create_test_reporting_capabilities
 
 
 def _create_test_tenant_and_principal(ad_server: str | None = None) -> tuple[str, str]:
@@ -89,6 +90,7 @@ def _create_basic_media_buy_with_webhook(
             format_ids=[],
             targeting_template={},
             delivery_type="",
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         pricing_option = PricingOption(

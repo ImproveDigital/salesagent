@@ -37,6 +37,7 @@ from src.core.schemas import (
     SignalDeployment,
     Targeting,
 )
+from tests.helpers.adcp_factories import create_test_reporting_capabilities
 
 
 class AdCPSchemaContractValidator:
@@ -69,15 +70,15 @@ class AdCPSchemaContractValidator:
         # Step 3: Validate required AdCP fields are present
         for field in adcp_spec_fields:
             assert field in adcp_output, f"Required AdCP field '{field}' missing from {schema_class.__name__} output"
-            assert adcp_output[field] is not None, (
-                f"Required AdCP field '{field}' is null in {schema_class.__name__} output"
-            )
+            assert (
+                adcp_output[field] is not None
+            ), f"Required AdCP field '{field}' is null in {schema_class.__name__} output"
 
         # Step 4: Validate internal fields are excluded from AdCP output
         for field in internal_only_fields:
-            assert field not in adcp_output, (
-                f"Internal field '{field}' should not appear in {schema_class.__name__} AdCP output"
-            )
+            assert (
+                field not in adcp_output
+            ), f"Internal field '{field}' should not appear in {schema_class.__name__} AdCP output"
 
         # Step 5: Test internal output (if available)
         if hasattr(model_instance, "model_dump_internal"):
@@ -96,9 +97,9 @@ class AdCPSchemaContractValidator:
                     else:
                         # Field has exclude=True and won't appear in any serialization
                         continue
-                assert field in internal_output, (
-                    f"Field '{field}' missing from internal output of {schema_class.__name__}"
-                )
+                assert (
+                    field in internal_output
+                ), f"Field '{field}' missing from internal output of {schema_class.__name__}"
 
         # Step 6: Test roundtrip conversion safety
         if hasattr(model_instance, "model_dump_internal"):
@@ -127,9 +128,9 @@ class AdCPSchemaContractValidator:
         for field in adcp_spec_fields:
             original_value = adcp_output.get(field)
             reconstructed_value = reconstructed_adcp.get(field)
-            assert reconstructed_value == original_value, (
-                f"Field '{field}' changed during roundtrip: {original_value} → {reconstructed_value}"
-            )
+            assert (
+                reconstructed_value == original_value
+            ), f"Field '{field}' changed during roundtrip: {original_value} → {reconstructed_value}"
 
     def validate_field_mapping_consistency(
         self, schema_class: type, test_data: dict[str, Any], internal_external_mappings: dict[str, str]
@@ -153,16 +154,16 @@ class AdCPSchemaContractValidator:
                 # Get value via external property/mapping
                 if hasattr(model_instance, external_field):
                     external_value = getattr(model_instance, external_field)
-                    assert external_value == internal_value, (
-                        f"Field mapping inconsistency: {internal_field} ({internal_value}) != {external_field} ({external_value})"
-                    )
+                    assert (
+                        external_value == internal_value
+                    ), f"Field mapping inconsistency: {internal_field} ({internal_value}) != {external_field} ({external_value})"
 
                 # Verify external field appears in AdCP output
                 adcp_output = model_instance.model_dump()
                 assert external_field in adcp_output, f"External field '{external_field}' missing from AdCP output"
-                assert internal_field not in adcp_output, (
-                    f"Internal field '{internal_field}' should not appear in AdCP output"
-                )
+                assert (
+                    internal_field not in adcp_output
+                ), f"Internal field '{internal_field}' should not appear in AdCP output"
 
 
 class TestProductSchemaContract:
@@ -187,6 +188,7 @@ class TestProductSchemaContract:
                 "provider": "Google Ad Manager with IAS viewability",
                 "notes": "MRC-accredited viewability. 50% in-view for 1s display / 2s video",
             },
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "measurement": {
                 "type": "brand_lift",
                 "attribution": "deterministic_purchase",
@@ -245,6 +247,7 @@ class TestProductSchemaContract:
             ],
             "delivery_type": "non_guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": True,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -284,6 +287,7 @@ class TestProductSchemaContract:
                 "provider": "Nielsen DAR with IAS viewability",
                 "notes": "MRC-accredited viewability. Panel-based demographic measurement updated monthly.",
             },
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "measurement": {
                 "type": "incremental_sales_lift",
                 "attribution": "probabilistic",
@@ -327,6 +331,7 @@ class TestProductSchemaContract:
             ],
             "delivery_type": "non_guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -579,6 +584,7 @@ class TestGetProductsResponseContract:
                         currency="USD",
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),
             ),
             Product(
                 product_id="response_test_2",
@@ -603,6 +609,7 @@ class TestGetProductsResponseContract:
                         price_guidance={"p50": 10.0, "p90": 15.0},
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),
             ),
         ]
 
@@ -645,6 +652,7 @@ class TestSchemaEvolutionSafety:
             ],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -681,6 +689,7 @@ class TestSchemaEvolutionSafety:
             ],
             "delivery_type": "non_guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -732,6 +741,7 @@ class TestSchemaEvolutionSafety:
                     min_spend_per_package=Decimal("2000.00"),  # Decimal input
                 )
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         adcp_output = product_with_decimal.model_dump()

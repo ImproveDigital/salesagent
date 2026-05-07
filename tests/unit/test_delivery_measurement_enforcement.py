@@ -28,6 +28,7 @@ from tests.helpers.adcp_factories import (
     create_test_cpm_pricing_option,
     create_test_db_product,
     create_test_publisher_properties_by_tag,
+    create_test_reporting_capabilities,
 )
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ def _make_schema_product(**overrides) -> Product:
         "delivery_measurement": {"provider": "test_provider"},
         "publisher_properties": [create_test_publisher_properties_by_tag()],
         "pricing_options": [create_test_cpm_pricing_option()],
+        "reporting_capabilities": create_test_reporting_capabilities(),
     }
     defaults.update(overrides)
     return Product(**defaults)
@@ -93,6 +95,7 @@ class TestDeliveryMeasurementOptional:
             publisher_properties=[create_test_publisher_properties_by_tag()],
             pricing_options=[create_test_cpm_pricing_option()],
             # delivery_measurement intentionally omitted — now optional per adcp 3.10
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
         assert product.delivery_measurement is None
 

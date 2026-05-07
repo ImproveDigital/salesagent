@@ -4,6 +4,7 @@ from src.core.schemas import Product
 from tests.helpers.adcp_factories import (
     create_test_cpm_pricing_option,
     create_test_publisher_properties_by_tag,
+    create_test_reporting_capabilities,
 )
 
 
@@ -34,6 +35,7 @@ def test_product_with_empty_pricing_options():
             }
         ],
         publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # Verify the product serializes correctly
@@ -66,6 +68,7 @@ def test_product_with_pricing_options():
             )
         ],
         publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # Verify the product serializes with pricing_options
@@ -98,6 +101,7 @@ def test_product_pricing_options_defaults_to_empty_list():
             },
             publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
             # pricing_options not provided - should raise validation error
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
     # Verify the error is about missing pricing_options
@@ -133,6 +137,7 @@ def test_product_with_empty_pricing_options_serializes_as_empty_array():
             )
         ],
         publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # Simulate clearing pricing for anonymous user

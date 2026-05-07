@@ -867,6 +867,14 @@ def create_test_db_product(
     if targeting_template is None:
         targeting_template = {}
 
+    # AdCP 4.4 requires reporting_capabilities. Production INSERTs use the
+    # column's server_default, but in-memory ORM construction (unit tests)
+    # bypasses the DB so we set the same baseline here.
+    if "reporting_capabilities" not in kwargs:
+        from src.core.database.models import PRODUCT_REPORTING_CAPABILITIES_DEFAULT
+
+        kwargs["reporting_capabilities"] = dict(PRODUCT_REPORTING_CAPABILITIES_DEFAULT)
+
     return DBProduct(
         tenant_id=tenant_id,
         product_id=product_id,
