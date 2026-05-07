@@ -31,7 +31,12 @@ def _identity_with_tenantcontext(**fields):
 
 
 class TestCheckBillingPolicy:
-    """BR-RULE-059: seller billing policy enforcement."""
+    """BR-RULE-059: seller billing policy enforcement.
+
+    All cases here pass ``principal_billing_enabled=True`` so the BR-RULE-061
+    principal-level gate doesn't fire — these tests are about the tenant
+    ``supported_billing`` gate only. BR-RULE-061-specific cases are below.
+    """
 
     def test_no_policy_configured_accepts_all(self):
         identity = _identity_with()  # no supported_billing key
@@ -86,6 +91,36 @@ class TestCheckBillingPolicy:
         identity = _identity_with(supported_billing=["agent"])
         assert isinstance(identity.tenant, dict)
         assert _check_billing_policy("agent", identity, principal_billing_enabled=True) is None
+
+
+class TestCheckBillingPolicyPrincipalGate:
+    """BR-RULE-061: principal-level agent-billing capability gate.
+
+    When ``billing='agent'``, the calling principal's ``billing_enabled``
+    flag must be True. Operator-flagged principals (free-tier, test, etc.)
+    can't be the billing party.
+    """
+
+    def test_agent_billing_rejected_when_principal_disabled(self):
+        identity = _identity_with(supported_billing=["agent", "operator"])
+        errors = _check_billing_policy("agent", identity, principal_billing_enabled=False)
+        assert errors is not None
+        assert errors[0].code == "BILLING_NOT_PERMITTED_FOR_AGENT"
+        # ``recovery`` is the adcp Recovery enum; compare against its value.
+        assert errors[0].recovery.value == "correctable"
+        assert errors[0].field == "billing"
+
+    def test_operator_billing_accepted_when_principal_disabled(self):
+        """billing='operator' bypasses the principal gate — only agent billing checks the flag."""
+        identity = _identity_with(supported_billing=["agent", "operator"])
+        assert _check_billing_policy("operator", identity, principal_billing_enabled=False) is None
+
+    def test_tenant_gate_fires_before_principal_gate(self):
+        """Unsupported billing value rejected with BILLING_NOT_SUPPORTED, not the principal-gate code."""
+        identity = _identity_with(supported_billing=["operator"])
+        errors = _check_billing_policy("agent", identity, principal_billing_enabled=False)
+        assert errors is not None
+        assert errors[0].code == "BILLING_NOT_SUPPORTED"
 
 
 class TestBuildSetupForApproval:
