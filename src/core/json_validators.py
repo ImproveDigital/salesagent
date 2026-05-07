@@ -9,7 +9,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import validates
 
 # Pydantic models for JSON field validation
@@ -31,7 +31,14 @@ class CommentModel(BaseModel):
 
 
 class PlatformMappingModel(BaseModel):
-    """Model for principal.platform_mappings."""
+    """Model for principal.platform_mappings.
+
+    Uses ``extra="forbid"`` so removed adapter keys (e.g. ``kevel`` after
+    its removal) fail loudly on write instead of being silently scrubbed
+    by the validator's ``model_dump(exclude_none=True)`` round-trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     google_ad_manager: dict[str, Any] | None = None
     mock: dict[str, Any] | None = None
