@@ -31,6 +31,7 @@ from adcp.server.auth import current_principal
 from adcp.types import GetProductsRequest
 
 from src.core.config_loader import get_tenant_by_id
+from src.core.exceptions import AdCPError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     CreateMediaBuyRequest,
@@ -160,6 +161,15 @@ async def _delegate_update_media_buy(
     @IdempotencyStore.wrap doesn't compose — see #559). We rebuild
     a single :class:`UpdateMediaBuyRequest` here for the impl, since
     the impl wants the unified wire shape.
+
+    AdCPError translation: the impl raises typed AdCPError subclasses
+    (e.g. AdCPMediaBuyNotFoundError, AdCPPackageNotFoundError) for
+    structured rejections. The framework dispatcher only projects
+    decisioning AdcpError to the wire ``adcp_error`` envelope, so we
+    translate here. Without this translation a typed not-found surfaces
+    as an opaque INTERNAL_ERROR — losing the tenant-isolation guarantee
+    that cross-tenant probing returns ``MEDIA_BUY_NOT_FOUND``, not
+    ``AUTHORIZATION_ERROR``.
     """
     identity = _build_identity(ctx)
     if isinstance(patch, dict):
@@ -170,7 +180,15 @@ async def _delegate_update_media_buy(
         patch_dict = dict(patch)
     patch_dict["media_buy_id"] = media_buy_id
     req_model = _coerce_to_request_model(patch_dict, UpdateMediaBuyRequest)
-    response = await asyncio.to_thread(_update_media_buy_impl, req_model, identity)
+    try:
+        response = await asyncio.to_thread(_update_media_buy_impl, req_model, identity)
+    except AdCPError as exc:
+        raise AdcpError(
+            exc.error_code,
+            message=exc.message or str(exc),
+            recovery=exc.recovery,
+            details=exc.details,
+        ) from exc
     return _to_wire(response)
 
 
