@@ -645,6 +645,22 @@ class TestWriteGuard:
                 session.commit()
             session.rollback()
 
+    def test_platform_background_worker_flag_allows_adapter_config_update(self, managed_tenant):
+        # Background sync workers (inventory sync, refresh) write
+        # adapter_config.custom_targeting_keys on every run. They mark
+        # their session with platform_background_worker=True so the guard
+        # lets the platform-internal mutation through. UI sessions never
+        # set this flag, so publisher writes still fail.
+        with get_db_session() as session:
+            session.info["platform_background_worker"] = True
+            adapter = session.scalars(select(AdapterConfig).filter_by(tenant_id=managed_tenant)).first()
+            assert adapter is not None
+            adapter.custom_targeting_keys = {"sport": "12345", "team": "67890"}
+            session.commit()
+        with get_db_session() as session:
+            adapter = session.scalars(select(AdapterConfig).filter_by(tenant_id=managed_tenant)).first()
+            assert adapter.custom_targeting_keys == {"sport": "12345", "team": "67890"}
+
 
 # ---------------------------------------------------------------------------
 # End-to-end + reverse-proxy + OpenAPI smoke

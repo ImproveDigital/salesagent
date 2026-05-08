@@ -623,6 +623,11 @@ class GAMInventoryService:
             else:
                 logger.info(f"No custom targeting keys found in gam_inventory for tenant {tenant_id}")
         except Exception as e:
+            # Roll the session back so the outer sync loop can keep using it
+            # for subsequent phases (audience segments, mark-stale, etc.).
+            # Without this, every later statement on this session raises
+            # PendingRollbackError that buries the original cause in logs.
+            self.db.rollback()
             logger.error(f"Failed to update adapter_config.custom_targeting_keys: {e}", exc_info=True)
 
     def _convert_item_to_db_format(self, tenant_id: str, inventory_type: str, item, sync_time: datetime) -> dict:
