@@ -2351,8 +2351,8 @@ class TestCustomDateRangeBothProvided:
                 start_date="2026-03-01",
                 end_date="2026-03-07",
             )
-            assert response.reporting_period.start == datetime(2026, 3, 1, tzinfo=UTC)
-            assert response.reporting_period.end == datetime(2026, 3, 7, tzinfo=UTC)
+            assert response.reporting_period.start == datetime(2026, 3, 1, 0, 0, 0, tzinfo=UTC)
+            assert response.reporting_period.end == datetime(2026, 3, 7, 23, 59, 59, 999999, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
