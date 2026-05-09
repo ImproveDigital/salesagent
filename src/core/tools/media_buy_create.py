@@ -1273,7 +1273,9 @@ def push_creative_to_existing_buy(
     )
     from src.core.database.models import (
         CreativeAssignment,
-        Tenant,
+    )
+    from src.core.database.models import (
+        Tenant as ModelTenant,
     )
     from src.core.database.repositories import MediaBuyUoW
 
@@ -1282,7 +1284,7 @@ def push_creative_to_existing_buy(
             assert uow.session is not None
             session = uow.session
 
-            tenant_obj = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            tenant_obj = session.scalars(select(ModelTenant).filter_by(tenant_id=tenant_id)).first()
             if not tenant_obj:
                 return False, f"Tenant {tenant_id} not found"
 
@@ -3176,9 +3178,9 @@ async def _create_media_buy_impl(
                 # Merge dimensions from product's format_ids if request format_ids don't have them
                 # This handles the case where buyer specifies format_id but not dimensions
                 # Build lookup of product format dimensions by (normalized_url, id)
-                product_format_dimensions: dict[
-                    tuple[str | None, str], tuple[int | None, int | None, float | None]
-                ] = {}
+                product_format_dimensions: dict[tuple[str | None, str], tuple[int | None, int | None, float | None]] = (
+                    {}
+                )
                 if pkg_product.format_ids:
                     for fmt in pkg_product.format_ids:
                         agent_url = fmt.agent_url

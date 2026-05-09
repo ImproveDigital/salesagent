@@ -227,6 +227,76 @@ class DeliveryRepository:
     # WebhookDeliveryLog writes
     # ------------------------------------------------------------------
 
+    # Maximum size in bytes for stored request_payload (JSON-encoded) and
+    # response_body. Anything larger is truncated at insert time so a
+    # pathologically-large webhook body can't blow up the row.
+    _BODY_TRUNCATION_BYTES: int = 64 * 1024
+
+    @classmethod
+    def _truncate_request_payload(cls, payload: dict | None) -> dict | None:
+        """Truncate or replace a JSON payload to ~64KB.
+
+        Shape contract for buyer-visible consumers:
+        - Returns the original dict unchanged if it fits and is
+          serializable (this is the common case — buyers see exactly the
+          AdCP webhook body we sent).
+        - On overflow / unserializable input, returns a sentinel dict
+          with a single ``_meta`` key:
+          ``{"_meta": {"truncated": True, "original_size_bytes": N,
+          "preview": <first 4KB of stringified payload>}}``
+          so consumers can distinguish "real payload" from "metadata
+          replacement" by checking ``_meta`` membership rather than
+          guessing from leaked underscore-prefixed keys.
+        """
+        if payload is None:
+            return None
+        import json
+
+        try:
+            encoded = json.dumps(payload)
+        except (TypeError, ValueError):
+            return {"_meta": {"truncated": True, "reason": "unserializable"}}
+        size = len(encoded.encode("utf-8"))
+        if size <= cls._BODY_TRUNCATION_BYTES:
+            return payload
+        return {
+            "_meta": {
+                "truncated": True,
+                "original_size_bytes": size,
+                "preview": encoded[:4096],
+            }
+        }
+
+    @classmethod
+    def _truncate_response_body(cls, body: str | None) -> str | None:
+        """Truncate a response body to ~64KB.
+
+        Plain ASCII / valid UTF-8 bodies get sliced at the byte boundary
+        with a ``[truncated]`` marker appended. If the body is not
+        decodable as UTF-8 (binary error pages, gzipped HTML, etc.)
+        we replace the whole field with a sentinel string rather than
+        silently producing a partially-stripped garbage string from
+        ``decode(errors='ignore')``.
+        """
+        if body is None:
+            return None
+        encoded = body.encode("utf-8")
+        size = len(encoded)
+        if size <= cls._BODY_TRUNCATION_BYTES:
+            return body
+        # Try to slice at the byte boundary and decode strictly. If the
+        # cut lands mid-multibyte, walk back up to 3 bytes until we
+        # find a valid prefix. If nothing decodes (rare — implies
+        # invalid UTF-8 in the original body too), fall through to the
+        # binary sentinel.
+        for end in range(cls._BODY_TRUNCATION_BYTES, max(0, cls._BODY_TRUNCATION_BYTES - 4), -1):
+            try:
+                prefix = encoded[:end].decode("utf-8")
+                return prefix + "\n... [truncated]"
+            except UnicodeDecodeError:
+                continue
+        return f"<binary response, {size} bytes, not stored>"
+
     def create_log(
         self,
         *,
@@ -245,11 +315,18 @@ class DeliveryRepository:
         response_time_ms: int | None = None,
         completed_at: datetime | None = None,
         next_retry_at: datetime | None = None,
+        request_payload: dict | None = None,
+        response_body: str | None = None,
     ) -> WebhookDeliveryLog:
         """Create or update a webhook delivery log entry.
 
         Uses session.merge() to handle upsert semantics (the protocol webhook
         service updates the same log entry across retry attempts).
+
+        ``request_payload`` and ``response_body`` are truncated to ~64KB
+        on insert so a pathologically-large webhook body can't blow up
+        the row. Pass them when you have them; older callers that don't
+        provide them get ``None`` (rows pre-#101 schema).
 
         Does NOT commit — the caller handles that.
         """
@@ -270,7 +347,86 @@ class DeliveryRepository:
             response_time_ms=response_time_ms,
             completed_at=completed_at,
             next_retry_at=next_retry_at,
+            request_payload=self._truncate_request_payload(request_payload),
+            response_body=self._truncate_response_body(response_body),
         )
         self._session.merge(log_entry)
         self._session.flush()
         return log_entry
+
+    # ------------------------------------------------------------------
+    # WebhookDeliveryLog cross-tenant maintenance (retention)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def delete_logs_older_than(session: Session, cutoff: datetime) -> int:
+        """Delete every webhook_delivery_log row with ``created_at < cutoff``.
+
+        Tenant-agnostic — used by the retention script which prunes
+        across the whole table. Returns the rowcount of the DELETE.
+        Caller commits.
+        """
+        from sqlalchemy import delete as sa_delete
+
+        result = session.execute(sa_delete(WebhookDeliveryLog).where(WebhookDeliveryLog.created_at < cutoff))
+        # CursorResult.rowcount is set after a DELETE on the SA 2.0 dialect.
+        rowcount = getattr(result, "rowcount", 0) or 0
+        return int(rowcount)
+
+    @staticmethod
+    def count_logs_older_than(session: Session, cutoff: datetime) -> int:
+        """Count rows that ``delete_logs_older_than`` would delete.
+
+        Used for ``--dry-run`` reporting in the retention script.
+        Tenant-agnostic.
+        """
+        from sqlalchemy import func as sa_func
+
+        return int(
+            session.execute(
+                select(sa_func.count()).select_from(WebhookDeliveryLog).where(WebhookDeliveryLog.created_at < cutoff)
+            ).scalar_one()
+        )
+
+    # ------------------------------------------------------------------
+    # WebhookDeliveryLog reads — for #101 buyer self-debug surface
+    # ------------------------------------------------------------------
+
+    def _list_logs_query(self, media_buy_id: str, limit: int):
+        return (
+            select(WebhookDeliveryLog)
+            .where(WebhookDeliveryLog.tenant_id == self._tenant_id)
+            .where(WebhookDeliveryLog.media_buy_id == media_buy_id)
+            .order_by(WebhookDeliveryLog.created_at.desc())
+            .limit(limit)
+        )
+
+    def list_logs_for_buyer(
+        self,
+        media_buy_id: str,
+        principal_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[WebhookDeliveryLog]:
+        """Recent webhook deliveries for a media buy, scoped to one principal.
+
+        Use on buyer-facing surfaces. ``principal_id`` is required so a
+        buyer agent never sees another principal's deliveries even if
+        multiple agents share visibility into the same buy.
+        """
+        stmt = self._list_logs_query(media_buy_id, limit).where(WebhookDeliveryLog.principal_id == principal_id)
+        return list(self._session.scalars(stmt).all())
+
+    def list_logs_for_operator(
+        self,
+        media_buy_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[WebhookDeliveryLog]:
+        """Recent webhook deliveries for a media buy across all principals.
+
+        Tenant-scoped. Use only on operator-facing surfaces (admin UI)
+        where the caller is authorized to see all webhook activity for
+        every principal in the tenant.
+        """
+        return list(self._session.scalars(self._list_logs_query(media_buy_id, limit)).all())

@@ -66,13 +66,11 @@ def test_security_requirement_references_bearer_scheme():
     is published."""
     schemes, requirements = _build_security_for_auth(_production_auth())
 
-    assert len(requirements) == 1, (
-        f"Expected exactly one SecurityRequirement; got {len(requirements)}"
-    )
+    assert len(requirements) == 1, f"Expected exactly one SecurityRequirement; got {len(requirements)}"
     requirement = requirements[0]
-    assert "bearerAuth" in requirement.schemes, (
-        f"SecurityRequirement must reference 'bearerAuth' scheme; got {dict(requirement.schemes)!r}"
-    )
+    assert (
+        "bearerAuth" in requirement.schemes
+    ), f"SecurityRequirement must reference 'bearerAuth' scheme; got {dict(requirement.schemes)!r}"
 
 
 def test_unauthenticated_handler_publishes_no_security():

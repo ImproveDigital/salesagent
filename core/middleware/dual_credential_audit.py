@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 

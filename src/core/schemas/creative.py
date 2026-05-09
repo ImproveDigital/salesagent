@@ -62,7 +62,6 @@ from pydantic import (
 
 from src.core.config import get_pydantic_extra_mode
 from src.core.schemas._base import (
-    ApprovalStatus,
     FormatId,
     NestedModelSerializerMixin,
     SalesAgentBaseModel,

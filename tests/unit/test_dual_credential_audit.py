@@ -68,9 +68,7 @@ async def test_warns_on_different_tokens_in_both_headers(caplog):
     assert "adcp-token-aaa" not in msg, f"Raw x-adcp-auth token leaked into log: {msg!r}"
     assert "rfc6750-token-bbb" not in msg, f"Raw Bearer token leaked into log: {msg!r}"
     # Fingerprints (8 hex chars per credential) must appear so SOC can correlate.
-    assert "x_adcp_fp=" in msg and "bearer_fp=" in msg, (
-        f"Expected fingerprint markers in log; got {msg!r}"
-    )
+    assert "x_adcp_fp=" in msg and "bearer_fp=" in msg, f"Expected fingerprint markers in log; got {msg!r}"
 
 
 @pytest.mark.asyncio
@@ -91,9 +89,9 @@ async def test_no_warning_when_tokens_match(caplog):
         await _drive(_http_scope(headers), middleware)
 
     assert inner.called
-    assert not [r for r in caplog.records if r.levelno == logging.WARNING], (
-        "Expected no warning when both headers carry the same token"
-    )
+    assert not [
+        r for r in caplog.records if r.levelno == logging.WARNING
+    ], "Expected no warning when both headers carry the same token"
 
 
 @pytest.mark.asyncio
