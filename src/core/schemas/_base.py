@@ -20,16 +20,9 @@ from adcp.types import (
     PricingModel,  # Replaces local PricingModel enum (lowercase members: .cpm, .cpc, etc.)
 )
 from adcp.types import CreateMediaBuyRequest as LibraryCreateMediaBuyRequest
-
-# Import main request/response types from stable API
 from adcp.types import Format as LibraryFormat
-
-# Import types from stable API (per adcp 2.7.0+)
 from adcp.types import FormatId as LibraryFormatId
 from adcp.types import PackageRequest as LibraryPackageRequest
-
-# Import types from stable API (per adcp 2.9.0+ - all types now in stable)
-# Note: AffectedPackage was removed in 2.9.0, use Package instead
 from adcp.types import PackageUpdate as LibraryPackageUpdate
 from adcp.types import UpdateMediaBuyRequest as LibraryUpdateMediaBuyRequest
 from adcp.types.aliases import (
@@ -338,7 +331,7 @@ class AffectedPackage(LibraryPackage):
     - paused: Boolean indicating whether package is paused (replaces old status enum)
     """
 
-    # Internal fields for tracking what changed (not in AdCP spec)
+    # Internal fields for tracking what changed.
     changes_applied: dict[str, Any] | None = Field(
         None,
         description="Internal: Detailed changes applied to package (creative_ids added/removed, etc.)",
@@ -364,19 +357,19 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):
     # Pydantic allows subclass override at runtime but mypy doesn't recognize this
     affected_packages: list[AffectedPackage] | None = None  # type: ignore[assignment]
 
-    # Internal fields (excluded from AdCP responses)
+    # workflow_step_id is surfaced on the wire so buyers can disambiguate
+    # "deferred for approval" from "applied with no package effect" —
+    # both otherwise serialize to the same {media_buy_id, affected_packages: []}
+    # envelope. AdCP UpdateMediaBuyResponse1 has `extra='allow'`, so the
+    # extra field is permitted. None values are dropped by exclude_none on
+    # the wire boundary, so immediate-apply responses don't leak the field.
     workflow_step_id: str | None = None
 
     @model_serializer(mode="wrap")
     def _serialize_model(self, serializer, info):
-        """Serialize model, excluding internal fields by default."""
+        """Serialize model — keeps workflow_step_id for deferred-state signal."""
         # Get base serialization
         data = serializer(self)
-
-        # Exclude workflow_step_id from protocol responses
-        # (unless explicitly requested via model_dump_internal)
-        if not info.context or not info.context.get("include_internal"):
-            data.pop("workflow_step_id", None)
 
         # Explicitly serialize affected_packages to ensure AffectedPackage.model_dump() is called
         # This ensures internal fields (changes_applied, buyer_package_ref) are excluded via exclude=True
@@ -406,10 +399,15 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""
+        if self.workflow_step_id and not self.affected_packages:
+            return (
+                f"Media buy {self.media_buy_id} update queued for seller approval "
+                f"(workflow step {self.workflow_step_id}). Poll the workflow step for "
+                f"the final outcome."
+            )
         if self.affected_packages:
             return f"Media buy {self.media_buy_id} updated: {len(self.affected_packages)} package(s) affected."
-        else:
-            return f"Media buy {self.media_buy_id} updated successfully."
+        return f"Media buy {self.media_buy_id} updated successfully."
 
 
 class UpdateMediaBuyError(AdCPUpdateMediaBuyError):
@@ -668,21 +666,19 @@ class Format(LibraryFormat):
         description="Internal: Platform-specific configuration (e.g., gam) for creative mapping",
     )
     category: Literal["standard", "custom", "generative"] | None = Field(
-        None, exclude=True, description="Internal: Format category (not in AdCP spec)"
+        None, exclude=True, description="Internal: Format category"
     )
     is_standard: bool | None = Field(
-        None, exclude=True, description="Internal: Whether this follows IAB specifications (not in AdCP spec)"
+        None, exclude=True, description="Internal: Whether this follows IAB specifications"
     )
     requirements: dict[str, Any] | None = Field(
         None,
         exclude=True,
-        description="Internal: Legacy technical specifications (not in AdCP spec, use renders instead)",
+        description="Internal: Legacy technical specifications (use renders instead)",
     )
-    iab_specification: str | None = Field(
-        None, exclude=True, description="Internal: Name of IAB specification (not in AdCP spec)"
-    )
+    iab_specification: str | None = Field(None, exclude=True, description="Internal: Name of IAB specification")
     accepts_3p_tags: bool | None = Field(
-        None, exclude=True, description="Internal: Whether format accepts third-party tags (not in AdCP spec)"
+        None, exclude=True, description="Internal: Whether format accepts third-party tags"
     )
 
     @property
@@ -814,13 +810,12 @@ def convert_format_ids_to_formats(format_ids: list[str], tenant_id: str | None =
 
 
 class FrequencyCap(LibraryFrequencyCap):
-    """Frequency capping extending AdCP library type with scope.
+    """Local alias for adcp ``FrequencyCap`` — kept as a customization hook.
 
-    Inherits suppress_minutes: float from library.
-    Adds scope field for media buy vs package level capping.
+    The previous ``scope`` extension was wire-visible but never read by any
+    adapter or impl path. Tracked upstream as adcp RFC #4240; until that
+    lands, the media-buy vs package distinction is not preserved.
     """
-
-    scope: Literal["media_buy", "package"] = Field("media_buy", description="Apply at media buy or package level")
 
 
 class TargetingCapability(SalesAgentBaseModel):
@@ -895,7 +890,7 @@ class Targeting(TargetingOverlay):
     # axe_include_segment: str | None
     # axe_exclude_segment: str | None
 
-    # Override frequency_cap to use our extended FrequencyCap with scope
+    # Override frequency_cap to use our local FrequencyCap subclass (customization hook).
     frequency_cap: FrequencyCap | None = None
 
     # --- Geo exclusion extensions (not in library) ---
@@ -1138,16 +1133,12 @@ class AIReviewPolicy(SalesAgentBaseModel):
 
 
 class CreativePolicy(LibraryCreativePolicy):
-    """Extends library CreativePolicy with AI provenance requirements.
+    """Local alias for adcp ``CreativePolicy``.
 
-    Library provides: co_branding, landing_page, templates_available.
-    Local extension adds provenance_required for EU AI Act Article 50 compliance.
+    Library covers co_branding, landing_page, templates_available, and the
+    full provenance_required + provenance_requirements EU AI Act Article 50
+    surface. Subclass kept as a customization hook.
     """
-
-    provenance_required: bool | None = Field(
-        default=None,
-        description="When True, creatives must include AI provenance metadata (EU AI Act Article 50)",
-    )
 
 
 # --- Core Schemas ---
@@ -1309,7 +1300,7 @@ class PackageRequest(LibraryPackageRequest):
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
-    # Internal fields (not in AdCP spec) - excluded from API responses
+    # Internal fields — excluded from API responses.
     tenant_id: str | None = Field(None, description="Internal: Tenant ID for multi-tenancy", exclude=True)
     media_buy_id: str | None = Field(None, description="Internal: Associated media buy ID", exclude=True)
     platform_line_item_id: str | None = Field(
@@ -1383,7 +1374,7 @@ class Package(LibraryPackage):
     - package_id, status
     """
 
-    # Internal fields (not in AdCP spec) - excluded from API responses
+    # Internal fields — excluded from API responses.
     tenant_id: str | None = Field(None, description="Internal: Tenant ID for multi-tenancy", exclude=True)
     media_buy_id: str | None = Field(None, description="Internal: Associated media buy ID", exclude=True)
     platform_line_item_id: str | None = Field(
@@ -1561,36 +1552,6 @@ class AssetStatus(SalesAgentBaseModel):
     workflow_step_id: str | None = None  # HITL workflow step ID for manual approval
 
 
-# Unified update models
-class PackageUpdate(SalesAgentBaseModel):
-    """Updates to apply to a specific package."""
-
-    package_id: str
-    active: bool | None = None  # True to activate, False to pause
-    budget: float | None = Field(None, ge=0)  # Budget allocation in the currency specified by the pricing option
-    impressions: int | None = None  # Direct impression goal (overrides budget calculation)
-    cpm: float | None = None  # Update CPM rate
-    daily_budget: float | None = None  # Daily spend cap
-    daily_impressions: int | None = None  # Daily impression cap
-    pacing: Literal["even", "asap", "front_loaded"] | None = None
-    creative_ids: list[str] | None = None  # Update creative assignments
-    targeting_overlay: Targeting | None = None  # Package-specific targeting refinements
-
-
-class UpdatePackageRequest(SalesAgentBaseModel):
-    """Update one or more packages within a media buy.
-
-    Uses PATCH semantics: Only packages mentioned are affected.
-    Omitted packages remain unchanged.
-    To remove a package from delivery, set active=false.
-    To add new packages, use create_media_buy or add_packages (future tool).
-    """
-
-    media_buy_id: str
-    packages: list[PackageUpdate]  # List of package updates
-    today: date | None = None  # For testing/simulation
-
-
 # AdCP-compliant supporting models for update-media-buy-request
 class AdCPPackageUpdate(LibraryPackageUpdate):
     """Package-specific update extending library type.
@@ -1599,13 +1560,18 @@ class AdCPPackageUpdate(LibraryPackageUpdate):
     creative_assignments, creatives, bid_price, ext, impressions, pacing,
     package_id).
 
-    Adds creative_ids — spec-mandated field missing from library codegen.
-    TODO(adcp-library): Remove creative_ids once upstream codegen adds it.
+    The local ``creative_ids`` field is non-spec — the AdCP package-update
+    schema uses ``creatives`` (full objects) and ``creative_assignments``
+    (placement bindings). Drop ``creative_ids`` in the Pattern #1 cleanup
+    pass and migrate callers to the spec fields.
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
-    # Spec field missing from library codegen (adcp#208)
     creative_ids: list[str] | None = None
+    # Same library default-injection bug as on the parent UpdateMediaBuyRequest
+    # (Literal[True]=True). Force default to None so omitted fields don't
+    # silently mark the package canceled. (#155)
+    canceled: Literal[True] | None = Field(default=None)  # type: ignore[assignment]
 
 
 class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
@@ -1620,6 +1586,10 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
     - packages: use our AdCPPackageUpdate (adds creative_ids)
     - budget: campaign-level budget (not in library — convenience field)
     - today: internal testing field
+    - canceled: force default to None (library declares Literal[True]=True
+      which silently injects canceled=True into every validated payload —
+      latent data-loss vector once any code reads the field as a
+      cancellation signal). See #155.
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
@@ -1628,6 +1598,11 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
     end_time: datetime | None = None
     # Override packages to use our extended type with creative_ids
     packages: list[AdCPPackageUpdate] | None = None  # type: ignore[assignment]
+    # Override library default of `canceled: Literal[True] = True`. Buyer
+    # must explicitly send `canceled: true` to request cancellation;
+    # omission must mean "not a cancellation request", not "default to
+    # canceled". (#155)
+    canceled: Literal[True] | None = Field(default=None)  # type: ignore[assignment]
     # Campaign-level budget (not in library spec — convenience field)
     # Bare float is accepted so transport wrappers can preserve existing DB currency
     # when the caller updates only the amount.
@@ -1945,7 +1920,7 @@ class Signal(LibrarySignal):
     signal_type: Literal["marketplace", "custom", "owned"] = Field(..., description="Type of signal")  # type: ignore[assignment]
     deployments: list[SignalDeployment] = Field(..., description="Array of platform deployments")  # type: ignore[assignment]
 
-    # Internal fields (not in AdCP spec, excluded from serialization)
+    # Internal fields — excluded from serialization.
     tenant_id: str | None = Field(None, description="Internal: Tenant ID for multi-tenancy", exclude=True)
     created_at: datetime | None = Field(None, description="Internal: Creation timestamp", exclude=True)
     updated_at: datetime | None = Field(None, description="Internal: Last update timestamp", exclude=True)
@@ -2035,11 +2010,10 @@ class GetSignalsResponse(NestedModelSerializerMixin, LibraryGetSignalsResponse):
 
 # --- Signal Activation ---
 class ActivateSignalRequest(LibraryActivateSignalRequest):
-    """Extends library ActivateSignalRequest with local extension fields.
+    """Extends library ActivateSignalRequest.
 
     Library provides: signal_agent_segment_id, deployments, idempotency_key,
-    context, ext. Local extensions: campaign_id, media_buy_id (unused in impl,
-    kept for API compat).
+    context, ext.
 
     NOTE: ActivateSignalResponse is NOT migrated — library uses RootModel
     discriminated union (success|error) which is fundamentally incompatible
@@ -2058,10 +2032,6 @@ class ActivateSignalRequest(LibraryActivateSignalRequest):
         max_length=255,
         pattern=r"^[A-Za-z0-9_.:-]{16,255}$",
     )
-
-    # Extension fields (not in library spec)
-    campaign_id: str | None = Field(None, description="Optional campaign ID to activate signal for")
-    media_buy_id: str | None = Field(None, description="Optional media buy ID to activate signal for")
 
     @property
     def signal_id(self) -> str:
@@ -2318,6 +2288,15 @@ class GetMediaBuysPackage(SalesAgentBaseModel):
     start_time: str | None = Field(default=None, description="Package start time (ISO 8601)")
     end_time: str | None = Field(default=None, description="Package end time (ISO 8601)")
     paused: bool | None = Field(default=None, description="Whether this package is paused")
+    targeting_overlay: TargetingOverlay | None = Field(
+        default=None,
+        description=(
+            "Targeting overlay echoed from the most recent create_media_buy or "
+            "update_media_buy. Sellers claiming the property-lists or collection-lists "
+            "specialisms include the persisted PropertyListReference / "
+            "CollectionListReference here so buyers can verify what was stored."
+        ),
+    )
     creative_approvals: list["CreativeApproval"] | None = Field(
         default=None, description="Creative approval state for creatives assigned to this package"
     )
@@ -2326,6 +2305,14 @@ class GetMediaBuysPackage(SalesAgentBaseModel):
     )
     snapshot_unavailable_reason: SnapshotUnavailableReason | None = Field(
         default=None, description="Reason snapshot is unavailable (present when include_snapshot=true but no snapshot)"
+    )
+    ext: dict | None = Field(
+        default=None,
+        description=(
+            "Vendor-namespaced extension object (AdCP convention). For projected/imported "
+            "GAM packages, populated as ``{'gam': {'imported': true, 'line_item_id': ...}}`` "
+            "so buyers can distinguish them from native AdCP packages."
+        ),
     )
 
 
@@ -2340,6 +2327,14 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
     packages: list[GetMediaBuysPackage] = Field(..., description="Packages within this media buy")
     created_at: datetime | None = Field(default=None, description="When this media buy was created")
     updated_at: datetime | None = Field(default=None, description="When this media buy was last updated")
+    ext: dict | None = Field(
+        default=None,
+        description=(
+            "Vendor-namespaced extension object (AdCP convention). For projected/imported "
+            "GAM orders, populated as ``{'gam': {'imported': true, 'order_id': ..., 'advertiser_id': ...}}`` "
+            "so buyers can distinguish them from native AdCP buys."
+        ),
+    )
 
     def model_dump(self, **kwargs):
         result = super().model_dump(**kwargs)
@@ -2351,13 +2346,15 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
 class GetMediaBuysRequest(SalesAgentBaseModel):
     """Request to retrieve media buys.
 
-    Matches the adcp 3.6.0 GetMediaBuysRequest spec.
-    Defined locally because adcp 3.6.0 is not yet required.
+    NOTE: standalone class (does not extend library GetMediaBuysRequest) because
+    salesagent treats ``include_snapshot``/``include_history`` as transport-only
+    flags, not buyer-facing fields. The library exposes them as request fields
+    per spec; we deliberately reject them at the schema layer to enforce the
+    policy. Track salesagent issue before moving to Pattern #1.
     """
 
     media_buy_ids: list[str] | None = Field(default=None, description="Specific media buy IDs to retrieve")
     status_filter: Any | None = Field(default=None, description="Filter by status (MediaBuyStatus or list)")
-    account_id: str | None = Field(default=None, description="Account to filter to (legacy, prefer account)")
     account: LibraryAccountReference | None = Field(default=None, description="Account reference (AdCP 3.x)")
     context: ContextObject | None = Field(default=None, description="Application-level context")
 
@@ -2365,7 +2362,8 @@ class GetMediaBuysRequest(SalesAgentBaseModel):
 class GetMediaBuysResponse(NestedModelSerializerMixin, SalesAgentBaseModel):
     """Response from get_media_buys.
 
-    Matches the adcp 3.6.0 GetMediaBuysResponse spec.
+    NOTE: standalone class (does not extend library GetMediaBuysResponse).
+    Track salesagent issue before moving to Pattern #1 alongside the request.
     """
 
     media_buys: list[GetMediaBuysMediaBuy] = Field(..., description="List of matching media buys")

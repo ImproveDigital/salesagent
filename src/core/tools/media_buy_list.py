@@ -36,6 +36,10 @@ class _MediaBuyData:
     raw_request: dict | None
     created_at: datetime | None
     updated_at: datetime | None
+    # Persisted MediaBuy.status from the DB. Honored by ``_compute_status``
+    # for blocker / terminal states (pending_creatives, paused, rejected,
+    # canceled) that no clock can resolve.
+    status: str | None = None
     # Pre-computed status for projected GAM buys (whose state comes from
     # GAM, not just flight dates). None means use the date-derived status.
     projected_status: object | None = None
@@ -57,7 +61,7 @@ from adcp.types import MediaBuyStatus
 from src.core.auth import get_principal_object
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyUoW
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import AdCPAuthenticationError
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.schemas import (
     ApprovalStatus,
@@ -68,8 +72,11 @@ from src.core.schemas import (
     GetMediaBuysResponse,
     Snapshot,
     SnapshotUnavailableReason,
+    Targeting,
 )
 from src.core.tools._gam_projection import (
+    build_buy_ext,
+    build_package_ext,
     line_item_to_package_fields,
     order_to_media_buy_fields,
     project_gam_status,
@@ -96,8 +103,10 @@ def _get_media_buys_impl(
     if identity is None:
         raise AdCPAuthenticationError("Identity is required")
 
-    if req.account is not None or req.account_id is not None:
-        raise AdCPValidationError("account filtering is not yet supported", recovery="correctable")
+    # ``req.account`` is an optional spec-defined scoping hint. The principal
+    # already scopes to a tenant, so we tolerate the field rather than reject
+    # the request — buyer agents (and storyboards) routinely pass it for
+    # routing context, not as a hostile filter.
 
     testing_ctx = identity.testing_context
     principal_id = identity.principal_id
@@ -107,7 +116,7 @@ def _get_media_buys_impl(
             errors=[{"code": "principal_id_missing", "message": "Principal ID not found in context"}],
         )
 
-    principal = get_principal_object(principal_id)
+    principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
     if not principal:
         return GetMediaBuysResponse(
             media_buys=[],
@@ -203,9 +212,11 @@ def _get_media_buys_impl(
                     start_time=pkg_config.get("start_time"),
                     end_time=pkg_config.get("end_time"),
                     paused=pkg_config.get("paused"),
+                    targeting_overlay=_build_targeting_overlay(pkg_config),
                     creative_approvals=approvals if approvals else None,
                     snapshot=snapshot,
                     snapshot_unavailable_reason=snapshot_unavailable if include_snapshot else None,
+                    ext=build_package_ext(pkg_config),
                 )
             )
 
@@ -222,6 +233,7 @@ def _get_media_buys_impl(
                 packages=response_packages,
                 created_at=buy.created_at,
                 updated_at=buy.updated_at,
+                ext=build_buy_ext(buy.raw_request),
             )
         )
 
@@ -258,6 +270,7 @@ def _fetch_target_media_buys(
             raw_request=buy.raw_request,
             created_at=buy.created_at,
             updated_at=buy.updated_at,
+            status=buy.status,
         )
         for buy in buys
         if _compute_status(buy, today) in filter_statuses
@@ -281,10 +294,39 @@ def _resolve_status_filter(
     return {status_filter}
 
 
+# Statuses no clock can resolve: blockers awaiting a buyer / operator action,
+# and terminal explicit states. ``_compute_status`` returns these verbatim from
+# the persisted ``MediaBuy.status`` rather than overwriting them with a
+# date-derived value.
+_BLOCKER_STATUSES: frozenset[str] = frozenset(
+    {
+        MediaBuyStatus.pending_creatives.value,
+        MediaBuyStatus.paused.value,
+        MediaBuyStatus.rejected.value,
+        MediaBuyStatus.canceled.value,
+    }
+)
+
+
 def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatus:
-    """Compute the current AdCP status of a media buy based on its dates."""
+    """Compute the current AdCP status of a media buy.
+
+    Precedence:
+    1. Projected GAM status (set by ``_project_gam_buys``) wins — GAM is the
+       source of truth for adapter-managed buys.
+    2. Persisted blocker / terminal statuses (``pending_creatives``, ``paused``,
+       ``rejected``, ``canceled``) win over date math — no clock can resolve a
+       missing creative or an explicit operator action.
+    3. Otherwise derive from flight dates: ``pending_start`` / ``active`` /
+       ``completed``.
+    """
     if isinstance(buy, _MediaBuyData) and buy.projected_status is not None:
         return cast(MediaBuyStatus, buy.projected_status)
+
+    persisted = (buy.status or "").lower()
+    if persisted in _BLOCKER_STATUSES:
+        return MediaBuyStatus(persisted)
+
     start = buy.start_time.date() if buy.start_time else cast(date, buy.start_date)
     end = buy.end_time.date() if buy.end_time else cast(date, buy.end_date)
 
@@ -415,3 +457,23 @@ def _map_creative_status(status: str) -> ApprovalStatus:
     if status == "rejected":
         return ApprovalStatus.rejected
     return ApprovalStatus.pending_review
+
+
+def _build_targeting_overlay(pkg_config: dict) -> Targeting | None:
+    """Hydrate the persisted targeting_overlay from package_config.
+
+    Per AdCP spec (``Package.targeting_overlay`` on get_media_buys), sellers
+    must echo the persisted targeting back so buyers can verify what was
+    stored. For sellers claiming the property-lists / collection-lists
+    specialisms, this includes the ``PropertyListReference`` and
+    ``CollectionListReference`` provided on create / update.
+
+    Falls back to the legacy ``targeting`` key for media buys written before
+    the storage migration to ``targeting_overlay``.
+    """
+    raw = pkg_config.get("targeting_overlay") or pkg_config.get("targeting")
+    if not raw:
+        return None
+    if isinstance(raw, Targeting):
+        return raw
+    return Targeting.model_validate(raw)

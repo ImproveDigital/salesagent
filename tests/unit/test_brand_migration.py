@@ -83,30 +83,33 @@ class TestCreateMediaBuyRequestBrandMigration:
 class TestGetProductsRequestBrandMigration:
     """GetProductsRequest: brand_manifest REMOVED, brand (BrandReference) optional."""
 
-    def test_brand_manifest_rejected_on_get_products_request(self):
-        """Constructing GetProductsRequest with brand_manifest raises ValidationError.
+    def test_brand_manifest_does_not_populate_brand(self):
+        """Constructing GetProductsRequest with the deprecated brand_manifest kwarg
+        does not populate the spec's ``brand`` field.
 
-        Our schema uses extra='forbid' in dev/CI, so brand_manifest (now an unknown
-        field in adcp 3.6.0) triggers 'Extra inputs are not permitted'.
+        Phase 2 slice 7: GetProductsRequest is now an alias for the AdCP library
+        type, which uses ``extra='allow'`` for forward compatibility. Unknown
+        fields like ``brand_manifest`` are kept on ``model_extra`` rather than
+        rejected — but they don't bind to the spec field, so a downstream caller
+        that reads ``request.brand`` still sees None.
         """
         from src.core.schemas import GetProductsRequest
 
-        with pytest.raises(ValidationError) as exc_info:
-            GetProductsRequest(
-                brief="test products",
-                brand_manifest={"name": "Test Brand"},
-            )
-
-        errors = exc_info.value.errors()
-        assert any("brand_manifest" in str(e["loc"]) for e in errors), (
-            "Expected 'brand_manifest' to be flagged as extra input"
+        request = GetProductsRequest(
+            buying_mode="wholesale",
+            brief="test products",
+            brand_manifest={"name": "Test Brand"},
         )
+
+        assert request.brand is None, "Deprecated brand_manifest must not bind to brand"
+        assert request.model_extra == {"brand_manifest": {"name": "Test Brand"}}
 
     def test_brand_reference_accepted_on_get_products_request(self):
         """Constructing GetProductsRequest with brand={'domain': '...'} succeeds."""
         from src.core.schemas import GetProductsRequest
 
         request = GetProductsRequest(
+            buying_mode="wholesale",
             brief="test products",
             brand={"domain": "testbrand.com"},
         )

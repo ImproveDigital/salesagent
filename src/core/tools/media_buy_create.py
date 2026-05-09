@@ -153,7 +153,6 @@ from src.core.schemas import (
     CreateMediaBuyError,
     CreateMediaBuyRequest,
     CreateMediaBuyResult,
-    CreateMediaBuySubmitted,
     CreateMediaBuySuccess,
     CreativeApprovalStatus,
     Error,
@@ -162,7 +161,6 @@ from src.core.schemas import (
     Package,
     PackageRequest,
     Principal,
-    Product,
     Targeting,
 )
 from src.core.schemas import (
@@ -212,15 +210,12 @@ def _determine_media_buy_status(
     This ensures consistent status across all adapters (GAM, Mock, etc.).
 
     Status Priority (highest to lowest) - ALL SPEC-COMPLIANT:
-    1. pending_activation: Manual approval required OR needs creatives OR scheduled for future
-    2. active: Currently delivering (has creatives, approved, within flight dates)
-    3. completed: Past end date
-    4. paused: (Reserved for future use - not currently returned)
-
-    Internal states mapped to spec statuses:
-    - "pending_approval" → pending_activation (awaiting manual approval)
-    - "needs_creatives" → pending_activation (missing or unapproved creatives)
-    - "ready" → pending_activation (scheduled for future start)
+    1. completed: Past end date (terminal — must check first)
+    2. pending_creatives: Missing or unapproved creatives — buyer's next action is
+       sync_creatives. Higher priority than pending_start because creatives are a
+       concrete missing artifact, not just a wall-clock wait.
+    3. pending_start: Manual approval required OR scheduled for future start
+    4. active: Currently delivering (has creatives, approved, within flight dates)
 
     Args:
         manual_approval_required: Whether the media buy requires manual approval
@@ -231,24 +226,79 @@ def _determine_media_buy_status(
         now: Current time (defaults to datetime.now(UTC))
 
     Returns:
-        Status string matching AdCP MediaBuyStatus enum (pending_activation, active, paused, completed)
+        Status string matching AdCP MediaBuyStatus enum
+        (pending_creatives, pending_start, active, completed)
     """
     if now is None:
         now = datetime.now(UTC)
 
-    # Priority 1: Completed (past end date - check first to avoid false pending_activation)
+    # Priority 1: Completed (past end date - check first to avoid false pending state)
     if now > end_time:
         return MediaBuyStatus.completed.value
 
-    # Priority 2: Pending activation (any blocking condition or scheduled for future)
-    # - Manual approval required
-    # - Missing creatives or unapproved creatives
-    # - Scheduled for future start
-    if manual_approval_required or not has_creatives or not creatives_approved or now < start_time:
+    # Priority 2: Pending creatives (higher than pending_start). Per AdCP, this is the
+    # buyer's signal to call sync_creatives. A future-dated buy with no creatives is
+    # blocked on creatives, not on the clock — pending_creatives wins.
+    if not has_creatives or not creatives_approved:
+        return MediaBuyStatus.pending_creatives.value
+
+    # Priority 3: Pending start (manual approval gate or scheduled for future)
+    if manual_approval_required or now < start_time:
         return MediaBuyStatus.pending_start.value
 
-    # Priority 3: Active (currently delivering - all conditions met)
+    # Priority 4: Active (currently delivering - all conditions met)
     return MediaBuyStatus.active.value
+
+
+def _request_has_creatives(req: CreateMediaBuyRequest) -> bool:
+    """True if the request carries any creative references (ids or inline objects).
+
+    Used to pick the spec ``MediaBuyStatus`` for a synchronously-minted buy:
+    when no creatives accompany the request, the buyer's next step is to call
+    ``sync_creatives``, which corresponds to ``MediaBuyStatus.pending_creatives``.
+    When creatives are already present, the buy is awaiting governance/start
+    rather than creatives, which corresponds to ``MediaBuyStatus.pending_start``.
+    """
+    if not req.packages:
+        return False
+    for pkg in req.packages:
+        # Local PackageRequest extension: list of pre-uploaded creative ids
+        if _get_creative_ids(pkg):
+            return True
+        # adcp PackageRequest: inline ``creatives`` list (full creative objects)
+        inline = getattr(pkg, "creatives", None)
+        if inline:
+            return True
+    return False
+
+
+def _link_step_to_media_buy(*, tenant_id: str, step_id: str, media_buy_id: str, branch: str) -> None:
+    """Persist the workflow_step ↔ media_buy linkage as an ``ObjectWorkflowMapping``.
+
+    ``context_manager._send_push_notifications`` walks these mappings to know
+    which media_buy a step refers to when firing completion webhooks. Without
+    a mapping, it returns early with "No object mappings found" and the
+    buyer's webhook never fires.
+
+    Both the manual-approval and auto-approval success branches need this row,
+    hence the shared helper. ``branch`` is just a log label so we can tell the
+    two call sites apart in the activity feed.
+    """
+    # FIXME(salesagent-9f2): workflow mapping should use a repository method
+    from src.core.database.models import ObjectWorkflowMapping
+    from src.core.database.repositories import MediaBuyUoW
+
+    with MediaBuyUoW(tenant_id) as wf_uow:
+        assert wf_uow.session is not None
+        mapping = ObjectWorkflowMapping(
+            object_type="media_buy",
+            object_id=media_buy_id,
+            step_id=step_id,
+            action="create",
+        )
+        wf_uow.session.add(mapping)
+        # UoW auto-commits on clean exit
+        logger.info(f"✅ Linked workflow step {step_id} to media buy ({branch})")
 
 
 def _get_format_spec_sync(agent_url: str, format_id: str) -> Any | None:
@@ -276,6 +326,131 @@ def _get_format_spec_sync(agent_url: str, format_id: str) -> Any | None:
     except Exception as e:
         logger.warning(f"Could not fetch format {format_id} from {agent_url}: {e}")
         return None
+
+
+def _detect_overbook_warnings(
+    *,
+    adapter: Any,
+    products_in_buy: list[Any],
+    effective_configs: dict[str, dict],
+    req: "CreateMediaBuyRequest",
+    total_budget: float,
+) -> list[dict[str, Any]]:
+    """Pre-flight check that surfaces inventory-overbook warnings to the buyer.
+
+    For single-product GAM buys, compares the implied impression goal
+    (``budget / cpm * 1000``) against GAM's availability forecast for
+    the product's ad units. Returns a list of warning records with
+    ``code='inventory_overbook_minor'`` when goal exceeds forecast.
+
+    Fail-open everywhere: returns ``[]`` when the adapter is not GAM,
+    when the buy has multiple products (per #152 design — multi-product
+    budget allocation deferred to a follow-up), when forecast or rate
+    can't be determined, or when GAM rejects the forecast call. Never
+    blocks the buy; this is informational only.
+
+    Wire surface: callers attach the returned list to ``response.ext``
+    under the key ``warnings`` per AdCP convention. Once
+    https://github.com/adcontextprotocol/adcp/issues/4248 lands, this
+    moves to a first-class ``warnings[]`` field.
+    """
+    if adapter.__class__.__name__ != "GoogleAdManager":
+        return []
+    if len(products_in_buy) != 1:
+        # Multi-product allocation is non-trivial (different products may
+        # have different CPMs). Defer to a follow-up — see #152.
+        return []
+    if total_budget <= 0:
+        return []
+
+    product = products_in_buy[0]
+    impl_config = effective_configs.get(product.product_id, {}) or {}
+    ad_unit_ids = impl_config.get("targeted_ad_unit_ids") or []
+    if not ad_unit_ids:
+        return []
+
+    # Pull the first pricing option as the rate. The CPM-only cap is
+    # intentional for the first ship: derive impressions only when the
+    # rate is meaningful for that calculation.
+    pricing_options = getattr(product, "pricing_options", None) or []
+    if not pricing_options:
+        return []
+    first_option = pricing_options[0]
+    inner = getattr(first_option, "root", first_option)
+    pricing_model = str(getattr(inner, "pricing_model", "") or "").lower()
+    if pricing_model != "cpm":
+        return []
+    rate = getattr(inner, "rate", None)
+    if rate is None or float(rate) <= 0:
+        return []
+
+    cpm = float(rate)
+    implied_impressions = int(total_budget / cpm * 1000)
+    if implied_impressions <= 0:
+        return []
+
+    # Resolve flight window from the request
+    flight_start = getattr(req, "flight_start_date", None) or getattr(req, "start_time", None)
+    flight_end = getattr(req, "flight_end_date", None) or getattr(req, "end_time", None)
+    if flight_start is None or flight_end is None:
+        return []
+
+    if isinstance(flight_start, datetime):
+        start_d = flight_start.date()
+    else:
+        start_d = flight_start
+    if isinstance(flight_end, datetime):
+        end_d = flight_end.date()
+    else:
+        end_d = flight_end
+
+    # Get forecast manager from the adapter. Fail-open if absent.
+    orders_manager = getattr(adapter, "orders_manager", None)
+    client_manager = getattr(orders_manager, "client_manager", None)
+    if client_manager is None:
+        return []
+
+    from src.adapters.gam.managers.forecast import GAMForecastManager
+
+    advertiser_id = getattr(orders_manager, "advertiser_id", None)
+    forecast_manager = GAMForecastManager(client_manager=client_manager, advertiser_id=advertiser_id)
+
+    available = forecast_manager.get_available_units(
+        ad_unit_ids=ad_unit_ids,
+        start_date=start_d,
+        end_date=end_d,
+        line_item_type=impl_config.get("line_item_type", "STANDARD"),
+        cost_type=impl_config.get("cost_type", "CPM"),
+        include_descendants=bool(impl_config.get("include_descendants", True)),
+    )
+    if available is None:
+        # Forecast call failed or returned null — fail open. The buy
+        # proceeds without warning. The adapter call below will run as
+        # before; if delivery actually under-paces, the buyer sees that
+        # via get_media_buy_delivery.
+        return []
+
+    if implied_impressions <= available:
+        return []
+
+    overbook_pct = round((implied_impressions / available - 1) * 100, 1) if available > 0 else 100.0
+    return [
+        {
+            "code": "inventory_overbook_minor",
+            "message": (
+                f"Implied impression goal ({implied_impressions:,}) exceeds GAM availability "
+                f"forecast ({available:,}) by {overbook_pct}%. The line item will accept the "
+                f"buy but may land in INVENTORY_RELEASED until publisher resolves the overbook "
+                f"in GAM admin."
+            ),
+            "details": {
+                "goal_impressions": implied_impressions,
+                "forecast_available_impressions": available,
+                "overbook_percent": overbook_pct,
+                "product_id": product.product_id,
+            },
+        }
+    ]
 
 
 def _validate_creatives_before_adapter_call(
@@ -781,7 +956,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             # Get the Principal object (needed for adapter)
             from src.core.auth import get_principal_object
 
-            principal = get_principal_object(media_buy.principal_id)
+            principal = get_principal_object(media_buy.principal_id, tenant_id=tenant_id)
             if not principal:
                 error_msg = f"Principal {media_buy.principal_id} not found"
                 logger.error(f"[APPROVAL] {error_msg}")
@@ -890,13 +1065,33 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                 # Create creative map
                 creative_map = {c.creative_id: c for c in creatives}
 
+                # Resolve the per-tenant pre-approval gate once per buy approval
+                # (rather than per creative) since the flag changes only on
+                # operator action. (#145)
+                from src.core.feature_flags import is_creative_pre_approval_gate_enabled
+
+                gate_enabled = is_creative_pre_approval_gate_enabled(tenant_obj)
+
                 # Build assets list for adapter and collect all validation errors
                 assets = []
                 all_validation_errors = []
+                gated_creative_ids: list[str] = []
                 for creative_id, package_assignment_list in packages_by_creative.items():
                     creative = creative_map.get(creative_id)
                     if not creative:
                         logger.warning(f"[APPROVAL] Creative {creative_id} not found in database")
+                        continue
+
+                    # Pre-approval gate: hold back creatives that haven't
+                    # cleared local human review. They'll be pushed to the
+                    # ad server retroactively by approve_creative when the
+                    # operator flips status to 'approved'. (#145)
+                    if gate_enabled and creative.status == "pending_review":
+                        gated_creative_ids.append(creative_id)
+                        logger.info(
+                            f"[APPROVAL] Pre-approval gate held back creative {creative_id} "
+                            f"(status=pending_review). Adapter upload deferred to local approve."
+                        )
                         continue
 
                     # Convert Creative model to asset dict format expected by adapter
@@ -1047,6 +1242,160 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         error_msg = f"Adapter creation failed: {str(e)}"
         logger.error(f"[APPROVAL] {error_msg}\n{error_traceback}")
         return False, error_msg
+
+
+def push_creative_to_existing_buy(
+    *,
+    creative_id: str,
+    media_buy_id: str,
+    tenant_id: str,
+) -> tuple[bool, str | None]:
+    """Push a single approved creative to an already-active GAM line item.
+
+    Used by ``approve_creative`` (admin blueprint) when the per-tenant
+    pre-approval gate is enabled and the operator just approved a
+    creative whose buy is already live in the ad server. The buy
+    approval flow (#145 gate at ``execute_approved_media_buy``) skipped
+    this creative because its local status was ``pending_review``;
+    now that a human has approved it, push it to the live line item.
+
+    Returns ``(success, error_message)``. ``error_message`` is non-None
+    only on failure. Local approval has already succeeded by the time
+    this fires — failures here log loudly but don't roll back the local
+    state. The operator can re-trigger by re-clicking Approve
+    (idempotent at the adapter layer for already-uploaded creatives).
+    """
+    from sqlalchemy import select
+
+    from src.core.config_loader import get_tenant_by_id, set_current_tenant
+    from src.core.database.models import (
+        Creative as CreativeModel,
+    )
+    from src.core.database.models import (
+        CreativeAssignment,
+        Tenant,
+    )
+    from src.core.database.repositories import MediaBuyUoW
+
+    try:
+        with MediaBuyUoW(tenant_id) as uow:
+            assert uow.session is not None
+            session = uow.session
+
+            tenant_obj = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if not tenant_obj:
+                return False, f"Tenant {tenant_id} not found"
+
+            # Set tenant ContextVar so adapter helpers resolve config correctly.
+            tenant_config = get_tenant_by_id(tenant_id)
+            if tenant_config:
+                set_current_tenant(tenant_config)
+
+            creative = session.scalars(
+                select(CreativeModel).filter_by(tenant_id=tenant_id, creative_id=creative_id)
+            ).first()
+            if not creative:
+                return False, f"Creative {creative_id} not found"
+
+            assignment = session.scalars(
+                select(CreativeAssignment).filter_by(
+                    tenant_id=tenant_id, creative_id=creative_id, media_buy_id=media_buy_id
+                )
+            ).first()
+            if not assignment:
+                return False, (f"No assignment of creative {creative_id} to media buy {media_buy_id} — nothing to push")
+
+            # ``get_adapter`` requires the Pydantic ``Principal`` schema (with
+            # decoded platform_mappings); ``get_principal_object`` returns that
+            # shape from the ORM model.
+            principal = get_principal_object(creative.principal_id, tenant_id=tenant_id)
+            if not principal:
+                return False, f"Principal {creative.principal_id} not found"
+
+            adapter = get_adapter(principal, dry_run=False, tenant=tenant_obj)
+            if not (hasattr(adapter, "creatives_manager") and adapter.creatives_manager):
+                return False, "Adapter does not support creative upload"
+
+            # Build the asset dict — same shape as execute_approved_media_buy.
+            from src.core.format_resolver import get_format
+            from src.core.helpers.creative_helpers import (
+                extract_click_url,
+                extract_impression_tracker_url,
+                extract_media_url_and_dimensions,
+            )
+
+            creative_data = creative.data or {}
+            try:
+                format_spec = get_format(
+                    str(creative.format),
+                    agent_url=creative.agent_url,
+                    tenant_id=tenant_id,
+                    product_id=None,
+                )
+            except Exception as e:
+                logger.warning(f"[GATE-PUSH] Could not load format spec for {creative_id}: {e}")
+                format_spec = None
+
+            url, width, height = extract_media_url_and_dimensions(creative_data, format_spec)
+            click_url = extract_click_url(creative_data, format_spec)
+            impression_tracker_url = extract_impression_tracker_url(creative_data, format_spec)
+
+            if not url or not width or not height:
+                return False, (
+                    f"Creative {creative_id} cannot be pushed: missing url/width/height "
+                    f"(width={width}, height={height}, url={'set' if url else 'missing'})"
+                )
+
+            asset: dict[str, Any] = {
+                "creative_id": creative.creative_id,
+                "package_assignments": [{"package_id": assignment.package_id, "weight": assignment.weight or 100}],
+                "width": width,
+                "height": height,
+                "url": url,
+                "click_url": click_url,
+                "asset_type": creative_data.get("asset_type", "image"),
+                "name": creative.name or f"Creative {creative.creative_id}",
+            }
+            if impression_tracker_url:
+                asset["delivery_settings"] = {"tracking_urls": {"impression": [impression_tracker_url]}}
+
+            # Resolve the GAM order id. Native AdCP buys use the GAM
+            # order id as their media_buy_id; gam_import buys carry it
+            # on external_id.
+            from src.core.database.models import MediaBuy as DBMediaBuy
+
+            media_buy_row = session.scalars(
+                select(DBMediaBuy).filter_by(tenant_id=tenant_id, media_buy_id=media_buy_id)
+            ).first()
+            if media_buy_row is None:
+                return False, f"Media buy {media_buy_id} not found"
+            gam_order_id = media_buy_row.external_id or media_buy_id
+
+            try:
+                statuses = adapter.creatives_manager.add_creative_assets(gam_order_id, [asset], datetime.now(UTC))
+            except Exception as e:
+                logger.error(
+                    f"[GATE-PUSH] Adapter raised pushing creative {creative_id} to buy {media_buy_id}: {e}",
+                    exc_info=True,
+                )
+                return False, str(e)
+
+            # Inspect statuses: a single creative was uploaded; check it.
+            for status in statuses:
+                if status.creative_id == creative_id and status.status == "failed":
+                    return False, status.message or "Adapter reported upload failure"
+
+            logger.info(
+                f"[GATE-PUSH] Successfully pushed creative {creative_id} to live buy "
+                f"{media_buy_id} (GAM order {gam_order_id})"
+            )
+            return True, None
+    except Exception as e:
+        logger.error(
+            f"[GATE-PUSH] Unexpected error pushing creative {creative_id} to buy {media_buy_id}: {e}",
+            exc_info=True,
+        )
+        return False, str(e)
 
 
 def _validate_pricing_model_selection(
@@ -2360,17 +2709,12 @@ async def _create_media_buy_impl(
                 logger.info(f"✅ Created {len(pending_packages)} MediaPackage records")
 
             # Link the workflow step to the media buy so the approval button shows in UI
-            with MediaBuyUoW(tenant["tenant_id"]) as wf_uow:
-                # FIXME(salesagent-9f2): workflow mapping should use a repository method
-                assert wf_uow.session is not None
-                from src.core.database.models import ObjectWorkflowMapping
-
-                mapping = ObjectWorkflowMapping(
-                    object_type="media_buy", object_id=media_buy_id, step_id=step.step_id, action="create"
-                )
-                wf_uow.session.add(mapping)
-                # UoW auto-commits on clean exit
-                logger.info(f"✅ Linked workflow step {step.step_id} to media buy")
+            _link_step_to_media_buy(
+                tenant_id=tenant["tenant_id"],
+                step_id=step.step_id,
+                media_buy_id=media_buy_id,
+                branch="manual-approval",
+            )
 
             # Create creative assignments for manual approval flow
             # This must happen AFTER media packages are created so we have package_ids
@@ -2491,21 +2835,32 @@ async def _create_media_buy_impl(
                             # UoW auto-commits on clean exit
                             logger.info(f"✅ Created creative assignments for package {pkg_id}")
 
-            # Async-pending-approval path — emit the spec's submitted envelope.
-            # Per ``create_media_buy_response`` (variant-3), the async shape carries
-            # ``status='submitted'`` and a ``task_id`` handle, and does NOT carry
-            # ``media_buy_id`` or ``packages`` (those belong to variant-1, whose
-            # ``status`` is a ``MediaBuyStatus`` and excludes 'submitted'). The
-            # ``media_buy_id`` is issued on the completion artifact (post-approval),
-            # not here. Buyers poll via ``tasks/get`` using ``task_id``.
+            # Manual-approval workflow with a synchronously-minted buy — emit
+            # variant-1 of ``create_media_buy_response`` (the sync-success
+            # shape) carrying ``media_buy_id``, ``packages``, and the spec
+            # ``MediaBuyStatus`` that reflects what's blocking activation:
+            #   - no creatives on the request → ``pending_creatives`` (buyer's
+            #     next call is ``sync_creatives``);
+            #   - creatives present → ``pending_start`` (awaiting human
+            #     governance and/or start time).
+            # Variant-3 (``status='submitted'`` + ``task_id``, no
+            # ``media_buy_id``) is reserved for genuinely async cases where
+            # the seller hasn't minted a buy yet. Here the buy is already in
+            # the DB with a permanent id, so withholding it from the buyer
+            # forces them through a polling round-trip and breaks downstream
+            # tools that key off ``media_buy_id``.
+            buy_status = (
+                MediaBuyStatus.pending_start if _request_has_creatives(req) else MediaBuyStatus.pending_creatives
+            )
             return CreateMediaBuyResult(
-                response=CreateMediaBuySubmitted(
-                    task_id=step.step_id,
-                    message=f"Media buy {media_buy_id} submitted; awaiting human review.",
+                response=CreateMediaBuySuccess(
+                    media_buy_id=media_buy_id,
+                    packages=pending_packages,
+                    status=buy_status,
                     workflow_step_id=step.step_id,
                     context=req.context,
                 ),
-                status=AdcpTaskStatus.submitted.value,
+                status=AdcpTaskStatus.completed.value,
             )
 
         # Get products for the media buy to check product-level auto-creation settings
@@ -2586,6 +2941,30 @@ async def _create_media_buy_impl(
             effective_configs[p.product_id].get("auto_create_enabled", True) for p in products_in_buy
         )
 
+        # Pre-flight overbook detection (#152). Single-product GAM CPM
+        # buys only on this iteration; fail-open everywhere. Warnings
+        # surface on the success response via response.ext.warnings
+        # pending https://github.com/adcontextprotocol/adcp/issues/4248.
+        overbook_warnings: list[dict[str, Any]] = []
+        try:
+            overbook_warnings = _detect_overbook_warnings(
+                adapter=adapter,
+                products_in_buy=products_in_buy,
+                effective_configs=effective_configs,
+                req=req,
+                total_budget=total_budget,
+            )
+            if overbook_warnings:
+                logger.warning(
+                    f"[OVERBOOK] {len(overbook_warnings)} warning(s) attached to response: "
+                    f"{[w['details'] for w in overbook_warnings]}"
+                )
+        except Exception as e:
+            # Defence-in-depth — the detector is already fail-open, but
+            # any unexpected raise here must NOT block the buy.
+            logger.warning(f"[OVERBOOK] detector raised, fail-open: {e}", exc_info=True)
+            overbook_warnings = []
+
         # Check if either tenant or product disables auto-creation
         # Skip in dry_run mode - we're only validating, not creating workflow
         if not testing_ctx.dry_run and (not auto_create_enabled or not product_auto_create):
@@ -2660,17 +3039,24 @@ async def _create_media_buy_impl(
             except Exception as e:
                 logger.warning(f"⚠️ Failed to send configuration approval Slack notification: {e}")
 
-            # Tenant- or product-config-driven approval requirement: emit the
-            # spec's submitted envelope (variant-3 of create_media_buy_response).
-            # See the manual-approval branch above for the contract rationale.
+            # Tenant- or product-config-driven approval requirement with a
+            # synchronously-minted buy — emit variant-1 (sync-success) carrying
+            # ``media_buy_id``, ``packages``, and the spec ``MediaBuyStatus``
+            # that reflects what's blocking activation. See the manual-approval
+            # branch above for the rationale on why this is variant-1, not
+            # variant-3.
+            buy_status = (
+                MediaBuyStatus.pending_start if _request_has_creatives(req) else MediaBuyStatus.pending_creatives
+            )
             return CreateMediaBuyResult(
-                response=CreateMediaBuySubmitted(
-                    task_id=step.step_id,
-                    message=f"Media buy {media_buy_id} submitted; {reason.lower()} requires approval.",
+                response=CreateMediaBuySuccess(
+                    media_buy_id=media_buy_id,
+                    packages=response_packages,
+                    status=buy_status,
                     workflow_step_id=step.step_id,
                     context=req.context,
                 ),
-                status=AdcpTaskStatus.submitted.value,
+                status=AdcpTaskStatus.completed.value,
             )
 
         # Continue with synchronized media buy creation
@@ -2697,7 +3083,7 @@ async def _create_media_buy_impl(
                 error_msg = f"Package {idx} has no product_id field set"
                 raise ValueError(error_msg)
 
-            pkg_product: Product | None = None
+            pkg_product: Any | None = None
             for p in products_in_buy:
                 if p.product_id == pkg_product_id:
                     pkg_product = p
@@ -3076,7 +3462,34 @@ async def _create_media_buy_impl(
         )
 
         # Store the media buy in database (context_id is NULL for synchronous operations)
-        # Repository handles raw_request serialization at the DB boundary
+        # Repository handles raw_request serialization at the DB boundary.
+        # Build package_id_map from the adapter's response so the serialised
+        # raw_request.packages entries carry the same package_id the
+        # MediaPackage rows are stored under. Without this injection, the
+        # delivery read path (media_buy_delivery.py:388) falls back to
+        # ``f"pkg_{product_id}_{idx}"`` which doesn't match the DB row, and
+        # the pricing_info lookup fails — yielding a delivery response with
+        # ``pricing_model=None`` that the AdCP wire validator rejects on
+        # the package-level ``ByPackageItem`` schema.
+        #
+        # Adapter contract: ``response.packages`` is positionally aligned
+        # with ``req.packages``. We assert the lengths match to fail loud
+        # if a future adapter ever reorders / drops / dedupes — silently
+        # mapping by adapter-response index when the request has a
+        # different shape would corrupt every downstream pricing lookup.
+        auto_package_id_map: dict[int, str] = {}
+        if response.packages:
+            req_pkg_count = len(req.packages) if req.packages else 0
+            assert len(response.packages) == req_pkg_count, (
+                f"Adapter contract violation: response.packages has "
+                f"{len(response.packages)} items, request had {req_pkg_count}. "
+                "package_id_map injection assumes 1:1 positional alignment."
+            )
+            for idx, resp_pkg in enumerate(response.packages):
+                pkg_id = getattr(resp_pkg, "package_id", None)
+                if pkg_id:
+                    auto_package_id_map[idx] = pkg_id
+
         try:
             with MediaBuyUoW(tenant["tenant_id"]) as create_uow:
                 assert create_uow.media_buys is not None
@@ -3092,6 +3505,7 @@ async def _create_media_buy_impl(
                     status=media_buy_status,
                     campaign_objective=getattr(req, "campaign_objective", "") or "",
                     kpi_goal=getattr(req, "kpi_goal", "") or "",
+                    package_id_map=auto_package_id_map or None,
                     account_id=identity.account_id if identity else None,
                 )
                 # UoW auto-commits on clean exit
@@ -3146,12 +3560,19 @@ async def _create_media_buy_impl(
                     request_pkg = req.packages[i] if req.packages and i < len(req.packages) else None
                     impressions = getattr(request_pkg, "impressions", None) if request_pkg else None
 
+                    # targeting_overlay is buyer-supplied input — pull from the request, not the
+                    # adapter response. Adapter responses are AdCP-spec ResponsePackage objects
+                    # which intentionally do not echo targeting back. Persisting the request value
+                    # is what lets get_media_buys later round-trip property_list / collection_list
+                    # references per the AdCP spec for sellers claiming list-targeting specialisms.
+                    request_targeting_overlay = request_pkg.targeting_overlay if request_pkg is not None else None
+
                     package_config = {
                         "package_id": resp_package_id,
                         "name": getattr(resp_package, "name", None),  # Include package name from adapter response
                         "product_id": getattr(resp_package, "product_id", None),
                         "budget": getattr(resp_package, "budget", None),
-                        "targeting_overlay": getattr(resp_package, "targeting_overlay", None),
+                        "targeting_overlay": request_targeting_overlay,
                         "creative_ids": getattr(resp_package, "creative_ids", None),
                         "creative_assignments": getattr(resp_package, "creative_assignments", None),
                         "format_ids_to_provide": getattr(resp_package, "format_ids_to_provide", None),
@@ -3625,12 +4046,24 @@ async def _create_media_buy_impl(
                 )
             )
 
-        # Create AdCP response with typed Package objects
+        # Create AdCP response with typed Package objects.
+        # Surface the DB-derived MediaBuyStatus on the wire so buyers see the correct
+        # blocker (pending_creatives vs pending_start) on the create_media_buy reply
+        # itself, matching what /get_media_buy will report later.
+        # Overbook warnings (#152) ride on response.ext per AdCP extension
+        # convention. Other Success construction sites (idempotency hit,
+        # simulated, deferred-for-approval) don't surface warnings yet —
+        # follow-up.
+        ext_payload: dict[str, Any] = {}
+        if overbook_warnings:
+            ext_payload["warnings"] = overbook_warnings
         adcp_response = CreateMediaBuySuccess(
             media_buy_id=response.media_buy_id,
             packages=response_packages,
+            status=MediaBuyStatus(media_buy_status),
             creative_deadline=response.creative_deadline,
             context=req.context,
+            ext=ext_payload if ext_payload else None,
         )
 
         # Log activity
@@ -3681,6 +4114,21 @@ async def _create_media_buy_impl(
         modified_response = adcp_response
         if hooks_result.media_buy_id_override:
             modified_response = adcp_response.model_copy(update={"media_buy_id": hooks_result.media_buy_id_override})
+
+        # Link the workflow step to the media buy so push-notification webhooks
+        # fire on completion. ``_send_push_notifications`` reads
+        # ``ObjectWorkflowMapping`` rows by step_id; without one, it returns
+        # early with "No object mappings found" and the buyer's webhook never
+        # fires. The manual-approval branch (~line 2362) already does this for
+        # its own flow; the auto-approval success branch needs the same. See
+        # issue #64.
+        if step is not None and not testing_ctx.dry_run:
+            _link_step_to_media_buy(
+                tenant_id=tenant["tenant_id"],
+                step_id=step.step_id,
+                media_buy_id=modified_response.media_buy_id,
+                branch="auto-approval",
+            )
 
         # Mark workflow step as completed on success
         ctx_manager.update_workflow_step(step.step_id, status="completed")

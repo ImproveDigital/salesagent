@@ -304,7 +304,7 @@ class TestGAMRealMediaBuyLifecycle:
 
             # ───── Phase 1: get_products ─────
             products_resp = await _get_products_impl(
-                GetProductsRequest(brand={"domain": "testbrand.com"}, brief="display"),
+                GetProductsRequest(buying_mode="wholesale", brand={"domain": "testbrand.com"}, brief="display"),
                 identity,
             )
             product_ids = [p.product_id for p in products_resp.products]
@@ -735,8 +735,11 @@ class TestGAMRealCreativeApprovalAsync:
                 ),
                 identity=identity,
             )
-            assert create_result.status == "submitted", (
-                f"expected status='submitted', got {create_result.status}; "
+            # Variant-1 (sync-success): manual-approval path mints a buy id
+            # synchronously and reports the spec ``MediaBuyStatus`` blocker
+            # (``pending_creatives`` here — no creatives in the request).
+            assert create_result.status == "completed", (
+                f"expected status='completed', got {create_result.status}; "
                 f"errors={getattr(create_result.response, 'errors', None)}"
             )
             media_buy_id = create_result.response.media_buy_id

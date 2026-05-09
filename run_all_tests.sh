@@ -46,6 +46,9 @@ collect_reports() {
     for name in unit integration e2e admin bdd ui; do
         [ -f ".tox/${name}.json" ] && cp ".tox/${name}.json" "$RESULTS_DIR/"
     done
+    # Guard against the [ -f ] && cp pattern returning 1 when the last file is missing —
+    # under `set -e` that would abort the caller after a successful test run.
+    return 0
 }
 
 # --- Quick mode (no Docker) ---
@@ -108,7 +111,7 @@ fi
 
 # --- Security audit ---
 echo -e "${BLUE}Running security audit (uv-secure)...${NC}"
-IGNORED_VULNS="GHSA-7gcm-g887-7qv7,GHSA-5239-wwwm-4pmq"
+IGNORED_VULNS="GHSA-5239-wwwm-4pmq"
 if uvx uv-secure --no-check-uv-tool --ignore-vulns "$IGNORED_VULNS" 2>/dev/null; then
     echo -e "${GREEN}Security audit passed${NC}"
 else

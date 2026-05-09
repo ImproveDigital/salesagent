@@ -237,12 +237,22 @@ class TestSyncStrictModeAbortTransport:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_strict", name="Strict Test")],
-                assignments={"c_strict": ["PKG-NONEXISTENT"]},
+                assignments=[{"creative_id": "c_strict", "package_id": "PKG-NONEXISTENT"}],
                 validation_mode="strict",
             )
 
         assert result.is_error, "Strict mode should error on missing package"
-        assert isinstance(result.error, AdCPNotFoundError)
+        # Each transport surfaces the typed error in its own envelope:
+        # ``IMPL`` re-raises the impl's ``AdCPNotFoundError`` verbatim,
+        # while ``MCP`` translates it into a ``NOT_FOUND``-coded
+        # ``ToolError`` on the JSON-RPC wire (per
+        # ``core/platforms/_delegate.py:_translate_adcp_error``).
+        if transport == Transport.IMPL:
+            assert isinstance(result.error, AdCPNotFoundError)
+        else:
+            assert "NOT_FOUND" in str(
+                result.error
+            ), f"MCP error should carry structured NOT_FOUND code; got {result.error!r}"
 
 
 @pytest.mark.requires_db
@@ -261,7 +271,7 @@ class TestSyncLenientModeContinuesTransport:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_lenient", name="Lenient Test")],
-                assignments={"c_lenient": ["PKG-MISSING"]},
+                assignments=[{"creative_id": "c_lenient", "package_id": "PKG-MISSING"}],
                 validation_mode="lenient",
             )
 
@@ -300,7 +310,7 @@ class TestSyncFormatValidationTransport:
         assert len(result.payload.creatives) == 1
         creative_result = result.payload.creatives[0]
         assert creative_result.action == CreativeAction.failed
-        assert any("list_creative_formats" in e for e in (creative_result.errors or []))
+        assert any("list_creative_formats" in e.message for e in (creative_result.errors or []))
 
 
 @pytest.mark.requires_db
@@ -437,7 +447,7 @@ class TestGenerativeBuildPromptBrief:
                         "creative_id": "c_gen_03",
                         "name": "Brief Test",
                         "format_id": fmt,
-                        "assets": {"brief": {"content": "Promote summer sale"}},
+                        "assets": {"brief": {"name": "summer-sale", "content": "Promote summer sale"}},
                     }
                 ],
             )
@@ -597,9 +607,9 @@ class TestGenerativeBuildUpdatePreserve:
             assert_envelope(result2, transport)
 
             # build_creative should NOT be called again (no prompt → skip build)
-            assert registry.build_creative.call_count == build_calls_after_create, (
-                "build_creative should not be called on update without prompt"
-            )
+            assert (
+                registry.build_creative.call_count == build_calls_after_create
+            ), "build_creative should not be called on update without prompt"
 
         # Verify existing generative data is preserved in DB
         with get_db_session() as session:
@@ -738,7 +748,7 @@ class TestFormatValidationUnreachable:
         assert len(result.payload.creatives) == 1
         creative_result = result.payload.creatives[0]
         assert creative_result.action == CreativeAction.failed
-        assert any("unreachable" in e.lower() for e in (creative_result.errors or []))
+        assert any("unreachable" in e.message.lower() for e in (creative_result.errors or []))
 
 
 # ---------------------------------------------------------------------------
@@ -780,7 +790,7 @@ class TestAssignmentPackageTenantFilter:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_cross", name="Cross Tenant")],
-                assignments={"c_cross": [pkg_id]},
+                assignments=[{"creative_id": "c_cross", "package_id": pkg_id}],
                 validation_mode="lenient",
             )
 
@@ -833,7 +843,7 @@ class TestAssignmentFormatCompatibility:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_fmt_mismatch", name="Format Mismatch")],
-                assignments={"c_fmt_mismatch": [pkg_id]},
+                assignments=[{"creative_id": "c_fmt_mismatch", "package_id": pkg_id}],
                 validation_mode="lenient",
             )
 
@@ -887,7 +897,7 @@ class TestAssignmentResultFields:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_assign", name="Assignment Test")],
-                assignments={"c_assign": [pkg_id]},
+                assignments=[{"creative_id": "c_assign", "package_id": pkg_id}],
             )
 
         assert result.is_success
@@ -1084,7 +1094,8 @@ class TestStaticPreviewFailed:
             creative_result = result.payload.creatives[0]
             assert creative_result.action == CreativeAction.failed
             assert any(
-                "no previews" in e.lower() or "no media_url" in e.lower() for e in (creative_result.errors or [])
+                "no previews" in e.message.lower() or "no media_url" in e.message.lower()
+                for e in (creative_result.errors or [])
             )
 
 
@@ -1122,7 +1133,7 @@ class TestGeminiKeyMissing:
         assert_envelope(result, transport)
         creative_result = result.payload.creatives[0]
         assert creative_result.action == CreativeAction.failed
-        assert any("gemini" in e.lower() for e in (creative_result.errors or []))
+        assert any("gemini" in e.message.lower() for e in (creative_result.errors or []))
 
 
 # ---------------------------------------------------------------------------

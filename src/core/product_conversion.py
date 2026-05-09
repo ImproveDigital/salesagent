@@ -24,8 +24,7 @@ from adcp import (
 )
 from adcp.types._generated import MediaChannel
 
-# Import our extended Product (includes implementation_config)
-# Not the library Product - we need the internal fields
+from src.core.resolved_product import ResolvedProduct
 from src.core.schemas import Product
 
 logger = logging.getLogger(__name__)
@@ -355,24 +354,37 @@ def convert_product_model_to_schema(product_model, adapter_type: str | None = No
         if converted_channels:
             product_data["channels"] = converted_channels
 
-    # countries: filter-related, kept on the schema with ``exclude=True`` so it
-    # doesn't reach the wire.
-    if product_model.countries:
-        product_data["countries"] = product_model.countries
+    return Product(**product_data)
 
-    # implementation_config: prefer the inventory-profile-resolved value
-    # (``effective_implementation_config`` is defined on the ORM model and
-    # falls back to the row's own column when no profile is attached).
-    product_data["implementation_config"] = product_model.effective_implementation_config
 
-    # Principal access control (internal field, ``exclude=True`` on schema).
-    product_data["allowed_principal_ids"] = product_model.allowed_principal_ids
+def convert_product_model_to_resolved(product_model, adapter_type: str | None = None) -> ResolvedProduct:
+    """Convert ORM Product → :class:`ResolvedProduct`.
 
-    # Device type targeting (from targeting_template.device_targets).
+    Builds the wire-shape Product via :func:`convert_product_model_to_schema`
+    and pulls internal fields directly off the ORM model.
+    """
+    wire = convert_product_model_to_schema(product_model, adapter_type=adapter_type)
+
+    countries = product_model.countries if product_model.countries else None
+    # Direct read — do NOT coerce ``[]`` to ``None``. ``allowed_principal_ids``
+    # is access-control data: an empty list means "no restrictions" while
+    # ``None`` means the same thing semantically, but the filter at
+    # ``products.py`` distinguishes them via ``getattr(..., None)`` and the
+    # caller may rely on the original shape.
+    allowed_principal_ids = product_model.allowed_principal_ids
+    implementation_config = product_model.effective_implementation_config
+
+    device_types: list[str] | None = None
     targeting_template = product_model.targeting_template
     if isinstance(targeting_template, dict):
         device_targets = targeting_template.get("device_targets")
         if isinstance(device_targets, list):
-            product_data["device_types"] = device_targets
+            device_types = device_targets
 
-    return Product(**product_data)
+    return ResolvedProduct(
+        wire=wire,
+        implementation_config=implementation_config,
+        countries=countries,
+        device_types=device_types,
+        allowed_principal_ids=allowed_principal_ids,
+    )

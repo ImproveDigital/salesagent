@@ -24,12 +24,13 @@ proposal manager. Until then this is the right shape: reuse
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from adcp.decisioning import AdcpError, RequestContext
 from adcp.server.auth import current_principal
-from adcp.types import GetProductsRequest
 
+from core.middleware.transport_detect import current_transport
 from src.core.config_loader import get_tenant_by_id
 from src.core.exceptions import AdCPError
 from src.core.resolved_identity import ResolvedIdentity
@@ -37,6 +38,7 @@ from src.core.schemas import (
     CreateMediaBuyRequest,
     GetMediaBuyDeliveryRequest,
     GetMediaBuysRequest,
+    GetProductsRequest,
     ListCreativeFormatsRequest,
     UpdateMediaBuyRequest,
 )
@@ -49,6 +51,15 @@ from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 from src.core.tools.media_buy_list import _get_media_buys_impl
 from src.core.tools.media_buy_update import _update_media_buy_impl
 from src.core.tools.products import _get_products_impl
+
+logger = logging.getLogger(__name__)
+
+# Process-singleton guard so the misconfig WARNING (see _build_identity)
+# fires once per process rather than once per request — repeated logs
+# add noise without adding signal once the operator has seen it. One
+# warning per worker is a feature for multi-proc deploys: each worker
+# independently confirms its own middleware chain.
+_TRANSPORT_FALLBACK_WARNED: bool = False
 
 
 def _build_identity(ctx: RequestContext[Any]) -> ResolvedIdentity:
@@ -87,14 +98,45 @@ def _build_identity(ctx: RequestContext[Any]) -> ResolvedIdentity:
     # can read it from the dispatched _impl without any threading.
     principal_id = current_principal.get() or getattr(ctx, "auth_principal", None)
 
+    # Inbound transport drives webhook payload shape: A2A buyers receive
+    # ``Task``/``TaskStatusUpdateEvent``, MCP buyers receive
+    # ``McpWebhookPayload``. ``TransportDetectMiddleware`` (added per #202)
+    # populates the ``current_transport`` ContextVar based on URL path;
+    # we read it here and stamp ``identity.protocol`` so every downstream
+    # impl sees the actual transport. Falls back to "mcp" when the
+    # ContextVar is unset (lifespan events, unit-test harness paths,
+    # admin requests that somehow reach here).
+    detected_transport = current_transport.get()
+    if detected_transport in ("mcp", "a2a"):
+        protocol: str = detected_transport
+    else:
+        protocol = "mcp"
+        # Forward-compat guard: if the auth chain populated
+        # ``current_principal`` (only set inside HTTP requests by
+        # ``BearerTokenAuthMiddleware``) but transport detection didn't,
+        # the middleware chain is misconfigured — A2A buyers will silently
+        # receive MCP-shaped webhooks. Surface once per process so the
+        # operator gets a clear signal before the next #64-style
+        # silent-drop bug. Lifespan / unit-test / admin paths don't
+        # populate ``current_principal``, so they skip this branch.
+        # See #221 for the rationale.
+        global _TRANSPORT_FALLBACK_WARNED
+        if not _TRANSPORT_FALLBACK_WARNED and current_principal.get() is not None:
+            _TRANSPORT_FALLBACK_WARNED = True
+            logger.warning(
+                "_build_identity falling back to protocol='mcp' inside an "
+                "authenticated request scope — TransportDetectMiddleware may "
+                "not be wired or has been reordered after the auth chain. "
+                "A2A buyers will silently receive MCP-shaped webhooks. "
+                "Check core.main:_serve_kwargs middleware order. "
+                "See salesagent issue #221."
+            )
+
     return ResolvedIdentity(
         principal_id=principal_id,
         tenant_id=tenant_id,
         tenant=tenant_dict,
-        # protocol is informational on _impl — defaults to "mcp" since
-        # the framework's transport context isn't passed through ctx;
-        # impls don't branch on it for any business logic today.
-        protocol="mcp",
+        protocol=protocol,
         testing_context=AdCPTestContext(),
     )
 
@@ -164,8 +206,18 @@ def _translate_adcp_error(exc: AdCPError) -> AdcpError:
     )
 
 
-async def _delegate_get_products(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
-    """Forward to ``src/core/tools/products.py:_get_products_impl``."""
+async def _delegate_get_products(req: GetProductsRequest, ctx: RequestContext[Any]) -> dict[str, Any]:
+    """Forward to ``src/core/tools/products.py:_get_products_impl``.
+
+    Note: typed ``req: GetProductsRequest`` here documents intent but
+    the SDK resolves ``params_model`` from the platform router's base
+    class advertisement, not from this delegate or the platform
+    subclass override. Unknown-field rejection (dev-mode strict-extra)
+    is therefore not enforced at the wire boundary today —
+    ``tests/integration/test_mcp_unknown_field_handling.py``'s
+    ``test_unknown_field_rejected`` is xfailed pending an upstream
+    SDK change.
+    """
     identity = _build_identity(ctx)
     req_model = _coerce_to_request_model(req, GetProductsRequest)
     response = await _get_products_impl(req_model, identity)
@@ -175,9 +227,15 @@ async def _delegate_get_products(req: Any, ctx: RequestContext[Any]) -> dict[str
 async def _delegate_create_media_buy(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/media_buy_create.py:_create_media_buy_impl``.
 
-    The impl pulls ``push_notification_config`` off the request itself
-    (not a separate kwarg in our wire shape), so we let it default to
-    None. The framework's idempotency wrap on the caller layer scopes
+    ``push_notification_config`` is a top-level AdCP request field that
+    the impl reads as a separate kwarg (NOT off ``req``) — it registers
+    a ``PushNotificationConfig`` DB row used by ``context_manager.
+    _send_push_notifications`` to fire workflow-step webhooks. We
+    extract it from ``req`` here and forward as a dict; without this,
+    buyers who set ``push_notification_config`` on the request body
+    silently get no completion webhooks.
+
+    The framework's idempotency wrap on the caller layer scopes
     retries; the impl's own transactional semantics handle the
     create-once invariant.
 
@@ -188,8 +246,16 @@ async def _delegate_create_media_buy(req: Any, ctx: RequestContext[Any]) -> dict
     """
     identity = _build_identity(ctx)
     req_model = _coerce_to_request_model(req, CreateMediaBuyRequest)
+    pnc = req_model.push_notification_config
+    pnc_dict: dict[str, Any] | None
+    if pnc is None:
+        pnc_dict = None
+    elif hasattr(pnc, "model_dump"):
+        pnc_dict = pnc.model_dump(mode="json", exclude_none=True)
+    else:
+        pnc_dict = dict(pnc)
     try:
-        response = await _create_media_buy_impl(req_model, identity=identity)
+        response = await _create_media_buy_impl(req_model, push_notification_config=pnc_dict, identity=identity)
     except AdCPError as exc:
         raise _translate_adcp_error(exc) from exc
     return _to_wire(response)
@@ -253,18 +319,34 @@ async def _delegate_sync_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
         body = dict(req)
     else:
         body = dict(req)
-    response = await asyncio.to_thread(
-        _sync_creatives_impl,
-        creatives=body.get("creatives") or [],
-        assignments=body.get("assignments"),
-        creative_ids=body.get("creative_ids"),
-        delete_missing=bool(body.get("delete_missing", False)),
-        dry_run=bool(body.get("dry_run", False)),
-        validation_mode=body.get("validation_mode") or "strict",
-        push_notification_config=body.get("push_notification_config"),
-        context=body.get("context"),
-        identity=identity,
-    )
+    # ``validation_mode`` arrives as a ``ValidationMode`` enum on the wire
+    # path (the spec schema is an enum; pydantic preserves it through
+    # ``model_dump(exclude_unset=True)``). Normalize to the underlying
+    # string value so the impl's ``validation_mode == "strict"`` checks
+    # work — without this, strict mode silently degrades to lenient and
+    # the assignment loop never raises ``AdCPNotFoundError``.
+    raw_mode = body.get("validation_mode")
+    validation_mode_str = getattr(raw_mode, "value", raw_mode) or "strict"
+    try:
+        response = await asyncio.to_thread(
+            _sync_creatives_impl,
+            creatives=body.get("creatives") or [],
+            assignments=body.get("assignments"),
+            creative_ids=body.get("creative_ids"),
+            delete_missing=bool(body.get("delete_missing", False)),
+            dry_run=bool(body.get("dry_run", False)),
+            validation_mode=validation_mode_str,
+            push_notification_config=body.get("push_notification_config"),
+            context=body.get("context"),
+            identity=identity,
+        )
+    except AdCPError as exc:
+        # Strict-mode validation failures (AdCPNotFoundError /
+        # AdCPValidationError raised by the assignment loop) need
+        # structured wire codes — without translation the framework
+        # surfaces an opaque INTERNAL_ERROR and buyers can't tell
+        # missing-package from internal failure.
+        raise _translate_adcp_error(exc) from exc
     return _to_wire(response)
 
 

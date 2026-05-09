@@ -19,7 +19,7 @@ from adcp.types import GetCreativeDeliveryResponse as LibraryGetCreativeDelivery
 from adcp.types import GetMediaBuyDeliveryRequest as LibraryGetMediaBuyDeliveryRequest
 from adcp.types import GetMediaBuyDeliveryResponse as LibraryGetMediaBuyDeliveryResponse
 from adcp.types import ReportingPeriod as LibraryReportingPeriod
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_serializer
 
 from src.core.config import get_pydantic_extra_mode
 from src.core.schemas._base import NestedModelSerializerMixin, SalesAgentBaseModel
@@ -72,15 +72,6 @@ class GetMediaBuyDeliveryRequest(LibraryGetMediaBuyDeliveryRequest):
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
-
-    # account, reporting_dimensions, attribution_window: now provided by adcp 3.10 library
-    # with proper types (AccountReference, ReportingDimensions, AttributionWindow).
-
-    # --- Salesagent extensions (NOT in adcp spec/library) ---
-    include_package_daily_breakdown: bool | None = Field(
-        None,
-        description="Include daily_breakdown arrays within each package (salesagent extension, not in adcp spec)",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +201,19 @@ class MediaBuyDeliveryData(SalesAgentBaseModel):
         description="AdCP extension object for adapter-specific data",
     )
 
+    @field_serializer("status")
+    def _serialize_status(self, value: str) -> str:
+        """Map salesagent's internal vocab to the AdCP wire enum.
+
+        The schema's ``status`` Literal carries the internal vocab so every
+        in-process consumer (filters, scheduler ``non_active_status_strs``,
+        per-buy comparisons) can keep its existing ``"ready"`` checks. The
+        AdCP wire ``MediaBuyStatus`` enum uses ``"pending_start"`` for the
+        same state, so we translate at serialisation time only. Every other
+        internal value coincides with its wire name.
+        """
+        return "pending_start" if value == "ready" else value
+
 
 class ReportingPeriod(LibraryReportingPeriod):
     """Extends library ReportingPeriod.
@@ -334,6 +338,10 @@ class AdapterPackageDelivery(SalesAgentBaseModel):
     package_id: str
     impressions: int
     spend: float
+    # Video completions surfaced from in-stream VAST inventory.
+    # Outstream returns zero (VAST events don't fire) — addressed by the
+    # full classifier-plus-merge in #225 Phase 2.
+    video_completions: int | None = None
     by_placement: list[dict[str, Any]] | None = None
 
 

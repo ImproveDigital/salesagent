@@ -14,7 +14,7 @@ __all__ = [
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import sqlalchemy.exc
@@ -63,6 +63,25 @@ from src.core.schemas import (
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+
+def _clamp_target_date_to_now(end_dt: datetime) -> datetime:
+    """Clamp a reporting-window ``end`` to "now" for freshness validation.
+
+    Ad-hoc ``get_media_buy_delivery`` queries may legitimately extend past
+    "now" (e.g. a buyer polling ``[today, tomorrow]``). GAM cannot have
+    produced data for a future boundary, so the freshness validator would
+    reject every such window as stale. Clamping to "now" lets the validator
+    apply its real check ("does the report cover up to now?") instead of an
+    impossible one ("does the report cover up to tomorrow?").
+
+    Naive datetimes are clamped against a naive ``now`` so the comparison
+    doesn't raise; aware datetimes against ``datetime.now(UTC)``.
+    """
+    now = datetime.now(UTC)
+    if end_dt.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    return min(end_dt, now)
 
 
 class GoogleAdManager(AdServerAdapter):
@@ -1116,11 +1135,12 @@ class GoogleAdManager(AdServerAdapter):
             requested_timezone="America/New_York",
         )
 
-        # Validate data freshness
-        # The adapter decides whether to return data or raise error if data is stale
-        # Target date is the end of the reporting period
-        target_date = date_range.end
-
+        # Validate data freshness. See `_clamp_target_date_to_now`: ad-hoc
+        # buyer queries can extend past "now", and GAM cannot have produced
+        # data for a future boundary. The webhook delivery path is unaffected
+        # because it calls `is_data_fresh_for_webhook` directly with its own
+        # yesterday-anchored target.
+        target_date = _clamp_target_date_to_now(date_range.end)
         is_fresh = validate_and_log_freshness(reporting_data, media_buy_id, target_date=target_date)
 
         if not is_fresh:
@@ -1131,6 +1151,11 @@ class GoogleAdManager(AdServerAdapter):
         total_clicks = reporting_data.metrics.get("total_clicks", 0)
         total_spend = reporting_data.metrics.get("total_spend", 0.0)
         avg_ctr = reporting_data.metrics.get("average_ctr", 0.0)
+        # In-stream VAST completions only — outstream players don't fire
+        # VAST events so this returns zero for those line items. The full
+        # classifier-plus-viewership-merge that handles outstream is
+        # tracked in #225 Phase 2.
+        total_video_completions = reporting_data.metrics.get("total_video_completions", 0) or 0
 
         # Build daily breakdown from reporting data
         daily_breakdown = []
@@ -1173,7 +1198,7 @@ class GoogleAdManager(AdServerAdapter):
         by_package = []
         if packages_data:
             # Group reporting data by line item
-            line_item_metrics = {}
+            line_item_metrics: dict[str, dict[str, float]] = {}
             for row in reporting_data.data:
                 line_item_id = row.get("line_item_id", "")
                 if line_item_id:
@@ -1182,10 +1207,12 @@ class GoogleAdManager(AdServerAdapter):
                             "impressions": 0,
                             "clicks": 0,
                             "spend": 0.0,
+                            "video_completions": 0,
                         }
                     line_item_metrics[line_item_id]["impressions"] += row.get("impressions", 0)
                     line_item_metrics[line_item_id]["clicks"] += row.get("clicks", 0)
                     line_item_metrics[line_item_id]["spend"] += row.get("spend", 0.0)
+                    line_item_metrics[line_item_id]["video_completions"] += row.get("video_completions", 0)
 
             # Match packages to line items and build delivery data
             for i, pkg_data in enumerate(packages_data):
@@ -1195,11 +1222,17 @@ class GoogleAdManager(AdServerAdapter):
 
                 if platform_line_item_id and platform_line_item_id in line_item_metrics:
                     metrics = line_item_metrics[platform_line_item_id]
+                    pkg_video = int(metrics["video_completions"])
                     by_package.append(
                         AdapterPackageDelivery(
                             package_id=package_id,
                             impressions=int(metrics["impressions"]),
                             spend=metrics["spend"],
+                            # None for non-video packages so the wire field
+                            # is dropped via exclude_none. Zero would falsely
+                            # claim "we measured zero VAST events" on a
+                            # display-only package.
+                            video_completions=pkg_video if pkg_video > 0 else None,
                         )
                     )
 
@@ -1212,8 +1245,16 @@ class GoogleAdManager(AdServerAdapter):
                 spend=total_spend,
                 clicks=total_clicks if total_clicks > 0 else None,
                 ctr=avg_ctr if avg_ctr > 0 else None,
-                video_completions=None,
-                completion_rate=None,
+                # None when we observed zero VAST events so the wire
+                # response doesn't claim "measured zero" on a display-only
+                # buy. Real values are surfaced when in-stream inventory
+                # delivered them.
+                video_completions=total_video_completions if total_video_completions > 0 else None,
+                completion_rate=(
+                    round(total_video_completions / total_impressions, 4)
+                    if total_video_completions > 0 and total_impressions > 0
+                    else None
+                ),
             ),
             currency=str(media_buy.currency or "USD"),
             daily_breakdown=daily_breakdown if daily_breakdown else None,

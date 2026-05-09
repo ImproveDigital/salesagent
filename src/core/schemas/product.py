@@ -4,9 +4,6 @@ Extracted from src/core/schemas/__init__.py to reduce file size.
 All classes are re-exported from src.core.schemas for backward compatibility.
 """
 
-from typing import Any
-
-from adcp.types import Catalog as LibraryCatalog
 from adcp.types import GetProductsResponse as LibraryGetProductsResponse
 from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
 from adcp.types import Placement as LibraryPlacement
@@ -63,87 +60,21 @@ class Placement(LibraryPlacement):
     )
 
 
-class Product(LibraryProduct):
-    """Product schema extending library Product with internal fields.
-
-    Inherits all AdCP-compliant fields from adcp library's Product,
-    ensuring we stay in sync with spec updates. Adds only internal-only
-    fields that we need for our implementation.
-
-    This pattern ensures:
-    - External serialization uses library Product (spec-compliant)
-    - Internal code has extra fields it needs (implementation_config)
-    - No conversion functions needed - inheritance handles it
-    - Automatic updates when library Product changes
-    """
-
-    # Internal-only fields (not in AdCP spec)
-    implementation_config: dict[str, Any] | None = Field(
-        default=None,
-        description="Internal: Ad server-specific configuration for implementing this product",
-        exclude=True,  # Exclude from serialization by default
-    )
-
-    # Filter-related fields (not in AdCP Product spec, but needed for filtering)
-    countries: list[str] | None = Field(
-        default=None,
-        description="Internal: Country codes (ISO 3166-1 alpha-2) where this product is available",
-        exclude=True,  # Exclude from serialization by default
-    )
-    # channels: inherited from library Product as list[MediaChannel] | None (public per AdCP spec)
-
-    # Device type targeting (from targeting_template.device_targets in DB)
-    device_types: list[str] | None = Field(
-        default=None,
-        description="Internal: Device types this product supports (mobile, desktop, tablet, ctv, etc.)",
-        exclude=True,  # Exclude from serialization by default
-    )
-
-    # Principal access control
-    allowed_principal_ids: list[str] | None = Field(
-        default=None,
-        description="Internal: Principal IDs that can see this product. NULL/empty means visible to all.",
-        exclude=True,  # Exclude from serialization by default
-    )
-
-    # Pricing rules (AdCP V3): ``fixed_price`` present = fixed pricing,
-    # ``floor_price`` present = auction with floor. The consolidated
-    # CpmPricingOption/VcpmPricingOption types enforce this.
-    #
-    # ``publisher_properties`` non-emptiness is enforced by the library
-    # ``Product`` itself via ``MinLen(1)`` — no local validator needed.
-
-    # No model_dump override: internal-only fields are marked ``exclude=True`` on
-    # the field declaration (Pydantic strips them automatically), and the
-    # library Product is the source of truth for what's on the wire.
+# Wire-shape Product is just the AdCP library type. Internal fields live on
+# ``src.core.resolved_product.ResolvedProduct``; the production wire path goes
+# through :func:`src.core.product_conversion.convert_product_model_to_resolved`,
+# which builds the wire shape from explicit ORM fields only.
+Product = LibraryProduct
 
 
 class ProductFilters(LibraryFilters):
     """Product filters extending library Filters from AdCP spec.
 
-    Inherits all AdCP-compliant filter fields from adcp library's Filters class,
-    ensuring we stay in sync with spec updates. All fields come from the library:
-    - delivery_type: Filter by delivery type (guaranteed, auction)
-    - format_ids: Filter by specific format IDs
-    - format_types: Filter by format types (video, display, audio)
-    - is_fixed_price: Filter for fixed price vs auction products
-    - min_exposures: Minimum exposures for measurement validity
-    - standard_formats_only: Only return IAB standard formats
-
-    Local extensions (not in AdCP product-filters.json):
-    - device_types: Filter by device form factors (mobile, desktop, tablet, ctv, etc.)
-
-    This pattern ensures:
-    - External requests use library Filters (spec-compliant)
-    - We automatically get spec updates when library updates
-    - No manual field duplication = no drift from spec
+    All filter fields come from the library — see adcp ProductFilters for the
+    full list (delivery_type, format_ids, format_types, is_fixed_price,
+    min_exposures, standard_formats_only, countries, regions, metros,
+    channels, etc.).
     """
-
-    # Local extension: device type filtering
-    device_types: list[str] | None = Field(
-        default=None,
-        description="Filter by device form factors (mobile, desktop, tablet, ctv, dooh, audio)",
-    )
 
     @model_validator(mode="before")
     @classmethod
@@ -151,32 +82,9 @@ class ProductFilters(LibraryFilters):
         return _upgrade_legacy_format_ids(values)
 
 
-class GetProductsRequest(LibraryGetProductsRequest):
-    """Extends library GetProductsWholesaleRequest (adcp 3.9: GetProductsRequest is a union alias).
-
-    Base class: GetProductsWholesaleRequest (brief optional, buying_mode='wholesale').
-    We widen buying_mode to str|None so callers aren't forced into a single mode.
-
-    Library provides: account, brand, brief, buyer_campaign_ref, catalog,
-    context, ext, fields, filters, pagination, property_list, refine.
-
-    Internal-only: product_selectors (excluded from external serialization).
-    """
-
-    model_config = ConfigDict(extra=get_pydantic_extra_mode())
-
-    # Widen buying_mode from Literal['wholesale'] to str|None (we accept any mode or none)
-    buying_mode: str | None = Field(  # type: ignore[assignment]
-        None,
-        description="Buyer intent: 'brief' (publisher curates) or 'wholesale' (buyer applies own audiences)",
-    )
-
-    # Internal-only fields (not in AdCP spec)
-    product_selectors: LibraryCatalog | None = Field(
-        None,
-        description="Selectors to filter the brand manifest product catalog for product discovery",
-        exclude=True,
-    )
+# Wire-shape GetProductsRequest is the AdCP library type. Callers must provide
+# buying_mode ('brief' or 'wholesale') per spec — no widening or local fields.
+GetProductsRequest = LibraryGetProductsRequest
 
 
 class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse):

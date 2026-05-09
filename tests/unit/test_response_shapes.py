@@ -274,6 +274,7 @@ class TestSyncCreativesResponseShape:
 
     def test_sync_response_failed_creative_has_errors(self):
         """Failed creative includes errors list."""
+        from adcp.types import Error
         from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
         from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
@@ -281,7 +282,10 @@ class TestSyncCreativesResponseShape:
         result = SyncCreativeResult(
             creative_id="creative_003",
             action=CreativeAction.failed,
-            errors=["Format not supported", "Missing required asset"],
+            errors=[
+                Error(code="format_not_supported", message="Format not supported"),
+                Error(code="missing_asset", message="Missing required asset"),
+            ],
         )
         resp = SyncCreativesResponse(creatives=[result], dry_run=False)  # type: ignore[call-arg]
         data = resp.model_dump(mode="json")
@@ -289,7 +293,7 @@ class TestSyncCreativesResponseShape:
         c = data["creatives"][0]
         assert_field_type(c, "errors", list)
         assert len(c["errors"]) == 2
-        assert all(isinstance(e, str) for e in c["errors"])
+        assert all(isinstance(e, dict) and "code" in e and "message" in e for e in c["errors"])
 
 
 # ===========================================================================
@@ -612,8 +616,8 @@ class TestUpdateMediaBuyResponseShape:
         assert_field_type(pkg, "paused", bool)
         assert pkg["package_id"] == "pkg_001"
 
-    def test_internal_fields_excluded(self):
-        """Internal fields (workflow_step_id, changes_applied, buyer_package_ref) are excluded."""
+    def test_package_internal_fields_excluded(self):
+        """AffectedPackage internal fields (changes_applied, buyer_package_ref) stay excluded."""
         from src.core.schemas import AffectedPackage, UpdateMediaBuySuccess
 
         package = AffectedPackage(
@@ -629,7 +633,10 @@ class TestUpdateMediaBuyResponseShape:
         )
         data = resp.model_dump(mode="json")
 
-        assert "workflow_step_id" not in data
+        # workflow_step_id is now wire-visible per #158 — buyers need it
+        # to disambiguate "deferred for approval" from "applied with no
+        # package effect". The two payloads were otherwise byte-identical.
+        assert data["workflow_step_id"] == "wf_456"
 
         pkg = data["affected_packages"][0]
         assert "changes_applied" not in pkg, "Internal 'changes_applied' field should be excluded"
@@ -868,6 +875,7 @@ class TestSerializationConsistency:
         """SyncCreativesResponse is JSON-serializable."""
         import json
 
+        from adcp.types import Error
         from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
         from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
@@ -881,7 +889,7 @@ class TestSerializationConsistency:
                 SyncCreativeResult(
                     creative_id="c2",
                     action=CreativeAction.failed,
-                    errors=["Bad format"],
+                    errors=[Error(code="bad_format", message="Bad format")],
                 ),
             ],
             dry_run=False,

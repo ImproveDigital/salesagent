@@ -53,12 +53,129 @@ from src.core.testing_hooks import AdCPTestContext
 from src.core.tools._gam_projection import (
     get_or_materialize_media_buy,
     is_projected_media_buy_id,
+    log_materialization_audit,
 )
+
+
+class _MaterializationAuditCtx:
+    """Fires ``log_materialization_audit`` on context exit when a payload is set.
+
+    Wraps the outer UoW so the audit fires guaranteed-once on every exit
+    path — success, mutation rejection, validation early-return, or
+    unexpected exception — without forcing a try/finally indent shift on
+    the entire ``_update_media_buy_impl`` body. Exits the audit context
+    AFTER the UoW commits, so the audit logger's separate session/commit
+    can't expire the freshly-flushed MediaBuy on the parent session.
+    """
+
+    def __init__(self) -> None:
+        self.payload: dict | None = None
+
+    def __enter__(self) -> "_MaterializationAuditCtx":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # Return None (== falsy) so exceptions are never suppressed.
+        if self.payload is not None:
+            log_materialization_audit(**self.payload)
+
+
 from src.core.tools.financial_validation import (
     validate_max_campaign_budget,
     validate_max_daily_package_spend,
     validate_min_package_budget,
 )
+
+# GAM enforces immutability of reservation-affecting fields on guaranteed
+# line items after approval. Without a pre-flight check, the seller
+# discovers the constraint only after Order has been mutated and ~3 min
+# of NO_FORECAST_YET retries have run on the LineItem leg, leaving
+# Order new + LineItem stale + DB new (three-way drift).
+_GUARANTEED_LINE_ITEM_TYPES: set[str] = {"STANDARD", "SPONSORSHIP"}
+_RESERVATION_FIELDS: set[str] = {"start_time", "end_time", "budget"}
+
+
+def serialize_for_workflow_step(model: Any) -> dict[str, Any]:
+    """Serialize a Pydantic model for storage on ``workflow_step.response_data``.
+
+    The ``workflow_step`` table holds the original request/response blob in
+    a JSONB column so the approval reviewer can replay or inspect the call.
+    JSONB needs a dict, not a model — but this is *persistence*, not a
+    transport boundary, so the no-``.model_dump()``-in-``_impl`` rule does
+    not apply.
+
+    Centralizes the dump kwargs (``mode='json'``) so all ~22 call sites
+    stay consistent, and lets the architecture guard switch from a
+    fragile ``(file, line_number)`` allowlist to a single function-name
+    exemption — see issue #240.
+    """
+    return model.model_dump(mode="json")
+
+
+def _check_guaranteed_immutable(
+    req: UpdateMediaBuyRequest,
+    media_buy_id: str,
+    uow: MediaBuyUoW,
+    session,
+    tenant_id: str,
+) -> UpdateMediaBuyError | None:
+    """Refuse reservation-affecting updates against guaranteed line items.
+
+    Returns ``None`` when the request is safe to proceed. Returns a
+    prepared ``UpdateMediaBuyError`` (code ``guaranteed_line_item_immutable``)
+    when at least one package's product is configured as a guaranteed
+    GAM line item (``STANDARD`` or ``SPONSORSHIP``) and the request
+    touches any reservation field (``start_time``, ``end_time``,
+    ``budget``).
+
+    Default-allow on unknown ``line_item_type`` so this never blocks new
+    GAM types Google introduces later.
+    """
+    requested = set(req.model_dump(exclude_unset=True).keys()) & _RESERVATION_FIELDS
+    if not requested:
+        return None
+
+    from src.core.database.models import Product as ModelProduct
+
+    assert uow.media_buys is not None
+    packages = uow.media_buys.get_packages(media_buy_id)
+    if not packages:
+        return None
+
+    product_ids = {pkg.package_config.get("product_id") for pkg in packages if pkg.package_config}
+    product_ids.discard(None)
+    if not product_ids:
+        return None
+
+    products = session.scalars(
+        select(ModelProduct).where(
+            ModelProduct.tenant_id == tenant_id,
+            ModelProduct.product_id.in_(product_ids),
+        )
+    ).all()
+
+    for product in products:
+        impl_config = product.implementation_config or {}
+        li_type = impl_config.get("line_item_type")
+        if li_type in _GUARANTEED_LINE_ITEM_TYPES:
+            blocked_fields = sorted(requested)
+            return UpdateMediaBuyError(
+                errors=[
+                    Error(
+                        code="guaranteed_line_item_immutable",
+                        message=(
+                            f"Media buy {media_buy_id} is a guaranteed line item "
+                            f"({li_type}); reservation-affecting fields "
+                            f"({', '.join(blocked_fields)}) cannot be modified after "
+                            f"approval. Pause and recreate, or contact the publisher."
+                        ),
+                        details={"line_item_type": li_type, "blocked_fields": blocked_fields},
+                    )
+                ],
+                context=req.context,
+            )
+
+    return None
 
 
 def _verify_principal(media_buy_id: str, context: "ResolvedIdentity", repo: MediaBuyRepository) -> None:
@@ -119,6 +236,7 @@ def _update_media_buy_impl(
     req: UpdateMediaBuyRequest,
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
+    bypass_manual_approval: bool = False,
 ) -> UpdateMediaBuySuccess | UpdateMediaBuyError:
     """Shared implementation for update_media_buy (used by both MCP and A2A).
 
@@ -131,6 +249,11 @@ def _update_media_buy_impl(
         req: Validated UpdateMediaBuyRequest with all protocol fields
         identity: ResolvedIdentity with principal/tenant info (transport-agnostic)
         context_id: Optional workflow context ID
+        bypass_manual_approval: When True, skip the manual-approval gate and
+            apply the update immediately. Used by the workflows-blueprint
+            replay path: an operator has already approved the deferred step
+            and we are now executing it. Buyer-facing transports (MCP/A2A)
+            never set this.
 
     Returns:
         UpdateMediaBuyResponse with updated media buy details
@@ -151,8 +274,12 @@ def _update_media_buy_impl(
     if not tenant:
         raise AdCPAuthenticationError("No tenant context available")
 
-    # Single UoW for entire update operation — one session, one transaction
-    with MediaBuyUoW(tenant["tenant_id"]) as uow:
+    # Single UoW for entire update operation — one session, one transaction.
+    # The audit context wraps the UoW so the materialization audit fires
+    # exactly once per first-time materialization, regardless of which
+    # exit path the function takes. Audit fires AFTER the UoW commits.
+    audit_ctx = _MaterializationAuditCtx()
+    with audit_ctx, MediaBuyUoW(tenant["tenant_id"]) as uow:
         assert uow.media_buys is not None
         # FIXME(salesagent-9f2): raw session usages below should migrate to repository methods
         assert uow.session is not None
@@ -183,6 +310,18 @@ def _update_media_buy_impl(
                     principal_id=principal_id,
                     media_buy_id=media_buy_id_to_use,
                 )
+                # Capture audit fields by value so the audit log call
+                # (which opens its own DB session and commits) doesn't
+                # need to re-read from the freshly-flushed instance.
+                # Setting on audit_ctx — fires from __exit__ after UoW commit.
+                audit_ctx.payload = {
+                    "tenant_id": tenant["tenant_id"],
+                    "principal_id": principal_id,
+                    "advertiser_name": imported_buy.advertiser_name,
+                    "advertiser_id": (imported_buy.raw_request or {}).get("gam_advertiser_id"),
+                    "order_id": imported_buy.external_id,
+                    "media_buy_id": imported_buy.media_buy_id,
+                }
 
         # Verify principal owns this media buy
         _verify_principal(media_buy_id_to_use, identity, uow.media_buys)
@@ -203,6 +342,10 @@ def _update_media_buy_impl(
                 or bool(req.new_packages)
             )
             if mutating:
+                # Materialization persisted even though we're rejecting
+                # the mutation — the wrapping ``_MaterializationAuditCtx``
+                # fires the audit on context exit, so we can return
+                # immediately without re-emitting here.
                 return UpdateMediaBuyError(
                     media_buy_id=media_buy_id_to_use,
                     errors=[
@@ -220,6 +363,33 @@ def _update_media_buy_impl(
 
         # Extract testing context early (needed for dry_run check)
         testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
+
+        # Idempotency replay (defence-in-depth on the SDK's post-hoc
+        # IdempotencyStore.wrap): if a prior call with this idempotency_key
+        # already completed (response_data populated), replay its response
+        # verbatim instead of re-executing. The SDK wrap caches AFTER the
+        # handler completes, so two sequential same-key calls hitting the
+        # impl before the first commits both reach this point. Mirrors the
+        # create-path pattern at media_buy_create.py:1471-1489. Skipped in
+        # dry_run since dry_run never writes a workflow step to read back.
+        if not testing_ctx.dry_run and req.idempotency_key:
+            from src.core.database.repositories.workflow import WorkflowRepository
+
+            workflow_repo = WorkflowRepository(session, tenant["tenant_id"])
+            existing_step = workflow_repo.find_by_idempotency_key(
+                req.idempotency_key,
+                principal_id,
+                tool_name="update_media_buy",
+            )
+            if existing_step is not None and existing_step.response_data:
+                logger.info(
+                    f"[IDEMPOTENCY] update_media_buy replaying step {existing_step.step_id} "
+                    f"for key={req.idempotency_key[:8]}..."
+                )
+                cached = {k: v for k, v in existing_step.response_data.items() if k != "request_data"}
+                if cached.get("errors"):
+                    return UpdateMediaBuyError.model_validate(cached)
+                return UpdateMediaBuySuccess.model_validate(cached)
 
         # Create or get persistent context and workflow step
         # Skip for dry_run mode (no side effects, no database writes)
@@ -262,7 +432,7 @@ def _update_media_buy_impl(
                 ctx_manager.update_workflow_step(
                     step.step_id,
                     status="failed",
-                    response_data=response_data.model_dump(mode="json"),
+                    response_data=serialize_for_workflow_step(response_data),
                     error_message=error_msg,
                 )
             return response_data
@@ -301,11 +471,25 @@ def _update_media_buy_impl(
         assert step is not None, "step should be created when not in dry_run mode"
         assert persistent_ctx is not None, "persistent_ctx should be created when not in dry_run mode"
 
+        # Pre-flight: GAM rejects reservation-affecting mutations on guaranteed
+        # line items after approval. Refusing here avoids ~3min of doomed
+        # NO_FORECAST_YET retries and the half-mutated Order they leave behind.
+        guaranteed_block = _check_guaranteed_immutable(req, media_buy_id_to_use, uow, session, tenant["tenant_id"])
+        if guaranteed_block is not None:
+            err_msg = guaranteed_block.errors[0].message
+            ctx_manager.update_workflow_step(
+                step.step_id,
+                status="failed",
+                response_data=serialize_for_workflow_step(guaranteed_block),
+                error_message=err_msg,
+            )
+            return guaranteed_block
+
         # Check if manual approval is required
         manual_approval_required = adapter.manual_approval_required
         manual_approval_operations = adapter.manual_approval_operations
 
-        if manual_approval_required and "update_media_buy" in manual_approval_operations:
+        if manual_approval_required and "update_media_buy" in manual_approval_operations and not bypass_manual_approval:
             # Store the original request alongside the response so the approval
             # execution path can re-execute the update after human approval.
             # This mirrors create_media_buy's raw_request pattern.
@@ -313,9 +497,14 @@ def _update_media_buy_impl(
                 media_buy_id=req.media_buy_id or "",
                 affected_packages=[],  # Not yet applied — pending approval
                 context=req.context,
+                # Surface the workflow step id so buyers can disambiguate
+                # "deferred for approval" from "applied with no package
+                # effect" — both otherwise serialize to the same envelope
+                # shape. (#158)
+                workflow_step_id=step.step_id,
             )
-            approval_data = approval_response.model_dump(mode="json")
-            approval_data["request_data"] = req.model_dump(mode="json")
+            approval_data = serialize_for_workflow_step(approval_response)
+            approval_data["request_data"] = serialize_for_workflow_step(req)
             ctx_manager.update_workflow_step(
                 step.step_id,
                 status="requires_approval",
@@ -369,7 +558,7 @@ def _update_media_buy_impl(
                     ctx_manager.update_workflow_step(
                         step.step_id,
                         status="failed",
-                        response_data=response_data.model_dump(mode="json"),
+                        response_data=serialize_for_workflow_step(response_data),
                         error_message=error_msg,
                     )
                     return response_data
@@ -426,10 +615,64 @@ def _update_media_buy_impl(
                                 ctx_manager.update_workflow_step(
                                     step.step_id,
                                     status="failed",
-                                    response_data=response_data.model_dump(mode="json"),
+                                    response_data=serialize_for_workflow_step(response_data),
                                     error_message=package_daily_spend_error,
                                 )
                                 return response_data
+
+        # Cancel: terminal transition. Double-cancel raises NOT_CANCELLABLE.
+        # Wired to the DB row directly (no adapter dispatch yet — the mock
+        # adapter only had an in-memory state change for this; GAM order
+        # archive on cancel is a follow-up). ``cancellation_reason`` is
+        # echoed back on the response.
+        #
+        # IMPORTANT: ``UpdateMediaBuyRequest.canceled`` is the AdCP-generated
+        # ``Literal[True] = True`` field — the Pydantic default is True
+        # whenever the buyer didn't include it in the wire payload. A
+        # naive ``req.canceled is True`` check would therefore fire on
+        # EVERY update (pause, budget, packages, etc.), preempting their
+        # branches. Gate on ``model_fields_set`` so only an explicit
+        # ``canceled=True`` from the buyer triggers cancellation.
+        canceled_in_request = "canceled" in getattr(req, "model_fields_set", set())
+        if canceled_in_request and req.canceled is True:
+            current_mb = uow.media_buys.get_by_id(req.media_buy_id)
+            if current_mb and str(current_mb.status) == "canceled":
+                error_response = UpdateMediaBuyError(
+                    errors=[
+                        Error(
+                            code="NOT_CANCELLABLE",
+                            message=(
+                                f"media_buy_id={req.media_buy_id!r} is already canceled — cannot cancel a terminal buy"
+                            ),
+                        )
+                    ],
+                    context=req.context,
+                )
+                ctx_manager.update_workflow_step(
+                    step.step_id,
+                    status="failed",
+                    response_data=serialize_for_workflow_step(error_response),
+                    error_message="already canceled",
+                )
+                return error_response
+
+            # MediaBuy ORM has no cancellation_reason column today —
+            # echoing the reason back on the response (via the SDK's
+            # response context) is the spec-compliant minimum. Persisting
+            # it would need a schema migration; tracked separately.
+            uow.media_buys.update_fields(req.media_buy_id, status="canceled")
+
+            cancel_response = UpdateMediaBuySuccess(
+                media_buy_id=req.media_buy_id or "",
+                affected_packages=[],
+                context=req.context,
+            )
+            ctx_manager.update_workflow_step(
+                step.step_id,
+                status="completed",
+                response_data=serialize_for_workflow_step(cancel_response),
+            )
+            return cancel_response
 
         # Handle campaign-level updates
         if req.paused is not None:
@@ -449,7 +692,7 @@ def _update_media_buy_impl(
                 ctx_manager.update_workflow_step(
                     step.step_id,
                     status="failed",
-                    response_data=error_response.model_dump(mode="json"),
+                    response_data=serialize_for_workflow_step(error_response),
                     error_message=result.errors[0].message if result.errors else "Pause/resume failed",
                 )
                 return error_response
@@ -481,13 +724,26 @@ def _update_media_buy_impl(
                 ctx_manager.update_workflow_step(
                     step.step_id,
                     status="completed",
-                    response_data=success_response.model_dump(mode="json"),
+                    response_data=serialize_for_workflow_step(success_response),
                 )
                 return success_response
 
         # Handle package-level updates
         if req.packages:
             for pkg_update in req.packages:
+                # Pre-validate package existence at the impl boundary so the
+                # spec-compliant PACKAGE_NOT_FOUND wire code surfaces uniformly
+                # regardless of which adapter handles the dispatch. Without
+                # this gate the adapter returns its own lowercase
+                # ``package_not_found`` error which the delegate cannot
+                # translate to AdCPPackageNotFoundError -> PACKAGE_NOT_FOUND
+                # on the wire (issue #73 invalid_transitions storyboard).
+                if pkg_update.package_id and (pkg_update.paused is not None or pkg_update.budget is not None):
+                    if uow.media_buys.get_package(req.media_buy_id, pkg_update.package_id) is None:
+                        raise AdCPPackageNotFoundError(
+                            f"Package '{pkg_update.package_id}' not found for media buy '{req.media_buy_id}'."
+                        )
+
                 # Handle paused state
                 if pkg_update.paused is not None:
                     # adcp 2.12.0+: paused=True means pause, paused=False means resume
@@ -508,7 +764,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_message,
                         )
                         return response_data
@@ -525,7 +781,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_msg,
                         )
                         return response_data
@@ -579,7 +835,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_message,
                         )
                         return response_data
@@ -609,7 +865,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_msg,
                         )
                         return response_data
@@ -650,7 +906,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_msg,
                         )
                         return response_data
@@ -833,7 +1089,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_msg,
                         )
                         return response_data
@@ -863,7 +1119,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_msg,
                         )
                         return response_data
@@ -891,7 +1147,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_msg,
                         )
                         return response_data
@@ -1053,7 +1309,7 @@ def _update_media_buy_impl(
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
-                            response_data=response_data.model_dump(mode="json"),
+                            response_data=serialize_for_workflow_step(response_data),
                             error_message=error_msg,
                         )
                         return response_data
@@ -1117,7 +1373,7 @@ def _update_media_buy_impl(
                 ctx_manager.update_workflow_step(
                     step.step_id,
                     status="failed",
-                    response_data=response_data.model_dump(mode="json"),
+                    response_data=serialize_for_workflow_step(response_data),
                     error_message=error_msg,
                 )
                 return response_data
@@ -1175,11 +1431,6 @@ def _update_media_buy_impl(
 
         # Handle start_time/end_time updates
         if req.start_time is not None or req.end_time is not None:
-            # TODO: Sync date changes to GAM order
-            # Currently only updates database - does NOT sync to GAM API
-            # This creates data inconsistency between our database and GAM
-            # Need to implement: adapter.orders_manager.update_order_dates(order_id, start_time, end_time)
-
             update_values: dict[str, Any] = {}
             if req.start_time is not None:
                 # Parse start_time (handle 'asap' and datetime strings)
@@ -1239,17 +1490,41 @@ def _update_media_buy_impl(
                     ctx_manager.update_workflow_step(
                         step.step_id,
                         status="failed",
-                        response_data=response_data.model_dump(mode="json"),
+                        response_data=serialize_for_workflow_step(response_data),
                         error_message=error_msg,
                     )
                     return response_data
 
                 uow.media_buys.update_fields(req.media_buy_id, **update_values)
-                logger.warning(
-                    f"Updated MediaBuy {req.media_buy_id} dates in database ONLY: "
+                logger.info(
+                    f"Updated MediaBuy {req.media_buy_id} dates in DB: "
                     f"start_time={update_values.get('start_time')}, end_time={update_values.get('end_time')}"
                 )
-                logger.warning("GAM sync NOT implemented - GAM still has old dates")
+
+                # Sync the change to the underlying ad server. The DB write
+                # above captures the buyer's intent durably; if the adapter
+                # call fails we log loudly but don't roll back, so a retry
+                # can re-apply GAM-side without losing intent.
+                orders_manager = getattr(adapter, "orders_manager", None)
+                gam_order_id = existing_mb.external_id or existing_mb.media_buy_id
+                if orders_manager is not None and gam_order_id:
+                    try:
+                        synced = orders_manager.update_order_dates(
+                            order_id=gam_order_id,
+                            start_time=update_values.get("start_time"),
+                            end_time=update_values.get("end_time"),
+                        )
+                    except Exception as e:
+                        synced = False
+                        logger.error(
+                            f"Adapter raised while syncing dates for {req.media_buy_id} "
+                            f"(GAM order {gam_order_id}): {e}",
+                            exc_info=True,
+                        )
+                    if not synced:
+                        logger.error(
+                            f"GAM date sync FAILED for {req.media_buy_id} (Order {gam_order_id}); DB updated, GAM stale"
+                        )
 
         # Create ObjectWorkflowMapping to link media buy update to workflow step
         # This enables webhook delivery when the update completes
@@ -1299,7 +1574,7 @@ def _update_media_buy_impl(
         ctx_manager.update_workflow_step(
             step.step_id,
             status="completed",
-            response_data=final_response.model_dump(mode="json"),
+            response_data=serialize_for_workflow_step(final_response),
         )
 
     return final_response

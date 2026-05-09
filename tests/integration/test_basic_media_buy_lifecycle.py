@@ -69,6 +69,7 @@ class TestBasicMediaBuyLifecycle:
 
         # ───────── Phase 1: get_products ─────────
         products_req = GetProductsRequest(
+            buying_mode="wholesale",
             brand={"domain": "testbrand.com"},
             brief="display advertising",
         )
@@ -244,8 +245,13 @@ class TestMediaBuyApprovalAsync:
     async def test_human_review_required_creates_workflow_step_then_executes(
         self, sample_tenant, sample_principal, sample_products
     ):
-        """tenant.human_review_required=True → create_media_buy returns
-        status='submitted'; execute_approved_media_buy transitions to active."""
+        """tenant.human_review_required=True → create_media_buy returns the
+        sync-success envelope (variant-1) carrying ``media_buy_id`` and
+        ``MediaBuyStatus.pending_creatives`` (no creatives in this request);
+        a ``requires_approval`` workflow_step is parked for the human;
+        execute_approved_media_buy then transitions the buy to active."""
+        from adcp.types import MediaBuyStatus
+
         from src.core.database.models import MediaBuy as DBMediaBuy
         from src.core.database.models import WorkflowStep
         from src.core.schemas import CreateMediaBuyRequest
@@ -273,13 +279,17 @@ class TestMediaBuyApprovalAsync:
         )
         result = await _create_media_buy_impl(req=req, identity=identity)
 
-        assert result.status == "submitted", (
-            f"Expected submitted, got status={result.status}, errors={getattr(result.response, 'errors', None)}"
+        # Variant-1 (sync-success): the buy is minted synchronously with a
+        # ``MediaBuyStatus`` describing what's blocking activation. Without
+        # creatives in the request that's ``pending_creatives``. The wrapper
+        # ``status`` reports the seller's task as ``completed`` (sync work done).
+        assert result.status == "completed", (
+            f"Expected completed, got status={result.status}, errors={getattr(result.response, 'errors', None)}"
         )
         media_buy_id = result.response.media_buy_id
         assert media_buy_id
+        assert result.response.status == MediaBuyStatus.pending_creatives
 
-        # Approval workflow_step exists.
         with get_db_session() as session:
             steps = session.scalars(select(WorkflowStep).where(WorkflowStep.step_type == "media_buy_creation")).all()
             approval_steps = [s for s in steps if s.status == "requires_approval"]

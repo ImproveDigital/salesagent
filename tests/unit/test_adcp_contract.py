@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from adcp.types import CreativePolicy
+from adcp.types import CreativePolicy, Error
 
 from src.core.database.models import (
     Principal as PrincipalModel,
@@ -116,16 +116,11 @@ class TestSchemaMatchesLibrary:
             SyncCreativesRequest as LocalSyncCreativesRequest,
         )
 
-        # GetProductsRequest - local extends library with internal-only fields
+        # GetProductsRequest is now a plain alias for the library type (slice 7)
+        # — fields must match exactly, no local extensions.
         lib_fields = set(LibGetProductsRequest.model_fields.keys())
         local_fields = set(GetProductsRequest.model_fields.keys())
-        # product_selectors — internal-only field (not in AdCP spec)
-        # buying_mode and account are now in the library (adcp 3.9) but overridden locally
-        # (buying_mode widened to str|None, account made optional)
-        local_extensions = {"product_selectors"}
-        assert lib_fields == local_fields - local_extensions, (
-            f"GetProductsRequest drift: lib={lib_fields}, local={local_fields}"
-        )
+        assert lib_fields == local_fields, f"GetProductsRequest drift: lib={lib_fields}, local={local_fields}"
 
         # GetMediaBuyDeliveryRequest - local extends library with spec fields
         lib_fields = set(LibGetMediaBuyDeliveryRequest.model_fields.keys())
@@ -185,7 +180,7 @@ class TestSchemaMatchesLibrary:
         assert lib_req.filters is None
 
         # Our schema widens buying_mode to optional, so empty request works
-        our_req = GetProductsRequest()
+        our_req = GetProductsRequest(buying_mode="wholesale")
         assert our_req.brief is None
         assert our_req.brand is None  # adcp 3.6.0: brand replaces brand_manifest
 
@@ -199,7 +194,7 @@ class TestSchemaMatchesLibrary:
         assert lib_req.brand.domain == "acme.com"
 
         # Our schema should also accept brand with domain
-        our_req = GetProductsRequest(brand={"domain": "acme.com"})
+        our_req = GetProductsRequest(buying_mode="wholesale", brand={"domain": "acme.com"})
         assert our_req.brand is not None
 
     def test_create_media_buy_request_brand_required(self):
@@ -412,17 +407,18 @@ class TestAdCPContract:
         """
         # Per AdCP spec, all fields are optional
         # Empty request is valid
-        empty_request = GetProductsRequest()
+        empty_request = GetProductsRequest(buying_mode="wholesale")
         assert empty_request.brief is None
         assert empty_request.brand is None  # adcp 3.6.0: brand replaces brand_manifest
 
         # Request with brief only
-        brief_only = GetProductsRequest(brief="Looking for display ads on news sites")
+        brief_only = GetProductsRequest(buying_mode="wholesale", brief="Looking for display ads on news sites")
         assert brief_only.brief == "Looking for display ads on news sites"
         assert brief_only.brand is None
 
         # Request with brand only (adcp 3.6.0: uses BrandReference with domain)
         brand_only = GetProductsRequest(
+            buying_mode="wholesale",
             brand={"domain": "saas.example.com"},
         )
         assert brand_only.brief is None
@@ -430,6 +426,7 @@ class TestAdCPContract:
 
         # Request with both (common case)
         full_request = GetProductsRequest(
+            buying_mode="wholesale",
             brief="Looking for display ads",
             brand={"domain": "acme.com"},
         )
@@ -514,6 +511,7 @@ class TestAdCPContract:
         # Note: Per AdCP spec, brand is OPTIONAL (not required)
         # adcp 3.6.0: brand_manifest replaced by brand (BrandReference with required domain)
         request = GetProductsRequest(
+            buying_mode="wholesale",
             brief="Looking for high-volume campaigns",
             brand={"domain": "nike.com"},
         )
@@ -525,7 +523,7 @@ class TestAdCPContract:
             assert request.brand.domain == "nike.com"
 
         # Should succeed without brand (per AdCP spec, it's optional)
-        brief_only_request = GetProductsRequest(brief="Just a brief")
+        brief_only_request = GetProductsRequest(buying_mode="wholesale", brief="Just a brief")
         assert brief_only_request.brief == "Just a brief"
         assert brief_only_request.brand is None
 
@@ -776,43 +774,117 @@ class TestAdCPContract:
             )
 
     def test_adcp_response_excludes_internal_fields(self):
-        """Test that AdCP responses don't expose internal fields."""
+        """AdCP wire dumps must not carry internal fields.
+
+        Phase 2 slice 5: internal fields (implementation_config, countries,
+        device_types, allowed_principal_ids) live on :class:`ResolvedProduct`,
+        not on the wire-shape :class:`Product` schema. Two layers of defense:
+
+        1. Declaration: the Product schema must not declare any of the four
+           internal fields as its own model fields.
+        2. Production path: :func:`convert_product_model_to_resolved` builds
+           the wire-shape Product from explicit ORM columns only. Even if
+           the ORM model carries an internal value (e.g. ``implementation_config``),
+           the converter pulls it onto ``ResolvedProduct`` and never threads
+           it into the wire-shape constructor — so ``resolved.wire.model_dump()``
+           is clean regardless of what extras Pydantic would have allowed.
+        """
+        from unittest.mock import MagicMock
+
+        from src.core.product_conversion import convert_product_model_to_resolved
+
+        forbidden = {"implementation_config", "countries", "device_types", "allowed_principal_ids"}
+
+        # Layer 1 — schema declaration.
+        assert not (forbidden & set(ProductSchema.model_fields.keys())), (
+            "Internal fields must not be declared on the wire-shape Product schema"
+        )
+
+        # Layer 2 — production converter path stays clean even when the ORM
+        # model carries values for all four internal fields.
         from tests.helpers.adcp_factories import (
             create_test_cpm_pricing_option,
+            create_test_format_id,
             create_test_publisher_properties_by_tag,
             create_test_reporting_capabilities,
         )
 
-        products = [
-            ProductSchema(
-                product_id="test",
-                name="Test Product",
-                description="Test",
-                format_ids=[],
-                delivery_type="guaranteed",
-                delivery_measurement={
-                    "provider": "test_provider",
-                    "notes": "Test measurement",
-                },  # Required per AdCP spec
-                implementation_config={"internal": "data"},  # Should be excluded
-                publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
-                pricing_options=[
-                    create_test_cpm_pricing_option(
-                        pricing_option_id="cpm_usd_fixed",
-                        currency="USD",
-                        rate=10.0,
-                    )
-                ],
-                reporting_capabilities=create_test_reporting_capabilities(),  # Required per AdCP 4.4
-            )
+        orm = MagicMock()
+        orm.product_id = "test"
+        orm.name = "Test Product"
+        orm.description = "Test"
+        orm.delivery_type = "guaranteed"
+        orm.effective_format_ids = [create_test_format_id("display_300x250")]
+        orm.effective_properties = [create_test_publisher_properties_by_tag(publisher_domain="test.com")]
+        orm.delivery_measurement = {"provider": "test_provider", "notes": "Test measurement"}
+        orm.pricing_options = []
+        orm.is_custom = False
+        orm.reporting_capabilities = create_test_reporting_capabilities()
+        orm.channels = None
+        for opt in (
+            "measurement",
+            "creative_policy",
+            "product_card",
+            "product_card_detailed",
+            "placements",
+            "property_targeting_allowed",
+            "signal_targeting_allowed",
+            "catalog_match",
+            "catalog_types",
+            "conversion_tracking",
+            "data_provider_signals",
+            "forecast",
+        ):
+            setattr(orm, opt, None)
+
+        # Internal fields populated on the ORM — the converter must keep them
+        # off the wire shape.
+        orm.countries = ["US", "CA"]
+        orm.allowed_principal_ids = ["secret"]
+        orm.effective_implementation_config = {"gam": "config"}
+        orm.targeting_template = {"device_targets": ["mobile"]}
+
+        # Skip the empty pricing_options check — patch the call to provide a stub.
+        orm.pricing_options = [
+            type(
+                "PO",
+                (),
+                {
+                    "pricing_model": "cpm",
+                    "rate": 10.0,
+                    "currency": "USD",
+                    "is_fixed": True,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "min_spend_per_package": None,
+                    "vcpm_threshold": None,
+                    "duration_days": None,
+                    "metadata": None,
+                    "rate_card": None,
+                },
+            )()
         ]
 
-        response = GetProductsResponse(products=products)
-        response_dict = response.model_dump()
+        # Bypass the actual pricing converter (its constraints are exercised elsewhere).
+        from unittest.mock import patch
 
-        # Verify implementation_config is excluded from response
-        for product in response_dict["products"]:
-            assert "implementation_config" not in product, "Internal config should not be in AdCP response"
+        with patch("src.core.product_conversion.convert_pricing_option_to_adcp") as mock:
+            mock.return_value = create_test_cpm_pricing_option(
+                pricing_option_id="cpm_usd_fixed", currency="USD", rate=10.0
+            )
+            resolved = convert_product_model_to_resolved(orm, adapter_type="mock")
+
+        wire_dump = resolved.wire.model_dump()
+
+        for forbidden_name in forbidden:
+            assert forbidden_name not in wire_dump, (
+                f"Internal field '{forbidden_name}' leaked into the wire dump from the production converter"
+            )
+
+        # And the values still travel on the ResolvedProduct sidecar.
+        assert resolved.countries == ["US", "CA"]
+        assert resolved.allowed_principal_ids == ["secret"]
+        assert resolved.implementation_config == {"gam": "config"}
+        assert resolved.device_types == ["mobile"]
 
     def test_adcp_signal_support(self):
         """Test AdCP v2.4 signal support in Targeting schema.
@@ -1498,7 +1570,7 @@ class TestAdCPContract:
                 SyncCreativeResult(
                     creative_id="creative_789",
                     action="failed",
-                    errors=["Invalid format"],
+                    errors=[Error(code="invalid_format", message="Invalid format")],
                 ),
             ],
         )

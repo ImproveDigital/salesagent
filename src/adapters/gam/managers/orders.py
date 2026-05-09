@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from googleads import ad_manager
 
@@ -20,6 +21,59 @@ logger = logging.getLogger(__name__)
 # Line item type constants for GAM automation
 GUARANTEED_LINE_ITEM_TYPES = {"STANDARD", "SPONSORSHIP"}
 NON_GUARANTEED_LINE_ITEM_TYPES = {"NETWORK", "BULK", "PRICE_PRIORITY", "HOUSE"}
+
+# GAM Order builder has no timeZoneId field; line items default to the network
+# default unless overridden via impl_config.time_zone.
+DEFAULT_GAM_TIME_ZONE = "America/New_York"
+
+# LineItem forecast warmup is typically ~60 min after create or any
+# targeting change. GAM rejects mutations during this window with
+# ForecastingError.NO_FORECAST_YET. Backoff sleeps between retries
+# total ~3 min over 8 attempts (mirrors `update_line_item_budget`).
+NO_FORECAST_RETRY_BACKOFF: tuple[int, ...] = (5, 10, 20, 30, 30, 30, 30, 30)
+
+
+def _gam_datetime(dt: datetime, tz_id: str) -> dict[str, Any]:
+    """Build a GAM DateTime payload for ``dt`` expressed in ``tz_id``.
+
+    GAM interprets the wall-clock fields under ``timeZoneId``, so a tz-aware
+    datetime must be converted to that zone before extraction or the emitted
+    instant shifts by the UTC offset. Naive datetimes pass through unchanged
+    on the assumption they are already in network-local time.
+    """
+    local = dt.astimezone(ZoneInfo(tz_id)) if dt.tzinfo is not None else dt
+    return {
+        "date": {"year": local.year, "month": local.month, "day": local.day},
+        "hour": local.hour,
+        "minute": local.minute,
+        "second": local.second,
+    }
+
+
+def _build_custom_criteria_set(custom_targeting_keys: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a GAM ``CustomCriteriaSet`` from ``{key_id: {values, operator}}``.
+
+    Returns ``None`` when no children would be produced (empty input,
+    non-dict specs, or missing ``values``).
+    """
+    children: list[dict[str, Any]] = []
+    for key_id, value_spec in custom_targeting_keys.items():
+        if not isinstance(value_spec, dict):
+            continue
+        raw_values = value_spec.get("values") or []
+        if not raw_values:
+            continue
+        children.append(
+            {
+                "xsi_type": "CustomCriteria",
+                "keyId": str(key_id),
+                "valueIds": [str(v) for v in raw_values],
+                "operator": value_spec.get("operator", "IS"),
+            }
+        )
+    if not children:
+        return None
+    return {"logicalOperator": "AND", "children": children}
 
 
 class GAMOrdersManager:
@@ -84,18 +138,8 @@ class GAMOrdersManager:
             "traffickerId": self.trafficker_id,
             "status": "DRAFT",  # Start as DRAFT - will approve after line items are created
             "totalBudget": {"currencyCode": currency, "microAmount": int(total_budget * 1_000_000)},
-            "startDateTime": {
-                "date": {"year": start_time.year, "month": start_time.month, "day": start_time.day},
-                "hour": start_time.hour,
-                "minute": start_time.minute,
-                "second": start_time.second,
-            },
-            "endDateTime": {
-                "date": {"year": end_time.year, "month": end_time.month, "day": end_time.day},
-                "hour": end_time.hour,
-                "minute": end_time.minute,
-                "second": end_time.second,
-            },
+            "startDateTime": _gam_datetime(start_time, DEFAULT_GAM_TIME_ZONE),
+            "endDateTime": _gam_datetime(end_time, DEFAULT_GAM_TIME_ZONE),
         }
 
         # Add PO number if provided
@@ -433,8 +477,8 @@ class GAMOrdersManager:
             if impl_config.get("targeted_placement_ids"):
                 if "inventoryTargeting" not in line_item_targeting:
                     line_item_targeting["inventoryTargeting"] = {}
-                line_item_targeting["inventoryTargeting"]["targetedPlacements"] = [
-                    {"placementId": placement_id} for placement_id in impl_config["targeted_placement_ids"]
+                line_item_targeting["inventoryTargeting"]["targetedPlacementIds"] = [
+                    str(placement_id) for placement_id in impl_config["targeted_placement_ids"]
                 ]
 
             # Require inventory targeting - no fallback
@@ -451,19 +495,13 @@ class GAMOrdersManager:
                 log(f"[red]Error: {error_msg}[/red]")
                 raise ValueError(error_msg)
 
-            # Add custom targeting from product config
-            # IMPORTANT: Merge without overwriting buyer's targeting (e.g., AEE signals from key_value_pairs)
-            if impl_config.get("custom_targeting_keys"):
-                if "customTargeting" not in line_item_targeting:
-                    line_item_targeting["customTargeting"] = {}
-                # Add product custom targeting, but don't overwrite existing keys from buyer
-                for key, value in impl_config["custom_targeting_keys"].items():
-                    if key not in line_item_targeting["customTargeting"]:
-                        line_item_targeting["customTargeting"][key] = value
-                    else:
-                        log(
-                            f"[yellow]Product config custom targeting key '{key}' conflicts with buyer targeting, keeping buyer value[/yellow]"
-                        )
+            # Add custom targeting from product config as a CustomCriteriaSet.
+            # Skip if the buyer already supplied customTargeting (e.g., AEE signals
+            # from key_value_pairs) so we don't clobber upstream merges.
+            if impl_config.get("custom_targeting_keys") and not line_item_targeting.get("customTargeting"):
+                criteria_set = _build_custom_criteria_set(impl_config["custom_targeting_keys"])
+                if criteria_set is not None:
+                    line_item_targeting["customTargeting"] = criteria_set
 
             # Build creative placeholders from format_ids
             # First try to get from package.format_ids (buyer-specified)
@@ -896,18 +934,12 @@ class GAMOrdersManager:
                 "creativeRotationType": impl_config.get("creative_rotation_type", "EVEN"),
                 "deliveryRateType": impl_config.get("delivery_rate_type", "EVENLY"),
                 "startDateTime": {
-                    "date": {"year": start_time.year, "month": start_time.month, "day": start_time.day},
-                    "hour": start_time.hour,
-                    "minute": start_time.minute,
-                    "second": start_time.second,
-                    "timeZoneId": impl_config.get("time_zone", "America/New_York"),
+                    **_gam_datetime(start_time, impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE)),
+                    "timeZoneId": impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE),
                 },
                 "endDateTime": {
-                    "date": {"year": end_time.year, "month": end_time.month, "day": end_time.day},
-                    "hour": end_time.hour,
-                    "minute": end_time.minute,
-                    "second": end_time.second,
-                    "timeZoneId": impl_config.get("time_zone", "America/New_York"),
+                    **_gam_datetime(end_time, impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE)),
+                    "timeZoneId": impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE),
                 },
                 # Set status based on whether manual approval is required
                 # DRAFT = needs manual approval, READY = ready to serve (when creatives added)
@@ -1184,6 +1216,141 @@ class GAMOrdersManager:
         # All retries exhausted
         logger.error(f"Failed to update line item {line_item_id} budget after {max_retries} attempts")
         return False
+
+    def update_order_dates(
+        self,
+        order_id: str,
+        start_time: datetime | None,
+        end_time: datetime | None,
+        time_zone_id: str = DEFAULT_GAM_TIME_ZONE,
+    ) -> bool:
+        """Push flight-date changes from an approved update_media_buy to GAM.
+
+        Patches the Order's ``startDateTime``/``endDateTime`` and every
+        child LineItem's flight bounds. The Order has no ``timeZoneId``
+        field (GAM uses the network default); LineItems carry an explicit
+        ``timeZoneId`` so it's set on the per-item payload to match.
+
+        Returns ``True`` only when both the Order update and every
+        LineItem update succeed. Partial failures are logged at ERROR and
+        return ``False`` so the caller can surface drift; the DB record
+        is not rolled back since the buyer's intent is durable and a
+        retry can re-apply GAM-side without losing it.
+        """
+        if start_time is None and end_time is None:
+            return True
+
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] Would update Order {order_id} dates: start={start_time} end={end_time} tz={time_zone_id}"
+            )
+            return True
+
+        try:
+            order_service = self.client_manager.get_service("OrderService")
+
+            statement = ad_manager.StatementBuilder().Where("id = :id").WithBindVariable("id", int(order_id)).Limit(1)
+            order_response = order_service.getOrdersByStatement(statement.ToStatement())
+            orders = order_response["results"] if order_response and "results" in order_response else []
+            if not orders:
+                logger.error(f"Order {order_id} not found in GAM")
+                return False
+            order = orders[0]
+
+            new_order_start = _gam_datetime(start_time, time_zone_id) if start_time else None
+            new_order_end = _gam_datetime(end_time, time_zone_id) if end_time else None
+
+            if isinstance(order, dict):
+                if new_order_start is not None:
+                    order["startDateTime"] = new_order_start
+                if new_order_end is not None:
+                    order["endDateTime"] = new_order_end
+            else:
+                if new_order_start is not None:
+                    order.startDateTime = new_order_start
+                if new_order_end is not None:
+                    order.endDateTime = new_order_end
+
+            updated_orders = order_service.updateOrders([order])
+            if not updated_orders:
+                logger.error(f"GAM updateOrders returned no results for Order {order_id}")
+                return False
+            logger.info(f"✓ Updated Order {order_id} dates")
+        except Exception as e:
+            logger.error(f"Error updating Order {order_id} dates: {e}", exc_info=True)
+            return False
+
+        try:
+            line_item_service = self.client_manager.get_service("LineItemService")
+
+            li_statement = (
+                ad_manager.StatementBuilder().Where("orderId = :orderId").WithBindVariable("orderId", int(order_id))
+            )
+            li_response = line_item_service.getLineItemsByStatement(li_statement.ToStatement())
+            line_items = li_response["results"] if li_response and "results" in li_response else []
+            if not line_items:
+                logger.info(f"Order {order_id} has no line items to update")
+                return True
+
+            new_li_start = (
+                {**_gam_datetime(start_time, time_zone_id), "timeZoneId": time_zone_id} if start_time else None
+            )
+            new_li_end = {**_gam_datetime(end_time, time_zone_id), "timeZoneId": time_zone_id} if end_time else None
+
+            for li in line_items:
+                if isinstance(li, dict):
+                    if new_li_start is not None:
+                        li["startDateTime"] = new_li_start
+                    if new_li_end is not None:
+                        li["endDateTime"] = new_li_end
+                else:
+                    if new_li_start is not None:
+                        li.startDateTime = new_li_start
+                    if new_li_end is not None:
+                        li.endDateTime = new_li_end
+
+            # Forecast warmup: GAM rejects LineItem mutations with
+            # ForecastingError.NO_FORECAST_YET for ~60min after creation
+            # or any targeting change. Mirror the retry pattern in
+            # `update_line_item_budget` and `approve_order`. Order's
+            # updateOrders above is not subject to forecasting and was
+            # already applied; if every retry exhausts, the caller sees
+            # Order new + LineItem stale and can re-trigger this lane.
+            import time
+
+            updated_line_items = None
+            for attempt, delay in enumerate(NO_FORECAST_RETRY_BACKOFF, start=1):
+                try:
+                    updated_line_items = line_item_service.updateLineItems(line_items)
+                    break
+                except Exception as e:
+                    err = str(e)
+                    is_warmup = "NO_FORECAST_YET" in err or "ForecastingError" in err
+                    if is_warmup and attempt < len(NO_FORECAST_RETRY_BACKOFF):
+                        logger.info(
+                            f"NO_FORECAST_YET on Order {order_id} LineItems "
+                            f"(attempt {attempt}/{len(NO_FORECAST_RETRY_BACKOFF)}); sleeping {delay}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise
+            else:
+                logger.error(
+                    f"LineItem update gave up after {len(NO_FORECAST_RETRY_BACKOFF)} attempts on Order {order_id}"
+                )
+                return False
+
+            if not updated_line_items or len(updated_line_items) != len(line_items):
+                logger.error(
+                    f"GAM updateLineItems returned {len(updated_line_items) if updated_line_items else 0}"
+                    f" of {len(line_items)} expected for Order {order_id}"
+                )
+                return False
+            logger.info(f"✓ Updated {len(line_items)} line item(s) under Order {order_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating line items under Order {order_id}: {e}", exc_info=True)
+            return False
 
     def pause_line_item(self, line_item_id: str) -> bool:
         """Pause line item in GAM by setting status to PAUSED.

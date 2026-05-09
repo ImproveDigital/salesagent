@@ -211,6 +211,15 @@ class Tenant(Base, JSONValidatorMixin):
     # native to the host.
     embed_breadcrumb_root: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
 
+    # Per-tenant gate (#145). When True, creatives at status='pending_review'
+    # are held back from the ad-server upload until a human flips them to
+    # 'approved' — closing the auto-create-path window where the local
+    # pending_review flag was informational only. Default False preserves
+    # today's behavior byte-for-byte.
+    creative_pre_approval_gate_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     # Relationships
     products = relationship("Product", back_populates="tenant", cascade="all, delete-orphan")
     principals = relationship("Principal", back_populates="tenant", cascade="all, delete-orphan")
@@ -1132,6 +1141,7 @@ class MediaBuy(Base):
             "idx_media_buys_external_id",
             "tenant_id",
             "external_id",
+            unique=True,
             postgresql_where=text("external_id IS NOT NULL"),
         ),
     )
@@ -2339,6 +2349,7 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     auth_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signing_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="hmac", server_default=text("'hmac'"))
 
     # Relationships
     tenant = relationship("Tenant", backref="push_notification_configs", overlaps="principal")
@@ -2560,5 +2571,17 @@ class TenantSigningCredential(Base):
             "purpose",
             "is_active",
             postgresql_where=text("is_active"),
+        ),
+        # At-most-one-active per (tenant, purpose). Mirrored in the
+        # alembic migration so production gets the same enforcement.
+        # Without this, two concurrent admin sessions both creating an
+        # active credential succeed; the snapshot loader then picks one
+        # arbitrarily and the operator-published JWKS may list the other.
+        Index(
+            "ux_tenant_signing_credentials_active",
+            "tenant_id",
+            "purpose",
+            unique=True,
+            postgresql_where=text("is_active = TRUE"),
         ),
     )
