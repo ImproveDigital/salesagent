@@ -520,13 +520,34 @@ def _set_user_role(role: str | None) -> None:
     g.user["role"] = _normalize_role(role)
 
 
-def require_tenant_access(api_mode=False, role: tuple[str, ...] | None = None):
+def require_tenant_access(
+    api_mode=False,
+    role: tuple[str, ...] | None = None,
+    allow_embedded_writes: bool = False,
+):
     """Decorator to require tenant access for routes.
 
     On embedded views (permanent ``is_embedded=True`` OR header-auth
     preview), mutation methods (POST/PUT/DELETE/PATCH) are rejected with
-    403 — the upstream platform owns the tenant's state. GETs render
-    normally so deep-links land on the platform-managed lock banner.
+    403 by default — the upstream platform owns the tenant's state. GETs
+    render normally so deep-links land on the platform-managed lock banner.
+
+    Routes that touch *publisher-managed* surfaces (Product, Principal,
+    Creative, Workflow, AdvertiserRoutingRule, …) must opt in to embedded
+    writes with ``allow_embedded_writes=True``. The model-layer guard
+    (``src/core/database/embedded_tenant_guard.py``) is the authoritative
+    protection for platform-managed surfaces (Tenant core columns,
+    AdapterConfig, signing creds) — it stays in force regardless of this
+    flag, so opting in cannot smuggle a platform-managed write through.
+
+    An opted-in route MAY still write to a platform-managed column if it
+    explicitly sets ``session.info["management_api_caller"] = True`` (the
+    same bypass the Tenant Management API uses). Today only
+    ``buyer_routing.update_default_advertiser`` does this — it writes
+    ``Tenant.default_gam_advertiser_id``, which the design treats as
+    publisher-controlled even though the column lives on the Tenant row.
+    New uses of the bypass need explicit reviewer attention; the guard's
+    PUBLISHER_WRITABLE_FIELDS allowlist is the long-term home for that.
 
     ``role`` declares the RBAC policy for this route. Mutation routes
     that don't set ``role`` default to ``("admin",)`` (closed-by-default
@@ -554,9 +575,10 @@ def require_tenant_access(api_mode=False, role: tuple[str, ...] | None = None):
             def _call_handler():
                 """After auth resolves, gate writes on embedded views,
                 then check role, then dispatch."""
-                blocked = _maybe_block_embedded_write(tenant_id, api_mode)
-                if blocked is not None:
-                    return blocked
+                if not allow_embedded_writes:
+                    blocked = _maybe_block_embedded_write(tenant_id, api_mode)
+                    if blocked is not None:
+                        return blocked
                 blocked = _maybe_block_role_gate(api_mode, role)
                 if blocked is not None:
                     return blocked
