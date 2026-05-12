@@ -35,7 +35,7 @@ from adcp.decisioning import AdcpError, RequestContext
 from adcp.decisioning.proposal_manager import ProposalCapabilities
 from adcp.types import GetProductsRequest, GetProductsResponse
 
-from core.platforms._delegate import _build_identity, _coerce_to_request_model
+from core.platforms._delegate import _build_identity, _coerce_to_request_model, translate_adcp_errors
 from src.core.tools.products import _get_products_impl
 
 
@@ -61,6 +61,7 @@ class SalesAgentProposalManager:
         refine=False,
     )
 
+    @translate_adcp_errors
     async def get_products(
         self,
         req: GetProductsRequest,
@@ -71,6 +72,17 @@ class SalesAgentProposalManager:
         ``GetProductsResponse`` Pydantic model rather than a wire dict
         because the framework's ProposalManager protocol declares the
         typed return; the inner adcp serializer handles model_dump.
+
+        ``@translate_adcp_errors`` is mandatory here even though every
+        delegate it wraps lives in ``_delegate.py``: when a tenant has a
+        proposal manager wired (and every active tenant does per
+        :func:`core.main._build_proposal_managers`), the framework router
+        routes ``get_products`` to this method instead of
+        :func:`core.platforms._delegate._delegate_get_products`. Without
+        the decorator, salesagent ``AdCPError`` raises and pydantic
+        ``ValidationError`` raises surface as opaque ``INTERNAL_ERROR``
+        on the wire. The decorator also performs the
+        ``adcp_major_version`` negotiation check before the impl runs.
         """
         identity = _build_identity(ctx)
         req_model = _coerce_to_request_model(req, GetProductsRequest)
