@@ -438,15 +438,42 @@ function initInventoryTree(config) {
         el.innerHTML = `<div class="tree-empty text-danger">${msg}</div>`;
     }
 
+    // --- Recursive expand-all: fetches unloaded children level by level ---
+    async function _expandAllRecursive() {
+        if (!treeEl) return;
+
+        // Show all containers and icons for whatever is already in the DOM
+        treeEl.querySelectorAll('.tree-children').forEach(el => { el.style.display = 'block'; });
+        treeEl.querySelectorAll('.toggle-icon').forEach(el => { el.textContent = '\u25BC'; });
+
+        // Find nodes whose children haven't been fetched yet
+        const unloaded = Array.from(
+            treeEl.querySelectorAll('.tree-node[data-children-loaded="false"]')
+        );
+        if (unloaded.length === 0) return;
+
+        // Fetch all unloaded nodes in parallel
+        await Promise.all(unloaded.map(nodeEl => {
+            const childrenEl = nodeEl.querySelector(':scope > .tree-children');
+            if (!childrenEl) return Promise.resolve();
+            const depth = parseInt(nodeEl.dataset.depth || '0', 10);
+            const toggle = nodeEl.querySelector(':scope > .tree-node-header > .tree-toggle');
+            if (toggle) toggle.classList.add('loading');
+            return fetchChildren(nodeEl.dataset.unitId, childrenEl, depth + 1).then(() => {
+                nodeEl.dataset.childrenLoaded = 'true';
+                childrenEl.style.display = 'block';
+                if (toggle) toggle.classList.remove('loading');
+            });
+        }));
+
+        // Newly fetched children may themselves have unloaded children \u2014 recurse
+        await _expandAllRecursive();
+    }
+
     // --- Public API ---
     const api = {
         search(term) { _doSearch(term); },
-        expandAll() {
-            if (treeEl) {
-                treeEl.querySelectorAll('.tree-children').forEach(el => { el.style.display = 'block'; });
-                treeEl.querySelectorAll('.toggle-icon').forEach(el => { el.textContent = '\u25BC'; });
-            }
-        },
+        expandAll() { _expandAllRecursive(); },
         collapseAll() {
             if (treeEl) {
                 treeEl.querySelectorAll('.tree-children').forEach(el => { el.style.display = 'none'; });
