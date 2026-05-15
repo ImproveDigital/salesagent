@@ -6,6 +6,11 @@
       "platform": "ECS",
       "account_id": "509399601946",
       "region": "eu-central-1"
+    },
+    "dev": {
+      "platform": "ECS",
+      "account_id": "864981731098",
+      "region": "eu-central-1"
     }
   }
 }

@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - main
+      - develop
 
 permissions:
   id-token: write
@@ -13,6 +14,7 @@ permissions:
 
 env:
   BRANCH_TO_TARGET_ENV: 'main=prod develop=dev'
+  ROLE_ARN: ${{ github.ref_name == 'main' && 'arn:aws:iam::509399601946:role/onefms-prod-prebid-sales-agent-cicd-pipeline-prebidsalesagent' || 'arn:aws:iam::864981731098:role/onefms-dev-prebid-sales-agent-cicd-pipeline-prebidsalesagent' }}
 
 jobs:
   deploy:
@@ -31,7 +33,7 @@ jobs:
       - name: Configure AWS CLI
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: 'arn:aws:iam::509399601946:role/onefms-prod-prebid-sales-agent-cicd-pipeline-prebidsalesagent'
+          role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: eu-central-1
 
       - name: Build & Deploy
