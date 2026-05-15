@@ -21,6 +21,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     Float,
@@ -2767,54 +2768,73 @@ class TenantSigningCredential(Base):
 
 
 class Proposal(Base):
-    """Persistent backing for :class:`SalesAgentProposalStore`.
+    """``proposals`` table schema mirror — table-creation-only declaration.
 
-    Stores the ``Proposal`` shape returned by ``get_products`` so a
-    subsequent ``create_media_buy(proposal_id=X)`` can derive packages
-    from the proposal's allocations + recipes instead of receiving them
-    inline. The framework's ``proposal_dispatch`` orchestrates the
-    lifecycle (put_draft → try_reserve_consumption → finalize_consumption);
-    this row is the durable backing the store reads/writes.
+    The runtime owner of this table is
+    :class:`adcp.decisioning.pg.proposal_store.PgProposalStore` (adcp
+    5.5.0), which speaks raw psycopg3 with explicit-column INSERTs.
+    salesagent code MUST NOT query through this ORM model — every read
+    and write goes through :func:`core.decisioning.proposal_store.get_proposal_store`.
 
-    Multi-tenancy: ``tenant_id`` is the salesagent's row-level scoping
-    column (cascades on tenant deactivation); ``account_id`` is the
-    AdCP account that owns the proposal — the framework passes
-    ``expected_account_id`` on every read and the store collapses
-    cross-tenant probes to ``None``.
+    This class exists so :data:`Base.metadata` knows the table when
+    :func:`sqlalchemy.MetaData.create_all` runs (every integration test
+    fixture rebuilds per-test DBs via ``Base.metadata.create_all``,
+    bypassing Alembic). Without it, the table is missing from the test
+    DB and ``PgProposalStore`` raises ``UndefinedTable`` on every
+    proposal-path dispatch.
 
-    State machine: ``state`` is one of ``draft`` / ``committed`` /
-    ``consuming`` / ``consumed`` per :class:`adcp.decisioning.
-    proposal_store.ProposalState`.
+    Production runs Alembic (migration ``t2u3v4w5x6y7``), which is the
+    source of truth for the schema. The column types here are chosen
+    to produce the same DDL ``create_all`` would emit — namely they
+    omit ``COLLATE "C"`` (test-only perf optimization) but otherwise
+    match. The ``CheckConstraint`` on ``state`` and the partial unique
+    + partial expires_at indexes are replicated so test DBs match
+    production behavior for any SQL we ever might add against this
+    table (we don't today, but the principle stands).
+
+    The generated ``tenant_id`` column is declared via
+    :class:`sqlalchemy.Computed` so SQLAlchemy emits the matching
+    ``GENERATED ALWAYS AS ... STORED`` clause. The FK + cascade to
+    ``tenants`` is preserved.
     """
 
     __tablename__ = "proposals"
 
-    proposal_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(
-        String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
-    )
-    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
     recipes: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
     proposal_payload: Mapped[dict] = mapped_column(JSONType, nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    media_buy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    media_buy_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     recipe_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        Computed("split_part(account_id, ':', 1)", persisted=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
 
     __table_args__ = (
-        # Reverse-index lookup constraint per the ProposalStore Protocol
-        # (:meth:`get_by_media_buy_id`). Partial because pre-consumption
-        # rows have NULL ``media_buy_id`` — those must not be rejected.
+        CheckConstraint(
+            "state IN ('draft', 'committed', 'consuming', 'consumed')",
+            name="ck_proposals_state",
+        ),
         Index(
             "ux_proposals_account_media_buy",
             "account_id",
             "media_buy_id",
             unique=True,
             postgresql_where=text("media_buy_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_proposals_expires_at",
+            "expires_at",
+            postgresql_where=text("expires_at IS NOT NULL"),
         ),
         Index("ix_proposals_tenant_id", "tenant_id"),
     )

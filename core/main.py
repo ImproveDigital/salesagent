@@ -65,6 +65,7 @@ from sqlalchemy import select
 # evicts the webhook-signing credential cache on commit. Must run before
 # any session opens so rotations observed via the ORM trigger eviction.
 import src.services.webhook_signing  # noqa: F401
+from core.decisioning.proposal_store import close_proposal_store, get_proposal_store
 from core.middleware.admin_mount import AdminWSGIMount
 from core.middleware.dual_credential_audit import DualCredentialAuditMiddleware
 from core.platforms.gam import GamPlatform
@@ -74,7 +75,6 @@ from core.stores.accounts import SalesagentAccountStore
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal as PrincipalRow
 from src.core.database.models import Tenant as TenantRow
-from src.core.database.repositories import SalesAgentProposalStore
 from src.core.signing import SigningVerifyMiddleware
 
 logger = logging.getLogger(__name__)
@@ -291,13 +291,24 @@ def build_router() -> LazyPlatformRouter:
     # miss tenants registered after boot, but the factory has no such
     # coupling. The framework calls this on every dispatch; the
     # closure return is O(1).
-    proposal_store = SalesAgentProposalStore()
+    #
+    # The store itself is the upstream :class:`PgProposalStore`
+    # (adcp 5.5.0, adcontextprotocol/adcp-client-python#732). Cross-tenant
+    # rejection, CAS for state transitions, TTL bookkeeping, and the
+    # ``ON CONFLICT`` upsert all live in the library — our pool wiring
+    # in :mod:`core.decisioning.proposal_store` is the only local glue.
+    #
+    # ``get_proposal_store`` is called *inside* the factory closure
+    # rather than eagerly here so unit tests can ``build_router()``
+    # without setting ``DATABASE_URL``. The factory only fires when the
+    # framework dispatches a proposal-aware tool, by which point the
+    # production server has a live DSN.
     router = LazyPlatformRouter(
         accounts=SalesagentAccountStore(),
         factory=build_platform_for_tenant,
         capabilities=capabilities,
         proposal_managers=proposal_managers,
-        proposal_store_factory=lambda _tenant_id: proposal_store,
+        proposal_store_factory=lambda _tenant_id: get_proposal_store(),
     )
     # validate_idempotency_wiring inspects the platform handed to serve()
     # for @IdempotencyStore.wrap decorators. The router shell has none —
@@ -516,8 +527,14 @@ def _serve_kwargs(
     # Background schedulers wire as serve()'s native lifespan hooks
     # (adcp 5.4.0 #713). transport="both" is required for these to fire,
     # which we already pass below.
+    #
+    # PgProposalStore's pool opens lazily on first method call via
+    # ``_LazyOpenPgProposalStore`` — no ``on_startup`` entry needed,
+    # which is the right behavior for integration tests that rebuild
+    # the store against per-test databases. ``close_proposal_store``
+    # on shutdown drains in-flight connections before serve() exits.
     on_startup = [_start_schedulers] if include_scheduler else None
-    on_shutdown = [_stop_schedulers] if include_scheduler else None
+    on_shutdown = [_stop_schedulers, close_proposal_store] if include_scheduler else [close_proposal_store]
 
     return {
         "router": router,
@@ -658,6 +675,13 @@ def build_app():
         enable_dns_rebinding_protection=False,
         auth=kwargs["auth"],
         pre_validation_hooks=pre_validation_hooks,
+        # Forward lifespan hooks so the proposal-store close hook
+        # fires on shutdown (``open_proposal_store`` is gone — pool
+        # opens lazily on first async call now). ``main()``'s
+        # ``serve()`` call wires these natively; ``build_app`` has
+        # to forward them explicitly because it bypasses ``serve``.
+        on_startup=kwargs["on_startup"],
+        on_shutdown=kwargs["on_shutdown"],
     )
     return _apply_asgi_middleware(app, asgi_middleware)
 
