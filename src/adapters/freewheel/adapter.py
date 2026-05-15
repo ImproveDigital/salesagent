@@ -76,7 +76,6 @@ from src.adapters.base import (
     AdServerAdapter,
     CreativeEngineAdapter,
     DeliveryDataUnavailable,
-    PermissionCheck,
     PermissionsReport,
     TargetingCapabilities,
 )
@@ -90,13 +89,11 @@ from src.core.database.repositories.freewheel_inventory import FreeWheelInventor
 from src.core.database.repositories.freewheel_placement_stats import FreeWheelPlacementStatsRepository
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
-    AdapterPackageDelivery,
     AssetStatus,
     CheckMediaBuyStatusResponse,
     CreateMediaBuyError,
     CreateMediaBuyRequest,
     CreateMediaBuyResponse,
-    DeliveryTotals,
     Error,
     MediaPackage,
     Principal,
@@ -396,32 +393,13 @@ class FreeWheelAdapter(AdServerAdapter):
         }
 
     def check_permissions(self) -> PermissionsReport:
-        """Probe every FW endpoint the adapter depends on, return a report.
-
-        Probes are cheap GETs with one-row pagination where supported. The
-        permission is considered granted unless the upstream returns a hard
-        deny (401/403). 4xx validation errors (400/404/422) prove the
-        endpoint accepts the call — just with a missing query param or
-        body — so they count as granted.
-
-        Auth-level failures (no token, expired refresh, bad credentials)
-        surface on the report as ``error=...`` with all checks granted=False
-        — separating a credentials problem from a per-endpoint scope gap.
-        """
-        report = PermissionsReport(
-            adapter=self.adapter_name,
-            tenant_id=self.tenant_id,
-            checked_at=datetime.now(UTC),
-            fully_operational=False,
-            checks=[],
-        )
-
+        """Probe every FW endpoint the adapter depends on, return a report."""
+        report = self._new_permissions_report(dry_run_message="Dry-run mode — no live FreeWheel client to probe with.")
         if self.dry_run or self._client is None:
-            report.error = "Dry-run mode — no live FreeWheel client to probe with."
             return report
 
         # Each tuple: (name, description, method, path, required, feature)
-        probes = [
+        probes: list[tuple[str, str, str, str, bool, str]] = [
             ("auth_token_info", "Validate bearer token", "GET", "/auth/token/info", True, "auth"),
             (
                 "v4_inventory_sites",
@@ -541,39 +519,22 @@ class FreeWheelAdapter(AdServerAdapter):
 
         from src.adapters.freewheel.client import FreeWheelAuthError
 
+        # FW's transport probe is content-type-aware (v3 paths return XML,
+        # v4 paths return JSON). The base ``_walk_permission_probes`` helper
+        # takes a ``probe_fn(method, path) -> (status, body)`` so we bind
+        # the accept-header selection here.
+        assert self._client is not None  # early-returned above when None
+        client = self._client
+
+        def _probe(method: str, path: str) -> tuple[int, str]:
+            accept = "application/xml" if "/services/v3/" in path else "application/json"
+            return client._transport.probe(method, path, accept=accept)
+
         try:
-            for name, description, method, path, required, feature in probes:
-                try:
-                    accept = "application/xml" if "/services/v3/" in path else "application/json"
-                    status, body = self._client._transport.probe(method, path, accept=accept)
-                except FreeWheelAuthError as exc:
-                    # Auth failure invalidates the whole pass — bail
-                    report.error = f"Authentication failed: {exc}"
-                    return report
-
-                granted = status not in (401, 403)
-                detail: str | None = None
-                if not granted:
-                    snippet = body.strip().replace("\n", " ")[:120]
-                    detail = f"{status}: {snippet}" if snippet else f"HTTP {status}"
-
-                report.checks.append(
-                    PermissionCheck(
-                        name=name,
-                        description=description,
-                        granted=granted,
-                        required=required,
-                        feature=feature,
-                        probe_target=f"{method} {path.split('?', 1)[0]}",
-                        detail=detail,
-                    )
-                )
+            self._walk_permission_probes(report, probes, _probe, auth_error_types=(FreeWheelAuthError,))
         except Exception as exc:
             logger.warning("FreeWheel permissions probe failed unexpectedly: %s", exc)
             report.error = f"Permissions probe failed: {type(exc).__name__}: {exc}"
-            return report
-
-        report.fully_operational = all(c.granted for c in report.checks if c.required)
         return report
 
     # ----- helpers -----
@@ -911,35 +872,11 @@ class FreeWheelAdapter(AdServerAdapter):
 
         if not stats_rows:
             raise DeliveryDataUnavailable(media_buy_id)
-
-        total_impressions = sum(row.impressions or 0 for row in stats_rows)
-        total_spend = sum((row.spend_micros or 0) for row in stats_rows) / 1_000_000.0
-        total_completed = sum((row.completed_views or 0) for row in stats_rows)
-        # Pick a currency: every row should agree, but fall back to the
-        # first non-null if they don't.
-        currency = next((row.currency for row in stats_rows if row.currency), "USD")
-
-        totals = DeliveryTotals(
-            impressions=float(total_impressions),
-            spend=total_spend,
-            completed_views=float(total_completed) if total_completed else None,
-            completion_rate=(total_completed / total_impressions) if total_impressions else None,
-        )
-        by_package = [
-            AdapterPackageDelivery(
-                package_id=row.placement_id,
-                impressions=int(row.impressions or 0),
-                spend=(row.spend_micros or 0) / 1_000_000.0,
-                completed_views=int(row.completed_views) if row.completed_views is not None else None,
-            )
-            for row in stats_rows
-        ]
-        return AdapterGetMediaBuyDeliveryResponse(
-            media_buy_id=media_buy_id,
-            reporting_period=date_range,
-            totals=totals,
-            by_package=by_package,
-            currency=currency,
+        return self._aggregate_stat_rows_to_delivery_response(
+            media_buy_id,
+            date_range,
+            stats_rows,
+            package_id_attr="placement_id",
         )
 
     def get_packages_snapshot(

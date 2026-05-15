@@ -1,0 +1,603 @@
+"""Tests for the SpringServe adapter -- registry wiring, dry-run, init."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
+
+import pytest
+
+from src.adapters import get_adapter_default_channels, get_adapter_schemas
+from src.adapters.springserve import SpringServeAdapter
+from src.adapters.springserve.schemas import SpringServeConnectionConfig, SpringServeProductConfig
+from tests.helpers.adapter_test_helpers import (
+    invoke_create_media_buy,
+    make_sample_create_request,
+    make_sample_video_package,
+)
+
+
+@pytest.fixture
+def mock_principal():
+    principal = MagicMock()
+    principal.name = "video_advertiser"
+    principal.principal_id = "principal_ss_1"
+    # SpringServe Demand Partner IDs are integers; the adapter casts the
+    # returned value to int.
+    principal.get_adapter_id.return_value = "42"
+    principal.platform_mappings = {"springserve": {"demand_partner_id": "42"}}
+    return principal
+
+
+@pytest.fixture
+def sample_request():
+    return make_sample_create_request()
+
+
+@pytest.fixture
+def sample_packages():
+    return [make_sample_video_package()]
+
+
+class TestRegistry:
+    def test_get_adapter_schemas_returns_springserve_classes(self):
+        schemas = get_adapter_schemas("springserve")
+        assert schemas is not None
+        assert schemas.connection_config is SpringServeConnectionConfig
+        assert schemas.product_config is SpringServeProductConfig
+        assert schemas.capabilities.inventory_entity_label == "Supply Tags"
+
+    def test_default_channels_cover_video_and_audio(self):
+        channels = get_adapter_default_channels("springserve")
+        assert "olv" in channels
+        assert "ctv" in channels
+        assert "streaming_audio" in channels
+        assert "podcast" in channels
+
+    def test_default_delivery_measurement_is_springserve(self):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=MagicMock(get_adapter_id=MagicMock(return_value="42")),
+            dry_run=True,
+            tenant_id="tenant_ss_1",
+        )
+        assert adapter.default_delivery_measurement == {"provider": "springserve"}
+
+
+class TestCapabilities:
+    def _dry_run_adapter(self, mock_principal):
+        return SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=True,
+            tenant_id="tenant_ss_1",
+        )
+
+    def test_supported_pricing_models(self, mock_principal):
+        adapter = self._dry_run_adapter(mock_principal)
+        assert adapter.get_supported_pricing_models() == {"cpm", "flat_rate"}
+
+    def test_targeting_capabilities(self, mock_principal):
+        adapter = self._dry_run_adapter(mock_principal)
+        caps = adapter.get_targeting_capabilities()
+        assert caps.geo_countries is True
+        assert caps.geo_regions is True
+        assert caps.nielsen_dma is True
+        assert caps.us_zip is False  # postal targeting unsupported
+
+    def test_creative_formats_include_video_and_audio(self, mock_principal):
+        adapter = self._dry_run_adapter(mock_principal)
+        formats = adapter.get_creative_formats()
+        # Six video + four audio
+        format_ids = [f["format_id"]["id"] for f in formats]
+        assert "springserve_video_15s_pre_roll" in format_ids
+        assert "springserve_video_30s_post_roll" in format_ids
+        assert "springserve_audio_15s_pre_roll" in format_ids
+        assert "springserve_audio_30s_mid_roll" in format_ids
+
+        video_types = {f["type"] for f in formats}
+        assert video_types == {"video", "audio"}
+
+
+class TestAdapterDryRun:
+    def test_dry_run_creates_buy_without_calling_client(self, mock_principal, sample_request, sample_packages):
+        adapter = SpringServeAdapter(
+            config={"api_token": "test-token"},
+            principal=mock_principal,
+            dry_run=True,
+            tenant_id="tenant_ss_1",
+        )
+        response = invoke_create_media_buy(adapter, sample_request, sample_packages)
+        assert response.packages is not None
+        assert len(response.packages) == 1
+        assert response.media_buy_id.startswith("springserve_")
+        assert adapter._client is None
+
+    def test_dry_run_rejects_postal_targeting(self, mock_principal, sample_request, sample_packages):
+        from src.core.schemas import Targeting
+
+        sample_packages[0] = sample_packages[0].model_copy(
+            update={
+                "targeting_overlay": Targeting(
+                    geo_countries=["US"],
+                    geo_postal_areas=[{"system": "us_zip", "values": ["10001"]}],
+                )
+            }
+        )
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=True,
+            tenant_id="tenant_ss_1",
+        )
+        response = invoke_create_media_buy(adapter, sample_request, sample_packages)
+        assert hasattr(response, "errors")
+        assert response.errors[0].code == "unsupported_targeting"
+
+    def test_live_mode_requires_credentials(self, mock_principal):
+        with pytest.raises(ValueError, match="email \\+ password.*or api_token"):
+            SpringServeAdapter(
+                config={},
+                principal=mock_principal,
+                dry_run=False,
+                tenant_id="tenant_ss_1",
+            )
+
+    def test_live_mode_requires_demand_partner_id(self):
+        principal = MagicMock()
+        principal.principal_id = "principal_no_dp"
+        principal.get_adapter_id.return_value = None  # no mapping
+
+        with pytest.raises(ValueError, match="demand_partner_id"):
+            SpringServeAdapter(
+                config={"api_token": "tok"},
+                principal=principal,
+                dry_run=False,
+                tenant_id="tenant_ss_1",
+            )
+
+    def test_default_demand_partner_id_fallback(self):
+        principal = MagicMock()
+        principal.principal_id = "principal_no_mapping"
+        principal.get_adapter_id.return_value = None  # no per-principal mapping
+
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok", "default_demand_partner_id": 99},
+            principal=principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        assert adapter.demand_partner_id == 99
+
+
+class TestLiveCreateMediaBuy:
+    """Mapping A: AdCP MediaBuy -> SpringServe Campaign,
+    AdCP Package -> SpringServe Demand Tag."""
+
+    def _adapter_with_mock_client(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        adapter._client = MagicMock()
+        adapter._client.campaigns.create.return_value = MagicMock(id=900001)
+        adapter._client.demand_tags.create.return_value = MagicMock(id=800001)
+        return adapter
+
+    def test_creates_one_campaign_per_buy(self, mock_principal, sample_request, sample_packages):
+        adapter = self._adapter_with_mock_client(mock_principal)
+        invoke_create_media_buy(adapter, sample_request, sample_packages)
+        assert adapter._client.campaigns.create.call_count == 1
+
+    def test_campaign_create_uses_principal_demand_partner_and_paused(
+        self, mock_principal, sample_request, sample_packages
+    ):
+        adapter = self._adapter_with_mock_client(mock_principal)
+        invoke_create_media_buy(adapter, sample_request, sample_packages)
+        kw = adapter._client.campaigns.create.call_args.kwargs
+        assert kw["demand_partner_id"] == 42
+        assert kw["is_active"] is False  # created paused -- Stage 3 binds creative + activates
+
+    def test_one_demand_tag_per_package_parented_to_new_campaign(self, mock_principal, sample_request, sample_packages):
+        adapter = self._adapter_with_mock_client(mock_principal)
+        invoke_create_media_buy(adapter, sample_request, sample_packages)
+
+        assert adapter._client.demand_tags.create.call_count == len(sample_packages)
+        for package, call in zip(
+            sample_packages,
+            adapter._client.demand_tags.create.call_args_list,
+            strict=True,
+        ):
+            kw = call.kwargs
+            assert kw["campaign_id"] == 900001
+            assert kw["demand_partner_id"] == 42
+            assert kw["is_active"] is False
+            assert kw["secondary_code"] == package.package_id
+            assert kw["format"] == "video"  # video format_id on the sample
+
+    def test_media_buy_id_carries_campaign_id(self, mock_principal, sample_request, sample_packages):
+        adapter = self._adapter_with_mock_client(mock_principal)
+        response = invoke_create_media_buy(adapter, sample_request, sample_packages)
+        assert response.media_buy_id == "springserve_900001"
+
+    def test_audio_format_routes_demand_tag_format_to_audio(self, mock_principal, sample_request, sample_packages):
+        from src.core.schemas import FormatId
+
+        adapter = self._adapter_with_mock_client(mock_principal)
+        sample_packages[0] = sample_packages[0].model_copy(
+            update={"format_ids": [FormatId(agent_url="springserve://default", id="springserve_audio_30s_pre_roll")]}
+        )
+        invoke_create_media_buy(adapter, sample_request, sample_packages)
+
+        kw = adapter._client.demand_tags.create.call_args.kwargs
+        assert kw["format"] == "audio"
+
+    def test_upstream_error_returns_error_response(self, mock_principal, sample_request, sample_packages):
+        from src.adapters.springserve import SpringServeError
+
+        adapter = self._adapter_with_mock_client(mock_principal)
+        adapter._client.campaigns.create.side_effect = SpringServeError("network 503", status_code=503, body="oops")
+
+        response = invoke_create_media_buy(adapter, sample_request, sample_packages)
+        assert hasattr(response, "errors")
+        assert response.errors[0].code == "upstream_error"
+        # No demand tags created if campaign failed.
+        adapter._client.demand_tags.create.assert_not_called()
+
+
+class TestLiveCreatives:
+    """Stage 3 creative upload + binding."""
+
+    def _adapter(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        adapter._client = MagicMock()
+        return adapter
+
+    def test_add_creative_assets_posts_video(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        adapter._client.creatives.create.return_value = MagicMock(id=1182735)
+
+        statuses = adapter.add_creative_assets(
+            "springserve_900001",
+            [
+                {
+                    "creative_id": "adcp_creative_1",
+                    "name": "Spot 15s",
+                    "url": "https://cdn.example.com/spot.mp4",
+                    "duration_seconds": 15,
+                    "width": 1920,
+                    "height": 1080,
+                }
+            ],
+            today=datetime.now(UTC),
+        )
+
+        adapter._client.creatives.create.assert_called_once_with(
+            name="Spot 15s",
+            demand_partner_id=42,
+            creative_remote_url="https://cdn.example.com/spot.mp4",
+            creative_format="video",
+            creative_content_type="video/mp4",
+            duration_seconds=15,
+            width=1920,
+            height=1080,
+            creative_landing_page_url=None,
+            secondary_code="adcp_creative_1",
+        )
+        # Returned creative_id is the SS id (so associate_creatives can use it).
+        assert statuses[0].creative_id == "1182735"
+        assert statuses[0].status == "approved"
+
+    def test_add_creative_assets_audio_format_id_routes_audio(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        adapter._client.creatives.create.return_value = MagicMock(id=1182999)
+
+        adapter.add_creative_assets(
+            "springserve_900001",
+            [
+                {
+                    "creative_id": "adcp_audio_1",
+                    "name": "Audio Spot",
+                    "url": "https://cdn.example.com/spot.mp3",
+                    "format_id": {"id": "springserve_audio_30s_pre_roll", "agent_url": "springserve://t"},
+                }
+            ],
+            today=datetime.now(UTC),
+        )
+
+        kw = adapter._client.creatives.create.call_args.kwargs
+        assert kw["creative_format"] == "audio"
+        assert kw["creative_content_type"] == "audio/mpeg"
+
+    def test_add_creative_assets_audio_mime_hint_routes_audio(self, mock_principal):
+        """If the asset itself carries an audio/* content_type, route to audio
+        even without a format_id hint."""
+        adapter = self._adapter(mock_principal)
+        adapter._client.creatives.create.return_value = MagicMock(id=1)
+
+        adapter.add_creative_assets(
+            "springserve_900001",
+            [{"creative_id": "c1", "url": "https://x", "content_type": "audio/mp4"}],
+            today=datetime.now(UTC),
+        )
+
+        kw = adapter._client.creatives.create.call_args.kwargs
+        assert kw["creative_format"] == "audio"
+        assert kw["creative_content_type"] == "audio/mp4"
+
+    def test_add_creative_assets_missing_url_marks_failed(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        statuses = adapter.add_creative_assets(
+            "springserve_900001",
+            [{"creative_id": "no_url"}],
+            today=datetime.now(UTC),
+        )
+        adapter._client.creatives.create.assert_not_called()
+        assert statuses[0].status == "failed"
+        assert statuses[0].creative_id == "no_url"
+
+    def test_add_creative_assets_missing_creative_id_marks_failed(self, mock_principal):
+        """A bad asset reports failed for its own slot; later assets keep going."""
+        adapter = self._adapter(mock_principal)
+        adapter._client.creatives.create.return_value = MagicMock(id=1)
+
+        statuses = adapter.add_creative_assets(
+            "springserve_900001",
+            [
+                {"url": "https://x/spot.mp4"},  # missing creative_id
+                {"creative_id": "good", "url": "https://cdn.example.com/spot.mp4"},
+            ],
+            today=datetime.now(UTC),
+        )
+
+        # Bad asset fails fast with empty id; good asset is uploaded normally.
+        assert statuses[0].status == "failed"
+        assert statuses[0].creative_id == ""
+        assert statuses[1].status == "approved"
+        # Good asset triggered exactly one creates call (the bad asset short-circuited).
+        assert adapter._client.creatives.create.call_count == 1
+
+    def test_add_creative_assets_rejects_non_https_url(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        statuses = adapter.add_creative_assets(
+            "springserve_900001",
+            [{"creative_id": "c_http", "url": "http://cdn.example.com/spot.mp4"}],
+            today=datetime.now(UTC),
+        )
+        adapter._client.creatives.create.assert_not_called()
+        assert statuses[0].status == "failed"
+
+    def test_add_creative_assets_rejects_loopback_url(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        statuses = adapter.add_creative_assets(
+            "springserve_900001",
+            [{"creative_id": "c_local", "url": "https://localhost:8080/spot.mp4"}],
+            today=datetime.now(UTC),
+        )
+        adapter._client.creatives.create.assert_not_called()
+        assert statuses[0].status == "failed"
+
+    def test_add_creative_assets_rejects_rfc1918_url(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        statuses = adapter.add_creative_assets(
+            "springserve_900001",
+            [{"creative_id": "c_priv", "url": "https://10.0.0.5/spot.mp4"}],
+            today=datetime.now(UTC),
+        )
+        adapter._client.creatives.create.assert_not_called()
+        assert statuses[0].status == "failed"
+
+    def test_add_creative_assets_upstream_failure_marks_failed(self, mock_principal):
+        from src.adapters.springserve import SpringServeError
+
+        adapter = self._adapter(mock_principal)
+        adapter._client.creatives.create.side_effect = SpringServeError("rejected", status_code=400, body="bad")
+        statuses = adapter.add_creative_assets(
+            "springserve_900001",
+            [{"creative_id": "c1", "url": "https://x"}],
+            today=datetime.now(UTC),
+        )
+        assert statuses[0].status == "failed"
+
+    def test_associate_creatives_binds_and_activates_demand_tag(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        results = adapter.associate_creatives(line_item_ids=["800001"], platform_creative_ids=["1182735"])
+
+        adapter._client.demand_tags.update.assert_called_once_with(800001, creative_id=1182735, is_active=True)
+        assert results == [{"line_item_id": "800001", "creative_id": "1182735", "status": "success"}]
+
+    def test_associate_creatives_multiple_per_tag_keeps_last_marks_others_skipped(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        results = adapter.associate_creatives(
+            line_item_ids=["800001"],
+            platform_creative_ids=["1", "2", "3"],
+        )
+
+        # Only the last creative is bound; earlier ones recorded as skipped.
+        adapter._client.demand_tags.update.assert_called_once_with(800001, creative_id=3, is_active=True)
+        statuses = [r["status"] for r in results]
+        assert statuses == ["skipped", "skipped", "success"]
+
+    def test_associate_creatives_upstream_error_marks_failed(self, mock_principal):
+        from src.adapters.springserve import SpringServeError
+
+        adapter = self._adapter(mock_principal)
+        adapter._client.demand_tags.update.side_effect = SpringServeError("rejected", status_code=400, body="bad")
+        results = adapter.associate_creatives(line_item_ids=["800001"], platform_creative_ids=["1"])
+        assert results[0]["status"] == "failed"
+
+
+class TestLiveCheckStatus:
+    def test_active_campaign_reports_active(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        adapter._client = MagicMock()
+        adapter._client.campaigns.get.return_value = MagicMock(is_active=True)
+
+        result = adapter.check_media_buy_status("springserve_900001", today=datetime.now(UTC))
+
+        adapter._client.campaigns.get.assert_called_once_with(900001)
+        assert result.status == "active"
+
+    def test_inactive_campaign_reports_paused(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        adapter._client = MagicMock()
+        adapter._client.campaigns.get.return_value = MagicMock(is_active=False)
+
+        result = adapter.check_media_buy_status("springserve_900001", today=datetime.now(UTC))
+        assert result.status == "paused"
+
+
+class TestLiveUpdateMediaBuy:
+    def _adapter(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        adapter._client = MagicMock()
+        return adapter
+
+    def test_pause_media_buy_flips_campaign_inactive(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        result = adapter.update_media_buy(
+            media_buy_id="springserve_900001",
+            action="pause_media_buy",
+            package_id=None,
+            budget=None,
+            today=datetime.now(UTC),
+        )
+        adapter._client.campaigns.update.assert_called_once_with(900001, is_active=False)
+        assert not hasattr(result, "errors")
+
+    def test_resume_media_buy_flips_campaign_active(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        adapter.update_media_buy(
+            media_buy_id="springserve_900001",
+            action="resume_media_buy",
+            package_id=None,
+            budget=None,
+            today=datetime.now(UTC),
+        )
+        adapter._client.campaigns.update.assert_called_once_with(900001, is_active=True)
+
+    def test_pause_package_finds_demand_tag_by_secondary_code(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        adapter._client.campaigns.get.return_value = MagicMock(demand_tag_ids=[800001, 800002])
+        adapter._client.demand_tags.get.side_effect = [
+            MagicMock(id=800001, secondary_code="other_pkg"),
+            MagicMock(id=800002, secondary_code="pkg_target"),
+        ]
+
+        result = adapter.update_media_buy(
+            media_buy_id="springserve_900001",
+            action="pause_package",
+            package_id="pkg_target",
+            budget=None,
+            today=datetime.now(UTC),
+        )
+
+        adapter._client.demand_tags.update.assert_called_once_with(800002, is_active=False)
+        assert not hasattr(result, "errors")
+
+    def test_pause_package_missing_returns_package_not_found(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        adapter._client.campaigns.get.return_value = MagicMock(demand_tag_ids=[800001])
+        adapter._client.demand_tags.get.return_value = MagicMock(id=800001, secondary_code="other")
+
+        result = adapter.update_media_buy(
+            media_buy_id="springserve_900001",
+            action="pause_package",
+            package_id="missing",
+            budget=None,
+            today=datetime.now(UTC),
+        )
+        assert result.errors[0].code == "package_not_found"
+        adapter._client.demand_tags.update.assert_not_called()
+
+    def test_update_package_budget_not_yet_supported(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        result = adapter.update_media_buy(
+            media_buy_id="springserve_900001",
+            action="update_package_budget",
+            package_id="pkg_1",
+            budget=5000,
+            today=datetime.now(UTC),
+        )
+        assert result.errors[0].code == "unsupported_action"
+        assert "Stage 4" in result.errors[0].message
+
+    def test_update_media_buy_rejects_unknown_action(self, mock_principal):
+        adapter = self._adapter(mock_principal)
+        response = adapter.update_media_buy(
+            media_buy_id="springserve_900001",
+            action="banana",
+            package_id=None,
+            budget=None,
+            today=datetime.now(UTC),
+        )
+        assert response.errors[0].code == "unsupported_action"
+
+
+class TestPermissionsProbe:
+    def test_dry_run_reports_no_live_client(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=True,
+            tenant_id="tenant_ss_1",
+        )
+        report = adapter.check_permissions()
+        assert report.error is not None
+        assert "Dry-run" in report.error
+        assert report.fully_operational is False
+        assert report.checks == []
+
+    def test_probe_walks_every_endpoint(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        # Every probe returns 200 -> all granted, fully_operational.
+        adapter._client = MagicMock()
+        adapter._client.probe.return_value = (200, "")
+
+        report = adapter.check_permissions()
+        # 6 probes: campaigns, demand_tags, videos, supply_tags, supply_partners, report
+        assert len(report.checks) == 6
+        assert all(c.granted for c in report.checks)
+        assert report.fully_operational is True
+
+    def test_probe_marks_403_as_denied(self, mock_principal):
+        adapter = SpringServeAdapter(
+            config={"api_token": "tok"},
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_ss_1",
+        )
+        adapter._client = MagicMock()
+        # All endpoints 403 -- token valid but lacks scope on every surface
+        adapter._client.probe.return_value = (403, "forbidden")
+
+        report = adapter.check_permissions()
+        assert all(not c.granted for c in report.checks)
+        assert report.fully_operational is False

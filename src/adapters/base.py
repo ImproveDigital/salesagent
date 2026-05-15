@@ -456,6 +456,132 @@ class AdServerAdapter(ABC):
         )
 
     @staticmethod
+    def _aggregate_stat_rows_to_delivery_response(
+        media_buy_id: str,
+        reporting_period: ReportingPeriod,
+        stat_rows: list[Any],
+        *,
+        package_id_attr: str,
+        default_currency: str = "USD",
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        """Aggregate platform stat rows into an AdCP delivery response.
+
+        Shared between reporting-cache adapters (FreeWheel, SpringServe).
+        Each row is expected to expose ``impressions``, ``spend_micros``,
+        ``completed_views``, and ``currency`` attributes; the per-row
+        identifier comes from ``getattr(row, package_id_attr)``.
+        """
+        from src.core.schemas import AdapterPackageDelivery, DeliveryTotals
+
+        total_impressions = sum(getattr(row, "impressions", 0) or 0 for row in stat_rows)
+        total_spend = sum(getattr(row, "spend_micros", 0) or 0 for row in stat_rows) / 1_000_000.0
+        total_completed = sum(getattr(row, "completed_views", 0) or 0 for row in stat_rows)
+        currency = next((row.currency for row in stat_rows if row.currency), default_currency)
+        totals = DeliveryTotals(
+            impressions=float(total_impressions),
+            spend=total_spend,
+            completed_views=float(total_completed) if total_completed else None,
+            completion_rate=(total_completed / total_impressions) if total_impressions else None,
+        )
+        by_package = [
+            AdapterPackageDelivery(
+                package_id=getattr(row, package_id_attr),
+                impressions=int(getattr(row, "impressions", 0) or 0),
+                spend=(getattr(row, "spend_micros", 0) or 0) / 1_000_000.0,
+                completed_views=int(row.completed_views) if row.completed_views is not None else None,
+            )
+            for row in stat_rows
+        ]
+        return AdapterGetMediaBuyDeliveryResponse(
+            media_buy_id=media_buy_id,
+            reporting_period=reporting_period,
+            totals=totals,
+            by_package=by_package,
+            currency=currency,
+        )
+
+    @staticmethod
+    def _platform_status_to_delivery_status(status: str | None) -> Any:
+        """Translate a platform-reported delivery-status string to the AdCP enum.
+
+        Shared across reporting-cache adapters (FreeWheel, SpringServe).
+        Returns ``None`` for unknown/missing values so callers can leave
+        the field unset rather than guess. Returns ``DeliveryStatus`` enum.
+        """
+        from src.core.schemas import DeliveryStatus
+
+        if not status:
+            return None
+        lower = status.lower()
+        if lower in ("delivering", "active"):
+            return DeliveryStatus.delivering
+        if lower in ("completed", "complete"):
+            return DeliveryStatus.completed
+        if lower in ("paused", "not_delivering", "inactive"):
+            return DeliveryStatus.not_delivering
+        if lower in ("exhausted", "budget_exhausted"):
+            return DeliveryStatus.budget_exhausted
+        return None
+
+    def _wrap_sync_run(
+        self,
+        sync_kind: str,
+        run_callable: Callable[[], Any],
+        *,
+        scope_error_types: tuple[type[Exception], ...] = (),
+        retryable_error_types: tuple[type[Exception], ...] = (),
+        rows_count_key: str = "rows",
+        rows_attr: str = "rows_updated",
+        report_id_attr: str = "report_id",
+        error_attr: str = "error",
+    ) -> AdapterSyncResult:
+        """Run a reporting/inventory sync callable and wrap result into AdapterSyncResult.
+
+        Translates the three outcomes into the uniform shape the shared
+        scheduler expects:
+
+        * scope-error (e.g. ``ReportingScopeNotGranted``) -> soft-failed
+          result with ``metadata={"scope_pending": True}`` so the scheduler
+          keeps retrying without log spam.
+        * retryable-error (e.g. ``ReportingError``) -> soft-failed result
+          with the error string preserved.
+        * success -> ``succeeded`` is True iff the inner result's
+          ``error`` attribute is None; counts and report_id surfaced.
+        """
+        start = datetime.now(UTC)
+        try:
+            inner = run_callable()
+        except scope_error_types as exc:
+            return AdapterSyncResult(
+                sync_kind=sync_kind,
+                started_at=start,
+                finished_at=datetime.now(UTC),
+                succeeded=False,
+                errors={"scope": str(exc)},
+                metadata={"scope_pending": True},
+            )
+        except retryable_error_types as exc:
+            return AdapterSyncResult(
+                sync_kind=sync_kind,
+                started_at=start,
+                finished_at=datetime.now(UTC),
+                succeeded=False,
+                errors={"reporting_client": str(exc)},
+            )
+        inner_error = getattr(inner, error_attr, None)
+        rows_updated = getattr(inner, rows_attr, 0)
+        report_id = getattr(inner, report_id_attr, None)
+        return AdapterSyncResult(
+            sync_kind=sync_kind,
+            started_at=start,
+            finished_at=datetime.now(UTC),
+            succeeded=inner_error is None,
+            counts={rows_count_key: rows_updated},
+            errors={"job": inner_error} if inner_error else {},
+            metadata={"report_id": report_id} if report_id else {},
+        )
+
+    @staticmethod
     def _resolve_pricing_rate(
         package: MediaPackage,
         package_pricing_info: dict[str, dict] | None,
@@ -868,6 +994,74 @@ class AdServerAdapter(ABC):
             fully_operational=True,  # no checks declared → no failures
             checks=[],
         )
+
+    def _new_permissions_report(self, *, dry_run_message: str | None = None) -> PermissionsReport:
+        """Build an empty :class:`PermissionsReport` scaffold for this adapter.
+
+        ``check_permissions`` subclass implementations call this to get a
+        consistently-populated report shell; when ``dry_run_message`` is
+        supplied and dry-run is active, the report is returned pre-set with
+        ``error`` and ``fully_operational=False`` so the caller can return
+        it immediately without further setup.
+        """
+        report = PermissionsReport(
+            adapter=getattr(self.__class__, "adapter_name", self.__class__.__name__),
+            tenant_id=self.tenant_id,
+            checked_at=datetime.now(UTC),
+            fully_operational=False,
+            checks=[],
+        )
+        if dry_run_message is not None and self.dry_run:
+            report.error = dry_run_message
+        return report
+
+    def _walk_permission_probes(
+        self,
+        report: PermissionsReport,
+        probes: list[tuple[str, str, str, str, bool, str]],
+        probe_fn: Callable[[str, str], tuple[int, str]],
+        *,
+        auth_error_types: tuple[type[Exception], ...] = (),
+    ) -> None:
+        """Run a permission probe matrix into ``report.checks``.
+
+        Each entry in ``probes`` is ``(name, description, method, path,
+        required, feature)``. ``probe_fn(method, path)`` must return
+        ``(status_code, body_snippet)`` without raising on non-2xx; if it
+        does raise an instance of ``auth_error_types`` (e.g. the adapter's
+        auth-error class) the walk stops early and ``report.error`` is
+        populated. The final ``fully_operational`` rollup is set on the
+        report after all probes complete.
+
+        4xx validation errors (400/404/422) count as granted because they
+        prove the endpoint accepts the call -- granted is determined by
+        status NOT in (401, 403).
+        """
+        for name, description, method, path, required, feature in probes:
+            try:
+                status, body = probe_fn(method, path)
+            except auth_error_types as exc:
+                report.error = f"Authentication failed: {exc}"
+                return
+
+            granted = status not in (401, 403)
+            detail: str | None = None
+            if not granted:
+                snippet = body.strip().replace("\n", " ")[:120]
+                detail = f"{status}: {snippet}" if snippet else f"HTTP {status}"
+
+            report.checks.append(
+                PermissionCheck(
+                    name=name,
+                    description=description,
+                    granted=granted,
+                    required=required,
+                    feature=feature,
+                    probe_target=f"{method} {path.split('?', 1)[0]}",
+                    detail=detail,
+                )
+            )
+        report.fully_operational = all(c.granted for c in report.checks if c.required)
 
     def get_creative_formats(self) -> list[dict[str, Any]]:
         """Return creative formats provided by this adapter.
