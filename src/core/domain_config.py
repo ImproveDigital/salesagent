@@ -8,6 +8,7 @@ In single-tenant mode, most of these functions are not needed since there's
 no subdomain routing. In multi-tenant mode, you must set SALES_AGENT_DOMAIN.
 """
 
+import functools
 import os
 
 
@@ -38,14 +39,51 @@ def _get_protocol_for_domain(domain: str | None) -> str:
     return "http" if _is_localhost(domain) else "https"
 
 
+@functools.lru_cache(maxsize=1)
+def _resolve_single_tenant_virtual_host() -> str | None:
+    """Look up the single tenant's ``virtual_host`` without disrupting other sessions.
+
+    Cached for process lifetime — ``virtual_host`` changes via the Admin UI are
+    rare. Call ``_resolve_single_tenant_virtual_host.cache_clear()`` from the
+    Tenant edit handler if you need the next URL build to see the change
+    without a restart.
+
+    Uses a standalone ``Session(engine)`` rather than ``get_db_session()`` /
+    the thread-local ``scoped_session`` so callers that already hold an open
+    session (request handlers, services) aren't disrupted when this lookup's
+    session closes.
+    """
+    if os.environ.get("ADCP_MULTI_TENANT", "false").lower() == "true":
+        return None
+
+    try:
+        from sqlalchemy import text
+
+        from src.core.database.database_session import get_engine
+
+        # Single-column config lookup via Core SQL — no ORM models, no scoped
+        # session, no repository needed. This is configuration access (read a
+        # column to build URLs), not domain data access.
+        with get_engine().connect() as conn:
+            row = conn.execute(text("SELECT virtual_host FROM tenants WHERE is_active = TRUE LIMIT 1")).first()
+            return row[0] if row and row[0] else None
+    except Exception:
+        return None
+
+
 def get_sales_agent_domain() -> str | None:
     """Get the sales agent domain (e.g., sales-agent.example.com).
 
-    Returns:
-        The configured SALES_AGENT_DOMAIN, or None if not configured.
-        Multi-tenant mode requires this to be set.
+    Priority:
+      1. ``SALES_AGENT_DOMAIN`` env var (explicit override — required in multi-tenant mode).
+      2. In single-tenant mode, the active tenant's ``virtual_host``. This lets
+         self-hosted publishers configure their domain once in the Admin UI
+         without duplicating it into env vars.
+      3. ``None`` if neither is available.
     """
-    return os.getenv("SALES_AGENT_DOMAIN")
+    if env_domain := os.getenv("SALES_AGENT_DOMAIN"):
+        return env_domain
+    return _resolve_single_tenant_virtual_host()
 
 
 def get_admin_domain() -> str | None:
