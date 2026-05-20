@@ -15,15 +15,19 @@ from src.core.transport_helpers import resolve_identity_from_context
 
 logger = logging.getLogger(__name__)
 
-# Discovery tools that work without authentication.
-# All other tools require a valid auth token.
+# Tools callable without a bearer token. Buyers must be able to discover
+# the agent before they have credentials.
+#
+# Single source of truth — also passed as ``BearerTokenAuth.mcp_discovery_tools``
+# in ``core.main._serve_kwargs`` so the transport gate and this middleware agree.
+# Every name must exist in ``adcp.server.mcp_tools.ADCP_TOOL_DEFINITIONS`` or
+# ``BearerTokenAuth`` rejects it at construction via ``validate_discovery_set``.
 AUTH_OPTIONAL_TOOLS = frozenset(
     {
         "get_adcp_capabilities",
         "get_products",
         "list_accounts",
         "list_creative_formats",
-        "list_authorized_properties",
     }
 )
 

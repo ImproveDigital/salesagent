@@ -56,8 +56,10 @@ from adcp.server import (
     Principal,
     SubdomainTenantMiddleware,
     Tenant,
+    ToolContext,
     auth_context_factory,
 )
+from adcp.server.mcp_tools import DISCOVERY_TOOLS
 from adcp.server.spec_compat import _spec_compat_hooks_impl
 from sqlalchemy import select
 
@@ -81,6 +83,7 @@ from core.stores.accounts import SalesagentAccountStore
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal as PrincipalRow
 from src.core.database.models import Tenant as TenantRow
+from src.core.mcp_auth_middleware import AUTH_OPTIONAL_TOOLS
 from src.core.signing import SigningVerifyMiddleware
 
 logger = logging.getLogger(__name__)
@@ -185,6 +188,70 @@ def _validate_token(token: str) -> Principal | None:
     return Principal(
         caller_identity=row.principal_id,
         tenant_id=row.tenant_id,
+    )
+
+
+def auth_context_factory_with_discovery_fallback(meta):
+    """Wrap :func:`adcp.server.auth.auth_context_factory` to recover the
+    authenticated principal on the MCP discovery-tool path.
+
+    ``BearerTokenAuth.mcp_discovery_tools`` (adcp 5.6.0 #745) instructs the
+    transport gate to bypass bearer-token validation for the configured
+    tool set. The bypass clears ``request.state`` and the SDK auth
+    ContextVars to ``None`` even when the buyer DID send a token — by
+    design, so unauthenticated discovery works. The downside: authenticated
+    buyers hitting a discovery tool reach the dispatch task with no
+    resolved principal, so ``SalesagentAccountStore.resolve`` and
+    ``_build_identity`` (which both read ``current_principal`` /
+    ``current_tenant``) fall over with ``ACCOUNT_NOT_FOUND`` or
+    ``AUTH_TOKEN_INVALID``.
+
+    This factory runs in the dispatch task. When the upstream factory
+    returns an anonymous ``ToolContext`` we re-extract the bearer token
+    from the request headers, validate it via :func:`_validate_token`,
+    populate the SDK ContextVars and return a populated
+    ``ToolContext``. ContextVars set here propagate to ``_resolve_account``
+    and ``_build_identity`` downstream in the same task. Anonymous
+    buyers (no token) get the original anonymous ``ToolContext``
+    unchanged so genuinely unauthenticated discovery still works.
+    """
+    ctx = auth_context_factory(meta)
+    if ctx.caller_identity is not None or ctx.tenant_id is not None:
+        return ctx
+    request = getattr(meta, "request_context", None)
+    if request is None or not hasattr(request, "headers"):
+        return ctx
+    token: str | None = None
+    auth_header = request.headers.get("authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.headers.get("x-adcp-auth")
+    if not token:
+        return ctx
+    principal = _validate_token(token)
+    if principal is None:
+        return ctx
+
+    # Lazy imports — avoid pulling adcp.server.auth internals at module load.
+    from adcp.decisioning.context import AuthInfo
+    from adcp.server.auth import current_principal, current_tenant
+
+    current_principal.set(principal.caller_identity)
+    current_tenant.set(principal.tenant_id)
+
+    return ToolContext(
+        request_id=ctx.request_id,
+        caller_identity=principal.caller_identity,
+        tenant_id=principal.tenant_id,
+        metadata={
+            **(ctx.metadata or {}),
+            "adcp.auth_info": AuthInfo(
+                kind="bearer",
+                principal=principal.caller_identity,
+                credential=None,
+            ),
+        },
     )
 
 
@@ -552,21 +619,26 @@ def _serve_kwargs(
         # path also covers signing for non-embedded tenants). Auto-emit on
         # the SDK side would double-fire.
         "auto_emit_completion_webhooks": False,
-        # Bearer-token auth wraps both MCP and A2A legs. adcp 5.4.0
-        # (#720 / #721) makes ``Authorization: Bearer <token>`` the
-        # always-accepted spec-canonical carrier on BOTH legs and turns
-        # the legacy ``x-adcp-auth: <raw>`` header into an additive
-        # opt-in alias on the MCP leg for early adopters that haven't
-        # migrated. New clients use ``Authorization: Bearer`` and
-        # interoperate with off-the-shelf a2a-sdk and MCP buyer SDKs;
-        # legacy MCP clients sending ``x-adcp-auth`` keep working
-        # unchanged. Migration is a one-way drift with no flag day.
+        # Bearer-token auth wraps both MCP and A2A legs.
+        # ``Authorization: Bearer <token>`` is the spec-canonical carrier
+        # on both legs. ``x-adcp-auth: <raw>`` is an additive alias on
+        # the MCP leg only — kept so legacy MCP buyers interoperate with
+        # off-the-shelf MCP and a2a-sdk clients without code changes.
+        #
+        # ``mcp_discovery_tools`` gates ``tools/call`` at the transport:
+        # tools in the set bypass the bearer check (still 401 on a bad
+        # token, but a missing one is fine); everything else requires
+        # valid auth pre-dispatch. The set must cover what AdCP buyers
+        # need to discover the agent before they have credentials.
+        # ``AUTH_OPTIONAL_TOOLS`` is shared with ``MCPAuthMiddleware`` so
+        # the transport gate and the FastMCP middleware agree.
         "auth": BearerTokenAuth(
             validate_token=_validate_token,
+            mcp_discovery_tools=DISCOVERY_TOOLS | AUTH_OPTIONAL_TOOLS,
             mcp_legacy_header_aliases=["x-adcp-auth"],
         ),
         "asgi_middleware": asgi_middleware,
-        "context_factory": auth_context_factory,
+        "context_factory": auth_context_factory_with_discovery_fallback,
         "allowed_hosts": _allowed_hosts(),
         "allowed_origins": [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:8000").split(",")],
         "streaming_responses": os.environ.get("ADCP_STREAMING_RESPONSES", "false").lower() == "true",
