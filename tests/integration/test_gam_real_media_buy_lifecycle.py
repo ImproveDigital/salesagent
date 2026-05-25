@@ -553,8 +553,11 @@ class TestGAMRealDeliveryWebhook:
         from threading import Thread
         from time import sleep
 
+        from adcp.types import MediaBuyStatus
+
         from src.core.schemas import CreateMediaBuyRequest
         from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
         from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
         from tests.integration.media_buy_helpers import force_media_buy_status
 
@@ -588,11 +591,12 @@ class TestGAMRealDeliveryWebhook:
                     req=CreateMediaBuyRequest(
                         **required_request_kwargs(),
                         brand={"domain": "testbrand.com"},
-                        # Past-equivalent start so the scheduler's date-based
-                        # status filter sees this buy as 'active' (the filter
-                        # is computed from start/end dates, not the DB column —
-                        # see _get_target_media_buys). 'asap' is mapped to now.
-                        start_time="asap",
+                        # Keep the GAM line item start safely in the future.
+                        # The scheduler path below is explicitly triggered by
+                        # media_buy_id and then status-promoted, so it does not
+                        # need a near-now GAM flight that can race into
+                        # START_DATE_TIME_IS_IN_PAST.
+                        start_time=_future(1),
                         end_time=_future(8),
                         po_number=f"E2E-WH-{uuid.uuid4().hex[:6]}",
                         packages=[
@@ -664,14 +668,31 @@ class TestGAMRealDeliveryWebhook:
                     assert deliveries, f"missing media_buy_deliveries: {result}"
                     assert deliveries[0]["media_buy_id"] == order_id
                 else:
-                    # Confirm the scheduler ran the delivery query against
-                    # GAM (the behaviour we DO want to prove). The delivery
-                    # call is logged as an audit event — and crucially the
-                    # scheduler returned ``triggered=True`` above, meaning
-                    # it found the buy + webhook config, opened a session,
-                    # and called _send_report_for_media_buy. The skip is
-                    # then a documented branch of that method.
-                    pass
+                    from src.core.schemas import GetMediaBuyDeliveryRequest
+
+                    now = datetime.now(UTC)
+                    delivery_response = _get_media_buy_delivery_impl(
+                        GetMediaBuyDeliveryRequest(
+                            media_buy_ids=[order_id],
+                            status_filter=[
+                                MediaBuyStatus.active,
+                                MediaBuyStatus.completed,
+                                MediaBuyStatus.pending_start,
+                                MediaBuyStatus.paused,
+                            ],
+                            start_date=(now.date() - timedelta(days=1)).isoformat(),
+                            end_date=now.date().isoformat(),
+                            context=None,
+                        ),
+                        identity,
+                    )
+                    errors = delivery_response.errors or []
+                    expected_skip_codes = {"adapter_error", "data_unavailable", "media_buy_status_excluded"}
+                    error_codes = {getattr(error, "code", None) for error in errors}
+                    assert error_codes and error_codes <= expected_skip_codes, (
+                        "Scheduler did not send a webhook and delivery did not return an expected "
+                        f"real-GAM skip/error code: {errors}"
+                    )
         finally:
             server.shutdown()
             server.server_close()

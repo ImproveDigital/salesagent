@@ -219,8 +219,16 @@ def get_scoped_session():
     return _scoped_session
 
 
+def _create_db_session() -> Session:
+    """Create a new independent database session."""
+    get_engine()
+    if _session_factory is None:
+        raise RuntimeError("Database session factory was not initialized")
+    return _session_factory()
+
+
 @contextmanager
-def get_db_session() -> Generator[Session]:
+def get_db_session(*, allow_unhealthy: bool = False) -> Generator[Session]:
     """
     Context manager for database sessions with automatic cleanup and retry logic.
 
@@ -234,6 +242,16 @@ def get_db_session() -> Generator[Session]:
     The session will automatically rollback on exception and
     always be properly closed. Connection errors are logged with more detail.
 
+    Each context manager entry owns an independent Session. Do not route this
+    through scoped_session(): nested get_db_session() blocks in the same thread
+    must not share a Session, because the inner cleanup would detach ORM
+    instances still in use by the outer block.
+
+    Args:
+        allow_unhealthy: When True, bypass the short fail-fast health gate.
+            Intended for execute_with_retry() after it has already handled a
+            retryable connection error and is deliberately making a new attempt.
+
     Note: Query timeout is enforced at the database level via statement_timeout.
     Queries exceeding DATABASE_QUERY_TIMEOUT will raise OperationalError.
     """
@@ -242,20 +260,17 @@ def get_db_session() -> Generator[Session]:
     global _is_healthy, _last_health_check
 
     # Check if we should fail fast due to repeated database failures
-    if not _is_healthy:
+    if not allow_unhealthy and not _is_healthy:
         time_since_check = time.time() - _last_health_check
         if time_since_check < 10:  # Fail fast for 10 seconds after unhealthy check
             raise RuntimeError("Database is unhealthy - failing fast to prevent cascading failures")
 
-    scoped = get_scoped_session()
-    session = scoped()
+    session = _create_db_session()
     try:
         yield session
     except (OperationalError, DisconnectionError) as e:
         logger.error(f"Database connection error: {e}")
         session.rollback()
-        # Remove session from registry to force reconnection
-        scoped.remove()
         # Mark as unhealthy for circuit breaker
         _is_healthy = False
         _last_health_check = time.time()
@@ -266,7 +281,6 @@ def get_db_session() -> Generator[Session]:
         raise
     finally:
         session.close()
-        scoped.remove()
 
 
 def execute_with_retry(func, max_retries: int = 3, retry_on: tuple = (OperationalError, DisconnectionError)) -> Any:
@@ -287,9 +301,10 @@ def execute_with_retry(func, max_retries: int = 3, retry_on: tuple = (Operationa
 
     for attempt in range(max_retries):
         try:
-            with get_db_session() as session:
+            with get_db_session(allow_unhealthy=attempt > 0) as session:
                 result = func(session)
                 session.commit()
+                reset_health_state()
                 return result
         except retry_on as e:
             last_exception = e
@@ -299,8 +314,6 @@ def execute_with_retry(func, max_retries: int = 3, retry_on: tuple = (Operationa
                 wait_time = 0.5 * (2**attempt)
                 logger.info(f"Waiting {wait_time}s before retry...")
                 time.sleep(wait_time)
-                scoped = get_scoped_session()
-                scoped.remove()  # Clear the session registry
                 continue
             raise
         except SQLAlchemyError as e:

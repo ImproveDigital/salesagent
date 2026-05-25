@@ -101,11 +101,8 @@ class DeliveryWebhookScheduler:
         try:
             with get_db_session() as session:
                 # Find all active media buys (cross-tenant scheduler query).
-                # eager_load_tenant=True is required: each iteration calls
-                # _get_media_buy_delivery_impl which opens its own
-                # get_db_session() context; the inner scoped.remove() detaches
-                # every MediaBuy in this outer session, so a subsequent
-                # media_buy.tenant access raises DetachedInstanceError.
+                # Eager-load tenant because every iteration reads tenant-level
+                # reporting flags; keeping it joined avoids an N+1 batch query.
                 media_buys = MediaBuyRepository.get_all_by_statuses(
                     session, ["active", "approved"], eager_load_tenant=True
                 )

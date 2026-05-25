@@ -261,12 +261,10 @@ async def test_delivery_webhook_handles_multiple_media_buys_without_detached_ins
     iteration raised DetachedInstanceError on ``media_buy.tenant``.
 
     Root cause: ``_get_media_buy_delivery_impl`` opens its own
-    ``with get_db_session()`` context. The inner ``scoped.remove()``
-    detaches every MediaBuy loaded by the outer batch session, so the
-    next iteration's ``media_buy.tenant`` relationship access blows up.
-
-    Fix: eager-load tenant via ``joinedload`` so the relationship is
-    cached in the instance state and survives detach.
+    ``with get_db_session()`` context. If nested contexts share the same
+    scoped Session, the inner cleanup detaches every MediaBuy loaded by
+    the outer batch session, so the next iteration's ``media_buy.tenant``
+    relationship access blows up.
     """
     from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
     from tests.helpers.managed_tenant_api import bind_factories_to_session

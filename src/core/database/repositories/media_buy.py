@@ -732,15 +732,8 @@ class MediaBuyRepository:
         This is a system-level query for schedulers that need to process
         media buys regardless of tenant. Not tenant-scoped.
 
-        ``eager_load_tenant`` joins MediaBuy.tenant so the relationship is
-        materialized into the instance state. The delivery webhook scheduler
-        needs this because each iteration of its batch loop calls
-        ``_get_media_buy_delivery_impl``, which opens its own
-        ``get_db_session()`` context. The inner ``scoped.remove()`` detaches
-        every MediaBuy loaded by the outer session, so a subsequent
-        ``media_buy.tenant`` access raises ``DetachedInstanceError``.
-        Eager-loading caches the tenant value in the instance, which
-        survives detach.
+        ``eager_load_tenant`` joins MediaBuy.tenant so scheduler batches that
+        inspect tenant-level flags do not emit one lazy-load query per buy.
         """
         stmt = select(MediaBuy).where(MediaBuy.status.in_(statuses))
         if eager_load_tenant:
