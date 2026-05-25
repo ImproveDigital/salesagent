@@ -26,6 +26,18 @@ import pytest
 from src.core.feature_flags import is_creative_pre_approval_gate_enabled
 
 
+def _make_tenant_model():
+    from src.core.database.models import Tenant
+
+    return Tenant(
+        tenant_id="t_1",
+        name="Test Tenant",
+        subdomain="test",
+        ad_server="mock",
+        creative_pre_approval_gate_enabled=True,
+    )
+
+
 class TestFeatureFlagAccessor:
     def test_none_tenant_returns_false(self):
         assert is_creative_pre_approval_gate_enabled(None) is False
@@ -136,6 +148,42 @@ class TestPushCreativeToExistingBuyBehavior:
 
         assert success is False
         assert "Creative c_1 not found" in err
+
+    def test_push_uses_serialized_tenant_context_when_config_lookup_misses(self):
+        from src.core.schemas import Principal
+        from src.core.tools.media_buy_create import push_creative_to_existing_buy
+        from src.core.utils.tenant_utils import serialize_tenant_to_dict
+
+        tenant_obj = _make_tenant_model()
+        creative = MagicMock(creative_id="c_1", principal_id="p_1")
+        assignment = MagicMock(creative_id="c_1", media_buy_id="mb_1", package_id="pkg_1")
+        principal = Principal(principal_id="p_1", name="Buyer", platform_mappings={})
+        session = self._setup_session(
+            tenant_obj=tenant_obj,
+            creative=creative,
+            assignment=assignment,
+            principal=None,
+            media_buy=None,
+        )
+        uow = MagicMock(session=session)
+        uow.__enter__ = MagicMock(return_value=uow)
+        uow.__exit__ = MagicMock(return_value=False)
+        adapter = MagicMock(creatives_manager=None)
+        expected_tenant_context = serialize_tenant_to_dict(tenant_obj)
+
+        with (
+            patch("src.core.database.repositories.MediaBuyUoW", return_value=uow),
+            patch("src.core.config_loader.get_tenant_by_id", return_value=None),
+            patch("src.core.config_loader.set_current_tenant") as set_current_tenant,
+            patch("src.core.tools.media_buy_create.get_principal_object", return_value=principal),
+            patch("src.core.tools.media_buy_create.get_adapter", return_value=adapter) as get_adapter,
+        ):
+            success, err = push_creative_to_existing_buy(creative_id="c_1", media_buy_id="mb_1", tenant_id="t_1")
+
+        assert success is False
+        assert err == "Adapter does not support creative upload"
+        set_current_tenant.assert_called_once_with(expected_tenant_context)
+        get_adapter.assert_called_once_with(principal, dry_run=False, tenant=expected_tenant_context)
 
 
 class TestGateAppliesAtBuyApprovalPath:

@@ -809,10 +809,10 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
             # Set tenant ContextVar via standard config_loader boundary
             from src.core.config_loader import get_tenant_by_id
+            from src.core.utils.tenant_utils import serialize_tenant_to_dict
 
-            tenant_config = get_tenant_by_id(tenant_id)
-            if tenant_config:
-                set_current_tenant(tenant_config)
+            tenant_context = get_tenant_by_id(tenant_id) or serialize_tenant_to_dict(tenant_obj)
+            set_current_tenant(tenant_context)
             logger.info(f"[APPROVAL] Set tenant context: {tenant_id}")
 
             # Load media buy
@@ -1070,7 +1070,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             package_pricing_info,
             principal,
             testing_ctx,
-            tenant=tenant_obj,
+            tenant=tenant_context,
         )
 
         # Check if adapter returned an error response
@@ -1157,7 +1157,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                 # operator action. (#145)
                 from src.core.feature_flags import is_creative_pre_approval_gate_enabled
 
-                gate_enabled = is_creative_pre_approval_gate_enabled(tenant_obj)
+                gate_enabled = is_creative_pre_approval_gate_enabled(tenant_context)
 
                 # Build assets list for adapter and collect all validation errors
                 assets = []
@@ -1255,7 +1255,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     logger.info(f"[APPROVAL] Uploading {len(assets)} creatives to adapter")
 
                     # Get adapter and upload creatives
-                    adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_obj)
+                    adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_context)
 
                     # Call adapter's add_creative_assets method
                     # For GAM, the media_buy_id is the GAM order ID
@@ -1291,7 +1291,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         # 2. Creatives may have been uploaded after the initial approval attempt
         logger.info(f"[APPROVAL] Attempting to approve order {response.media_buy_id} in GAM")
         try:
-            adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_obj)
+            adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_context)
             if hasattr(adapter, "orders_manager") and adapter.orders_manager:
                 approval_success = adapter.orders_manager.approve_order(response.media_buy_id)
                 if approval_success:
@@ -1376,9 +1376,10 @@ def push_creative_to_existing_buy(
                 return False, f"Tenant {tenant_id} not found"
 
             # Set tenant ContextVar so adapter helpers resolve config correctly.
-            tenant_config = get_tenant_by_id(tenant_id)
-            if tenant_config:
-                set_current_tenant(tenant_config)
+            from src.core.utils.tenant_utils import serialize_tenant_to_dict
+
+            tenant_context = get_tenant_by_id(tenant_id) or serialize_tenant_to_dict(tenant_obj)
+            set_current_tenant(tenant_context)
 
             creative = session.scalars(
                 select(CreativeModel).filter_by(tenant_id=tenant_id, creative_id=creative_id)
@@ -1401,7 +1402,7 @@ def push_creative_to_existing_buy(
             if not principal:
                 return False, f"Principal {creative.principal_id} not found"
 
-            adapter = get_adapter(principal, dry_run=False, tenant=tenant_obj)
+            adapter = get_adapter(principal, dry_run=False, tenant=tenant_context)
             if not (hasattr(adapter, "creatives_manager") and adapter.creatives_manager):
                 return False, "Adapter does not support creative upload"
 

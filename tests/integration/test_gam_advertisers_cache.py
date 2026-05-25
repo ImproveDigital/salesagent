@@ -277,12 +277,13 @@ def _seed_cache(tenant_id: str, rows: list[tuple[str, str]]) -> None:
     (id, name) tuples — handy for the picker tests that don't need to
     exercise the full sync worker.
 
-    Resolves the existing Tenant ORM row first so the factory's
-    ``tenant`` SubFactory doesn't try to spin up a fresh parent.
+    Resolves the existing Tenant ORM row from the factory-bound session so the
+    factory doesn't try to attach a detached duplicate parent.
     """
-    with get_db_session() as session:
-        tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-        assert tenant is not None, f"Tenant {tenant_id!r} must exist before seeding cache rows"
+    session = GamAdvertiserFactory._meta.sqlalchemy_session
+    assert session is not None, "GamAdvertiserFactory must be bound before seeding cache rows"
+    tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+    assert tenant is not None, f"Tenant {tenant_id!r} must exist before seeding cache rows"
     for advertiser_id, name in rows:
         GamAdvertiserFactory(
             tenant=tenant,
