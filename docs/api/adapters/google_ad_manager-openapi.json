@@ -202,6 +202,11 @@
             "title": "Supports Geo Targeting",
             "type": "boolean"
           },
+          "supports_inventory_configuration_authoring": {
+            "default": false,
+            "title": "Supports Inventory Configuration Authoring",
+            "type": "boolean"
+          },
           "supports_inventory_profiles": {
             "default": false,
             "title": "Supports Inventory Profiles",
@@ -210,6 +215,11 @@
           "supports_inventory_sync": {
             "default": false,
             "title": "Supports Inventory Sync",
+            "type": "boolean"
+          },
+          "supports_materialization_preview": {
+            "default": false,
+            "title": "Supports Materialization Preview",
             "type": "boolean"
           },
           "supports_pricing_recommendations": {
@@ -230,6 +240,11 @@
           "supports_reporting_sync": {
             "default": false,
             "title": "Supports Reporting Sync",
+            "type": "boolean"
+          },
+          "supports_signal_mapping_authoring": {
+            "default": false,
+            "title": "Supports Signal Mapping Authoring",
             "type": "boolean"
           },
           "supports_webhooks": {
@@ -499,6 +514,12 @@
             "title": "Api Key",
             "type": "string",
             "writeOnly": true
+          },
+          "campaign_name_template": {
+            "default": "AdCP-{po_number}-{product_name}",
+            "maxLength": 500,
+            "title": "Campaign Name Template",
+            "type": "string"
           },
           "default_advertiser_id": {
             "anyOf": [

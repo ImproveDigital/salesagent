@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import (
     AnyHttpUrl,
@@ -168,6 +168,7 @@ class BroadstreetAdapterConfig(BaseModel):
     network_id: str = Field(..., min_length=1, max_length=64)
     api_key: SecretStr
     default_advertiser_id: str | None = Field(default=None, max_length=64)
+    campaign_name_template: str = Field(default="AdCP-{po_number}-{product_name}", max_length=500)
 
 
 class SpringServeAdapterConfig(BaseModel):
@@ -209,6 +210,156 @@ AdapterConfig = Annotated[
     GAMAdapterConfig | MockAdapterConfig | FreeWheelAdapterConfig | BroadstreetAdapterConfig | SpringServeAdapterConfig,
     Field(discriminator="type"),
 ]
+
+
+GAM_ORDER_NAME_MACROS = [
+    {"name": "campaign_name", "description": "Brand-derived campaign name; falls back to Campaign."},
+    {"name": "brand_name", "description": "Brand domain/name from the media-buy request."},
+    {"name": "promoted_offering", "description": "Backward-compatible alias for brand_name."},
+    {"name": "auto_name", "description": "AI-generated name when AI naming is enabled and configured."},
+    {"name": "date_range", "description": "Formatted flight date range."},
+    {"name": "month_year", "description": "Month and year for the flight start."},
+    {"name": "media_buy_id", "description": "Pre-created media-buy/order identifier."},
+    {"name": "buyer_ref", "description": "Backward-compatible alias for media_buy_id."},
+    {"name": "package_count", "description": "Number of packages in the media buy."},
+    {"name": "start_date", "description": "Flight start date in YYYY-MM-DD format."},
+    {"name": "end_date", "description": "Flight end date in YYYY-MM-DD format."},
+]
+
+GAM_LINE_ITEM_NAME_MACROS = [
+    {"name": "order_name", "description": "Resolved parent GAM order name."},
+    {"name": "product_name", "description": "Product name associated with the package."},
+    {"name": "package_name", "description": "Package name from the request, falling back to product_name."},
+    {"name": "package_index", "description": "1-based package position in the media buy."},
+]
+
+BROADSTREET_CAMPAIGN_NAME_MACROS = [
+    {"name": "po_number", "description": "PO number from the media-buy request, or unknown."},
+    {"name": "product_name", "description": "Name of the first product in the media buy."},
+    {"name": "advertiser_name", "description": "Principal/advertiser display name."},
+    {"name": "timestamp", "description": "UTC timestamp in YYYYMMDD_HHMMSS format."},
+]
+
+
+class TemplateMacro(BaseModel):
+    """One supported naming-template macro."""
+
+    model_config = _config()
+
+    name: str
+    description: str
+
+
+class AdapterSettingsSchemaResponse(BaseModel):
+    """Runtime adapter settings schema with template-macro metadata."""
+
+    model_config = _config()
+
+    type: str
+    schema_: dict[str, Any] = Field(..., alias="schema")
+    template_macros: dict[str, list[TemplateMacro]] = Field(default_factory=dict)
+
+
+class GoogleAdManagerSettings(BaseModel):
+    """GAM runtime settings that affect how buys are materialized."""
+
+    model_config = _config()
+
+    type: Literal["google_ad_manager"] = "google_ad_manager"
+    order_name_template: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Template used for GAM order names. Uses {macro} syntax and supports fallback syntax like {campaign_name|brand_name}.",
+        json_schema_extra={"x-supported-macros": cast(Any, GAM_ORDER_NAME_MACROS)},
+    )
+    line_item_name_template: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Template used for GAM line item names. Uses {macro} syntax.",
+        json_schema_extra={"x-supported-macros": cast(Any, GAM_LINE_ITEM_NAME_MACROS)},
+    )
+    auto_naming_enabled: bool = Field(
+        default=True,
+        description="Allow {auto_name} in order_name_template to invoke tenant AI naming when AI configuration is available.",
+    )
+    manual_approval_required: bool = Field(
+        default=False,
+        description="Require manual approval before GAM orders are pushed live.",
+    )
+
+
+class FreeWheelSettings(BaseModel):
+    """FreeWheel runtime settings that affect how buys are materialized."""
+
+    model_config = _config()
+
+    type: Literal["freewheel"] = "freewheel"
+    default_advertiser_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Fallback FreeWheel advertiser ID for principals without an explicit FreeWheel mapping.",
+    )
+
+
+class BroadstreetSettings(BaseModel):
+    """Broadstreet runtime settings that affect how buys are materialized."""
+
+    model_config = _config()
+
+    type: Literal["broadstreet"] = "broadstreet"
+    default_advertiser_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Fallback Broadstreet advertiser ID for principals without an explicit Broadstreet mapping.",
+    )
+    campaign_name_template: str = Field(
+        default="AdCP-{po_number}-{product_name}",
+        max_length=500,
+        description="Template used for Broadstreet campaign names. Uses {macro} syntax.",
+        json_schema_extra={"x-supported-macros": cast(Any, BROADSTREET_CAMPAIGN_NAME_MACROS)},
+    )
+
+
+class SpringServeSettings(BaseModel):
+    """SpringServe runtime settings that affect how buys are materialized."""
+
+    model_config = _config()
+
+    type: Literal["springserve"] = "springserve"
+    default_demand_partner_id: int | None = Field(
+        default=None,
+        description=("Fallback SpringServe Demand Partner ID for principals without an explicit SpringServe mapping."),
+    )
+    demand_class: Literal["line_item", "tag"] = Field(
+        default="line_item",
+        description=(
+            "'line_item' means SpringServe hosts buyer creative assets; 'tag' means buyer-supplied "
+            "third-party VAST/audio tags pass through without creative binding."
+        ),
+    )
+    enable_key_value_targeting: bool = Field(
+        default=False,
+        description="Translate AdCP signals into SpringServe demand_tag_keys entries on created demand tags.",
+    )
+
+
+class AdapterSettingsValidationError(BaseModel):
+    """One validation error for adapter runtime settings."""
+
+    model_config = _config()
+
+    field: str
+    message: str
+
+
+class AdapterSettingsValidationResponse(BaseModel):
+    """Validation result for adapter runtime settings."""
+
+    model_config = _config()
+
+    valid: bool
+    errors: list[AdapterSettingsValidationError] = Field(default_factory=list)
+    preview: dict[str, str] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +411,9 @@ class AdapterCapabilitiesResponse(AdapterCapabilitiesSummary):
     supports_forecasting: bool = False
     supports_reporting: bool = False
     supports_pricing_recommendations: bool = False
+    supports_inventory_configuration_authoring: bool = False
+    supports_signal_mapping_authoring: bool = False
+    supports_materialization_preview: bool = False
     sync_streams: list[str] = Field(default_factory=list)
     supported_object_types: list[str] = Field(default_factory=list)
     supported_signal_types: list[str] = Field(default_factory=list)

@@ -44,9 +44,11 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
     )
 
 
+from src.adapters.broadstreet import BroadstreetAdapter
 from src.adapters.freewheel import FreeWheelAdapter
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
+from src.adapters.springserve import SpringServeAdapter
 from src.adapters.triton import TritonAdapter
 from src.core.database.database_session import get_db_session
 from src.core.schemas import Principal
@@ -54,7 +56,7 @@ from src.core.schemas import Principal
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | TritonAdapter | FreeWheelAdapter:
+) -> MockAdServerAdapter | GoogleAdManager | TritonAdapter | FreeWheelAdapter | BroadstreetAdapter | SpringServeAdapter:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
@@ -174,6 +176,35 @@ def get_adapter(
                             "manual_approval_required": fw_validated.manual_approval_required,
                         }
                     )
+            elif adapter_type == "broadstreet":
+                stored = config_row.config_json or {}
+                if stored:
+                    bs_validated = BroadstreetAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "network_id": bs_validated.network_id,
+                            "api_key": bs_validated.api_key,
+                            "default_advertiser_id": bs_validated.default_advertiser_id,
+                            "campaign_name_template": bs_validated.campaign_name_template,
+                            "manual_approval_required": bs_validated.manual_approval_required,
+                        }
+                    )
+            elif adapter_type == "springserve":
+                stored = config_row.config_json or {}
+                if stored:
+                    ss_validated = SpringServeAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "email": ss_validated.email,
+                            "password": ss_validated.password,
+                            "api_token": ss_validated.api_token,
+                            "environment": ss_validated.environment,
+                            "default_demand_partner_id": ss_validated.default_demand_partner_id,
+                            "demand_class": ss_validated.demand_class,
+                            "enable_key_value_targeting": ss_validated.enable_key_value_targeting,
+                            "manual_approval_required": ss_validated.manual_approval_required,
+                        }
+                    )
 
     if not selected_adapter:
         # Default to mock if no adapter specified
@@ -213,6 +244,10 @@ def get_adapter(
         return TritonAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     elif selected_adapter == "freewheel":
         return FreeWheelAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "broadstreet":
+        return BroadstreetAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "springserve":
+        return SpringServeAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
         # Default to mock for unsupported adapters
         return MockAdServerAdapter(

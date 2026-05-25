@@ -145,6 +145,10 @@ components:
           default: false
           title: Supports Geo Targeting
           type: boolean
+        supports_inventory_configuration_authoring:
+          default: false
+          title: Supports Inventory Configuration Authoring
+          type: boolean
         supports_inventory_profiles:
           default: false
           title: Supports Inventory Profiles
@@ -152,6 +156,10 @@ components:
         supports_inventory_sync:
           default: false
           title: Supports Inventory Sync
+          type: boolean
+        supports_materialization_preview:
+          default: false
+          title: Supports Materialization Preview
           type: boolean
         supports_pricing_recommendations:
           default: false
@@ -168,6 +176,10 @@ components:
         supports_reporting_sync:
           default: false
           title: Supports Reporting Sync
+          type: boolean
+        supports_signal_mapping_authoring:
+          default: false
+          title: Supports Signal Mapping Authoring
           type: boolean
         supports_webhooks:
           default: false
@@ -243,6 +255,11 @@ components:
           title: Api Key
           type: string
           writeOnly: true
+        campaign_name_template:
+          default: AdCP-{po_number}-{product_name}
+          maxLength: 500
+          title: Campaign Name Template
+          type: string
         default_advertiser_id:
           anyOf:
           - maxLength: 64
@@ -480,6 +497,80 @@ components:
       description: OpenAPI document returned by ``GET /adapters/{adapter_type}/openapi.json``.
       title: AdapterOpenApiDocument
       type: object
+    AdapterSettingsSchemaResponse.f44f287:
+      additionalProperties: false
+      description: Runtime adapter settings schema with template-macro metadata.
+      properties:
+        schema:
+          additionalProperties: true
+          title: Schema
+          type: object
+        template_macros:
+          additionalProperties:
+            items:
+              $ref: '#/components/schemas/AdapterSettingsSchemaResponse.f44f287.TemplateMacro'
+            type: array
+          title: Template Macros
+          type: object
+        type:
+          title: Type
+          type: string
+      required:
+      - type
+      - schema
+      title: AdapterSettingsSchemaResponse
+      type: object
+    AdapterSettingsSchemaResponse.f44f287.TemplateMacro:
+      additionalProperties: false
+      description: One supported naming-template macro.
+      properties:
+        description:
+          title: Description
+          type: string
+        name:
+          title: Name
+          type: string
+      required:
+      - name
+      - description
+      title: TemplateMacro
+      type: object
+    AdapterSettingsValidationResponse.f44f287:
+      additionalProperties: false
+      description: Validation result for adapter runtime settings.
+      properties:
+        errors:
+          items:
+            $ref: '#/components/schemas/AdapterSettingsValidationResponse.f44f287.AdapterSettingsValidationError'
+          title: Errors
+          type: array
+        preview:
+          additionalProperties:
+            type: string
+          title: Preview
+          type: object
+        valid:
+          title: Valid
+          type: boolean
+      required:
+      - valid
+      title: AdapterSettingsValidationResponse
+      type: object
+    AdapterSettingsValidationResponse.f44f287.AdapterSettingsValidationError:
+      additionalProperties: false
+      description: One validation error for adapter runtime settings.
+      properties:
+        field:
+          title: Field
+          type: string
+        message:
+          title: Message
+          type: string
+      required:
+      - field
+      - message
+      title: AdapterSettingsValidationError
+      type: object
     ApiError.f44f287:
       additionalProperties: false
       description: Standard problem-detail shape used by every Tenant Management endpoint.
@@ -514,6 +605,42 @@ components:
           default: null
           title: Notes
       title: ApproveWorkflowRequest
+      type: object
+    BroadstreetSettings.f44f287:
+      additionalProperties: false
+      description: Broadstreet runtime settings that affect how buys are materialized.
+      properties:
+        campaign_name_template:
+          default: AdCP-{po_number}-{product_name}
+          description: Template used for Broadstreet campaign names. Uses {macro}
+            syntax.
+          maxLength: 500
+          title: Campaign Name Template
+          type: string
+          x-supported-macros:
+          - description: PO number from the media-buy request, or unknown.
+            name: po_number
+          - description: Name of the first product in the media buy.
+            name: product_name
+          - description: Principal/advertiser display name.
+            name: advertiser_name
+          - description: UTC timestamp in YYYYMMDD_HHMMSS format.
+            name: timestamp
+        default_advertiser_id:
+          anyOf:
+          - maxLength: 64
+            type: string
+          - type: 'null'
+          default: null
+          description: Fallback Broadstreet advertiser ID for principals without an
+            explicit Broadstreet mapping.
+          title: Default Advertiser Id
+        type:
+          const: broadstreet
+          default: broadstreet
+          title: Type
+          type: string
+      title: BroadstreetSettings
       type: object
     BuyerAdvertiserMapping.f44f287:
       additionalProperties: false
@@ -765,6 +892,97 @@ components:
       required:
       - url
       title: CreateWebhookSubscriptionRequest
+      type: object
+    FreeWheelSettings.f44f287:
+      additionalProperties: false
+      description: FreeWheel runtime settings that affect how buys are materialized.
+      properties:
+        default_advertiser_id:
+          anyOf:
+          - maxLength: 64
+            type: string
+          - type: 'null'
+          default: null
+          description: Fallback FreeWheel advertiser ID for principals without an
+            explicit FreeWheel mapping.
+          title: Default Advertiser Id
+        type:
+          const: freewheel
+          default: freewheel
+          title: Type
+          type: string
+      title: FreeWheelSettings
+      type: object
+    GoogleAdManagerSettings.f44f287:
+      additionalProperties: false
+      description: GAM runtime settings that affect how buys are materialized.
+      properties:
+        auto_naming_enabled:
+          default: true
+          description: Allow {auto_name} in order_name_template to invoke tenant AI
+            naming when AI configuration is available.
+          title: Auto Naming Enabled
+          type: boolean
+        line_item_name_template:
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          default: null
+          description: Template used for GAM line item names. Uses {macro} syntax.
+          title: Line Item Name Template
+          x-supported-macros:
+          - description: Resolved parent GAM order name.
+            name: order_name
+          - description: Product name associated with the package.
+            name: product_name
+          - description: Package name from the request, falling back to product_name.
+            name: package_name
+          - description: 1-based package position in the media buy.
+            name: package_index
+        manual_approval_required:
+          default: false
+          description: Require manual approval before GAM orders are pushed live.
+          title: Manual Approval Required
+          type: boolean
+        order_name_template:
+          anyOf:
+          - maxLength: 500
+            type: string
+          - type: 'null'
+          default: null
+          description: Template used for GAM order names. Uses {macro} syntax and
+            supports fallback syntax like {campaign_name|brand_name}.
+          title: Order Name Template
+          x-supported-macros:
+          - description: Brand-derived campaign name; falls back to Campaign.
+            name: campaign_name
+          - description: Brand domain/name from the media-buy request.
+            name: brand_name
+          - description: Backward-compatible alias for brand_name.
+            name: promoted_offering
+          - description: AI-generated name when AI naming is enabled and configured.
+            name: auto_name
+          - description: Formatted flight date range.
+            name: date_range
+          - description: Month and year for the flight start.
+            name: month_year
+          - description: Pre-created media-buy/order identifier.
+            name: media_buy_id
+          - description: Backward-compatible alias for media_buy_id.
+            name: buyer_ref
+          - description: Number of packages in the media buy.
+            name: package_count
+          - description: Flight start date in YYYY-MM-DD format.
+            name: start_date
+          - description: Flight end date in YYYY-MM-DD format.
+            name: end_date
+        type:
+          const: google_ad_manager
+          default: google_ad_manager
+          title: Type
+          type: string
+      title: GoogleAdManagerSettings
       type: object
     ListAccountsManagedResponse.f44f287:
       additionalProperties: false
@@ -1861,6 +2079,11 @@ components:
           title: Api Key
           type: string
           writeOnly: true
+        campaign_name_template:
+          default: AdCP-{po_number}-{product_name}
+          maxLength: 500
+          title: Campaign Name Template
+          type: string
         default_advertiser_id:
           anyOf:
           - maxLength: 64
@@ -2224,6 +2447,11 @@ components:
           title: Api Key
           type: string
           writeOnly: true
+        campaign_name_template:
+          default: AdCP-{po_number}-{product_name}
+          maxLength: 500
+          title: Campaign Name Template
+          type: string
         default_advertiser_id:
           anyOf:
           - maxLength: 64
@@ -2660,6 +2888,41 @@ components:
       required:
       - notes
       title: RejectWorkflowRequest
+      type: object
+    SpringServeSettings.f44f287:
+      additionalProperties: false
+      description: SpringServe runtime settings that affect how buys are materialized.
+      properties:
+        default_demand_partner_id:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          description: Fallback SpringServe Demand Partner ID for principals without
+            an explicit SpringServe mapping.
+          title: Default Demand Partner Id
+        demand_class:
+          default: line_item
+          description: '''line_item'' means SpringServe hosts buyer creative assets;
+            ''tag'' means buyer-supplied third-party VAST/audio tags pass through
+            without creative binding.'
+          enum:
+          - line_item
+          - tag
+          title: Demand Class
+          type: string
+        enable_key_value_targeting:
+          default: false
+          description: Translate AdCP signals into SpringServe demand_tag_keys entries
+            on created demand tags.
+          title: Enable Key Value Targeting
+          type: boolean
+        type:
+          const: springserve
+          default: springserve
+          title: Type
+          type: string
+      title: SpringServeSettings
       type: object
     TargetingValuesRefreshResponse.f44f287:
       additionalProperties: false
@@ -3675,6 +3938,107 @@ paths:
           description: Internal Server Error
       summary: Return the full catalog of supported ad-server adapter types.
       tags: []
+  /api/v1/tenant-management/adapters/broadstreet/config-schema:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_adapters_broadstreet_config-schema
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsSchemaResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return the Broadstreet runtime settings schema and supported naming
+        macros.
+      tags: []
+  /api/v1/tenant-management/adapters/freewheel/config-schema:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_adapters_freewheel_config-schema
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsSchemaResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return the FreeWheel runtime settings schema.
+      tags: []
+  /api/v1/tenant-management/adapters/gam/config-schema:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_adapters_gam_config-schema
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsSchemaResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return the GAM runtime settings schema and supported naming macros.
+      tags: []
+  /api/v1/tenant-management/adapters/google_ad_manager/config-schema:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_adapters_google_ad_manager_config-schema
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsSchemaResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return the GAM runtime settings schema and supported naming macros.
+      tags: []
+  /api/v1/tenant-management/adapters/springserve/config-schema:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_adapters_springserve_config-schema
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsSchemaResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return the SpringServe runtime settings schema.
+      tags: []
   /api/v1/tenant-management/adapters/{adapter_type}/capabilities:
     get:
       description: ''
@@ -4188,6 +4552,541 @@ paths:
                 $ref: '#/components/schemas/ValidationError.6a07bef'
           description: Unprocessable Content
       summary: Probe the saved adapter config without modifying state.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/broadstreet/config:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_tenants_{tenant_id}_adapters_broadstreet_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadstreetSettings.f44f287'
+          description: OK
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return tenant-level Broadstreet runtime settings.
+      tags: []
+    put:
+      description: ''
+      operationId: put__api_v1_tenant-management_tenants_{tenant_id}_adapters_broadstreet_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadstreetSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadstreetSettings.f44f287'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Bad Request
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Update tenant-level Broadstreet runtime settings.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/broadstreet/config:validate:
+    post:
+      description: ''
+      operationId: post__api_v1_tenant-management_tenants_{tenant_id}_adapters_broadstreet_config:validate
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadstreetSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsValidationResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Validate Broadstreet runtime settings without modifying state.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/freewheel/config:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_tenants_{tenant_id}_adapters_freewheel_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FreeWheelSettings.f44f287'
+          description: OK
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return tenant-level FreeWheel runtime settings.
+      tags: []
+    put:
+      description: ''
+      operationId: put__api_v1_tenant-management_tenants_{tenant_id}_adapters_freewheel_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FreeWheelSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FreeWheelSettings.f44f287'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Bad Request
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Update tenant-level FreeWheel runtime settings.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/freewheel/config:validate:
+    post:
+      description: ''
+      operationId: post__api_v1_tenant-management_tenants_{tenant_id}_adapters_freewheel_config:validate
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FreeWheelSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsValidationResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Validate FreeWheel runtime settings without modifying state.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/gam/config:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_tenants_{tenant_id}_adapters_gam_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+          description: OK
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return tenant-level GAM runtime settings.
+      tags: []
+    put:
+      description: ''
+      operationId: put__api_v1_tenant-management_tenants_{tenant_id}_adapters_gam_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Bad Request
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Update tenant-level GAM runtime settings.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/gam/config:validate:
+    post:
+      description: ''
+      operationId: post__api_v1_tenant-management_tenants_{tenant_id}_adapters_gam_config:validate
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsValidationResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Validate GAM runtime settings without modifying state.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/google_ad_manager/config:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_tenants_{tenant_id}_adapters_google_ad_manager_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+          description: OK
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return tenant-level GAM runtime settings.
+      tags: []
+    put:
+      description: ''
+      operationId: put__api_v1_tenant-management_tenants_{tenant_id}_adapters_google_ad_manager_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Bad Request
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Update tenant-level GAM runtime settings.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/google_ad_manager/config:validate:
+    post:
+      description: ''
+      operationId: post__api_v1_tenant-management_tenants_{tenant_id}_adapters_google_ad_manager_config:validate
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoogleAdManagerSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsValidationResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Validate GAM runtime settings without modifying state.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/springserve/config:
+    get:
+      description: ''
+      operationId: get__api_v1_tenant-management_tenants_{tenant_id}_adapters_springserve_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpringServeSettings.f44f287'
+          description: OK
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Return tenant-level SpringServe runtime settings.
+      tags: []
+    put:
+      description: ''
+      operationId: put__api_v1_tenant-management_tenants_{tenant_id}_adapters_springserve_config
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpringServeSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpringServeSettings.f44f287'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Bad Request
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError.f44f287'
+          description: Not Found
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Update tenant-level SpringServe runtime settings.
+      tags: []
+  /api/v1/tenant-management/tenants/{tenant_id}/adapters/springserve/config:validate:
+    post:
+      description: ''
+      operationId: post__api_v1_tenant-management_tenants_{tenant_id}_adapters_springserve_config:validate
+      parameters:
+      - description: ''
+        in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpringServeSettings.f44f287'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterSettingsValidationResponse.f44f287'
+          description: OK
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError.6a07bef'
+          description: Unprocessable Content
+      summary: Validate SpringServe runtime settings without modifying state.
       tags: []
   /api/v1/tenant-management/tenants/{tenant_id}/audit-log:
     get:

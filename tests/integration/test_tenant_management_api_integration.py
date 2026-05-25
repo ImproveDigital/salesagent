@@ -348,6 +348,266 @@ class TestTenantManagementAPIIntegration:
         assert capabilities_response.status_code in (401, 403)
         assert openapi_response.status_code in (401, 403)
 
+    def test_gam_settings_schema_documents_supported_macros(self, client, mock_api_key_auth):
+        response = client.get(
+            "/api/v1/tenant-management/adapters/google_ad_manager/config-schema",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+
+        assert response.status_code == 200
+        body = response.json
+        assert body["type"] == "google_ad_manager"
+        line_item_schema = body["schema"]["properties"]["line_item_name_template"]
+        line_item_macros = {macro["name"] for macro in line_item_schema["x-supported-macros"]}
+        assert {"order_name", "product_name", "package_name", "package_index"}.issubset(line_item_macros)
+        assert "line_item_name_template" in body["template_macros"]
+
+    def test_gam_settings_roundtrip_and_validate_macros(self, client, mock_api_key_auth, factory_session):
+        from tests.factories import AdapterConfigFactory, TenantFactory
+
+        tenant = TenantFactory(
+            tenant_id="tm_gam_settings",
+            ad_server="google_ad_manager",
+        )
+        AdapterConfigFactory(
+            tenant=tenant,
+            adapter_type="google_ad_manager",
+            gam_network_code="123456",
+            gam_line_item_name_template="{product_name}",
+        )
+        factory_session.commit()
+
+        payload = {
+            "type": "google_ad_manager",
+            "order_name_template": "{auto_name}",
+            "line_item_name_template": "{package_name}-{package_index}",
+            "auto_naming_enabled": True,
+            "manual_approval_required": True,
+        }
+        response = client.put(
+            "/api/v1/tenant-management/tenants/tm_gam_settings/adapters/google_ad_manager/config",
+            json=payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+
+        assert response.status_code == 200, response.get_data(as_text=True)
+        assert response.json == payload
+
+        get_response = client.get(
+            "/api/v1/tenant-management/tenants/tm_gam_settings/adapters/gam/config",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert get_response.status_code == 200
+        assert get_response.json == payload
+
+        invalid_payload = {**payload, "line_item_name_template": "{unknown_macro}"}
+        validation_response = client.post(
+            "/api/v1/tenant-management/tenants/tm_gam_settings/adapters/gam/config:validate",
+            json=invalid_payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert validation_response.status_code == 200
+        assert validation_response.json["valid"] is False
+        assert validation_response.json["errors"][0]["field"] == "line_item_name_template"
+
+        put_invalid_response = client.put(
+            "/api/v1/tenant-management/tenants/tm_gam_settings/adapters/gam/config",
+            json=invalid_payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert put_invalid_response.status_code == 400
+        assert put_invalid_response.json["error"] == "invalid_adapter_settings"
+
+    def test_freewheel_settings_roundtrip(self, client, mock_api_key_auth, factory_session):
+        from tests.factories import AdapterConfigFactory, TenantFactory
+
+        tenant = TenantFactory(
+            tenant_id="tm_freewheel_settings",
+            ad_server="freewheel",
+        )
+        AdapterConfigFactory(
+            tenant=tenant,
+            adapter_type="freewheel",
+            config_json={
+                "api_token": "test_fw_token",
+                "environment": "production",
+                "default_advertiser_id": "adv_old",
+            },
+        )
+        factory_session.commit()
+
+        schema_response = client.get(
+            "/api/v1/tenant-management/adapters/freewheel/config-schema",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert schema_response.status_code == 200
+        assert schema_response.json["type"] == "freewheel"
+        assert "default_advertiser_id" in schema_response.json["schema"]["properties"]
+        assert schema_response.json["template_macros"] == {}
+
+        payload = {
+            "type": "freewheel",
+            "default_advertiser_id": "adv_new",
+        }
+        response = client.put(
+            "/api/v1/tenant-management/tenants/tm_freewheel_settings/adapters/freewheel/config",
+            json=payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+
+        assert response.status_code == 200, response.get_data(as_text=True)
+        assert response.json == payload
+
+        get_response = client.get(
+            "/api/v1/tenant-management/tenants/tm_freewheel_settings/adapters/freewheel/config",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert get_response.status_code == 200
+        assert get_response.json == payload
+
+        validation_response = client.post(
+            "/api/v1/tenant-management/tenants/tm_freewheel_settings/adapters/freewheel/config:validate",
+            json=payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert validation_response.status_code == 200
+        assert validation_response.json["valid"] is True
+
+    def test_settings_validation_redacts_stored_connection_secrets(self, client, mock_api_key_auth, factory_session):
+        from tests.factories import AdapterConfigFactory, TenantFactory
+
+        tenant = TenantFactory(
+            tenant_id="tm_freewheel_secret_redaction",
+            ad_server="freewheel",
+        )
+        AdapterConfigFactory(
+            tenant=tenant,
+            adapter_type="freewheel",
+            config_json={
+                "api_token": "stored_secret_token",
+                "environment": "invalid_env",
+            },
+        )
+        factory_session.commit()
+
+        response = client.post(
+            "/api/v1/tenant-management/tenants/tm_freewheel_secret_redaction/adapters/freewheel/config:validate",
+            json={"type": "freewheel", "default_advertiser_id": "adv_new"},
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+
+        assert response.status_code == 400
+        assert response.json["error"] == "adapter_connection_config_incomplete"
+        assert "stored_secret_token" not in response.get_data(as_text=True)
+
+    def test_broadstreet_settings_roundtrip_and_validate_macros(self, client, mock_api_key_auth, factory_session):
+        from tests.factories import AdapterConfigFactory, TenantFactory
+
+        tenant = TenantFactory(
+            tenant_id="tm_broadstreet_settings",
+            ad_server="broadstreet",
+        )
+        AdapterConfigFactory(
+            tenant=tenant,
+            adapter_type="broadstreet",
+            config_json={
+                "network_id": "net_123",
+                "api_key": "test_api_key",
+                "default_advertiser_id": "adv_old",
+                "campaign_name_template": "Old-{product_name}",
+            },
+        )
+        factory_session.commit()
+
+        payload = {
+            "type": "broadstreet",
+            "default_advertiser_id": "adv_new",
+            "campaign_name_template": "BS-{po_number}-{product_name}-{timestamp}",
+        }
+        response = client.put(
+            "/api/v1/tenant-management/tenants/tm_broadstreet_settings/adapters/broadstreet/config",
+            json=payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+
+        assert response.status_code == 200, response.get_data(as_text=True)
+        assert response.json == payload
+
+        schema_response = client.get(
+            "/api/v1/tenant-management/adapters/broadstreet/config-schema",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert schema_response.status_code == 200
+        assert "campaign_name_template" in schema_response.json["template_macros"]
+
+        invalid_payload = {**payload, "campaign_name_template": "{bad_macro}"}
+        validation_response = client.post(
+            "/api/v1/tenant-management/tenants/tm_broadstreet_settings/adapters/broadstreet/config:validate",
+            json=invalid_payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert validation_response.status_code == 200
+        assert validation_response.json["valid"] is False
+
+    def test_springserve_settings_roundtrip(self, client, mock_api_key_auth, factory_session):
+        from tests.factories import AdapterConfigFactory, TenantFactory
+
+        tenant = TenantFactory(
+            tenant_id="tm_springserve_settings",
+            ad_server="springserve",
+        )
+        AdapterConfigFactory(
+            tenant=tenant,
+            adapter_type="springserve",
+            config_json={
+                "api_token": "test_ss_token",
+                "environment": "production",
+                "default_demand_partner_id": 111,
+                "demand_class": "line_item",
+                "enable_key_value_targeting": False,
+            },
+        )
+        factory_session.commit()
+
+        schema_response = client.get(
+            "/api/v1/tenant-management/adapters/springserve/config-schema",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert schema_response.status_code == 200
+        assert schema_response.json["type"] == "springserve"
+        schema_properties = schema_response.json["schema"]["properties"]
+        assert {"default_demand_partner_id", "demand_class", "enable_key_value_targeting"}.issubset(schema_properties)
+
+        payload = {
+            "type": "springserve",
+            "default_demand_partner_id": 222,
+            "demand_class": "tag",
+            "enable_key_value_targeting": True,
+        }
+        response = client.put(
+            "/api/v1/tenant-management/tenants/tm_springserve_settings/adapters/springserve/config",
+            json=payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+
+        assert response.status_code == 200, response.get_data(as_text=True)
+        assert response.json == payload
+
+        get_response = client.get(
+            "/api/v1/tenant-management/tenants/tm_springserve_settings/adapters/springserve/config",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert get_response.status_code == 200
+        assert get_response.json == payload
+
+        validation_response = client.post(
+            "/api/v1/tenant-management/tenants/tm_springserve_settings/adapters/springserve/config:validate",
+            json=payload,
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert validation_response.status_code == 200
+        assert validation_response.json["valid"] is True
+
     def test_create_minimal_gam_tenant(self, client, mock_api_key_auth):
         """Test creating a minimal GAM tenant with just refresh token."""
         tenant_data = {

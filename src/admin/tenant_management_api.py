@@ -10,6 +10,7 @@ remain for direct-customer (open-instance) callers.
 import json
 import logging
 import os
+import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from flask import Blueprint, has_request_context, jsonify, request
+from pydantic import ValidationError as PydanticValidationError
 from spectree import Response, SpecTree
 from spectree.models import InType, SecureType, SecurityScheme, SecuritySchemeData
 from sqlalchemy import delete, func, or_, select
@@ -24,6 +26,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import attributes
 
 from src.admin.api_schemas.tenant_management import (
+    BROADSTREET_CAMPAIGN_NAME_MACROS,
+    GAM_LINE_ITEM_NAME_MACROS,
+    GAM_ORDER_NAME_MACROS,
     WEBHOOK_EVENT_TYPES,
     AccountDetail,
     AccountSummary,
@@ -32,17 +37,23 @@ from src.admin.api_schemas.tenant_management import (
     AdapterCatalogEntry,
     AdapterConfigResponse,
     AdapterOpenApiDocument,
+    AdapterSettingsSchemaResponse,
+    AdapterSettingsValidationError,
+    AdapterSettingsValidationResponse,
     AdapterStatusResponse,
     AdapterUnsupportedFeature,
     ApiError,
     ApproveWorkflowRequest,
     BroadstreetAdapterConfig,
+    BroadstreetSettings,
     BuyerAdvertiserMapping,
     CreateAccountRequest,
     CreateBuyerAdvertiserMappingRequest,
     CreateWebhookSubscriptionRequest,
     FreeWheelAdapterConfig,
+    FreeWheelSettings,
     GAMAdapterConfig,
+    GoogleAdManagerSettings,
     ListAccountsManagedResponse,
     ListAdaptersResponse,
     ListAuditLogResponse,
@@ -68,6 +79,7 @@ from src.admin.api_schemas.tenant_management import (
     SetupTaskItem,
     SetupTasksBlock,
     SpringServeAdapterConfig,
+    SpringServeSettings,
     StatusSyncRunBlock,
     StatusSyncsBlock,
     TargetingValuesRefreshResponse,
@@ -189,6 +201,108 @@ def _api_error(code: str, message: str, status: int, details: dict | None = None
     """Build a (jsonified, status) tuple matching the :class:`ApiError` schema."""
     body = ApiError(error=code, message=message, details=details).model_dump(exclude_none=True)
     return jsonify(body), status
+
+
+def _pydantic_error_details(exc: PydanticValidationError) -> list[dict[str, Any]]:
+    """Return JSON-safe Pydantic error details for API responses."""
+
+    safe_errors: list[dict[str, Any]] = []
+    for error in exc.errors():
+        safe_errors.append({key: value for key, value in error.items() if key in {"type", "loc", "msg", "url"}})
+    return json.loads(json.dumps(safe_errors, default=str))
+
+
+def _template_macro_names(macros: list[dict[str, str]]) -> set[str]:
+    """Return supported macro names from the schema metadata."""
+
+    return {macro["name"] for macro in macros}
+
+
+def _unknown_template_macros(template: str | None, allowed: set[str]) -> list[str]:
+    """Find unsupported ``{macro}`` names, including fallback alternatives."""
+
+    if not template:
+        return []
+
+    unknown: set[str] = set()
+    for match in re.finditer(r"\{([^}]+)\}", template):
+        for macro_name in match.group(1).split("|"):
+            stripped = macro_name.strip()
+            if stripped and stripped not in allowed:
+                unknown.add(stripped)
+    return sorted(unknown)
+
+
+def _adapter_settings_schema_response(
+    adapter_type: str,
+    model: type[GoogleAdManagerSettings]
+    | type[FreeWheelSettings]
+    | type[BroadstreetSettings]
+    | type[SpringServeSettings],
+    template_macros: dict[str, list[dict[str, str]]],
+) -> AdapterSettingsSchemaResponse:
+    """Return a JSON Schema plus explicit template macro metadata."""
+
+    return AdapterSettingsSchemaResponse(
+        type=adapter_type,
+        **{"schema": model.model_json_schema()},
+        template_macros=template_macros,
+    )
+
+
+def _settings_validation_response(
+    field_templates: dict[str, str | None],
+    field_macros: dict[str, list[dict[str, str]]],
+) -> AdapterSettingsValidationResponse:
+    """Validate naming-template fields and return preview strings."""
+
+    from src.core.utils.naming import apply_naming_template
+
+    sample_contexts = {
+        "order_name_template": {
+            "campaign_name": "Spring Launch",
+            "brand_name": "example.com",
+            "promoted_offering": "example.com",
+            "auto_name": "Example Spring Launch",
+            "date_range": "May 01-31, 2026",
+            "month_year": "May 2026",
+            "media_buy_id": "gam_ab12cd34",
+            "buyer_ref": "gam_ab12cd34",
+            "package_count": "2",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-31",
+        },
+        "line_item_name_template": {
+            "order_name": "Example Spring Launch [mb_gam_ab12cd34]",
+            "product_name": "Homepage Sports",
+            "package_name": "Homepage Sports - May",
+            "package_index": "1",
+        },
+        "campaign_name_template": {
+            "po_number": "PO-12345",
+            "product_name": "Homepage Display",
+            "advertiser_name": "Example Advertiser",
+            "timestamp": "20260525_120000",
+        },
+    }
+
+    errors: list[AdapterSettingsValidationError] = []
+    preview: dict[str, str] = {}
+    for field_name, template in field_templates.items():
+        allowed = _template_macro_names(field_macros[field_name])
+        unknown = _unknown_template_macros(template, allowed)
+        if unknown:
+            errors.append(
+                AdapterSettingsValidationError(
+                    field=field_name,
+                    message=f"Unsupported macro(s): {', '.join(unknown)}",
+                )
+            )
+            continue
+        if template:
+            preview[field_name] = apply_naming_template(template, sample_contexts[field_name])
+
+    return AdapterSettingsValidationResponse(valid=not errors, errors=errors, preview=preview)
 
 
 def _canonical_agent_url(value: str | None) -> str | None:
@@ -1328,6 +1442,478 @@ def get_adapter_contract_openapi(adapter_type: str):
         return _api_error("adapter_not_found", f"Unknown adapter type: {adapter_type!r}", 404)
 
     return jsonify(document)
+
+
+@tenant_management_api.route("/adapters/google_ad_manager/config-schema", methods=["GET"])
+@tenant_management_api.route("/adapters/gam/config-schema", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=AdapterSettingsSchemaResponse))
+def get_gam_settings_schema():
+    """Return the GAM runtime settings schema and supported naming macros."""
+    response = _adapter_settings_schema_response(
+        "google_ad_manager",
+        GoogleAdManagerSettings,
+        {
+            "order_name_template": GAM_ORDER_NAME_MACROS,
+            "line_item_name_template": GAM_LINE_ITEM_NAME_MACROS,
+        },
+    )
+    return jsonify(response.model_dump(by_alias=True))
+
+
+@tenant_management_api.route("/adapters/freewheel/config-schema", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=AdapterSettingsSchemaResponse))
+def get_freewheel_settings_schema():
+    """Return the FreeWheel runtime settings schema."""
+    response = _adapter_settings_schema_response("freewheel", FreeWheelSettings, {})
+    return jsonify(response.model_dump(by_alias=True))
+
+
+@tenant_management_api.route("/adapters/broadstreet/config-schema", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=AdapterSettingsSchemaResponse))
+def get_broadstreet_settings_schema():
+    """Return the Broadstreet runtime settings schema and supported naming macros."""
+    response = _adapter_settings_schema_response(
+        "broadstreet",
+        BroadstreetSettings,
+        {"campaign_name_template": BROADSTREET_CAMPAIGN_NAME_MACROS},
+    )
+    return jsonify(response.model_dump(by_alias=True))
+
+
+@tenant_management_api.route("/adapters/springserve/config-schema", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=AdapterSettingsSchemaResponse))
+def get_springserve_settings_schema():
+    """Return the SpringServe runtime settings schema."""
+    response = _adapter_settings_schema_response("springserve", SpringServeSettings, {})
+    return jsonify(response.model_dump(by_alias=True))
+
+
+def _get_adapter_settings_row(session, tenant_id: str, adapter_type: str) -> tuple[Tenant | None, AdapterConfig | None]:
+    """Fetch the tenant and matching adapter config for runtime settings."""
+
+    tenant = TenantConfigRepository(session, tenant_id).get_tenant()
+    if tenant is None:
+        return None, None
+    adapter = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+    if adapter is None or adapter.adapter_type != adapter_type:
+        return tenant, None
+    return tenant, adapter
+
+
+def _gam_settings_from_adapter(adapter: AdapterConfig, tenant: Tenant | None = None) -> GoogleAdManagerSettings:
+    """Build GAM runtime settings from the stored adapter row."""
+
+    manual_approval_required = bool(adapter.gam_manual_approval_required)
+    if tenant is not None:
+        manual_approval_required = bool(tenant.human_review_required or adapter.gam_manual_approval_required)
+
+    return GoogleAdManagerSettings(
+        order_name_template=adapter.gam_order_name_template,
+        line_item_name_template=adapter.gam_line_item_name_template,
+        auto_naming_enabled=tenant.auto_naming_enabled if tenant is not None else True,
+        manual_approval_required=manual_approval_required,
+    )
+
+
+def _freewheel_settings_from_adapter(adapter: AdapterConfig) -> FreeWheelSettings:
+    """Build FreeWheel runtime settings from the stored adapter row."""
+
+    config = dict(adapter.config_json or {})
+    return FreeWheelSettings(default_advertiser_id=config.get("default_advertiser_id"))
+
+
+def _broadstreet_settings_from_adapter(adapter: AdapterConfig) -> BroadstreetSettings:
+    """Build Broadstreet runtime settings from the stored adapter row."""
+
+    config = dict(adapter.config_json or {})
+    return BroadstreetSettings(
+        default_advertiser_id=config.get("default_advertiser_id"),
+        campaign_name_template=config.get("campaign_name_template") or "AdCP-{po_number}-{product_name}",
+    )
+
+
+def _springserve_settings_from_adapter(adapter: AdapterConfig) -> SpringServeSettings:
+    """Build SpringServe runtime settings from the stored adapter row."""
+
+    config = dict(adapter.config_json or {})
+    return SpringServeSettings(
+        default_demand_partner_id=config.get("default_demand_partner_id"),
+        demand_class=config.get("demand_class") or "line_item",
+        enable_key_value_targeting=bool(config.get("enable_key_value_targeting", False)),
+    )
+
+
+def _adapter_settings_not_found(tenant_id: str, adapter_type: str):
+    return _api_error(
+        "adapter_config_not_found",
+        f"Tenant {tenant_id!r} is not configured for adapter {adapter_type!r}",
+        404,
+    )
+
+
+def _connection_config_model(adapter_type: str) -> type[Any] | None:
+    """Return the adapter connection schema used to validate stored config."""
+
+    if adapter_type == "freewheel":
+        from src.adapters.freewheel import FreeWheelConnectionConfig
+
+        return FreeWheelConnectionConfig
+    if adapter_type == "broadstreet":
+        from src.adapters.broadstreet.schemas import BroadstreetConnectionConfig
+
+        return BroadstreetConnectionConfig
+    if adapter_type == "springserve":
+        from src.adapters.springserve import SpringServeConnectionConfig
+
+        return SpringServeConnectionConfig
+    return None
+
+
+def _validated_connection_config_payload(
+    adapter_type: str, config: dict[str, Any]
+) -> tuple[dict[str, Any] | None, Any]:
+    """Validate stored adapter connection config and return a persistable payload."""
+
+    model = _connection_config_model(adapter_type)
+    if model is None:
+        return dict(config), None
+
+    try:
+        validated = model(**config)
+    except PydanticValidationError as exc:
+        return None, _api_error(
+            "adapter_connection_config_incomplete",
+            f"Stored {adapter_type!r} connection config is incomplete; configure credentials first",
+            400,
+            details={"errors": _pydantic_error_details(exc)},
+        )
+    return validated.model_dump(), None
+
+
+def _validate_adapter_settings_target(
+    session,
+    tenant_id: str,
+    adapter_type: str,
+    *,
+    require_connection_config: bool = False,
+) -> tuple[AdapterConfig | None, Any]:
+    """Validate that a runtime-settings target exists and is saveable."""
+
+    tenant, adapter = _get_adapter_settings_row(session, tenant_id, adapter_type)
+    if tenant is None:
+        return None, _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+    if adapter is None:
+        return None, _adapter_settings_not_found(tenant_id, adapter_type)
+    if require_connection_config:
+        _, error = _validated_connection_config_payload(adapter_type, dict(adapter.config_json or {}))
+        if error is not None:
+            return None, error
+    return adapter, None
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/google_ad_manager/config", methods=["GET"])
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/gam/config", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=GoogleAdManagerSettings, HTTP_404=ApiError))
+def get_gam_settings(tenant_id: str):
+    """Return tenant-level GAM runtime settings."""
+    with get_db_session() as session:
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "google_ad_manager")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "google_ad_manager")
+        return jsonify(_gam_settings_from_adapter(adapter, tenant).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/google_ad_manager/config:validate", methods=["POST"])
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/gam/config:validate", methods=["POST"])
+@require_tenant_management_api_key
+@spec.validate(json=GoogleAdManagerSettings, resp=Response(HTTP_200=AdapterSettingsValidationResponse))
+def validate_gam_settings(tenant_id: str):
+    """Validate GAM runtime settings without modifying state."""
+    settings: GoogleAdManagerSettings = _validated_json_payload()
+    with get_db_session() as session:
+        _adapter, error = _validate_adapter_settings_target(session, tenant_id, "google_ad_manager")
+        if error is not None:
+            return error
+
+    response = _settings_validation_response(
+        {
+            "order_name_template": settings.order_name_template,
+            "line_item_name_template": settings.line_item_name_template,
+        },
+        {
+            "order_name_template": GAM_ORDER_NAME_MACROS,
+            "line_item_name_template": GAM_LINE_ITEM_NAME_MACROS,
+        },
+    )
+    return jsonify(response.model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/google_ad_manager/config", methods=["PUT"])
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/gam/config", methods=["PUT"])
+@require_tenant_management_api_key
+@spec.validate(
+    json=GoogleAdManagerSettings,
+    resp=Response(HTTP_200=GoogleAdManagerSettings, HTTP_400=ApiError, HTTP_404=ApiError),
+)
+def put_gam_settings(tenant_id: str):
+    """Update tenant-level GAM runtime settings."""
+    settings: GoogleAdManagerSettings = _validated_json_payload()
+    validation = _settings_validation_response(
+        {
+            "order_name_template": settings.order_name_template,
+            "line_item_name_template": settings.line_item_name_template,
+        },
+        {
+            "order_name_template": GAM_ORDER_NAME_MACROS,
+            "line_item_name_template": GAM_LINE_ITEM_NAME_MACROS,
+        },
+    )
+    if not validation.valid:
+        return _api_error(
+            "invalid_adapter_settings",
+            "Adapter settings failed validation",
+            400,
+            details={"errors": [error.model_dump() for error in validation.errors]},
+        )
+
+    with get_db_session() as session:
+        session.info["management_api_caller"] = True
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "google_ad_manager")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "google_ad_manager")
+
+        adapter.gam_order_name_template = settings.order_name_template
+        adapter.gam_line_item_name_template = settings.line_item_name_template
+        adapter.gam_manual_approval_required = settings.manual_approval_required
+        tenant.auto_naming_enabled = settings.auto_naming_enabled
+        tenant.human_review_required = settings.manual_approval_required
+        adapter.updated_at = datetime.now(UTC)
+        session.commit()
+        invalidate_status_cache(tenant_id)
+        return jsonify(_gam_settings_from_adapter(adapter, tenant).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/freewheel/config", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=FreeWheelSettings, HTTP_404=ApiError))
+def get_freewheel_settings(tenant_id: str):
+    """Return tenant-level FreeWheel runtime settings."""
+    with get_db_session() as session:
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "freewheel")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "freewheel")
+        return jsonify(_freewheel_settings_from_adapter(adapter).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/freewheel/config:validate", methods=["POST"])
+@require_tenant_management_api_key
+@spec.validate(json=FreeWheelSettings, resp=Response(HTTP_200=AdapterSettingsValidationResponse))
+def validate_freewheel_settings(tenant_id: str):
+    """Validate FreeWheel runtime settings without modifying state."""
+    _settings: FreeWheelSettings = _validated_json_payload()
+    with get_db_session() as session:
+        _adapter, error = _validate_adapter_settings_target(
+            session,
+            tenant_id,
+            "freewheel",
+            require_connection_config=True,
+        )
+        if error is not None:
+            return error
+    return jsonify(AdapterSettingsValidationResponse(valid=True).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/freewheel/config", methods=["PUT"])
+@require_tenant_management_api_key
+@spec.validate(
+    json=FreeWheelSettings,
+    resp=Response(HTTP_200=FreeWheelSettings, HTTP_400=ApiError, HTTP_404=ApiError),
+)
+def put_freewheel_settings(tenant_id: str):
+    """Update tenant-level FreeWheel runtime settings."""
+    settings: FreeWheelSettings = _validated_json_payload()
+
+    with get_db_session() as session:
+        session.info["management_api_caller"] = True
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "freewheel")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "freewheel")
+
+        merged = dict(adapter.config_json or {})
+        merged["default_advertiser_id"] = settings.default_advertiser_id
+        validated_payload, error = _validated_connection_config_payload("freewheel", merged)
+        if error is not None:
+            return error
+        assert validated_payload is not None
+
+        adapter.config_json = validated_payload
+        attributes.flag_modified(adapter, "config_json")
+        adapter.updated_at = datetime.now(UTC)
+        session.commit()
+        invalidate_status_cache(tenant_id)
+        return jsonify(_freewheel_settings_from_adapter(adapter).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/broadstreet/config", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=BroadstreetSettings, HTTP_404=ApiError))
+def get_broadstreet_settings(tenant_id: str):
+    """Return tenant-level Broadstreet runtime settings."""
+    with get_db_session() as session:
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "broadstreet")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "broadstreet")
+        return jsonify(_broadstreet_settings_from_adapter(adapter).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/broadstreet/config:validate", methods=["POST"])
+@require_tenant_management_api_key
+@spec.validate(json=BroadstreetSettings, resp=Response(HTTP_200=AdapterSettingsValidationResponse))
+def validate_broadstreet_settings(tenant_id: str):
+    """Validate Broadstreet runtime settings without modifying state."""
+    settings: BroadstreetSettings = _validated_json_payload()
+    with get_db_session() as session:
+        _adapter, error = _validate_adapter_settings_target(
+            session,
+            tenant_id,
+            "broadstreet",
+            require_connection_config=True,
+        )
+        if error is not None:
+            return error
+
+    response = _settings_validation_response(
+        {"campaign_name_template": settings.campaign_name_template},
+        {"campaign_name_template": BROADSTREET_CAMPAIGN_NAME_MACROS},
+    )
+    return jsonify(response.model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/broadstreet/config", methods=["PUT"])
+@require_tenant_management_api_key
+@spec.validate(
+    json=BroadstreetSettings,
+    resp=Response(HTTP_200=BroadstreetSettings, HTTP_400=ApiError, HTTP_404=ApiError),
+)
+def put_broadstreet_settings(tenant_id: str):
+    """Update tenant-level Broadstreet runtime settings."""
+    settings: BroadstreetSettings = _validated_json_payload()
+    validation = _settings_validation_response(
+        {"campaign_name_template": settings.campaign_name_template},
+        {"campaign_name_template": BROADSTREET_CAMPAIGN_NAME_MACROS},
+    )
+    if not validation.valid:
+        return _api_error(
+            "invalid_adapter_settings",
+            "Adapter settings failed validation",
+            400,
+            details={"errors": [error.model_dump() for error in validation.errors]},
+        )
+
+    with get_db_session() as session:
+        session.info["management_api_caller"] = True
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "broadstreet")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "broadstreet")
+
+        merged = dict(adapter.config_json or {})
+        merged["default_advertiser_id"] = settings.default_advertiser_id
+        merged["campaign_name_template"] = settings.campaign_name_template
+        validated_payload, error = _validated_connection_config_payload("broadstreet", merged)
+        if error is not None:
+            return error
+        assert validated_payload is not None
+
+        adapter.config_json = validated_payload
+        attributes.flag_modified(adapter, "config_json")
+        adapter.updated_at = datetime.now(UTC)
+        session.commit()
+        invalidate_status_cache(tenant_id)
+        return jsonify(_broadstreet_settings_from_adapter(adapter).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/springserve/config", methods=["GET"])
+@require_tenant_management_api_key
+@spec.validate(resp=Response(HTTP_200=SpringServeSettings, HTTP_404=ApiError))
+def get_springserve_settings(tenant_id: str):
+    """Return tenant-level SpringServe runtime settings."""
+    with get_db_session() as session:
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "springserve")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "springserve")
+        return jsonify(_springserve_settings_from_adapter(adapter).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/springserve/config:validate", methods=["POST"])
+@require_tenant_management_api_key
+@spec.validate(json=SpringServeSettings, resp=Response(HTTP_200=AdapterSettingsValidationResponse))
+def validate_springserve_settings(tenant_id: str):
+    """Validate SpringServe runtime settings without modifying state."""
+    _settings: SpringServeSettings = _validated_json_payload()
+    with get_db_session() as session:
+        _adapter, error = _validate_adapter_settings_target(
+            session,
+            tenant_id,
+            "springserve",
+            require_connection_config=True,
+        )
+        if error is not None:
+            return error
+    return jsonify(AdapterSettingsValidationResponse(valid=True).model_dump())
+
+
+@tenant_management_api.route("/tenants/<tenant_id>/adapters/springserve/config", methods=["PUT"])
+@require_tenant_management_api_key
+@spec.validate(
+    json=SpringServeSettings,
+    resp=Response(HTTP_200=SpringServeSettings, HTTP_400=ApiError, HTTP_404=ApiError),
+)
+def put_springserve_settings(tenant_id: str):
+    """Update tenant-level SpringServe runtime settings."""
+    settings: SpringServeSettings = _validated_json_payload()
+
+    with get_db_session() as session:
+        session.info["management_api_caller"] = True
+        tenant, adapter = _get_adapter_settings_row(session, tenant_id, "springserve")
+        if tenant is None:
+            return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
+        if adapter is None:
+            return _adapter_settings_not_found(tenant_id, "springserve")
+
+        merged = dict(adapter.config_json or {})
+        merged["default_demand_partner_id"] = settings.default_demand_partner_id
+        merged["demand_class"] = settings.demand_class
+        merged["enable_key_value_targeting"] = settings.enable_key_value_targeting
+        validated_payload, error = _validated_connection_config_payload("springserve", merged)
+        if error is not None:
+            return error
+        assert validated_payload is not None
+
+        adapter.config_json = validated_payload
+        attributes.flag_modified(adapter, "config_json")
+        adapter.updated_at = datetime.now(UTC)
+        session.commit()
+        invalidate_status_cache(tenant_id)
+        return jsonify(_springserve_settings_from_adapter(adapter).model_dump())
 
 
 @tenant_management_api.route("/tenants", methods=["GET"])

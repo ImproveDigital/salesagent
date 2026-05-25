@@ -35,6 +35,11 @@ class BroadstreetConnectionConfig(BaseConnectionConfig):
         description="Default advertiser ID for principals without platform_mappings",
         json_schema_extra={"ui_order": 3},
     )
+    campaign_name_template: str = Field(
+        default="AdCP-{po_number}-{product_name}",
+        description="Template for campaign naming. Supports: {po_number}, {product_name}, {advertiser_name}, {timestamp}",
+        json_schema_extra={"ui_order": 4},
+    )
 
     @field_serializer("api_key")
     def _encrypt_api_key(self, value: str) -> str:
