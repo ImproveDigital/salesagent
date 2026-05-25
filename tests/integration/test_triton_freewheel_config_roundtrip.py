@@ -29,9 +29,15 @@ from unittest.mock import patch
 import pytest
 from cryptography.fernet import Fernet
 
+from src.adapters.broadstreet import BroadstreetAdapter
+from src.adapters.broadstreet.schemas import BroadstreetConnectionConfig
 from src.adapters.freewheel import FreeWheelConnectionConfig
+from src.adapters.springserve import SpringServeAdapter, SpringServeConnectionConfig
 from src.adapters.triton import TritonConnectionConfig
+from src.core.config_loader import set_current_tenant
 from src.core.database.repositories.adapter_config import AdapterConfigRepository
+from src.core.helpers import get_adapter
+from src.core.schemas import Principal
 from src.core.tenant_status import get_tenant_status, is_tenant_ad_server_configured
 from src.core.utils.encryption import is_encrypted
 from tests.factories.core import AdapterConfigFactory, TenantFactory
@@ -200,3 +206,50 @@ class TestFreeWheelConfigRoundtrip:
         assert is_tenant_ad_server_configured(_tenant) is False
         status = get_tenant_status(_tenant)
         assert any("credentials" in m.lower() or "api_token" in m for m in status["missing_config"])
+
+
+@pytest.mark.integration
+@pytest.mark.requires_db
+class TestConfigJsonAdapterFactory:
+    """Config-json adapters are rehydrated by the main adapter factory."""
+
+    def test_broadstreet_factory_uses_stored_runtime_settings(self, _tenant):
+        validated = BroadstreetConnectionConfig(
+            network_id="net_123",
+            api_key="bs_secret",
+            default_advertiser_id="adv_default",
+            campaign_name_template="BS-{po_number}-{product_name}",
+        )
+        _persist_adapter_config(_tenant, "broadstreet", validated.model_dump())
+        set_current_tenant({"tenant_id": _tenant, "ad_server": "broadstreet", "name": "Broadstreet", "subdomain": "bs"})
+
+        adapter = get_adapter(
+            Principal(principal_id="p_bs", name="Broadstreet Principal", platform_mappings={}),
+            dry_run=True,
+        )
+
+        assert isinstance(adapter, BroadstreetAdapter)
+        assert adapter.config["default_advertiser_id"] == "adv_default"
+        assert adapter.config["campaign_name_template"] == "BS-{po_number}-{product_name}"
+        assert adapter.config["api_key"] == "bs_secret"
+
+    def test_springserve_factory_uses_stored_runtime_settings(self, _tenant):
+        validated = SpringServeConnectionConfig(
+            api_token="ss_secret",
+            default_demand_partner_id=123,
+            demand_class="tag",
+            enable_key_value_targeting=True,
+        )
+        _persist_adapter_config(_tenant, "springserve", validated.model_dump())
+        set_current_tenant({"tenant_id": _tenant, "ad_server": "springserve", "name": "SpringServe", "subdomain": "ss"})
+
+        adapter = get_adapter(
+            Principal(principal_id="p_ss", name="SpringServe Principal", platform_mappings={}),
+            dry_run=True,
+        )
+
+        assert isinstance(adapter, SpringServeAdapter)
+        assert adapter.config["default_demand_partner_id"] == 123
+        assert adapter.config["demand_class"] == "tag"
+        assert adapter.config["enable_key_value_targeting"] is True
+        assert adapter.config["api_token"] == "ss_secret"

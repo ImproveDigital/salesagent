@@ -374,7 +374,7 @@ class BroadstreetAdapter(AdServerAdapter):
         # Build campaign name
         first_product_name = next(iter(products_map.values()), {}).get("name", "Campaign")
         campaign_name = self.campaign_manager.build_campaign_name(
-            template="AdCP-{po_number}-{product_name}",
+            template=self.config.get("campaign_name_template") or "AdCP-{po_number}-{product_name}",
             po_number=request.po_number,
             product_name=first_product_name,
             advertiser_name=self.principal.name,

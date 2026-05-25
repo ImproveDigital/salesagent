@@ -32,6 +32,8 @@ ROOT_JSON_PATH = REPO_ROOT / "openapi.json"
 ROOT_YAML_PATH = REPO_ROOT / "openapi.yaml"
 ADAPTER_OUT_DIR = REPO_ROOT / "docs" / "api" / "adapters"
 ADAPTER_TYPES = ("broadstreet", "freewheel", "google_ad_manager", "mock", "springserve")
+ADAPTER_MANIFEST_JSON_PATH = REPO_ROOT / "docs" / "api" / "adapter-contracts-manifest.json"
+ADAPTER_MANIFEST_YAML_PATH = REPO_ROOT / "docs" / "api" / "adapter-contracts-manifest.yaml"
 
 
 def _live_spec() -> dict:
@@ -148,6 +150,33 @@ def test_committed_adapter_openapi_yaml_matches_json():
         assert json.loads(json_path.read_text(encoding="utf-8")) == yaml.safe_load(
             yaml_path.read_text(encoding="utf-8")
         ), f"{yaml_path.relative_to(REPO_ROOT)} is out of sync with {json_path.relative_to(REPO_ROOT)}"
+
+
+def test_adapter_contract_manifest_matches_artifacts():
+    """The manifest gives downstream generators a static file list."""
+    assert ADAPTER_MANIFEST_JSON_PATH.exists(), (
+        f"{ADAPTER_MANIFEST_JSON_PATH.relative_to(REPO_ROOT)} missing — run `make openapi`"
+    )
+    assert ADAPTER_MANIFEST_YAML_PATH.exists(), (
+        f"{ADAPTER_MANIFEST_YAML_PATH.relative_to(REPO_ROOT)} missing — run `make openapi`"
+    )
+
+    manifest = json.loads(ADAPTER_MANIFEST_JSON_PATH.read_text(encoding="utf-8"))
+    yaml_manifest = yaml.safe_load(ADAPTER_MANIFEST_YAML_PATH.read_text(encoding="utf-8"))
+    assert manifest == yaml_manifest
+
+    expected_entries = sorted(
+        [
+            {
+                "type": path.name.removesuffix("-openapi.json"),
+                "openapi_json": f"adapters/{path.name}",
+                "openapi_yaml": f"adapters/{path.name.removesuffix('.json')}.yaml",
+            }
+            for path in ADAPTER_OUT_DIR.glob("*-openapi.json")
+        ],
+        key=lambda entry: entry["type"],
+    )
+    assert manifest["adapters"] == expected_entries
 
 
 def test_export_script_is_idempotent():

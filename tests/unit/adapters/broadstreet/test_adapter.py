@@ -179,6 +179,49 @@ class TestBroadstreetAdapterCreateMediaBuy:
         assert len(result.packages) == 1
         assert result.packages[0].package_id == "pkg_1"
 
+    def test_create_media_buy_uses_configured_campaign_name_template(self, mock_principal, mock_config):
+        """Campaign naming uses the tenant-level Broadstreet runtime setting."""
+        config = {**mock_config, "campaign_name_template": "Custom-{po_number}-{advertiser_name}"}
+        adapter = BroadstreetAdapter(
+            config=config,
+            principal=mock_principal,
+            dry_run=True,
+            tenant_id="test_tenant",
+        )
+
+        start_time = datetime.now(UTC)
+        end_time = start_time + timedelta(days=30)
+        request = MagicMock()
+        request.po_number = "PO-001"
+
+        package = MagicMock(spec=MediaPackage)
+        package.package_id = "pkg_1"
+        package.product_id = "prod_1"
+        package.name = "Test Package"
+        package.budget = 10000
+        package.impressions = 100000
+        package.implementation_config = {
+            "targeted_zone_ids": ["zone_1"],
+            "automation_mode": "automatic",
+        }
+
+        with patch.object(
+            adapter.campaign_manager, "create_campaign", wraps=adapter.campaign_manager.create_campaign
+        ) as create:
+            result = adapter.create_media_buy(
+                request=request,
+                packages=[package],
+                start_time=start_time,
+                end_time=end_time,
+            )
+
+        assert isinstance(result, CreateMediaBuySuccess)
+        create.assert_called_once_with(
+            name="Custom-PO-001-Test Advertiser",
+            start_date=start_time,
+            end_date=end_time,
+        )
+
     def test_create_media_buy_fails_without_zones(self, mock_principal, mock_config):
         """Test create_media_buy fails when no zones configured."""
         adapter = BroadstreetAdapter(
