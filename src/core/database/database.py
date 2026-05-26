@@ -61,9 +61,10 @@ def init_db(exit_on_error=False):
                     enable_axe_signals=True,
                     auto_approve_format_ids=json.dumps(
                         [
-                            "display_300x250",
-                            "display_728x90",
-                            "video_30s",
+                            "display_image",
+                            "display_html",
+                            "display_js",
+                            "video_vast",
                         ]
                     ),
                     human_review_required=False,
@@ -82,6 +83,7 @@ def init_db(exit_on_error=False):
                     billing_plan="standard",
                     ad_server=None,  # No adapter - user must configure
                     enable_axe_signals=False,  # User should explicitly enable
+                    default_gam_advertiser_id="test-advertiser" if create_demo_tenant else None,
                     admin_token=admin_token,
                 )
 
@@ -252,7 +254,9 @@ def init_db(exit_on_error=False):
                         "formats": [
                             {
                                 "agent_url": "https://creative.adcontextprotocol.org",
-                                "id": "display_300x250",
+                                "id": "display_image",
+                                "width": 300,
+                                "height": 250,
                             }
                         ],
                         "targeting_template": {
