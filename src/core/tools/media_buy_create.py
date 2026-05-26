@@ -899,7 +899,10 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     stmt_product = (
                         select(ProductModel)
                         .filter_by(tenant_id=tenant_id, product_id=product_id)
-                        .options(selectinload(ProductModel.pricing_options))
+                        .options(
+                            selectinload(ProductModel.pricing_options),
+                            selectinload(ProductModel.inventory_profile),
+                        )
                     )
                     product = session.scalars(stmt_product).first()
 
@@ -994,7 +997,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     from src.core.schemas import FormatId as FormatIdType
 
                     format_ids_list: list[FormatIdType] = []
-                    formats = product.format_ids or []
+                    formats = product.effective_format_ids or []
 
                     logger.debug(f"[APPROVAL] Converting {len(formats)} formats for package {package_id}")
 
@@ -3008,10 +3011,17 @@ async def _create_media_buy_impl(
             config_errors = []
 
             for schema_product in products_in_buy:
-                # Auto-generate default config if missing
-                if not schema_product.implementation_config:
+                existing_effective_config = dict(effective_configs.get(schema_product.product_id) or {})
+                needs_default_config = not existing_effective_config or any(
+                    field not in existing_effective_config for field in ("priority", "creative_placeholders")
+                )
+
+                # Auto-generate default line-item config if missing or incomplete.
+                # Profile-backed products may already have inventory targeting
+                # from the profile but no product-level GAM line-item defaults.
+                if needs_default_config:
                     logger.info(
-                        f"Product '{schema_product.name}' ({schema_product.product_id}) is missing GAM configuration. "
+                        f"Product '{schema_product.name}' ({schema_product.product_id}) is missing GAM configuration defaults. "
                         f"Auto-generating defaults based on product type."
                     )
                     # Generate defaults based on product delivery type and formats
@@ -3025,7 +3035,7 @@ async def _create_media_buy_impl(
                     auto_config = gam_validator.generate_default_config(
                         delivery_type=delivery_type_str, formats=formats_list
                     )
-                    effective_configs[schema_product.product_id] = auto_config
+                    effective_configs[schema_product.product_id] = {**auto_config, **existing_effective_config}
 
                     # Persist the auto-generated config to database
                     with MediaBuyUoW(tenant["tenant_id"]) as gam_uow:
@@ -3034,7 +3044,10 @@ async def _create_media_buy_impl(
                         product_stmt = select(ModelProduct).filter_by(product_id=schema_product.product_id)
                         db_product = gam_uow.session.scalars(product_stmt).first()
                         if db_product:
-                            db_product.implementation_config = auto_config
+                            db_product.implementation_config = {
+                                **auto_config,
+                                **(db_product.implementation_config or {}),
+                            }
                             # UoW auto-commits on clean exit
                             logger.info(f"Saved auto-generated GAM config for product {schema_product.product_id}")
 

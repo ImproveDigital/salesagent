@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from adcp import fetch_adagents, get_all_properties
+from adcp import get_all_properties
 from adcp.adagents import fetch_agent_authorizations_from_directory, validate_adagents_structure
 
 from src.services._adagents_shapes import (
@@ -24,6 +24,7 @@ from src.services._adagents_shapes import (
     is_bare_entry,
     top_level_properties,
 )
+from src.services.adagents_fetch import fetch_adagents_permissive as fetch_adagents
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,25 @@ _PLATFORM_AGENT_HOSTS = frozenset(h.strip().lower() for h in _PLATFORM_AGENT_HOS
 # network with headroom. Stops runaway loops if the directory ever emits a
 # pathological pagination cycle.
 _DIRECTORY_MAX_PAGES = 50
+
+
+def is_shared_platform_agent_url(agent_url: str | None) -> bool:
+    """Return true when an agent URL is a shared embedded platform host."""
+    if not agent_url:
+        return False
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(agent_url)
+    try:
+        _ = parsed.port
+    except ValueError:
+        return False
+
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return False
+    return _normalize_hostname_for_compare(hostname) in _PLATFORM_AGENT_HOSTS
 
 
 PublisherPartnerStatusKind = Literal[
@@ -459,9 +479,10 @@ class DirectoryPublisher:
 class DirectorySyncResult:
     """Discovery snapshot from the AAO directory's inverse-lookup endpoint.
 
-    Returned by :func:`fetch_publishers_from_directory` and consumed by the
-    `POST /publisher-partners/sync-from-directory` endpoint to upsert
-    :class:`PublisherPartner` rows.
+    Returned by :func:`fetch_publishers_from_directory`. The admin UI no
+    longer uses this as a setup primitive because embedded tenants can share
+    agent URLs; keep the client helper for low-level SDK coverage and possible
+    future offline tooling.
 
     ``publishers`` carries the full paginated set the directory has indexed
     for our agent_url. ``directory_indexed_at`` is the directory's own
