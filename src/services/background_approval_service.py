@@ -269,8 +269,7 @@ def get_active_approval_tasks() -> list[str]:
 
 def is_approval_task_running(order_id: str) -> bool:
     """Check if approval polling is running for a specific order."""
-    with _approval_lock:
-        return any(order_id in task_id for task_id in _active_approval_tasks)
+    return _active_approval_tasks.contains_substring(order_id)
 
 
 def start_order_approval_background(
@@ -301,10 +300,9 @@ def start_order_approval_background(
     """
     thread_id = f"mb_approval_{media_buy_id}_{order_id}"
 
-    with _approval_lock:
-        if thread_id in _active_approval_tasks:
-            logger.warning(f"Approval polling already running for media buy {media_buy_id}")
-            return thread_id
+    if _active_approval_tasks.contains(thread_id):
+        logger.warning(f"Approval polling already running for media buy {media_buy_id}")
+        return thread_id
 
     thread = threading.Thread(
         target=_run_media_buy_approval_thread,
@@ -313,8 +311,7 @@ def start_order_approval_background(
         name=f"mb-approval-{media_buy_id}",
     )
 
-    with _approval_lock:
-        _active_approval_tasks[thread_id] = thread
+    _active_approval_tasks.add(thread_id, thread)
 
     thread.start()
     logger.info(f"Started background media buy approval thread: {thread_id}")
@@ -399,8 +396,7 @@ def _run_media_buy_approval_thread(
         _mark_media_buy_approval_failed(tenant_id, media_buy_id, str(e))
 
     finally:
-        with _approval_lock:
-            _active_approval_tasks.pop(thread_id, None)
+        _active_approval_tasks.remove(thread_id)
 
 
 def _mark_media_buy_approval_succeeded(tenant_id: str, media_buy_id: str) -> None:
