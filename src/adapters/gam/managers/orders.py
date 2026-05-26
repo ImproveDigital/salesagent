@@ -271,9 +271,11 @@ class GAMOrdersManager:
                         )
                         return False
                 else:
-                    # Other errors - don't retry
+                    # Permanent error (e.g. PERMISSION_DENIED) — propagate so callers
+                    # can distinguish it from a transient NO_FORECAST_YET and stop
+                    # retrying immediately instead of polling for 15 minutes.
                     logger.error(f"Failed to approve GAM Order {order_id}: {error_str}")
-                    return False
+                    raise
 
         # Should not reach here, but just in case
         return False

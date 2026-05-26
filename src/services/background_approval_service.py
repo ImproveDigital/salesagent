@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 _active_approval_tasks = ThreadRegistry()
 
 
+def _is_transient_approval_error(error_str: str) -> bool:
+    """Return True for GAM errors that are worth retrying (forecasting not ready yet)."""
+    return "NO_FORECAST_YET" in error_str or "ForecastingError" in error_str
+
+
 def start_order_approval_polling(
     tenant_id: str,
     order_id: str,
@@ -161,8 +166,12 @@ def _run_approval_polling_thread(
                     )
 
             except Exception as e:
-                logger.warning(f"[{workflow_step_id}] Approval attempt {attempt} failed: {e}")
-                # Continue polling - error might be transient
+                if not _is_transient_approval_error(str(e)):
+                    error_msg = f"Permanent GAM error on attempt {attempt}: {e}"
+                    logger.error(f"[{workflow_step_id}] {error_msg}")
+                    _mark_approval_failed(tenant_id, workflow_step_id, error_msg)
+                    return
+                logger.warning(f"[{workflow_step_id}] Approval attempt {attempt} failed (transient): {e}")
 
             # Wait before next attempt
             time.sleep(polling_interval_seconds)
@@ -382,12 +391,13 @@ def _run_media_buy_approval_thread(
                     logger.info(f"[{media_buy_id}] GAM order {order_id} approved after {attempt} attempt(s)")
                     _mark_media_buy_approval_succeeded(tenant_id, media_buy_id)
                     break
-                logger.info(
-                    f"[{media_buy_id}] GAM forecasting not ready yet, "
-                    f"retrying in {polling_interval_seconds}s"
-                )
+                logger.info(f"[{media_buy_id}] GAM forecasting not ready yet, retrying in {polling_interval_seconds}s")
             except Exception as e:
-                logger.warning(f"[{media_buy_id}] Approval attempt {attempt} raised: {e}")
+                if not _is_transient_approval_error(str(e)):
+                    logger.error(f"[{media_buy_id}] Permanent GAM error on attempt {attempt}, stopping: {e}")
+                    _mark_media_buy_approval_failed(tenant_id, media_buy_id, str(e))
+                    return
+                logger.warning(f"[{media_buy_id}] Approval attempt {attempt} raised (transient): {e}")
 
             time.sleep(polling_interval_seconds)
 
