@@ -31,7 +31,25 @@ This is not the final bar for those specialisms. With `@adcp/sdk@7.11.0`,
 universal, media-buy, and signals storyboards. That full set is still a debt
 burn-down lane until the known media-buy failures are fixed.
 
-### 2. Latest SDK Drift
+### 2. Pinned Sales Non-Guaranteed Assessment
+
+Pull requests and pushes also run a pinned, non-blocking
+`sales-non-guaranteed` assessment. This is the burn-down lane for the full
+non-guaranteed specialism: it uses the same pinned SDK as the blocking gate,
+resolves the storyboard set from `sales-non-guaranteed`, excludes only
+`security_baseline` for the local Docker auth reasons described below, and
+uploads both storyboard reports and compose logs.
+
+This job is soft-fail. A red storyboard result should create or update the
+burn-down list, not block unrelated PRs until the lane is green enough to
+promote.
+
+Known local/CI limitation: `security_baseline` remains part of the release gate,
+where publishable auth metadata and HTTPS-style test-kit credentials are
+available. Treating it as a Docker-local smoke makes the required check fail for
+environment reasons rather than product regressions.
+
+### 3. Latest SDK Drift
 
 The same workflow runs a scheduled latest-SDK assessment with
 `ADCP_SDK_VERSION=latest` and `STORYBOARD_SOFT_FAIL=1`. This job should surface
@@ -40,7 +58,7 @@ being triaged.
 
 Use it to answer: "What did the current storyboard suite start expecting?"
 
-### 3. Release Gate
+### 4. Release Gate
 
 Before promoting a deployed agent, run the full storyboard suite against a
 clean staging environment with the exact tenant configuration and tokens that
@@ -70,8 +88,7 @@ npx -y @adcp/sdk@7.11.0 storyboard show --specialism sales-non-guaranteed
 npx -y @adcp/sdk@7.11.0 storyboard show --specialism signal-owned
 ```
 
-Pinned full-specialism assessment, useful for debt burn-down but not currently
-green enough to make blocking:
+Pinned `sales-non-guaranteed` assessment, matching the non-blocking CI lane:
 
 ```bash
 AGENT_URL=http://localhost:8000 \
@@ -79,11 +96,17 @@ AGENT_TOKEN=ci-test-token \
 ADCP_SDK_VERSION=7.11.0 \
 ALLOW_HTTP=1 \
 PROTOCOLS=mcp \
-SPECIALISMS=sales-non-guaranteed,signal-owned \
+SPECIALISMS=sales-non-guaranteed \
 EXCLUDED_STORYBOARDS=security_baseline \
 STORYBOARD_SOFT_FAIL=1 \
-REPORT_DIR=.context/storyboard-specialisms \
+REPORT_DIR=.context/storyboard-non-guaranteed \
 ./scripts/storyboard-check.sh
+```
+
+Equivalent Make target:
+
+```bash
+make storyboard-non-guaranteed
 ```
 
 Latest-SDK full assessment without blocking on known failures:

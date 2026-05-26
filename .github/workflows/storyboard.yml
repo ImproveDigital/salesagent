@@ -65,6 +65,62 @@ jobs:
       if: always()
       run: docker compose down -v
 
+  pinned-sales-non-guaranteed:
+    name: Pinned Sales Non-Guaranteed Assessment
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Node
+      uses: actions/setup-node@v5
+      with:
+        node-version: "24"
+
+    - name: Start services with docker compose
+      run: |
+        export LOCKFILE_HASH=$(shasum -a 256 uv.lock | awk '{print $1}')
+        docker compose up -d --wait --wait-timeout 180
+
+    - name: Run pinned sales non-guaranteed assessment
+      env:
+        AGENT_URL: http://localhost:8000
+        AGENT_TOKEN: ci-test-token
+        ADCP_SDK_VERSION: "7.11.0"
+        ALLOW_HTTP: "1"
+        PROTOCOLS: mcp
+        SPECIALISMS: sales-non-guaranteed
+        EXCLUDED_STORYBOARDS: security_baseline
+        STORYBOARD_SOFT_FAIL: "1"
+        REPORT_DIR: ${{ runner.temp }}/storyboard-sales-non-guaranteed
+        TIMEOUT: "240"
+      run: ./scripts/storyboard-check.sh
+
+    - name: Upload storyboard reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: storyboard-sales-non-guaranteed
+        path: ${{ runner.temp }}/storyboard-sales-non-guaranteed
+        if-no-files-found: ignore
+
+    - name: Collect service logs
+      if: always()
+      run: docker compose logs > "${{ runner.temp }}/storyboard-sales-non-guaranteed-compose.log" 2>&1 || true
+
+    - name: Cleanup
+      if: always()
+      run: docker compose down -v
+
+    - name: Upload service logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: storyboard-sales-non-guaranteed-compose-logs
+        path: ${{ runner.temp }}/storyboard-sales-non-guaranteed-compose.log
+        if-no-files-found: ignore
+
   latest-sdk-full:
     name: Latest SDK Storyboard Drift
     runs-on: ubuntu-latest

@@ -1,6 +1,6 @@
 .PHONY: setup quality quality-full pre-pr lint-fix lint typecheck test-fast test-full
 .PHONY: test-stack-up test-stack-down test-all test-cov test-entity openapi
-.PHONY: test-int test-bdd test-e2e storyboard-smoke
+.PHONY: test-int test-bdd test-e2e storyboard-smoke storyboard-non-guaranteed
 
 setup:
 	uv run python scripts/setup-dev.py
@@ -95,6 +95,18 @@ storyboard-smoke:
 	PROTOCOLS=$${PROTOCOLS:-mcp} \
 	STORYBOARDS=$${STORYBOARDS:-capability_discovery,pagination_integrity_list_accounts,get_signals_pagination_integrity,signal_owned} \
 	REPORT_DIR=$${REPORT_DIR:-.context/storyboard-smoke} \
+	./scripts/storyboard-check.sh
+
+storyboard-non-guaranteed:
+	AGENT_URL=$${AGENT_URL:-http://localhost:8000} \
+	AGENT_TOKEN=$${AGENT_TOKEN:-ci-test-token} \
+	ADCP_SDK_VERSION=$${ADCP_SDK_VERSION:-7.11.0} \
+	ALLOW_HTTP=$${ALLOW_HTTP:-1} \
+	PROTOCOLS=$${PROTOCOLS:-mcp} \
+	SPECIALISMS=$${SPECIALISMS:-sales-non-guaranteed} \
+	EXCLUDED_STORYBOARDS=$${EXCLUDED_STORYBOARDS:-security_baseline} \
+	STORYBOARD_SOFT_FAIL=$${STORYBOARD_SOFT_FAIL:-1} \
+	REPORT_DIR=$${REPORT_DIR:-.context/storyboard-non-guaranteed} \
 	./scripts/storyboard-check.sh
 
 # ─── Docker dev stack rebuild ──────────────────────────────────
