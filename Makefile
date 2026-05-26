@@ -92,7 +92,7 @@ storyboard-smoke:
 	AGENT_TOKEN=$${AGENT_TOKEN:-ci-test-token} \
 	ADCP_SDK_VERSION=$${ADCP_SDK_VERSION:-7.11.0} \
 	ALLOW_HTTP=$${ALLOW_HTTP:-1} \
-	PROTOCOLS=$${PROTOCOLS:-mcp} \
+	PROTOCOLS=$${PROTOCOLS:-mcp,a2a} \
 	STORYBOARDS=$${STORYBOARDS:-capability_discovery,pagination_integrity_list_accounts,get_signals_pagination_integrity,signal_owned} \
 	REPORT_DIR=$${REPORT_DIR:-.context/storyboard-smoke} \
 	./scripts/storyboard-check.sh
@@ -102,10 +102,11 @@ storyboard-non-guaranteed:
 	AGENT_TOKEN=$${AGENT_TOKEN:-ci-test-token} \
 	ADCP_SDK_VERSION=$${ADCP_SDK_VERSION:-7.11.0} \
 	ALLOW_HTTP=$${ALLOW_HTTP:-1} \
-	PROTOCOLS=$${PROTOCOLS:-mcp} \
+	PROTOCOLS=$${PROTOCOLS:-mcp,a2a} \
 	SPECIALISMS=$${SPECIALISMS:-sales-non-guaranteed} \
 	EXCLUDED_STORYBOARDS=$${EXCLUDED_STORYBOARDS:-security_baseline} \
 	STORYBOARD_SOFT_FAIL=$${STORYBOARD_SOFT_FAIL:-1} \
+	BETWEEN_PROTOCOLS_HOOK=$${BETWEEN_PROTOCOLS_HOOK:-} \
 	WEBHOOK_RECEIVER=$${WEBHOOK_RECEIVER:-} \
 	WEBHOOK_RECEIVER_PORT=$${WEBHOOK_RECEIVER_PORT:-} \
 	WEBHOOK_RECEIVER_PUBLIC_URL=$${WEBHOOK_RECEIVER_PUBLIC_URL:-} \

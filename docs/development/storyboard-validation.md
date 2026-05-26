@@ -12,7 +12,7 @@ Pull requests run `.github/workflows/storyboard.yml` against the local Docker
 stack using a pinned `@adcp/sdk` version. The blocking gate is intentionally
 deterministic: it runs the currently green storyboard set that covers the core
 contract, account pagination, signal pagination, and the advertised owned-signal
-specialism.
+specialism on both MCP and A2A.
 
 Current blocking set:
 
@@ -38,7 +38,9 @@ Pull requests and pushes also run a pinned, non-blocking
 non-guaranteed specialism: it uses the same pinned SDK as the blocking gate,
 resolves the storyboard set from `sales-non-guaranteed`, excludes only
 `security_baseline` for the local Docker auth reasons described below, and
-uploads both storyboard reports and compose logs.
+uploads both storyboard reports and compose logs. CI runs this lane on both
+MCP and A2A and resets the compose stack between protocol runs so each
+transport starts from clean seeded state.
 
 This job is soft-fail. A red storyboard result should create or update the
 burn-down list, not block unrelated PRs until the lane is green enough to
@@ -75,7 +77,7 @@ AGENT_URL=http://localhost:8000 \
 AGENT_TOKEN=ci-test-token \
 ADCP_SDK_VERSION=7.11.0 \
 ALLOW_HTTP=1 \
-PROTOCOLS=mcp \
+PROTOCOLS=mcp,a2a \
 STORYBOARDS=capability_discovery,pagination_integrity_list_accounts,get_signals_pagination_integrity,signal_owned \
 REPORT_DIR=.context/storyboard-smoke \
 ./scripts/storyboard-check.sh
@@ -95,10 +97,11 @@ AGENT_URL=http://localhost:8000 \
 AGENT_TOKEN=ci-test-token \
 ADCP_SDK_VERSION=7.11.0 \
 ALLOW_HTTP=1 \
-PROTOCOLS=mcp \
+PROTOCOLS=mcp,a2a \
 SPECIALISMS=sales-non-guaranteed \
 EXCLUDED_STORYBOARDS=security_baseline \
 STORYBOARD_SOFT_FAIL=1 \
+BETWEEN_PROTOCOLS_HOOK=./scripts/storyboard-reset-compose.sh \
 REPORT_DIR=.context/storyboard-non-guaranteed \
 ./scripts/storyboard-check.sh
 ```
@@ -150,6 +153,7 @@ REPORT_DIR=.context/storyboard-latest \
 Storyboard coverage is good enough when all of the following are true:
 
 - The pinned PR gate is required and green.
+- The pinned PR gate exercises both MCP and A2A.
 - The pinned full-specialism assessment has no untriaged failures.
 - The latest-SDK scheduled run has no untriaged failures.
 - Every advertised tool has local tests for pagination, auth scoping, request
