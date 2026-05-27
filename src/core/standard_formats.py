@@ -293,7 +293,7 @@ def get_standard_format(format_id: str) -> Format | None:
 
 
 def get_standard_formats() -> list[Format]:
-    """Return all local reference-catalog formats."""
+    """Return the bundled reference-format catalog as a list."""
     return list(STANDARD_FORMATS.values())
 
 

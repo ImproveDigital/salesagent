@@ -24,7 +24,7 @@ from src.core.canonical_formats import (
     CANONICAL_FORMAT_IDS,
     DEFAULT_CREATIVE_AGENT_URL,
     is_reference_creative_agent_url,
-    normalize_reference_agent_url,
+    normalize_creative_agent_url,
 )
 from src.core.schemas import FormatId
 
@@ -85,7 +85,7 @@ def _canonical_reference_format_kwargs(format_id: str, agent_url: Any = DEFAULT_
 def canonical_format_identity(format_ref: Any) -> tuple[str, str, int | None, int | None, int | None]:
     """Return a comparable canonical identity for a FormatId-like value."""
     fmt = upgrade_legacy_format_id(format_ref)
-    agent_url = normalize_reference_agent_url(fmt.agent_url)
+    agent_url = normalize_creative_agent_url(fmt.agent_url)
     return (
         agent_url,
         fmt.id,

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from pydantic import AnyUrl
 
-from src.core.creative_agent_registry import CreativeAgent, CreativeAgentRegistry
+from src.core.creative_agent_registry import CreativeAgent, CreativeAgentRegistry, _default_agent_url
 from src.core.exceptions import AdCPAdapterError
 from src.core.schemas import Format, FormatId, url
 
@@ -50,9 +50,39 @@ class TestCacheKeyAcceptsAnyUrl:
         assert result is not None
         assert result.format_id.id == "display_300x250_image"
 
+    @pytest.mark.asyncio
+    async def test_reference_preview_with_direct_url_does_not_open_client(self, monkeypatch):
+        """Reference static formats with direct assets should not require remote preview."""
+        registry = CreativeAgentRegistry()
+
+        def fail_create_client(*args, **kwargs):
+            raise AssertionError("reference preview should not open an MCP client")
+
+        monkeypatch.setattr("src.core.creative_agent_registry.create_mcp_client", fail_create_client)
+
+        result = await registry.preview_creative(
+            "https://creative.adcontextprotocol.org",
+            "display_300x250",
+            {"creative_id": "cr_1", "name": "Static", "format_id": "display_300x250", "url": "https://ad.test/a.png"},
+        )
+
+        assert result == {}
+
 
 class TestCreativeAgentRegistry:
     """Test suite for Creative Agent Registry adcp integration."""
+
+    def test_default_agent_url_uses_reference_when_env_blank(self, monkeypatch):
+        """Blank CREATIVE_AGENT_URL from matrix jobs must not unregister the standard agent."""
+        monkeypatch.setenv("CREATIVE_AGENT_URL", "")
+
+        assert _default_agent_url() == "https://creative.adcontextprotocol.org"
+
+    def test_default_agent_url_uses_env_override(self, monkeypatch):
+        """Non-blank CREATIVE_AGENT_URL still points CI/live tests at a local agent."""
+        monkeypatch.setenv("CREATIVE_AGENT_URL", "http://localhost:9999/api/creative-agent")
+
+        assert _default_agent_url() == "http://localhost:9999/api/creative-agent"
 
     def test_build_adcp_client_with_custom_auth_header(self):
         """Test _build_adcp_client correctly maps custom auth headers."""
@@ -566,6 +596,8 @@ class TestStaleCacheFallback:
         registry._build_adcp_client = lambda _agents: Mock()  # type: ignore[assignment]
 
         agent = self._agent()
+        # Use a custom agent so this test exercises stale-cache fallback
+        # rather than the reference-agent local catalog shortcut.
         registry._get_tenant_agents = lambda tenant_id=None: [agent]  # type: ignore[assignment]
         cached_formats = [Mock(name="cached_fmt", spec=[])]
         self._seed_cache(registry, agent, age_seconds=7200, formats=cached_formats)
