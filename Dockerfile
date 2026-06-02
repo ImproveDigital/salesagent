@@ -48,6 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ENV UV_CACHE_DIR=/cache/uv
 ENV UV_TOOL_DIR=/cache/uv-tools
 ENV UV_PYTHON_PREFERENCE=only-system
+ENV UV_LINK_MODE=copy
 
 # Copy project files
 WORKDIR /app
