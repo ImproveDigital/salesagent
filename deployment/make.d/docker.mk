@@ -13,6 +13,10 @@ DPL_DOCKER_IMAGE = $(or $(image),$(DPL_DOCKER_NAME):$(DPL_DOCKER_TAG)$(DPL_DOCKE
 
 DPL_DOCKER_ENV_VARS = image="$(DPL_DOCKER_IMAGE)"
 
+# Hash of uv.lock — passed as a build arg so the uv install layer is invalidated
+# whenever dependencies change. shasum is available on macOS and Linux (perl-digest-sha).
+DPL_LOCKFILE_HASH := $(shell shasum -a 256 uv.lock 2>/dev/null | awk '{print $$1}' || sha256sum uv.lock 2>/dev/null | awk '{print $$1}')
+
 _docker-debug:
 	@echo; echo "* docker.mk"; echo
 	@echo DPL_DOCKER_CONTEXT=$(DPL_DOCKER_CONTEXT)
@@ -46,6 +50,7 @@ _dpl-docker-build-default:
 	docker build -f $(DPL_DOCKER_FILE) \
 		--build-arg ENV="$(DPL_ENV)" --build-arg ENV_NAME="$(DPL_ENV_NAME)" \
 		--build-arg TAG="$(DPL_DOCKER_TAG)" \
+		--build-arg LOCKFILE_HASH="$(DPL_LOCKFILE_HASH)" \
 		-t $(DPL_DOCKER_IMAGE) -t $(DPL_DOCKER_NAME):latest$(DPL_DOCKER_TAG_SUFFIX) \
 		$(DPL_DOCKER_CONTEXT)
 
