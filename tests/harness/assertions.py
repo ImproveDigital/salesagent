@@ -5,8 +5,8 @@ payload properties. Use with TransportResult from dispatchers.
 
 Usage::
 
-    result = env.call_via(Transport.REST, creatives=[...])
-    assert_envelope(result, Transport.REST)
+    result = env.call_via(Transport.MCP, creatives=[...])
+    assert_envelope(result, Transport.MCP)
     assert result.is_success
     assert result.payload.creatives[0].action == CreativeAction.created
 """
@@ -24,18 +24,6 @@ def assert_envelope(result: TransportResult, transport: Transport) -> None:
     assert result.envelope.get("transport") == transport.value, (
         f"Expected envelope transport={transport.value}, got {result.envelope}"
     )
-
-    if transport == Transport.REST:
-        assert_rest_envelope(result)
-
-
-def assert_rest_envelope(result: TransportResult, expected_status: int = 200) -> None:
-    """Assert REST-specific envelope: HTTP status + content-type."""
-    assert result.envelope.get("status_code") == expected_status, (
-        f"Expected HTTP {expected_status}, got {result.envelope.get('status_code')}"
-    )
-    content_type = result.envelope.get("content_type", "")
-    assert "application/json" in content_type, f"Expected JSON content-type, got {content_type}"
 
 
 def assert_error_result(

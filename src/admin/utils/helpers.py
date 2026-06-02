@@ -13,8 +13,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from src.admin.utils.embedded_mode_auth import is_managed_instance
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantManagementConfig, User
+from src.core.database.repositories.tenant_config import TenantConfigRepository
 
 T = TypeVar("T")
 
@@ -95,19 +97,12 @@ def get_tenant_config_from_db(tenant_id):
                     )
                 elif adapter_type == "mock":
                     adapter_config[adapter_type]["dry_run"] = adapter_obj.mock_dry_run or False
-                elif adapter_type == "kevel":
-                    if adapter_obj.kevel_network_id:
-                        adapter_config[adapter_type]["network_id"] = adapter_obj.kevel_network_id
-                    if adapter_obj.kevel_api_key:
-                        adapter_config[adapter_type]["api_key"] = adapter_obj.kevel_api_key
-                    adapter_config[adapter_type]["manual_approval_required"] = (
-                        adapter_obj.kevel_manual_approval_required or False
-                    )
-                elif adapter_type == "triton":
-                    if adapter_obj.triton_station_id:
-                        adapter_config[adapter_type]["station_id"] = adapter_obj.triton_station_id
-                    if adapter_obj.triton_api_key:
-                        adapter_config[adapter_type]["api_key"] = adapter_obj.triton_api_key
+                elif adapter_type in {"triton", "triton_digital"}:
+                    if adapter_obj.config_json:
+                        adapter_config[adapter_type].update(adapter_obj.config_json)
+                elif adapter_type == "freewheel":
+                    if adapter_obj.config_json:
+                        adapter_config[adapter_type].update(adapter_obj.config_json)
 
                 config["adapters"] = adapter_config
 
@@ -261,18 +256,54 @@ def require_auth(admin_only=False):
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
-            # Check for test mode
-            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+            from flask import request
+
+            # Embedded-mode bypass — checked BEFORE session-based auth.
+            # Routes registered under /tenant/<tenant_id>/... receive
+            # tenant_id as a kwarg; routes scoped via ?tenant_id=... (e.g.
+            # /api/formats/*) carry it in request.args. Both must trigger
+            # the bypass — otherwise an iframe XHR with valid X-Identity-*
+            # headers falls through to OAuth and 302s to /login, which the
+            # browser auto-follows into the SPA shell and returns HTML
+            # where JSON was expected. Tenant isolation is preserved by
+            # the X-Identity-Org-Id vs tenant.external_org_id check inside
+            # authorize_embedded_request — a forged ?tenant_id= still 403s.
+            # See docs/integration/managed-mode-identity-contract.md.
+            tenant_id_kw = kwargs.get("tenant_id") or request.args.get("tenant_id")
+            if tenant_id_kw:
+                from src.admin.utils.embedded_mode_auth import (
+                    EmbeddedAuthDeny,
+                    EmbeddedAuthOk,
+                    authorize_embedded_request,
+                    synthetic_user_dict,
+                )
+
+                embedded_result = authorize_embedded_request(request, tenant_id_kw)
+                if isinstance(embedded_result, EmbeddedAuthDeny):
+                    abort(403, description=f"{embedded_result.error}: {embedded_result.message}")
+                if isinstance(embedded_result, EmbeddedAuthOk):
+                    g.user = synthetic_user_dict(embedded_result.identity)
+                    return f(*args, **kwargs)
+                # EmbeddedAuthPassthrough → fall through to existing OAuth path
+
+            # Check for test mode. Production never honors
+            # ``ADCP_AUTH_TEST_MODE`` — defense in depth so a misconfigured
+            # prod env can't activate the test-user bypass. Mirrors the
+            # equivalent guard on ``require_tenant_access``.
+            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true" and not is_admin_production()
             if test_mode and "test_user" in session:
                 g.user = session["test_user"]
                 return f(*args, **kwargs)
 
             if "user" not in session:
                 logger.info(f"require_auth: No 'user' in session. Session keys: {list(session.keys())}")
-                # Store the original URL to redirect back after login
-                from flask import request
-
-                return redirect(url_for("auth.login", next=request.url))
+                # Store the original URL to redirect back after login.
+                # Use the path-only form (request.full_path) so the
+                # ``next=`` parameter doesn't leak the upstream origin
+                # (e.g., ``localhost:3091``) when the salesagent is
+                # behind a reverse proxy.
+                next_url = request.full_path.rstrip("?")
+                return redirect(url_for("auth.login", next=next_url))
 
             # Store user in g for access in view functions
             g.user = session["user"]
@@ -295,8 +326,244 @@ def require_auth(admin_only=False):
     return decorator
 
 
-def require_tenant_access(api_mode=False):
-    """Decorator to require tenant access for routes."""
+_MUTATION_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+# GET/HEAD render lock banners (chrome-level UX, not a security boundary).
+# OPTIONS is CORS preflight — Flask handles it before the view runs, and
+# preflight is not a write.
+
+# Canonical role enum, matched between the embedded-mode contract
+# (``X-Identity-Role``) and the OAuth-side ``User.role`` column.
+# - ``admin``  — full read+write incl. config that changes trust/identity
+#   boundaries (users, SSO, adapter config, currency, danger zone)
+# - ``member`` — operational write authority (creatives, workflows,
+#   routing, partners, principals, products, sync triggers). The "ad ops"
+#   persona — full day-to-day work, no config-level boundaries
+# - ``viewer`` — read-only
+ROLES = ("admin", "member", "viewer")
+_ROLES_SET = frozenset(ROLES)
+# Legacy ``manager`` rows in ``User.role`` map to the new ``member`` enum
+# until the migration completes. Read-time mapping at the boundary keeps
+# the rest of the codebase on the canonical names.
+_LEGACY_ROLE_MAP = {"manager": "member"}
+
+
+def _normalize_role(raw: str | None) -> str:
+    """Map a stored or header-supplied role to the canonical enum.
+
+    Unknown values clamp to ``viewer`` (least privilege) per the
+    embedded-mode identity contract:
+
+        Future roles may be added without a v2 bump; consumers of
+        X-Identity-Role should treat unknown values as 'viewer' (least
+        privilege) and log a warning.
+
+    Used at every place a role enters the request: OAuth User row,
+    test-mode session, super-admin override (always returns ``admin``).
+    """
+    if not raw:
+        return "viewer"
+    mapped = _LEGACY_ROLE_MAP.get(raw, raw)
+    if mapped not in _ROLES_SET:
+        logger.warning("Unknown role %r — clamping to 'viewer' (least privilege)", raw)
+        return "viewer"
+    return mapped
+
+
+def _role_permits(actual: str, allowed: tuple[str, ...] | None) -> bool:
+    """Return True if ``actual`` (already normalized) is in ``allowed``.
+
+    ``allowed=None`` means no role gate is applied (read-only or
+    legacy route). Closed-by-default for mutations is enforced by
+    ``_maybe_block_role_gate`` which substitutes a default of
+    ``("admin",)`` when the route doesn't declare a policy.
+    """
+    if allowed is None:
+        return True
+    return actual in allowed
+
+
+def _maybe_block_role_gate(api_mode: bool, role: tuple[str, ...] | None):
+    """Enforce role policy after auth resolves but before the handler.
+
+    Closed-by-default: a mutation route without an explicit ``role``
+    parameter requires ``admin``. GETs and friends pass through unless
+    a route opts in to gating reads (rare).
+
+    Returns ``None`` to allow the request, or a 403 response tuple
+    (``api_mode=True``) / raises ``abort(403)`` (``api_mode=False``).
+    """
+    from flask import request
+
+    is_mutation = request.method in _MUTATION_METHODS
+    if role is None and not is_mutation:
+        return None
+    # Closed-by-default for writes: if the route didn't declare a policy,
+    # require admin. Routes that allow ``member`` writes must opt in.
+    effective = role if role is not None else ("admin",) if is_mutation else None
+    if effective is None:
+        return None
+
+    user = getattr(g, "user", None)
+    actual = _normalize_role(user.get("role") if isinstance(user, dict) else None)
+    if _role_permits(actual, effective):
+        return None
+    msg = f"Role {actual!r} not authorized for this action; required one of {', '.join(effective)}."
+    if api_mode:
+        return jsonify({"error": "role_not_authorized", "message": msg, "required_roles": list(effective)}), 403
+    abort(403, description=msg)
+
+
+def _maybe_block_embedded_write(tenant_id: str, api_mode: bool):
+    """Block writes to platform-managed tenants at the decorator boundary.
+
+    Embedded tenants — whether permanently flagged ``is_embedded=True`` or
+    rendered in embedded preview via ``X-Identity-*`` headers — are owned
+    by the upstream platform (Storefront, etc.). Writes via the publisher-
+    facing admin UI would conflict with the platform's authoritative state
+    (User records, principals, currencies, settings, ...). Lock banners
+    on GETs hide the affordances; this gate enforces the policy on the
+    backend so a header-auth caller can't POST around the chrome.
+
+    Cheap signals are checked first to avoid an extra tenant load on every
+    mutation request — only do the DB lookup when we have positive evidence
+    embedded mode could be in play:
+
+    1. Preview path — ``g.user["embedded_mode"]`` set by the header-auth
+       handler. Always blocks; no DB needed.
+    2. Production embedded deployment — ``MANAGED_INSTANCE=true`` env var.
+       Some tenants on this instance may be ``is_embedded=True``; load the
+       tenant and check the flag.
+    3. Anywhere else (open-instance dev/test deployments where
+       ``MANAGED_INSTANCE`` is unset and the request authenticated via
+       OAuth/test-mode): no embedded scenario is reachable, skip the DB
+       lookup entirely. This keeps unit tests that POST through
+       ``require_tenant_access`` from triggering a real DB session.
+
+    The decision is point-in-time; if ``tenant.is_embedded`` flips
+    concurrently with this check the upstream platform owns that race.
+
+    Returns ``None`` to allow the request to proceed, or a 403 response
+    tuple (``api_mode=True``) / raises ``abort(403)`` (``api_mode=False``).
+    JSON envelope is ``{"error": "embedded_writes_not_permitted",
+    "message": ...}`` so programmatic callers branch on the stable code,
+    not the message text.
+    """
+    from flask import request
+
+    if request.method not in _MUTATION_METHODS:
+        return None
+
+    # Cheap signal: per-request embedded_mode (preview / header-auth).
+    user = getattr(g, "user", None)
+    if isinstance(user, dict) and user.get("embedded_mode"):
+        return _embedded_write_blocked(api_mode)
+
+    # On production embedded instances, check the persistent tenant flag.
+    # Deploy invariant: ``is_embedded=True`` is only meaningful when the
+    # host instance has ``MANAGED_INSTANCE=true``. The cheap-signal short-
+    # circuit here means a misconfigured deployment (embedded tenant on a
+    # non-managed instance) gets the gate skipped — but ``is_embedded=True``
+    # already requires header auth, which is only trusted under
+    # ``MANAGED_INSTANCE=true``, so the front door is closed elsewhere.
+    if not is_managed_instance():
+        return None
+
+    # Reuse a tenant cached on ``g`` (set by ``authorize_embedded_request``
+    # when header-auth resolves) to avoid loading the tenant twice per
+    # request. The cached object is detached from its session — only read
+    # scalar columns, never lazy-load relationships.
+    tenant = getattr(g, "tenant", None)
+    if tenant is None:
+        with get_db_session() as db_session:
+            tenant = TenantConfigRepository(db_session, tenant_id).get_tenant()
+        if tenant is not None:
+            g.tenant = tenant
+    if tenant is None or not bool(getattr(tenant, "is_embedded", False)):
+        return None
+    return _embedded_write_blocked(api_mode)
+
+
+def _embedded_write_blocked(api_mode: bool):
+    """Render the 403 response for an embedded-write rejection."""
+    msg = "Tenant is platform-managed; writes via this surface are not permitted."
+    if api_mode:
+        return jsonify({"error": "embedded_writes_not_permitted", "message": msg}), 403
+    abort(403, description=msg)
+
+
+def _set_user_role(role: str | None) -> None:
+    """Populate ``g.user["role"]`` with the canonical normalized value.
+
+    Called from every auth path so downstream RBAC decisions
+    (``_maybe_block_role_gate``) can read a single source of truth.
+
+    Some legacy test fixtures pre-populate ``g.user`` as a bare string
+    (the email). Lift those into a dict so the role lands somewhere
+    the gate can read.
+    """
+    user = getattr(g, "user", None)
+    if user is None:
+        g.user = {}
+    elif isinstance(user, str):
+        # Legacy test fixtures pre-populate ``session["test_user"]`` as a
+        # bare string (the email). Lift to dict so the rest of the
+        # codebase sees one canonical shape.
+        g.user = {"email": user}
+    elif isinstance(user, dict):
+        pass  # already in canonical shape
+    else:
+        # Fail loud rather than silently erase identity. Today the only
+        # writers of ``g.user`` produce string, dict, or None; a different
+        # type means the auth path has drifted and the role/auth
+        # invariants downstream cannot be trusted.
+        raise TypeError(
+            f"g.user has unexpected type {type(user).__name__}; auth path produced "
+            f"a value the role gate cannot interpret. Expected str, dict, or None."
+        )
+    # Re-read after the lifting above (g.user may have been replaced),
+    # then stamp the canonical role onto the dict.
+    g.user["role"] = _normalize_role(role)
+
+
+def require_tenant_access(
+    api_mode=False,
+    role: tuple[str, ...] | None = None,
+    allow_embedded_writes: bool = False,
+):
+    """Decorator to require tenant access for routes.
+
+    On embedded views (permanent ``is_embedded=True`` OR header-auth
+    preview), mutation methods (POST/PUT/DELETE/PATCH) are rejected with
+    403 by default — the upstream platform owns the tenant's state. GETs
+    render normally so deep-links land on the platform-managed lock banner.
+
+    Routes that touch *publisher-managed* surfaces (Product, Principal,
+    Creative, Workflow, AdvertiserRoutingRule, …) must opt in to embedded
+    writes with ``allow_embedded_writes=True``. The model-layer guard
+    (``src/core/database/embedded_tenant_guard.py``) is the authoritative
+    protection for platform-managed surfaces (Tenant core columns,
+    AdapterConfig, signing creds) — it stays in force regardless of this
+    flag, so opting in cannot smuggle a platform-managed write through.
+
+    An opted-in route MAY still write to a platform-managed column if it
+    explicitly sets ``session.info["management_api_caller"] = True`` (the
+    same bypass the Tenant Management API uses). Today only
+    ``buyer_routing.update_default_advertiser`` does this — it writes
+    ``Tenant.default_gam_advertiser_id``, which the design treats as
+    publisher-controlled even though the column lives on the Tenant row.
+    New uses of the bypass need explicit reviewer attention; the guard's
+    PUBLISHER_WRITABLE_FIELDS allowlist is the long-term home for that.
+
+    ``role`` declares the RBAC policy for this route. Mutation routes
+    that don't set ``role`` default to ``("admin",)`` (closed-by-default
+    — config-grade authority required). Operational routes that the
+    "ad ops" persona (``member``) should be able to use must declare
+    ``role=("admin", "member")``. Read routes don't need a role gate
+    unless they expose data that should be admin-only.
+
+    The full enum is ``ROLES = ("admin", "member", "viewer")``. Unknown
+    values from headers or DB rows clamp to ``viewer`` (least privilege).
+    """
 
     def decorator(f):
         @wraps(f)
@@ -310,8 +577,50 @@ def require_tenant_access(api_mode=False):
                 f"Auth check - tenant: {tenant_id}, method: {request.method}, has_session: {has_session}, has_cookies: {has_cookies}, session_keys: {list(session.keys())}"
             )
 
-            # Check for test mode (global env var OR per-tenant auth_setup_mode)
-            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+            def _call_handler():
+                """After auth resolves, gate writes on embedded views,
+                then check role, then dispatch."""
+                if not allow_embedded_writes:
+                    blocked = _maybe_block_embedded_write(tenant_id, api_mode)
+                    if blocked is not None:
+                        return blocked
+                blocked = _maybe_block_role_gate(api_mode, role)
+                if blocked is not None:
+                    return blocked
+                return f(tenant_id, *args, **kwargs)
+
+            # Embedded-mode bypass — checked BEFORE session-based auth.
+            # When MANAGED_INSTANCE=true and the tenant is embedded,
+            # X-Identity-* headers from the upstream proxy authorize the
+            # request. See docs/integration/managed-mode-identity-contract.md.
+            from src.admin.utils.embedded_mode_auth import (
+                EmbeddedAuthDeny,
+                EmbeddedAuthOk,
+                authorize_embedded_request,
+                synthetic_user_dict,
+            )
+
+            embedded_result = authorize_embedded_request(request, tenant_id)
+            if isinstance(embedded_result, EmbeddedAuthDeny):
+                if api_mode:
+                    return jsonify({"error": embedded_result.error, "message": embedded_result.message}), 403
+                abort(403, description=f"{embedded_result.error}: {embedded_result.message}")
+            if isinstance(embedded_result, EmbeddedAuthOk):
+                g.user = synthetic_user_dict(embedded_result.identity)
+                # ``synthetic_user_dict`` already sets a role; normalize it
+                # so legacy ``manager`` rolls in (defensive — header values
+                # are admin/member/viewer per the contract, but the
+                # normalizer is the authority for unknown/clamped values).
+                _set_user_role(g.user.get("role"))
+                return _call_handler()
+            # EmbeddedAuthPassthrough → fall through to existing OAuth path
+
+            # Check for test mode (global env var OR per-tenant auth_setup_mode).
+            # Production never honors ``ADCP_AUTH_TEST_MODE`` — defense in
+            # depth so a misconfigured prod env can't accidentally activate
+            # the test-user bypass and grant the new "no role → admin"
+            # default to anyone with a session.
+            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true" and not is_admin_production()
 
             # Also check per-tenant auth_setup_mode if test_user is in session
             if not test_mode and "test_user" in session:
@@ -326,18 +635,40 @@ def require_tenant_access(api_mode=False):
 
             if test_mode and "test_user" in session:
                 g.user = session["test_user"]
+                test_role = session.get("test_user_role")
+                # ``super_admin`` is a Salesagent staff override — full
+                # access regardless of tenant role. An unset role is
+                # treated as ``admin`` for test-mode backward-compat:
+                # existing tests use the bypass without thinking about
+                # RBAC, and they expect full write access. Tests that
+                # exercise role enforcement set ``test_user_role``
+                # explicitly. Any other value (member/viewer/etc.) is
+                # taken as a real tenant role; unknown clamps to viewer.
+                if test_role in ("super_admin", None):
+                    if test_role is None:
+                        # Help future bisects spot a CI test that leaked
+                        # into a production-shaped environment.
+                        logger.debug(
+                            "test-mode bypass with no test_user_role — defaulting to 'admin' (legacy backward-compat)"
+                        )
+                    _set_user_role("admin")
+                else:
+                    _set_user_role(test_role)
                 # Test users can access their assigned tenant
                 if "test_tenant_id" in session and session["test_tenant_id"] == tenant_id:
-                    return f(tenant_id, *args, **kwargs)
+                    return _call_handler()
                 # Super admins can access all tenants
-                if session.get("test_user_role") == "super_admin":
-                    return f(tenant_id, *args, **kwargs)
+                if test_role == "super_admin":
+                    return _call_handler()
 
             if "user" not in session:
                 if api_mode:
                     return jsonify({"error": "Authentication required"}), 401
-                # Redirect to tenant-specific login (preserves tenant context)
-                return redirect(url_for("auth.tenant_login", tenant_id=tenant_id, next=request.url))
+                # Redirect to tenant-specific login (preserves tenant context).
+                # Use path-only ``next`` so reverse-proxy callers (Scope3
+                # Storefront iframe) don't see the upstream origin leaked.
+                next_url = request.full_path.rstrip("?")
+                return redirect(url_for("auth.tenant_login", tenant_id=tenant_id, next=next_url))
 
             user_info = session["user"]
 
@@ -349,7 +680,14 @@ def require_tenant_access(api_mode=False):
 
             # Check super admin status (is_super_admin handles env + db + session caching internally)
             if is_super_admin(email):
-                return f(tenant_id, *args, **kwargs)
+                # Salesagent-staff override: always admin, regardless of
+                # any tenant-scoped User row. ``g.user`` here is the
+                # session dict from OAuth; stamp the role onto it so
+                # downstream RBAC sees a consistent shape.
+                if not isinstance(getattr(g, "user", None), dict):
+                    g.user = {"email": email}
+                _set_user_role("admin")
+                return _call_handler()
 
             # Check if user has access to this specific tenant
             try:
@@ -362,7 +700,13 @@ def require_tenant_access(api_mode=False):
                             return jsonify({"error": "Access denied"}), 403
                         abort(403)
 
-                    return f(tenant_id, *args, **kwargs)
+                    # Stamp the user's tenant-scoped role onto g.user so
+                    # downstream RBAC reads a single canonical field.
+                    # Stash a dict if the session held a string email.
+                    if not isinstance(getattr(g, "user", None), dict):
+                        g.user = {"email": email}
+                    _set_user_role(user.role)
+                    return _call_handler()
 
             except Exception as e:
                 # Don't catch abort exceptions (they should propagate)

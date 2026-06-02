@@ -43,44 +43,25 @@ These already exist (don't recreate):
 
 ## Protocol
 
-### Step 1: Cook the molecule
+For each guard name, walk these steps in conversation:
 
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/structural-guard.yaml \
-  --var "GUARD_NAMES={all_args}" \
-  --epic-title "Guards: {all_args}"
-```
+1. **research** — define exactly what the guard should detect (the AST pattern, the rule)
+2. **scan** — write a scratch script to find current violations across the codebase
+3. **write-guard** — create `tests/unit/test_architecture_{guard_name}.py` following the existing structural-test pattern
+4. **mark-known** — populate the allowlist with current violations (each gets a `# FIXME` comment at the source location)
+5. **verify** — `make quality` passes; new violations would fail the guard
+6. **commit**
 
-**Dry run first** (recommended):
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/structural-guard.yaml \
-  --var "GUARD_NAMES={all_args}" \
-  --epic-title "Guards: {all_args}" \
-  --dry-run
-```
+### Done when all guards committed
 
-### Step 2: Walk the molecule
-
-```
-bd ready → bd show <atom-id> → execute → bd close <atom-id> → repeat
-```
-
-Each guard goes through: research → scan → write-guard → mark-known → verify → commit.
-
-### Step 3: Done when all atoms closed
-
-All guards committed and passing in `make quality`.
+All guards passing in `make quality`.
 
 ## Key Principles
 
 - **Allowlists shrink, never grow.** New violations fail the guard immediately.
-- **FIXME comments link to beads tasks.** Every known violation has a tracker.
 - **Guards follow existing patterns.** Read the 3 existing structural tests first.
 
 ## See Also
 
 - `/surface` — Create entity test suites (what the guards protect)
 - `/remediate` — Fill entity test stubs (fix the violations guards find)
-- `/mol-execute` — Execute individual beads tasks

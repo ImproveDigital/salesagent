@@ -7,19 +7,23 @@ snippet, snippet_type, template_variables), and context.
 Beads: salesagent-55b
 """
 
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
-from adcp.types.generated_poc.core.format_id import FormatId
+from adcp.types import FormatId
 
+from src.core.schemas import CreativeAsset
 from src.core.tools.creatives import _build_creative_data
 
 _FMT = FormatId(id="banner", agent_url="http://agent.test")
 
 
 def _make_creative(**extra: object) -> CreativeAsset:
-    """Build a minimal CreativeAsset with optional extra fields."""
+    """Build a minimal CreativeAsset bypassing schema validation.
+
+    Tests here exercise ``_build_creative_data`` shape, not asset validation,
+    so we bypass the typed-asset discriminator with ``model_construct``.
+    """
     defaults: dict = {"creative_id": "test", "name": "test", "format_id": _FMT, "assets": {}}
     defaults.update(extra)
-    return CreativeAsset(**defaults)
+    return CreativeAsset.model_construct(**defaults)
 
 
 class TestStandardFields:

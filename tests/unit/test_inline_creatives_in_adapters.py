@@ -21,6 +21,7 @@ from src.core.schemas import (
     MediaPackage,
     PackageRequest,
 )
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 
 class TestInlineCreativesInAdapters:
@@ -33,7 +34,6 @@ class TestInlineCreativesInAdapters:
             package_id="pkg_test_123_1",
             name="Test Package",
             delivery_type="guaranteed",
-            cpm=10.0,
             impressions=10000,
             format_ids=[{"agent_url": "https://creative.test", "id": "display_300x250"}],
             product_id="prod_test_123",
@@ -46,6 +46,7 @@ class TestInlineCreativesInAdapters:
         # Per AdCP v2.2.0: budget removed from top-level (now at package level)
         # adcp 3.6.0: brand_manifest → brand (BrandReference with domain field)
         return CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "example.com"},
             start_time=datetime.now(UTC),
             end_time=datetime.now(UTC) + timedelta(days=30),
@@ -88,7 +89,6 @@ class TestInlineCreativesInAdapters:
             "product_id": package.product_id,
             "name": package.name,
             "delivery_type": package.delivery_type,
-            "cpm": package.cpm,
             "impressions": package.impressions,
             "status": "active",  # Required by AdCP Package schema
             "platform_line_item_id": "line_item_123",
@@ -114,7 +114,6 @@ class TestInlineCreativesInAdapters:
     # TODO: Re-add adapter-specific tests after adapter initialization patterns are updated
     # The following tests were removed because adapter initialization changed:
     # - test_gam_adapter_includes_creative_ids_manual_approval
-    # - test_kevel_adapter_includes_creative_ids
     # - test_triton_adapter_includes_creative_ids
 
     def test_mock_adapter_includes_creative_ids(self, mock_package_with_creatives, mock_request, mocker):
@@ -140,6 +139,15 @@ class TestInlineCreativesInAdapters:
             packages=[mock_package_with_creatives],
             start_time=start_time,
             end_time=end_time,
+            package_pricing_info={
+                mock_package_with_creatives.package_id: {
+                    "pricing_model": "cpm",
+                    "rate": 10.0,
+                    "currency": "USD",
+                    "is_fixed": True,
+                    "bid_price": None,
+                }
+            },
         )
 
         # Mock adapter returns AdCP-compliant Package objects

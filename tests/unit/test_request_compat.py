@@ -41,9 +41,10 @@ class TestBrandManifestTranslation:
             "update_media_buy",
             {"brand_manifest": "https://acme.com/brand", "media_buy_id": "mb-1"},
         )
-        # update_media_buy has no brand field — brand_manifest is stripped but not translated
+        # update_media_buy has no brand field — leave brand_manifest visible
+        # so strict dev-mode validation can reject it as unknown.
         assert "brand" not in result.params
-        assert "brand_manifest" not in result.params
+        assert result.params["brand_manifest"] == "https://acme.com/brand"
 
     def test_brand_manifest_invalid_url_stripped(self):
         """A brand_manifest that isn't a valid URL is stripped without crashing."""
@@ -57,28 +58,28 @@ class TestBrandManifestTranslation:
 
 
 # ---------------------------------------------------------------------------
-# 2. campaign_ref → buyer_campaign_ref
+# 2. campaign_ref removed from create_media_buy
 # ---------------------------------------------------------------------------
 
 
 class TestCampaignRefTranslation:
-    """campaign_ref → buyer_campaign_ref (create_media_buy only)."""
+    """campaign_ref remains visible so strict validation rejects it."""
 
-    def test_campaign_ref_renamed(self):
+    def test_campaign_ref_stays_visible_for_create_media_buy(self):
         result = normalize_request_params(
             "create_media_buy",
             {"campaign_ref": "camp-123", "buyer_ref": "ref1"},
         )
-        assert result.params["buyer_campaign_ref"] == "camp-123"
-        assert "campaign_ref" not in result.params
+        assert result.params["campaign_ref"] == "camp-123"
+        assert "buyer_campaign_ref" not in result.params
 
     def test_campaign_ref_not_renamed_for_other_tools(self):
-        """campaign_ref is deleted but not translated for non-create_media_buy tools."""
+        """campaign_ref stays visible for all tools."""
         result = normalize_request_params(
             "get_media_buys",
             {"campaign_ref": "camp-123"},
         )
-        assert "campaign_ref" not in result.params
+        assert result.params["campaign_ref"] == "camp-123"
         assert "buyer_campaign_ref" not in result.params
 
 
@@ -146,7 +147,60 @@ class TestCatalogTranslation:
 
 
 # ---------------------------------------------------------------------------
-# 6. promoted_offerings → catalogs (top-level, get_products only)
+# 6. format_id alias → id inside format references
+# ---------------------------------------------------------------------------
+
+
+class TestFormatReferenceTranslation:
+    """Legacy format reference objects use format_id where current spec uses id."""
+
+    def test_sync_creatives_format_id_alias_normalized(self):
+        result = normalize_request_params(
+            "sync_creatives",
+            {
+                "creatives": [
+                    {
+                        "creative_id": "c1",
+                        "name": "Creative",
+                        "format_id": {
+                            "agent_url": "https://creative.adcontextprotocol.org/mcp",
+                            "format_id": "display_300x250_image",
+                        },
+                    }
+                ]
+            },
+        )
+
+        fmt = result.params["creatives"][0]["format_id"]
+        assert fmt == {
+            "agent_url": "https://creative.adcontextprotocol.org/mcp",
+            "id": "display_300x250_image",
+        }
+
+    def test_package_format_ids_alias_normalized(self):
+        result = normalize_request_params(
+            "create_media_buy",
+            {
+                "packages": [
+                    {
+                        "product_id": "p1",
+                        "format_ids": [
+                            {
+                                "agent_url": "https://creative.adcontextprotocol.org",
+                                "format_id": "display_300x250_image",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert result.params["packages"][0]["format_ids"][0]["id"] == "display_300x250_image"
+        assert "format_id" not in result.params["packages"][0]["format_ids"][0]
+
+
+# ---------------------------------------------------------------------------
+# 7. promoted_offerings → catalogs (top-level, get_products only)
 # ---------------------------------------------------------------------------
 
 
@@ -160,6 +214,14 @@ class TestPromotedOfferingsTranslation:
         )
         assert result.params["catalogs"] == [{"id": "po-1"}]
         assert "promoted_offerings" not in result.params
+
+    def test_promoted_offerings_stays_visible_for_other_tools(self):
+        result = normalize_request_params(
+            "list_creatives",
+            {"promoted_offerings": [{"id": "po-1"}]},
+        )
+        assert result.params["promoted_offerings"] == [{"id": "po-1"}]
+        assert "catalogs" not in result.params
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +282,7 @@ class TestPrecedence:
         assert result.params["brand"] == {"domain": "new.com"}
         assert "brand_manifest" not in result.params
 
-    def test_buyer_campaign_ref_takes_precedence_over_campaign_ref(self):
+    def test_buyer_campaign_ref_does_not_hide_campaign_ref(self):
         result = normalize_request_params(
             "create_media_buy",
             {
@@ -230,7 +292,7 @@ class TestPrecedence:
             },
         )
         assert result.params["buyer_campaign_ref"] == "new-ref"
-        assert "campaign_ref" not in result.params
+        assert result.params["campaign_ref"] == "old-ref"
 
     def test_account_takes_precedence_over_account_id(self):
         result = normalize_request_params(
@@ -264,12 +326,12 @@ class TestMultipleTranslations:
             },
         )
         assert result.params["brand"] == {"domain": "acme.com"}
-        assert result.params["buyer_campaign_ref"] == "camp-1"
         assert result.params["account"] == {"account_id": "acc-1"}
+        assert result.params["campaign_ref"] == "camp-1"
+        assert "buyer_campaign_ref" not in result.params
         assert "brand_manifest" not in result.params
-        assert "campaign_ref" not in result.params
         assert "account_id" not in result.params
-        assert len(result.translations_applied) == 3
+        assert len(result.translations_applied) == 2
 
 
 # ---------------------------------------------------------------------------

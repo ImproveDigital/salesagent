@@ -58,7 +58,7 @@ pytest_plugins = [
 
 
 @pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Generator[None, None, None]:
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Generator[None]:
     """Auto-xfail scenarios that fail due to genuinely missing step definitions.
 
     Only StepDefinitionNotFoundError and NotImplementedError are converted to
@@ -165,85 +165,43 @@ _SELECTIVE_XFAIL: list[tuple[str, set[str], str]] = [
 ]
 
 
-# MCP selective xfails: the MCP wrapper doesn't accept wcag_level,
-# output_format_ids, or input_format_ids params. Only xfail examples
-# that actually SEND the param — "omitted"/"not_provided" variants
-# send no param and pass fine.
+# MCP selective xfails: scenarios that pass under IMPL but not under MCP
+# for transport-specific reasons. Empty today — the wcag_level /
+# output_format_ids / input_format_ids xfails that used to live here were
+# stale (they fired because of an unrelated 401 from a missing tenant row,
+# not because the MCP wrapper rejected the params). The MCP wrapper does
+# accept all three; once the harness was fixed to seed a Principal, the
+# scenarios passed cleanly.
 # (tag, example_substrings, reason, strict)
 # strict=True  → must fail (genuine xfail)
-# strict=False → may pass vacuously (MCP errors → empty list → exclusion assertions pass)
-_MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = [
-    ("T-UC-005-partition-wcag", {"level_a", "level_aa", "level_aaa"}, "MCP wrapper does not accept wcag_level", True),
-    ("T-UC-005-boundary-wcag", {"first enum value", "last enum value"}, "MCP wrapper does not accept wcag_level", True),
-    (
-        "T-UC-005-partition-output-fmtids",
-        {"single_format_id", "multiple_ids_any_match", "no_matching_formats", "format_without_output_ids"},
-        "MCP wrapper does not accept output_format_ids",
-        True,
-    ),
-    (
-        "T-UC-005-boundary-output-fmtids",
-        {"single FormatId", "multiple FormatIds", "format has no output", "no formats match requested output"},
-        "MCP wrapper does not accept output_format_ids",
-        True,
-    ),
-    (
-        "T-UC-005-partition-input-fmtids",
-        {"single_format_id", "multiple_ids_any_match", "no_matching_formats", "format_without_input_ids"},
-        "MCP wrapper does not accept input_format_ids",
-        True,
-    ),
-    (
-        "T-UC-005-boundary-input-fmtids",
-        {"single FormatId", "multiple FormatIds", "format has no input", "no formats match requested input"},
-        "MCP wrapper does not accept input_format_ids",
-        True,
-    ),
-    # Invariant scenarios — "holds" genuinely fails (asserts presence);
-    # "violated"/"nofield" pass vacuously (asserts absence → empty list satisfies)
-    ("T-UC-005-inv-049-9-holds", set(), "MCP wrapper does not accept output_format_ids", True),
-    ("T-UC-005-inv-049-9-violated", set(), "MCP wrapper does not accept output_format_ids (vacuous pass)", False),
-    ("T-UC-005-inv-049-9-nofield", set(), "MCP wrapper does not accept output_format_ids (vacuous pass)", False),
-    ("T-UC-005-inv-049-10-holds", set(), "MCP wrapper does not accept input_format_ids", True),
-    ("T-UC-005-inv-049-10-violated", set(), "MCP wrapper does not accept input_format_ids (vacuous pass)", False),
-    ("T-UC-005-inv-049-10-nofield", set(), "MCP wrapper does not accept input_format_ids (vacuous pass)", False),
-]
+# strict=False → may pass vacuously
+_MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = []
 
-# REST xfails: REST endpoint drops all filter params (build_rest_body returns {}).
-# Only xfail scenarios that genuinely fail — many invariant "holds" scenarios
-# pass coincidentally because unfiltered results include the expected format.
-_REST_XFAIL_TAGS: set[str] = {
-    # Invariant filter scenarios where REST unfiltered results break assertions
-    "T-UC-005-inv-049-1-holds",  # type filter
-    "T-UC-005-inv-049-1-violated",
-    "T-UC-005-inv-049-2-holds",  # format_ids filter
-    "T-UC-005-inv-049-3-violated",  # asset_types filter
-    "T-UC-005-inv-049-4-violated",  # dimension filter
-    "T-UC-005-inv-049-4-nodim",  # dimension filter (no dimensions)
-    "T-UC-005-inv-049-5-holds",  # responsive=true filter
-    "T-UC-005-inv-049-6-holds",  # responsive=false filter
-    "T-UC-005-inv-049-7-holds",  # name_search filter
-    "T-UC-005-inv-049-7-violated",
-    "T-UC-005-inv-049-9-holds",  # output_format_ids filter
-    "T-UC-005-inv-049-9-violated",
-    "T-UC-005-inv-049-9-nofield",
-    "T-UC-005-inv-049-10-holds",  # input_format_ids filter
-    "T-UC-005-inv-049-10-violated",
-    "T-UC-005-inv-049-10-nofield",
-    "T-UC-005-inv-031-1-holds",  # multi-filter AND combination
-    "T-UC-005-inv-031-1-violated",
-}
+# REST is no longer a transport (legacy FastAPI app deleted alongside src.app).
+# REST_XFAIL_TAGS is kept as an empty set so the remaining xfail-application loop
+# below is a no-op — easier to read than removing the loop and re-adding it
+# when REST goes through the migration history.
+_REST_XFAIL_TAGS: set[str] = set()
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Apply xfail markers to scenarios with unimplemented production features."""
+    """Apply xfail markers to scenarios with unimplemented production features.
+
+    Also skips @a2a-tagged scenarios — the legacy a2a_server was removed in #10.
+    A2A is now served by core/ via ``adcp.server.serve(transport="a2a")``.
+    """
+    skip_a2a = pytest.mark.skip(reason="Legacy in-process A2A path removed; use framework-level A2A coverage")
+
     for item in items:
         marker_names = {m.name for m in item.iter_markers()}
         nodeid = item.nodeid
 
-        # Detect transport from parametrized nodeid: [mcp], [mcp-...], [rest], [rest-...]
+        if "a2a" in marker_names:
+            item.add_marker(skip_a2a)
+            continue
+
+        # Detect transport from parametrized nodeid: [mcp], [mcp-...]
         is_mcp = "[mcp]" in nodeid or "[mcp-" in nodeid
-        is_rest = "[rest]" in nodeid or "[rest-" in nodeid
 
         # Transport-specific xfails: MCP wrappers don't accept certain filter params
         if is_mcp:
@@ -251,23 +209,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 if tag in marker_names:
                     if not substrings or any(s in nodeid for s in substrings):
                         item.add_marker(pytest.mark.xfail(reason=reason, strict=strict))
-                    break
-
-        # UC-011 REST: per-request auth implemented (salesagent-xms)
-        # UC-011 MCP: billing policy and approval mode now populated from DB via
-        # account_approval_mode column + proper harness writes (#1184 complete).
-
-        # FIXME(salesagent-9d5): UC-006 REST — account resolution through CreativeSyncEnv
-        # REST route for sync_creatives exists but account kwarg may not be
-        # forwarded at the route level (SyncCreativesBody doesn't have account field)
-        if is_rest and any(t.startswith("T-UC-006") for t in marker_names) and "account" in marker_names:
-            item.add_marker(pytest.mark.xfail(reason="REST route doesn't forward account param", strict=False))
-
-        # Transport-specific xfails: REST drops all filter params
-        if is_rest:
-            for tag in _REST_XFAIL_TAGS:
-                if tag in marker_names:
-                    item.add_marker(pytest.mark.xfail(reason="REST endpoint drops filter params", strict=True))
                     break
 
         # --- UC-005: disclosure/asset scenarios with partial impl ---
@@ -552,8 +493,8 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
     metafunc.parametrize(
         "ctx",
-        [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST],
-        ids=["impl", "a2a", "mcp", "rest"],
+        [Transport.IMPL, Transport.MCP],
+        ids=["impl", "mcp"],
         indirect=True,
     )
 
@@ -564,8 +505,11 @@ def ctx(request: pytest.FixtureRequest) -> dict:
 
     When parametrized by pytest_generate_tests, ``request.param`` is a
     Transport enum injected as ctx["transport"]. Transport-specific
-    scenarios (tagged @rest/@mcp/@a2a) are NOT parametrized and get
+    scenarios (tagged @rest/@mcp) are NOT parametrized and get
     an empty ctx (When steps handle dispatch explicitly).
+
+    @a2a-tagged scenarios are skipped at collection — A2A is owned by
+    core/ via ``serve(transport="a2a")``.
     """
     d: dict = {}
     if hasattr(request, "param"):
@@ -626,7 +570,7 @@ def _detect_delivery_harness(request: pytest.FixtureRequest) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, None, None]:
+def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None]:
     """Provide the appropriate harness for each BDD scenario.
 
     - UC-005 → CreativeFormatsEnv
@@ -669,6 +613,12 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
         from tests.harness.creative_formats import CreativeFormatsEnv
 
         with CreativeFormatsEnv() as env:
+            # MCP dispatch needs a real Principal row so the bearer middleware
+            # can authenticate. The IMPL path doesn't touch DB auth, but
+            # parametrized scenarios share this fixture and the same harness
+            # exit point — create the tenant+principal up front so both
+            # transports see a populated identity.
+            env.setup_default_data()
             ctx["env"] = env
             yield
 
@@ -729,12 +679,14 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 ctx[f"db_principal_{env._principal_id}"] = principal
                 yield
         elif harness_type == "webhook":
+            request.getfixturevalue("integration_db")
             from tests.harness.delivery_webhook import WebhookEnv
 
             with WebhookEnv() as env:
                 ctx["env"] = env
                 yield
         elif harness_type == "circuit-breaker":
+            request.getfixturevalue("integration_db")
             from tests.harness.delivery_circuit_breaker import CircuitBreakerEnv
 
             with CircuitBreakerEnv() as env:

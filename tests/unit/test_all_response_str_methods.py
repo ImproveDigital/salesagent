@@ -13,17 +13,13 @@ from src.core.schemas import (
     ListCreativeFormatsResponse,
     ListCreativesResponse,
     Pagination,
-    Product,
     QuerySummary,
     SimulationControlResponse,
     SyncCreativesResponse,
     UpdateMediaBuySuccess,
     UpdatePerformanceIndexResponse,
 )
-from tests.helpers.adcp_factories import (
-    create_test_cpm_pricing_option,
-    create_test_publisher_properties_by_tag,
-)
+from tests.helpers.adcp_factories import create_test_product
 
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
 
@@ -38,82 +34,32 @@ class TestResponseStrMethods:
 
     def test_get_products_response_with_pricing(self):
         """GetProductsResponse with pricing returns standard message."""
-        product = Product(
-            product_id="test",
-            name="Test",
-            description="Test",
-            format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "banner"}],
-            delivery_type="guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },
-            is_custom=False,
-            publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
-            pricing_options=[
-                create_test_cpm_pricing_option(
-                    pricing_option_id="cpm_usd_fixed",
-                    currency="USD",
-                    rate=10.0,
-                )
-            ],
-        )
+        product = create_test_product(product_id="test", name="Test", description="Test")
         resp = GetProductsResponse(products=[product])
         assert str(resp) == "Found 1 product that matches your requirements."
 
     def test_get_products_response_with_multiple_products(self):
         """GetProductsResponse with multiple products generates count-based message."""
-        products = [
-            Product(
-                product_id=f"p{i}",
-                name=f"Product {i}",
-                description="Test",
-                format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "banner"}],
-                delivery_type="guaranteed",
-                delivery_measurement={
-                    "provider": "test_provider",
-                    "notes": "Test measurement",
-                },
-                is_custom=False,
-                publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
-                pricing_options=[
-                    create_test_cpm_pricing_option(
-                        pricing_option_id="cpm_usd_fixed",
-                        currency="USD",
-                        rate=10.0,
-                    )
-                ],
-            )
-            for i in range(3)
-        ]
+        products = [create_test_product(product_id=f"p{i}", name=f"Product {i}", description="Test") for i in range(3)]
         resp = GetProductsResponse(products=products)
         assert str(resp) == "Found 3 products that match your requirements."
 
     def test_get_products_response_anonymous_user(self):
         """GetProductsResponse without pricing (anonymous user) adds auth message."""
+        # Auction pricing (no fixed rate) signals anonymous-user pricing.
+        anon_pricing = {
+            "pricing_option_id": "cpm_usd_auction",
+            "pricing_model": "cpm",
+            "currency": "USD",
+            "is_fixed": False,
+            "price_guidance": {"floor": 1.0, "p50": 5.0},
+        }
         products = [
-            Product(
+            create_test_product(
                 product_id=f"p{i}",
                 name=f"Product {i}",
                 description="Test",
-                format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "banner"}],
-                delivery_type="guaranteed",
-                delivery_measurement={
-                    "provider": "test_provider",
-                    "notes": "Test measurement",
-                },
-                is_custom=False,
-                publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
-                pricing_options=[
-                    {
-                        "pricing_option_id": "cpm_usd_auction",
-                        "pricing_model": "cpm",
-                        "currency": "USD",
-                        "is_fixed": False,  # Required in adcp 2.4.0+
-                        "price_guidance": {"floor": 1.0, "p50": 5.0},
-                        # Auction pricing (anonymous user)
-                    }
-                ],
+                pricing_options=[anon_pricing],
             )
             for i in range(2)
         ]

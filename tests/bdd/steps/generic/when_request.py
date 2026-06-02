@@ -41,7 +41,7 @@ def _call_via(ctx: dict, transport: str | Transport, req: ListCreativeFormatsReq
     if isinstance(transport, Transport):
         t = transport
     else:
-        transport_map = {"a2a": Transport.A2A, "mcp": Transport.MCP, "rest": Transport.REST}
+        transport_map = {"mcp": Transport.MCP}
         t = transport_map.get(transport, Transport.IMPL)
     env = ctx["env"]
 
@@ -452,9 +452,7 @@ def _partition_output_format_ids(ctx: dict, partition: str) -> None:
         try:
             _call(
                 ctx,
-                req=ListCreativeFormatsRequest(
-                    output_format_ids=[FormatId(id="some-id")]  # type: ignore[call-arg]
-                ),
+                req=ListCreativeFormatsRequest(output_format_ids=[FormatId(id="some-id")]),  # type: ignore[call-arg]
             )
         except Exception as exc:
             ctx["error"] = exc
@@ -502,9 +500,7 @@ def _partition_input_format_ids(ctx: dict, partition: str) -> None:
         try:
             _call(
                 ctx,
-                req=ListCreativeFormatsRequest(
-                    input_format_ids=[FormatId(id="some-id")]  # type: ignore[call-arg]
-                ),
+                req=ListCreativeFormatsRequest(input_format_ids=[FormatId(id="some-id")]),  # type: ignore[call-arg]
             )
         except Exception as exc:
             ctx["error"] = exc

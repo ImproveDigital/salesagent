@@ -121,6 +121,7 @@ def test_product_with_profile_passes_adcp_validation():
     from tests.helpers.adcp_factories import (
         create_test_cpm_pricing_option,
         create_test_publisher_properties_by_tag,
+        create_test_reporting_capabilities,
     )
 
     # Create profile
@@ -161,6 +162,7 @@ def test_product_with_profile_passes_adcp_validation():
         property_tags=["all_inventory"],  # Fallback, not used with profile
         is_custom=False,
         countries=["US", "CA"],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # Get effective values from product (these come from profile)
@@ -198,6 +200,7 @@ def test_product_with_profile_passes_adcp_validation():
         },
         "publisher_properties": [create_test_publisher_properties_by_tag(publisher_domain="example.com")],
         "pricing_options": [create_test_cpm_pricing_option()],
+        "reporting_capabilities": create_test_reporting_capabilities(),
         # Note: targeting_template is NOT in AdCP Product schema - it's internal
     }
 
@@ -274,6 +277,7 @@ def test_product_with_profile_has_no_internal_fields_in_serialization():
     from tests.helpers.adcp_factories import (
         create_test_cpm_pricing_option,
         create_test_publisher_properties_by_tag,
+        create_test_reporting_capabilities,
     )
 
     # Create profile
@@ -314,6 +318,7 @@ def test_product_with_profile_has_no_internal_fields_in_serialization():
         property_tags=["all_inventory"],
         is_custom=False,
         countries=["US"],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # Simulate product serialization for AdCP API
@@ -335,6 +340,7 @@ def test_product_with_profile_has_no_internal_fields_in_serialization():
         # Note: targeting_template is NOT in AdCP Product schema - it's internal
         "publisher_properties": [create_test_publisher_properties_by_tag(publisher_domain="example.com")],
         "pricing_options": [create_test_cpm_pricing_option()],
+        "reporting_capabilities": create_test_reporting_capabilities(),
     }
 
     # Verify internal fields are NOT present

@@ -5,9 +5,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
-
-from src.core.schemas import Creative, CreativePolicy, CreativeStatusEnum
+from src.core.canonical_formats import canonicalize_format_ref
+from src.core.schemas import Creative, CreativeAsset, CreativePolicy, CreativeStatusEnum
 from src.core.validation_helpers import run_async_in_sync_context
 
 logger = logging.getLogger(__name__)
@@ -27,6 +26,7 @@ def _validate_creative_input(
     creative: CreativeAsset,
     registry: Any,
     principal_id: str,
+    registered_agent_urls: set[str] | None = None,
 ) -> Creative:
     """Validate a CreativeAsset and return a validated Creative model.
 
@@ -38,6 +38,7 @@ def _validate_creative_input(
         creative: CreativeAsset model from the sync payload.
         registry: CreativeAgentRegistry instance for format validation.
         principal_id: Authenticated principal ID for ownership.
+        registered_agent_urls: Normalized HTTP creative-agent URLs allowed for this tenant.
 
     Returns:
         Validated Creative schema object.
@@ -52,7 +53,7 @@ def _validate_creative_input(
     schema_data: dict[str, Any] = {
         "creative_id": creative.creative_id or str(uuid.uuid4()),
         "name": creative.name,
-        "format_id": creative.format_id,
+        "format_id": canonicalize_format_ref(creative.format_id),
         "assets": creative.assets or {},  # Required by AdCP v1 spec
         # adcp 3.6.0: variants is required by Creative schema (list[CreativeVariant]).
         # CreativeAsset (sync payload) may carry variants as an extra field (extra="allow").
@@ -107,12 +108,21 @@ def _validate_creative_input(
     agent_url = str(format_value.agent_url)
     format_id = format_value.id
 
-    # Skip external validation for adapter-provided formats (non-HTTP URLs)
-    # These formats are served by the adapter itself (e.g., broadstreet://default)
+    # Skip external validation for adapter-provided formats (non-HTTP URLs).
+    # These formats are served by an adapter-specific creative surface.
     # and validation is handled internally by the adapter
     is_adapter_format = not agent_url.startswith(("http://", "https://"))
 
     if not is_adapter_format:
+        from src.core.validation import normalize_agent_url
+
+        normalized_agent_url = normalize_agent_url(agent_url)
+        if registered_agent_urls is not None and normalized_agent_url not in registered_agent_urls:
+            raise ValueError(
+                f"Creative agent '{agent_url}' is not registered for this tenant. "
+                f"Use list_creative_formats to discover supported formats."
+            )
+
         # Check if format exists (uses in-memory cache with 1-hour TTL)
         # Use run_async_in_sync_context to handle both sync and async contexts
         format_spec = None
@@ -148,6 +158,34 @@ def _validate_creative_input(
         logger.debug(f"Skipping external validation for adapter-provided format '{format_id}' (agent_url: {agent_url})")
 
     return validated_creative
+
+
+def get_registered_creative_agent_urls(registry: Any, tenant_id: str | None) -> set[str] | None:
+    """Return normalized tenant-registered creative-agent URLs when available."""
+    if not tenant_id:
+        return None
+
+    get_tenant_agents = getattr(registry, "_get_tenant_agents", None)
+    if not callable(get_tenant_agents):
+        return None
+
+    agents = get_tenant_agents(tenant_id)
+    if not isinstance(agents, list | tuple):
+        return None
+
+    from src.core.canonical_formats import DEFAULT_CREATIVE_AGENT_URL
+    from src.core.validation import normalize_agent_url
+
+    registered = {normalize_agent_url(agent.agent_url) for agent in agents if getattr(agent, "enabled", True)}
+
+    default_agent = getattr(registry, "DEFAULT_AGENT", None)
+    default_agent_url = getattr(default_agent, "agent_url", None)
+    if default_agent_url and normalize_agent_url(default_agent_url) in registered:
+        # The reference creative agent may be configured to a local/service URL in
+        # CI or deployments, while products expose the public canonical AdCP URL.
+        registered.add(DEFAULT_CREATIVE_AGENT_URL)
+
+    return registered
 
 
 def check_provenance_required(

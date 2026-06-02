@@ -14,12 +14,13 @@ from adcp.types import DeliveryMetrics as LibraryDeliveryMetrics
 from adcp.types import (
     DeliveryStatus,  # noqa: F401 — re-exported for backward compat
     PricingModel,
+    SchemaVariant,
 )
 from adcp.types import GetCreativeDeliveryResponse as LibraryGetCreativeDeliveryResponse
 from adcp.types import GetMediaBuyDeliveryRequest as LibraryGetMediaBuyDeliveryRequest
 from adcp.types import GetMediaBuyDeliveryResponse as LibraryGetMediaBuyDeliveryResponse
 from adcp.types import ReportingPeriod as LibraryReportingPeriod
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_serializer
 
 from src.core.config import get_pydantic_extra_mode
 from src.core.schemas._base import NestedModelSerializerMixin, SalesAgentBaseModel
@@ -73,15 +74,6 @@ class GetMediaBuyDeliveryRequest(LibraryGetMediaBuyDeliveryRequest):
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
-    # account, reporting_dimensions, attribution_window: now provided by adcp 3.10 library
-    # with proper types (AccountReference, ReportingDimensions, AttributionWindow).
-
-    # --- Salesagent extensions (NOT in adcp spec/library) ---
-    include_package_daily_breakdown: bool | None = Field(
-        None,
-        description="Include daily_breakdown arrays within each package (salesagent extension, not in adcp spec)",
-    )
-
 
 # ---------------------------------------------------------------------------
 # Delivery data models
@@ -91,26 +83,20 @@ class GetMediaBuyDeliveryRequest(LibraryGetMediaBuyDeliveryRequest):
 # AdCP-compliant delivery models
 # FIXME(salesagent-jz3y): DeliveryTotals and PackageDelivery duplicate fields from
 # adcp library Totals/ByPackageItem instead of inheriting. These should extend the
-# library types (Pattern #1). Blocked on aligning video_completions -> completed_views
-# and adjusting all adapter call sites.
+# library types (Pattern #1). The video_completions -> completed_views rename is
+# done; remaining work is the inheritance switch, which has structural conflicts:
+# library DeliveryMetrics makes impressions/spend optional and library Totals types
+# spend as Any (we require both to be float, ge=0); library ByPackageItem requires
+# pricing_model, rate, currency (we treat them as optional during delivery).
 class DeliveryTotals(SalesAgentBaseModel):
-    """Aggregate metrics for a media buy or package.
-
-    Note: Does not yet extend library Totals. Library uses ``completed_views``;
-    salesagent uses ``video_completions``. A rename across all adapters is needed
-    before switching to inheritance.
-    """
+    """Aggregate metrics for a media buy or package."""
 
     impressions: float = Field(ge=0, description="Total impressions delivered")
     spend: float = Field(ge=0, description="Total amount spent")
     clicks: float | None = Field(None, ge=0, description="Total clicks (if applicable)")
     ctr: float | None = Field(None, ge=0, le=1, description="Click-through rate (clicks/impressions)")
-    # FIXME(salesagent-jz3y): adcp spec uses ``completed_views``, not ``video_completions``.
-    # Rename across all adapters to align with spec, then inherit from library Totals.
-    video_completions: float | None = Field(None, ge=0, description="Total video completions (if applicable)")
-    completion_rate: float | None = Field(
-        None, ge=0, le=1, description="Video completion rate (completions/impressions)"
-    )
+    completed_views: float | None = Field(None, ge=0, description="Total audio/video completions (if applicable)")
+    completion_rate: float | None = Field(None, ge=0, le=1, description="Completion rate (completed_views/impressions)")
     conversions: float | None = Field(None, ge=0, description="Total conversions (if applicable)")
     viewability: float | None = Field(None, ge=0, le=1, description="Viewability percentage as 0.0-1.0 (if applicable)")
 
@@ -127,15 +113,15 @@ class PlacementBreakdown(SalesAgentBaseModel):
 class PackageDelivery(SalesAgentBaseModel):
     """Metrics broken down by package.
 
-    Note: Does not yet extend library ByPackageItem. See DeliveryTotals note.
+    Note: Does not yet extend library ByPackageItem. Library requires
+    pricing_model, rate, currency (we treat them as optional during delivery).
     """
 
     package_id: str = Field(description="Publisher's package identifier")
     impressions: float = Field(ge=0, description="Package impressions")
     spend: float = Field(ge=0, description="Package spend")
     clicks: float | None = Field(None, ge=0, description="Package clicks")
-    # FIXME(salesagent-jz3y): adcp spec uses ``completed_views``, not ``video_completions``.
-    video_completions: float | None = Field(None, ge=0, description="Package video completions")
+    completed_views: float | None = Field(None, ge=0, description="Package audio/video completions")
     pacing_index: float | None = Field(
         None, ge=0, description="Delivery pace (1.0 = on track, <1.0 = behind, >1.0 = ahead)"
     )
@@ -156,6 +142,18 @@ class PackageDelivery(SalesAgentBaseModel):
         None,
         description="Placement-level delivery breakdown (populated when reporting_dimensions includes 'placement')",
     )
+    by_device_type: list[dict[str, Any]] | None = Field(
+        None,
+        description="Device-type delivery breakdown (populated when reporting_dimensions includes 'device_type')",
+    )
+    by_device_type_truncated: bool | None = Field(
+        None, description="Whether by_device_type was truncated for this package"
+    )
+    by_geo: list[dict[str, Any]] | None = Field(
+        None,
+        description="Geographic delivery breakdown (populated when reporting_dimensions includes 'geo')",
+    )
+    by_geo_truncated: bool | None = Field(None, description="Whether by_geo was truncated for this package")
 
 
 class DailyBreakdown(SalesAgentBaseModel):
@@ -174,8 +172,8 @@ class MediaBuyDeliveryData(SalesAgentBaseModel):
     """AdCP-compliant delivery data for a single media buy.
 
     Note: Does not yet extend library MediaBuyDelivery. Blocked on aligning
-    DeliveryTotals (video_completions -> completed_views) and PackageDelivery
-    with their library counterparts.
+    DeliveryTotals and PackageDelivery with their library counterparts (see
+    structural conflicts noted on DeliveryTotals).
 
     TODO(salesagent-jz3y): Add buyer_campaign_ref field from adcp spec
     (present in library MediaBuyDelivery but missing here).
@@ -209,6 +207,19 @@ class MediaBuyDeliveryData(SalesAgentBaseModel):
         default_factory=dict,
         description="AdCP extension object for adapter-specific data",
     )
+
+    @field_serializer("status")
+    def _serialize_status(self, value: str) -> str:
+        """Map salesagent's internal vocab to the AdCP wire enum.
+
+        The schema's ``status`` Literal carries the internal vocab so every
+        in-process consumer (filters, scheduler ``non_active_status_strs``,
+        per-buy comparisons) can keep its existing ``"ready"`` checks. The
+        AdCP wire ``MediaBuyStatus`` enum uses ``"pending_start"`` for the
+        same state, so we translate at serialisation time only. Every other
+        internal value coincides with its wire name.
+        """
+        return "pending_start" if value == "ready" else value
 
 
 class ReportingPeriod(LibraryReportingPeriod):
@@ -250,8 +261,14 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     aggregated_totals: AggregatedTotals = Field(..., description="Combined metrics across all returned media buys")
-    media_buy_deliveries: list[MediaBuyDeliveryData] = Field(  # type: ignore[assignment]
+    media_buy_deliveries: SchemaVariant[list[MediaBuyDeliveryData]] = Field(
         ..., description="Array of delivery data for each media buy"
+    )
+    by_device_type_truncated: bool | None = Field(
+        None, description="True when any requested device_type package breakdown was truncated"
+    )
+    by_geo_truncated: bool | None = Field(
+        None, description="True when any requested geo package breakdown was truncated"
     )
 
     def model_dump(self, **kwargs: Any) -> dict[str, Any]:
@@ -334,6 +351,10 @@ class AdapterPackageDelivery(SalesAgentBaseModel):
     package_id: str
     impressions: int
     spend: float
+    # Audio/video completions surfaced from in-stream VAST inventory.
+    # Outstream returns zero (VAST events don't fire) — addressed by the
+    # full classifier-plus-merge in #225 Phase 2.
+    completed_views: int | None = None
     by_placement: list[dict[str, Any]] | None = None
 
 
@@ -346,6 +367,7 @@ class AdapterGetMediaBuyDeliveryResponse(NestedModelSerializerMixin, SalesAgentB
     by_package: list[AdapterPackageDelivery]
     currency: str
     daily_breakdown: list[dict] | None = None  # Optional day-by-day delivery metrics
+    ext: dict[str, Any] | None = None  # Adapter-private delivery metadata
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +457,7 @@ class GetCreativeDeliveryResponse(NestedModelSerializerMixin, LibraryGetCreative
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
-    creatives: list[CreativeDeliveryData] = Field(  # type: ignore[assignment]
-        ..., description="Array of creative delivery data"
-    )
+    creatives: SchemaVariant[list[CreativeDeliveryData]] = Field(..., description="Array of creative delivery data")
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""

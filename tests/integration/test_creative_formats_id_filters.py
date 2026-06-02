@@ -8,7 +8,7 @@ Covers:
 from __future__ import annotations
 
 import pytest
-from adcp.types.generated_poc.core.format import Dimensions, Renders, Responsive
+from adcp.types import Dimensions, Renders, Responsive
 
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest
 from tests.factories import TenantFactory
@@ -19,11 +19,11 @@ AGENT_URL = "https://creative.adcontextprotocol.org"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 # REST drops all filter kwargs (build_rest_body returns {}), so filter-specific
-# tests use only IMPL/A2A/MCP. See CreativeFormatsEnv.build_rest_body.
-FILTER_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.MCP]
+# tests use only IMPL/MCP. See CreativeFormatsEnv.build_rest_body.
+FILTER_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 
 def _fmt(

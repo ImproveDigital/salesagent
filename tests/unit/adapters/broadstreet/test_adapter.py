@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.adapters.broadstreet import BroadstreetAdapter
+from src.adapters.broadstreet.formats import broadstreet_template_canonical_format_id
+from src.core.canonical_formats import DEFAULT_CREATIVE_AGENT_URL
 from src.core.schemas import (
     CreateMediaBuySuccess,
     MediaPackage,
@@ -178,6 +180,49 @@ class TestBroadstreetAdapterCreateMediaBuy:
         assert result.media_buy_id.startswith("bs_")
         assert len(result.packages) == 1
         assert result.packages[0].package_id == "pkg_1"
+
+    def test_create_media_buy_uses_configured_campaign_name_template(self, mock_principal, mock_config):
+        """Campaign naming uses the tenant-level Broadstreet runtime setting."""
+        config = {**mock_config, "campaign_name_template": "Custom-{po_number}-{advertiser_name}"}
+        adapter = BroadstreetAdapter(
+            config=config,
+            principal=mock_principal,
+            dry_run=True,
+            tenant_id="test_tenant",
+        )
+
+        start_time = datetime.now(UTC)
+        end_time = start_time + timedelta(days=30)
+        request = MagicMock()
+        request.po_number = "PO-001"
+
+        package = MagicMock(spec=MediaPackage)
+        package.package_id = "pkg_1"
+        package.product_id = "prod_1"
+        package.name = "Test Package"
+        package.budget = 10000
+        package.impressions = 100000
+        package.implementation_config = {
+            "targeted_zone_ids": ["zone_1"],
+            "automation_mode": "automatic",
+        }
+
+        with patch.object(
+            adapter.campaign_manager, "create_campaign", wraps=adapter.campaign_manager.create_campaign
+        ) as create:
+            result = adapter.create_media_buy(
+                request=request,
+                packages=[package],
+                start_time=start_time,
+                end_time=end_time,
+            )
+
+        assert isinstance(result, CreateMediaBuySuccess)
+        create.assert_called_once_with(
+            name="Custom-PO-001-Test Advertiser",
+            start_date=start_time,
+            end_date=end_time,
+        )
 
     def test_create_media_buy_fails_without_zones(self, mock_principal, mock_config):
         """Test create_media_buy fails when no zones configured."""
@@ -492,7 +537,7 @@ class TestBroadstreetAdapterCreativeFormats:
     """Tests for creative format discovery (Broadstreet as creative agent)."""
 
     def test_get_creative_formats_returns_templates(self, mock_principal, mock_config):
-        """Test that get_creative_formats returns Broadstreet templates as AdCP formats."""
+        """Test that get_creative_formats returns canonical AdCP formats."""
         adapter = BroadstreetAdapter(
             config=mock_config,
             principal=mock_principal,
@@ -502,22 +547,18 @@ class TestBroadstreetAdapterCreativeFormats:
 
         formats = adapter.get_creative_formats()
 
-        # Should return all template types
-        assert len(formats) > 0
-
-        # Check for cube_3d template
-        cube_format = next((f for f in formats if "cube_3d" in f["format_id"]["id"]), None)
-        assert cube_format is not None
-        assert cube_format["name"] == "Amazing 3D Cube Gallery"
-        assert cube_format["type"] == "display"
-
-        # Cube should have 6 required face images
-        required_assets = [a for a in cube_format["assets"] if a["required"]]
-        assert len(required_assets) == 6
-        assert all("image" in a["asset_id"] for a in required_assets)
+        assert {f["format_id"]["id"] for f in formats} == {
+            "display_image",
+            "display_html",
+            "display_js",
+            "image_slideshow_5s_each",
+            "native_standard",
+        }
+        assert all(f["format_id"]["agent_url"].rstrip("/") == DEFAULT_CREATIVE_AGENT_URL for f in formats)
+        assert all(not f["format_id"]["id"].startswith("broadstreet_") for f in formats)
 
     def test_get_creative_formats_includes_youtube(self, mock_principal, mock_config):
-        """Test YouTube video format is included."""
+        """YouTube rendering is a template option, not a separate format ID."""
         adapter = BroadstreetAdapter(
             config=mock_config,
             principal=mock_principal,
@@ -527,16 +568,16 @@ class TestBroadstreetAdapterCreativeFormats:
 
         formats = adapter.get_creative_formats()
 
-        youtube_format = next((f for f in formats if "youtube" in f["format_id"]["id"]), None)
-        assert youtube_format is not None
-        assert youtube_format["name"] == "YouTube Video with Text"
+        assert "display_html" in {f["format_id"]["id"] for f in formats}
+        assert all("youtube" not in f["format_id"]["id"] for f in formats)
 
-        # YouTube requires youtube_url asset
-        required = [a for a in youtube_format["assets"] if a["required"]]
-        assert any(a["asset_id"] == "youtube_url" for a in required)
+    def test_broadstreet_cube_maps_to_canonical_slideshow(self):
+        """Broadstreet cube is represented by the canonical multi-image display format."""
+        assert broadstreet_template_canonical_format_id("cube_3d") == "image_slideshow_5s_each"
+        assert broadstreet_template_canonical_format_id("gallery") == "image_slideshow_5s_each"
 
     def test_get_creative_formats_asset_types(self, mock_principal, mock_config):
-        """Test that asset types are correctly inferred."""
+        """Test that canonical format asset types are exposed."""
         adapter = BroadstreetAdapter(
             config=mock_config,
             principal=mock_principal,
@@ -545,16 +586,13 @@ class TestBroadstreetAdapterCreativeFormats:
         )
 
         formats = adapter.get_creative_formats()
-        cube_format = next((f for f in formats if "cube_3d" in f["format_id"]["id"]), None)
+        by_id = {f["format_id"]["id"]: f for f in formats}
 
-        # Image assets should have type "image"
-        front_image = next((a for a in cube_format["assets"] if a["asset_id"] == "front_image"), None)
-        assert front_image["asset_type"] == "image"
+        image_asset = by_id["display_image"]["assets"][0]
+        assert image_asset["asset_type"] == "image"
 
-        # Caption assets should have type "text"
-        front_caption = next((a for a in cube_format["assets"] if a["asset_id"] == "front_caption"), None)
-        assert front_caption["asset_type"] == "text"
+        html_asset = by_id["display_html"]["assets"][0]
+        assert html_asset["asset_type"] == "html"
 
-        # Click URL should have type "url"
-        click_url = next((a for a in cube_format["assets"] if a["asset_id"] == "click_url"), None)
-        assert click_url["asset_type"] == "url"
+        js_asset = by_id["display_js"]["assets"][0]
+        assert js_asset["asset_type"] == "javascript"

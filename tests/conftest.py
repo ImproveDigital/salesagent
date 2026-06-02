@@ -196,6 +196,7 @@ _ENTITY_PATTERNS: dict[str, list[str]] = {
         "review_agent",
         "task_management",
         "signals_agent",
+        "buyer_agent",
     ],
     "infra": [
         "tox_config",
@@ -256,6 +257,15 @@ def pytest_configure(config):
     # after every test run. OTEL_SDK_DISABLED prevents the SDK from
     # initializing entirely, eliminating the noise with zero test impact.
     os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+
+    # Force MemoryBackend for the idempotency store. The PgBackend caches a
+    # process-wide AsyncConnectionPool bound to whatever DATABASE_URL was
+    # live when the first MCP call ran. The integration_db fixture creates a
+    # per-test database and drops it on teardown, so the cached pool ends up
+    # pointing at a database that no longer exists — every later [mcp] test
+    # then waits 30s for psycopg's PoolTimeout. Memory backend sidesteps the
+    # cache; idempotency-specific suites that need PgBackend can override.
+    os.environ.setdefault("CORE_IDEMPOTENCY_BACKEND", "memory")
 
 
 # Add project root to Python path

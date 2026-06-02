@@ -28,7 +28,6 @@ Available mocks via env.mock:
 
 Transport support:
     call_impl(**kw)          -- direct _get_products_impl (sync wrapper around async)
-    call_a2a(**kw)           -- get_products_raw A2A wrapper
     call_mcp(**kw)           -- get_products MCP wrapper via _run_mcp_wrapper
     build_rest_body(**kw)    -- POST /api/v1/products body
     parse_rest_response(d)   -- JSON -> GetProductsResponse
@@ -73,8 +72,6 @@ class ProductEnv(ProductMixin, IntegrationEnv):
 
     ASYNC_PATCHES = {"dynamic_variants", "resolve_property_list"}
 
-    REST_ENDPOINT = "/api/v1/products"
-
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
@@ -98,23 +95,6 @@ class ProductEnv(ProductMixin, IntegrationEnv):
             # No running loop — safe to block with asyncio.run
             return asyncio.run(coro)
 
-    def call_a2a(self, **kwargs: Any) -> GetProductsResponse:
-        """Call get_products via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("get_products", GetProductsResponse, **kwargs)
-
     def call_mcp(self, **kwargs: Any) -> GetProductsResponse:
         """Call get_products via Client(mcp) — full pipeline dispatch."""
         return self._run_mcp_client("get_products", GetProductsResponse, **kwargs)
-
-    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert kwargs to GetProductsBody shape for REST POST.
-
-        GetProductsBody (src/routes/api_v1.py) accepts:
-            brief, brand, filters, adcp_version
-        """
-        _BODY_FIELDS = ("brief", "brand", "filters", "adcp_version")
-        return {k: kwargs[k] for k in _BODY_FIELDS if k in kwargs and kwargs[k] is not None}
-
-    def parse_rest_response(self, data: dict[str, Any]) -> GetProductsResponse:
-        """Parse REST JSON response into GetProductsResponse."""
-        return GetProductsResponse(**data)

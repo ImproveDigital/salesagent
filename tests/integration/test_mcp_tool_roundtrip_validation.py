@@ -29,6 +29,7 @@ from src.core.database.models import Product as ProductModel
 from src.core.database.models import Tenant
 from src.core.schemas import Product as ProductSchema
 from src.core.testing_hooks import TestingContext, apply_testing_hooks
+from tests.helpers.adcp_factories import create_test_reporting_capabilities
 from tests.utils.database_helpers import create_tenant_with_timestamps
 
 
@@ -251,6 +252,7 @@ class TestMCPToolRoundtripValidation:
                 "is_custom": db_product.is_custom or False,
                 "publisher_properties": publisher_properties,
                 "pricing_options": [pricing_kwargs],  # Use plain dict, not PricingOption object
+                "reporting_capabilities": db_product.reporting_capabilities or create_test_reporting_capabilities(),
             }
             schema_product = ProductSchema(**product_data)
             schema_products.append(schema_product)
@@ -258,7 +260,7 @@ class TestMCPToolRoundtripValidation:
         # Test the problematic roundtrip conversion that was failing in production
         for product in schema_products:
             # Step 1: Convert to internal dict (as get_products does)
-            product_dict = product.model_dump_internal()
+            product_dict = product.model_dump()
 
             # Step 2: Apply testing hooks (returns metadata, does not modify data)
             testing_ctx = TestingContext(dry_run=True, test_session_id="test", auto_advance=False)
@@ -390,6 +392,7 @@ class TestMCPToolRoundtripValidation:
                 "is_custom": db_product.is_custom or False,
                 "publisher_properties": publisher_properties,
                 "pricing_options": [pricing_kwargs],  # Use plain dict, not PricingOption object
+                "reporting_capabilities": db_product.reporting_capabilities or create_test_reporting_capabilities(),
             }
             schema_product = ProductSchema(**product_data)
             schema_products.append(schema_product)
@@ -405,7 +408,7 @@ class TestMCPToolRoundtripValidation:
             # Test the problematic roundtrip conversion with testing hooks
             for product in schema_products:
                 # Step 1: Convert to internal dict (as get_products does)
-                product_dict = product.model_dump_internal()
+                product_dict = product.model_dump()
 
                 # Step 2: Apply testing hooks (returns metadata, does not modify data)
                 hooks_result = apply_testing_hooks(testing_ctx, "get_products")
@@ -460,10 +463,11 @@ class TestMCPToolRoundtripValidation:
                     "is_fixed": True,  # Required in adcp 2.4.0+
                 }
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         # Step 1: Convert to dict (what the tool does before testing hooks)
-        product_dict = original_product.model_dump_internal()
+        product_dict = original_product.model_dump()
 
         # Verify the dict has the correct field name
         assert "format_ids" in product_dict
@@ -525,10 +529,11 @@ class TestMCPToolRoundtripValidation:
                     "is_fixed": False,  # Required in adcp 2.4.0+
                 }
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         # Roundtrip through internal format
-        internal_dict = product.model_dump_internal()
+        internal_dict = product.model_dump()
         reconstructed_product = ProductSchema(**internal_dict)
 
         # Get AdCP-compliant output
@@ -575,6 +580,7 @@ class TestMCPToolRoundtripValidation:
             "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"selection_type": "by_id", "publisher_domain": "example.com", "property_ids": ["all_inventory"]}
@@ -604,6 +610,7 @@ class TestMCPToolRoundtripValidation:
             "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"selection_type": "by_id", "publisher_domain": "example.com", "property_ids": ["all_inventory"]}
@@ -646,6 +653,7 @@ class TestMCPToolRoundtripPatterns:
                     "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
                     "delivery_type": "guaranteed",
                     "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+                    "reporting_capabilities": create_test_reporting_capabilities(),
                     "is_custom": False,
                     "publisher_properties": [
                         {
@@ -678,6 +686,7 @@ class TestMCPToolRoundtripPatterns:
                     ],
                     "delivery_type": "non_guaranteed",
                     "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+                    "reporting_capabilities": create_test_reporting_capabilities(),
                     "is_custom": True,
                     "publisher_properties": [
                         {
@@ -707,6 +716,7 @@ class TestMCPToolRoundtripPatterns:
                     "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_728x90"}],
                     "delivery_type": "non_guaranteed",
                     "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+                    "reporting_capabilities": create_test_reporting_capabilities(),
                     "is_custom": False,
                     "publisher_properties": [
                         {
@@ -734,7 +744,7 @@ class TestMCPToolRoundtripPatterns:
                 original = ProductSchema(**test_case["data"])
 
                 # Step 2: Convert to internal dict
-                internal_dict = original.model_dump_internal()
+                internal_dict = original.model_dump()
 
                 # Step 3: Simulate testing hooks or other processing
                 processed_dict = internal_dict.copy()
@@ -774,6 +784,7 @@ class TestMCPToolRoundtripPatterns:
             ],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager", "notes": "MRC-accredited viewability"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"selection_type": "by_id", "publisher_domain": "example.com", "property_ids": ["all_inventory"]}
@@ -805,7 +816,7 @@ class TestMCPToolRoundtripPatterns:
         product = ProductSchema(**complete_product_data)
 
         # Test internal representation
-        internal_dict = product.model_dump_internal()
+        internal_dict = product.model_dump()
         assert "format_ids" in internal_dict  # Field name (no separate internal/external anymore)
 
         # Test external (AdCP) representation

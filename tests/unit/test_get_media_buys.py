@@ -1,7 +1,7 @@
 """Tests for get_media_buys tool implementation.
 
 Covers:
-- Status computation from date fields (pending_activation, active, completed)
+- Status computation from date fields (pending_start, active, completed)
 - Status filtering (default: active only; explicit filters; multiple statuses)
 - Filtering by media_buy_ids and buyer_refs
 - Creative approval mapping (approved, rejected, pending_review)
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
-from pydantic import RootModel, ValidationError
+from pydantic import RootModel
 
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
@@ -36,6 +36,7 @@ from src.core.tools.media_buy_list import (
     _get_media_buys_impl,
     _map_creative_status,
     _resolve_status_filter,
+    _to_wire_status,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,10 @@ def make_media_buy(
     budget=Decimal("10000"),
     currency="USD",
     raw_request=None,
+    status="",
+    revision=1,
+    approved_at=None,
+    confirmed_at=None,
 ):
     buy = MagicMock()
     buy.media_buy_id = media_buy_id
@@ -87,6 +92,12 @@ def make_media_buy(
     buy.raw_request = raw_request or {}
     buy.created_at = datetime(2025, 1, 1, tzinfo=UTC)
     buy.updated_at = datetime(2025, 1, 1, tzinfo=UTC)
+    buy.revision = revision
+    buy.approved_at = approved_at
+    buy.confirmed_at = confirmed_at
+    # Persisted MediaBuy.status — defaults to empty so _compute_status falls
+    # through to date-derived behavior unless a test sets a blocker explicitly.
+    buy.status = status
     return buy
 
 
@@ -112,9 +123,9 @@ def make_package(
 
 
 class TestComputeStatus:
-    def test_pending_activation_when_before_start(self):
+    def test_pending_start_when_before_start(self):
         buy = make_media_buy(start_date=date(2099, 1, 1), end_date=date(2099, 12, 31))
-        assert _compute_status(buy, date(2025, 6, 15)) == MediaBuyStatus.pending_activation
+        assert _compute_status(buy, date(2025, 6, 15)) == MediaBuyStatus.pending_start
 
     def test_active_when_in_flight(self):
         buy = make_media_buy(start_date=date(2025, 1, 1), end_date=date(2025, 12, 31))
@@ -132,7 +143,175 @@ class TestComputeStatus:
             start_time=datetime(2099, 1, 1, tzinfo=UTC),
             end_time=datetime(2099, 12, 31, tzinfo=UTC),
         )
-        assert _compute_status(buy, date(2025, 6, 15)) == MediaBuyStatus.pending_activation
+        assert _compute_status(buy, date(2025, 6, 15)) == MediaBuyStatus.pending_start
+
+
+class TestComputeStatusPersistedPrecedence:
+    """Persisted MediaBuy.status must win for blocker / terminal states.
+
+    Regression: ``_compute_status`` previously ignored ``buy.status`` and
+    re-derived from dates only, silently overwriting buyer-visible blockers
+    (``pending_creatives``, ``paused``, ``canceled``, ``rejected``) with
+    date-derived values on every read. This broke the storyboard step
+    ``pending_creatives_to_start/create_buy_no_creatives``: a buy persisted as
+    ``pending_creatives`` with a future start time was being read back as
+    ``pending_start``.
+    """
+
+    TODAY = date(2025, 6, 15)
+
+    def test_persisted_pending_creatives_survives_future_start(self):
+        """A buy persisted as ``pending_creatives`` with a future start is
+        blocked on creatives, not on the clock — must not be re-derived to
+        ``pending_start``."""
+        buy = make_media_buy(
+            start_date=date(2099, 1, 1),
+            end_date=date(2099, 12, 31),
+            status="pending_creatives",
+        )
+        assert _compute_status(buy, self.TODAY) == MediaBuyStatus.pending_creatives
+
+    def test_persisted_paused_survives_in_flight(self):
+        """A paused buy in its flight window must report ``paused``, not
+        ``active``. ``paused`` is an explicit operator action; no date can
+        resolve it."""
+        buy = make_media_buy(
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
+            status="paused",
+        )
+        assert _compute_status(buy, self.TODAY) == MediaBuyStatus.paused
+
+    def test_persisted_canceled_survives_regardless_of_dates(self):
+        """``canceled`` is terminal; flight dates are irrelevant."""
+        buy_future = make_media_buy(
+            start_date=date(2099, 1, 1),
+            end_date=date(2099, 12, 31),
+            status="canceled",
+        )
+        buy_in_flight = make_media_buy(
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
+            status="canceled",
+        )
+        buy_past = make_media_buy(
+            start_date=date(2020, 1, 1),
+            end_date=date(2020, 12, 31),
+            status="canceled",
+        )
+        assert _compute_status(buy_future, self.TODAY) == MediaBuyStatus.canceled
+        assert _compute_status(buy_in_flight, self.TODAY) == MediaBuyStatus.canceled
+        assert _compute_status(buy_past, self.TODAY) == MediaBuyStatus.canceled
+
+    def test_persisted_pending_start_is_recomputed_when_in_flight(self):
+        """``pending_start`` is itself date-derived, so a stale persisted value
+        must NOT win — once today >= start, the read returns ``active``. Proves
+        we don't blindly trust persisted values for date-derivable statuses."""
+        buy = make_media_buy(
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
+            status="pending_start",
+        )
+        assert _compute_status(buy, self.TODAY) == MediaBuyStatus.active
+
+    def test_empty_persisted_status_falls_through_to_date_derived(self):
+        """Missing / empty persisted status is the legacy fall-through:
+        compute purely from flight dates."""
+        buy_active = make_media_buy(start_date=date(2025, 1, 1), end_date=date(2025, 12, 31), status="")
+        buy_none = make_media_buy(start_date=date(2099, 1, 1), end_date=date(2099, 12, 31), status=None)
+        assert _compute_status(buy_active, self.TODAY) == MediaBuyStatus.active
+        assert _compute_status(buy_none, self.TODAY) == MediaBuyStatus.pending_start
+
+
+class TestToWireStatus:
+    """``_to_wire_status`` coerces arbitrary input to a wire-valid string (#374).
+
+    The persisted ``MediaBuy.status`` column stores values beyond the wire
+    enum (``draft``, ``pending_approval``). Response-construction sites that
+    read the column directly MUST funnel the value through this helper so
+    a non-wire string never reaches the response model.
+    """
+
+    def test_returns_wire_string_for_enum_member(self):
+        assert _to_wire_status(MediaBuyStatus.active) == "active"
+        assert _to_wire_status(MediaBuyStatus.pending_creatives) == "pending_creatives"
+
+    def test_returns_wire_string_for_valid_string(self):
+        assert _to_wire_status("active") == "active"
+        assert _to_wire_status("pending_creatives") == "pending_creatives"
+
+    def test_case_insensitive(self):
+        assert _to_wire_status("Active") == "active"
+        assert _to_wire_status("PENDING_CREATIVES") == "pending_creatives"
+
+    def test_returns_none_for_persisted_only_values(self):
+        # These values are valid in the DB column but not in the wire enum.
+        assert _to_wire_status("draft") is None
+        assert _to_wire_status("pending_approval") is None
+
+    def test_returns_none_for_none_and_empty(self):
+        assert _to_wire_status(None) is None
+        assert _to_wire_status("") is None
+
+    def test_returns_none_for_non_string_non_enum(self):
+        assert _to_wire_status(42) is None
+        assert _to_wire_status(["active"]) is None
+
+
+class TestGetMediaBuysImplPersistedStatusPrecedence:
+    """End-to-end precedence: ``_get_media_buys_impl`` must not strip persisted
+    blocker statuses when reading buys back. The real precedence logic lives in
+    ``_compute_status``; we exercise it here against a mocked repo so a future
+    refactor that drops the persisted-status path won't silently regress.
+    """
+
+    def _run_with_buy(self, buy):
+        """Drive ``_get_media_buys_impl`` with one buy + a status_filter that
+        permits the expected outcome, return the response."""
+        with (
+            patch("src.core.tools.media_buy_list.MediaBuyUoW") as mock_uow_cls,
+            patch("src.core.tools.media_buy_list.get_principal_object") as mock_principal_obj,
+            patch("src.core.tools.media_buy_list._fetch_packages", return_value={}),
+            patch("src.core.tools.media_buy_list._fetch_creative_approvals", return_value={}),
+        ):
+            mock_principal_obj.return_value = MagicMock(principal_id="principal_1")
+            mock_repo = MagicMock()
+            mock_repo.get_by_principal.return_value = [buy]
+            mock_uow = MagicMock()
+            mock_uow.media_buys = mock_repo
+            mock_uow.media_buys.find_by_idempotency_key.return_value = None
+            mock_uow.session = MagicMock()
+            mock_uow_cls.return_value.__enter__.return_value = mock_uow
+            # No GAM projection
+            with patch("src.core.tools.media_buy_list._project_gam_buys", return_value=([], {})):
+                # Allow any status through the filter so we observe the raw
+                # computed status rather than an empty list.
+                req = GetMediaBuysRequest(
+                    status_filter=[
+                        MediaBuyStatus.pending_creatives,
+                        MediaBuyStatus.pending_start,
+                        MediaBuyStatus.active,
+                        MediaBuyStatus.paused,
+                        MediaBuyStatus.completed,
+                        MediaBuyStatus.canceled,
+                        MediaBuyStatus.rejected,
+                    ]
+                )
+                return _get_media_buys_impl(req, identity=make_identity())
+
+    def test_pending_creatives_survives_future_start_through_full_impl(self):
+        """The storyboard regression: create_buy_no_creatives persists
+        ``pending_creatives`` with a future start; ``get_media_buys`` must
+        return ``pending_creatives``, not ``pending_start``."""
+        buy = make_media_buy(
+            media_buy_id="buy_pc",
+            start_date=date(2099, 1, 1),
+            end_date=date(2099, 12, 31),
+            status="pending_creatives",
+        )
+        response = self._run_with_buy(buy)
+        assert len(response.media_buys) == 1
+        assert response.media_buys[0].status == MediaBuyStatus.pending_creatives
 
 
 class TestResolveStatusFilter:
@@ -154,8 +333,8 @@ class TestResolveStatusFilter:
         class StatusFilter(RootModel[list[MediaBuyStatus]]):
             pass
 
-        result = _resolve_status_filter(StatusFilter([MediaBuyStatus.pending_activation]))
-        assert result == {MediaBuyStatus.pending_activation}
+        result = _resolve_status_filter(StatusFilter([MediaBuyStatus.pending_start]))
+        assert result == {MediaBuyStatus.pending_start}
 
 
 class TestFetchTargetMediaBuys:
@@ -168,6 +347,7 @@ class TestFetchTargetMediaBuys:
         mock_repo.get_by_principal.return_value = buys
         mock_uow = MagicMock()
         mock_uow.media_buys = mock_repo
+        mock_uow.media_buys.find_by_idempotency_key.return_value = None
         return _fetch_target_media_buys(req, "principal_1", mock_uow, self.TODAY)
 
     def test_media_buy_ids_with_status_filter_excludes_non_matching(self):
@@ -280,8 +460,8 @@ class TestGetMediaBuysImpl:
         mock_adapter.get_packages_snapshot = MagicMock()
 
         with patch("src.core.tools.media_buy_list.get_adapter", return_value=mock_adapter):
-            req = self._make_request()
-            _get_media_buys_impl(req, identity=make_identity(), include_snapshot=False)
+            req = self._make_request(include_snapshot=False)
+            _get_media_buys_impl(req, identity=make_identity())
 
         mock_adapter.get_packages_snapshot.assert_not_called()
 
@@ -318,10 +498,17 @@ class TestGetMediaBuysImpl:
         mock_adapter.capabilities.supports_realtime_reporting = True
         mock_adapter.get_packages_snapshot.return_value = {"buy_1": {"pkg_1": snapshot}}
 
-        with patch("src.core.tools.media_buy_list.get_adapter", return_value=mock_adapter):
-            req = self._make_request()
-            response = _get_media_buys_impl(req, identity=make_identity(), include_snapshot=True)
+        identity = make_identity()
+        with patch("src.core.tools.media_buy_list.get_adapter", return_value=mock_adapter) as mock_get_adapter:
+            req = self._make_request(include_snapshot=True)
+            response = _get_media_buys_impl(req, identity=identity)
 
+        mock_get_adapter.assert_called_once_with(
+            mock_principal_obj.return_value,
+            dry_run=False,
+            testing_context=None,
+            tenant=identity.tenant,
+        )
         mock_adapter.get_packages_snapshot.assert_called_once()
         # The package_refs passed should include the platform_line_item_id
         call_args = mock_adapter.get_packages_snapshot.call_args[0][0]
@@ -356,8 +543,8 @@ class TestGetMediaBuysImpl:
         mock_adapter.capabilities.supports_realtime_reporting = False
 
         with patch("src.core.tools.media_buy_list.get_adapter", return_value=mock_adapter):
-            req = self._make_request()
-            response = _get_media_buys_impl(req, identity=make_identity(), include_snapshot=True)
+            req = self._make_request(include_snapshot=True)
+            response = _get_media_buys_impl(req, identity=make_identity())
 
         pkg_response = response.media_buys[0].packages[0]
         assert pkg_response.snapshot is None
@@ -370,6 +557,153 @@ class TestGetMediaBuysImpl:
         req = self._make_request()
         with pytest.raises(AdCPAuthenticationError, match="Identity is required"):
             _get_media_buys_impl(req, None)
+
+    @patch("src.core.tools.media_buy_list.MediaBuyUoW")
+    @patch("src.core.tools.media_buy_list.get_principal_object")
+    @patch("src.core.tools.media_buy_list._fetch_target_media_buys")
+    @patch("src.core.tools.media_buy_list._fetch_packages")
+    @patch("src.core.tools.media_buy_list._fetch_creative_approvals")
+    def test_account_in_request_does_not_raise(
+        self,
+        mock_fetch_approvals,
+        mock_fetch_packages,
+        mock_fetch_buys,
+        mock_principal_obj,
+        mock_uow_cls,
+    ):
+        """A request with ``account`` set MUST NOT raise.
+
+        Per AdCP spec, ``account`` on GetMediaBuysRequest is an optional scoping
+        hint, not a hostile field. The principal already scopes to a tenant, so
+        an explicit account reference (used by storyboards and buyer agents to
+        route requests) must be tolerated. Rejecting it caused the
+        media_buy_seller/inventory_list_targeting/get_after_create scenario to
+        surface ``Platform method 'get_media_buys' raised AdCPValidationError``.
+        """
+        from adcp.types import AccountReference
+
+        mock_principal_obj.return_value = MagicMock(principal_id="principal_1")
+        mock_fetch_buys.return_value = []
+        mock_fetch_packages.return_value = {}
+        mock_fetch_approvals.return_value = {}
+
+        req = self._make_request(
+            account=AccountReference.model_validate(
+                {
+                    "brand": {"domain": "acmeoutdoor.example"},
+                    "operator": "pinnacle-agency.example",
+                    "sandbox": True,
+                }
+            ),
+        )
+        # Must not raise.
+        response = _get_media_buys_impl(req, identity=make_identity())
+        assert response.media_buys == []
+
+    @patch("src.core.tools.media_buy_list.MediaBuyUoW")
+    @patch("src.core.tools.media_buy_list.get_principal_object")
+    @patch("src.core.tools.media_buy_list._fetch_target_media_buys")
+    @patch("src.core.tools.media_buy_list._fetch_packages")
+    @patch("src.core.tools.media_buy_list._fetch_creative_approvals")
+    def test_targeting_overlay_with_property_list_echoed_back(
+        self,
+        mock_fetch_approvals,
+        mock_fetch_packages,
+        mock_fetch_buys,
+        mock_principal_obj,
+        mock_uow_cls,
+    ):
+        """Per AdCP spec ``Package.targeting_overlay``: sellers MUST echo back
+        the persisted targeting on get_media_buys, including PropertyListReference
+        / CollectionListReference for sellers claiming the list-targeting
+        specialisms.
+        """
+        mock_principal_obj.return_value = MagicMock(principal_id="principal_1")
+
+        buy = make_media_buy(start_date=date(2020, 1, 1), end_date=date(2099, 12, 31))
+        package_config = {
+            "targeting_overlay": {
+                "property_list": {
+                    "agent_url": "https://governance.pinnacle-agency.example",
+                    "list_id": "acme_outdoor_allowlist_v1",
+                },
+                "collection_list": {
+                    "agent_url": "https://governance.pinnacle-agency.example",
+                    "list_id": "acme_outdoor_collections_v1",
+                },
+            },
+        }
+        pkg = make_package(package_config=package_config)
+        mock_fetch_buys.return_value = [buy]
+        mock_fetch_packages.return_value = {"buy_1": [pkg]}
+        mock_fetch_approvals.return_value = {}
+
+        req = self._make_request()
+        response = _get_media_buys_impl(req, identity=make_identity())
+
+        assert len(response.media_buys) == 1
+        package = response.media_buys[0].packages[0]
+        assert package.targeting_overlay is not None
+        assert package.targeting_overlay.property_list is not None
+        assert package.targeting_overlay.property_list.list_id == "acme_outdoor_allowlist_v1"
+        assert package.targeting_overlay.collection_list is not None
+        assert package.targeting_overlay.collection_list.list_id == "acme_outdoor_collections_v1"
+
+    @patch("src.core.tools.media_buy_list.MediaBuyUoW")
+    @patch("src.core.tools.media_buy_list._fetch_target_media_buys")
+    @patch("src.core.tools.media_buy_list._fetch_packages")
+    @patch("src.core.tools.media_buy_list._fetch_creative_approvals")
+    def test_does_not_rely_on_thread_local_tenant_context(
+        self,
+        mock_fetch_approvals,
+        mock_fetch_packages,
+        mock_fetch_buys,
+        mock_uow_cls,
+    ):
+        """_impl must pass identity.tenant_id explicitly — never depend on thread-local.
+
+        Regression for production RuntimeError("No tenant context set") on the
+        deployed Wonderstruck staging:
+
+            File "/app/src/core/tools/media_buy_list.py", line 115, in _get_media_buys_impl
+                principal = get_principal_object(principal_id)
+            File "/app/src/core/auth.py", line 294, in get_principal_object
+                tenant = get_current_tenant()
+            File "/app/src/core/config_loader.py", line 93, in get_current_tenant
+                raise RuntimeError("No tenant context set...")
+
+        ``_impl`` is transport-agnostic — the MCP transport does not set the
+        thread-local tenant ContextVar before invoking it. The fix is to pass
+        ``tenant_id=identity.tenant_id`` so ``get_principal_object`` skips the
+        ``get_current_tenant()`` fallback entirely.
+
+        We patch ``src.core.auth.get_current_tenant`` to raise. If ``_impl``
+        passes ``tenant_id`` explicitly, ``get_principal_object`` never reaches
+        that branch and the call succeeds.
+        """
+        mock_fetch_buys.return_value = []
+        mock_fetch_packages.return_value = {}
+        mock_fetch_approvals.return_value = {}
+
+        with patch(
+            "src.core.auth.get_current_tenant",
+            side_effect=RuntimeError("thread-local tenant context must not be read by _impl"),
+        ):
+            with patch("src.core.auth.get_db_session") as mock_db:
+                # Make get_principal_object return a principal-shaped row
+                principal_row = MagicMock()
+                principal_row.principal_id = "principal_1"
+                principal_row.name = "Test Principal"
+                principal_row.platform_mappings = {}
+                mock_session = MagicMock()
+                mock_session.scalars.return_value.first.return_value = principal_row
+                mock_db.return_value.__enter__.return_value = mock_session
+
+                req = self._make_request()
+                # Must not raise RuntimeError: identity.tenant_id satisfies the lookup.
+                response = _get_media_buys_impl(req, identity=make_identity())
+
+        assert response.media_buys == []
 
 
 class TestGetMediaBuysResponseStructure:
@@ -441,7 +775,9 @@ class TestGetMediaBuysResponseStructure:
         approval = pkg["creative_approvals"][0]
         assert isinstance(approval, dict), f"Expected dict, got {type(approval)}"
         assert approval["creative_id"] == "cr_1"
-        assert approval["approval_status"] == ApprovalStatus.approved
+        # CreativeApproval extends the library type per Pattern #1; approval_status
+        # comes back as the library's CreativeApprovalStatus enum, so compare on .value.
+        assert approval["approval_status"].value == ApprovalStatus.approved.value
 
         # Snapshot should be a dict
         snap = pkg["snapshot"]
@@ -450,30 +786,12 @@ class TestGetMediaBuysResponseStructure:
 
     def test_media_buy_status_values(self):
         """MediaBuyStatus enum values match AdCP spec strings."""
-        assert MediaBuyStatus.pending_activation.value == "pending_activation"
+        assert MediaBuyStatus.pending_start.value == "pending_start"
         assert MediaBuyStatus.active.value == "active"
         assert MediaBuyStatus.completed.value == "completed"
 
 
 # ---------------------------------------------------------------------------
-# Security regression: internal flags must not be in request objects
+# include_snapshot is buyer-facing per AdCP spec — extends LibraryGetMediaBuysRequest.
+# Snapshot semantics are exercised in TestGetMediaBuysImpl above.
 # ---------------------------------------------------------------------------
-
-
-class TestGetMediaBuysRequestRejectsInternalFlags:
-    """Regression: internal behavior flags must NOT be accepted by GetMediaBuysRequest.
-
-    External callers must never control _impl behavior through the request object.
-    Flags like include_snapshot are passed as explicit _impl parameters by transport
-    wrappers, not embedded in the request.
-    """
-
-    def test_include_snapshot_rejected(self):
-        """include_snapshot must NOT be accepted by GetMediaBuysRequest."""
-        with pytest.raises(ValidationError):
-            GetMediaBuysRequest(include_snapshot=True)
-
-    def test_include_snapshot_false_also_rejected(self):
-        """Even include_snapshot=False must be rejected — the field doesn't belong here."""
-        with pytest.raises(ValidationError):
-            GetMediaBuysRequest(include_snapshot=False)

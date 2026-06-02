@@ -44,31 +44,45 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
     )
 
 
+from src.adapters.broadstreet import BroadstreetAdapter
+from src.adapters.freewheel import FreeWheelAdapter
 from src.adapters.google_ad_manager import GoogleAdManager
-from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
-from src.adapters.triton_digital import TritonDigital
+from src.adapters.springserve import SpringServeAdapter
+from src.adapters.triton import TritonAdapter
 from src.core.database.database_session import get_db_session
+from src.core.platform_mappings import resolve_adapter_id
 from src.core.schemas import Principal
+
+
+def _tenant_default_gam_advertiser_id(tenant: Any) -> str | None:
+    if isinstance(tenant, dict):
+        return tenant.get("default_gam_advertiser_id")
+    return getattr(tenant, "default_gam_advertiser_id", None)
+
+
+def _principal_gam_advertiser_id(principal: Principal) -> str | None:
+    return resolve_adapter_id(principal.platform_mappings, "gam")
 
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
+) -> MockAdServerAdapter | GoogleAdManager | TritonAdapter | FreeWheelAdapter | BroadstreetAdapter | SpringServeAdapter:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
         principal: The authenticated principal
         dry_run: Whether to run in dry-run mode
         testing_context: Optional test context for simulations
-        tenant: Tenant context (from identity.tenant). Falls back to ContextVar if not provided.
+        tenant: Tenant context (from identity.tenant). Tool impls and threaded/background callers should pass this
+            explicitly; the ContextVar fallback is only a compatibility path for legacy callers.
     """
     import logging
 
     logger = logging.getLogger(__name__)
 
     if tenant is None:
-        # Fallback for callers that haven't been updated yet (e.g., async approval handlers)
+        # Compatibility fallback only. New impl, worker-thread, and background paths must pass tenant explicitly.
         from src.core.config_loader import get_current_tenant
 
         tenant = get_current_tenant()
@@ -81,7 +95,7 @@ def get_adapter(
         # ORM model (Tenant) — use attribute access
         tenant_id = tenant.tenant_id
         selected_adapter = tenant.ad_server or "mock"
-    logger.info(f"[ADAPTER_SELECT] Initial selected_adapter from tenant.ad_server: {selected_adapter}")
+    logger.debug(f"[ADAPTER_SELECT] Initial selected_adapter from tenant.ad_server: {selected_adapter}")
 
     # Get adapter config via repository
     from src.core.database.repositories.adapter_config import AdapterConfigRepository
@@ -96,11 +110,11 @@ def get_adapter(
         adapter_config: dict[str, Any] = {"enabled": True}
         if config_row:
             adapter_type = config_row.adapter_type
-            logger.info(f"[ADAPTER_SELECT] adapter_type from AdapterConfig: {adapter_type}")
+            logger.debug(f"[ADAPTER_SELECT] adapter_type from AdapterConfig: {adapter_type}")
             # Use adapter_type from AdapterConfig as the source of truth
             if adapter_type:
                 selected_adapter = adapter_type
-                logger.info(f"[ADAPTER_SELECT] Using AdapterConfig.adapter_type: {selected_adapter}")
+                logger.debug(f"[ADAPTER_SELECT] Using AdapterConfig.adapter_type: {selected_adapter}")
             if adapter_type == "mock":
                 adapter_config["dry_run"] = config_row.mock_dry_run or False
                 # Default to True (require approval) for safety
@@ -114,39 +128,90 @@ def get_adapter(
                 targeting_config = repo.get_gam_targeting_config(config_row)
                 naming_templates = repo.get_gam_naming_templates(config_row)
 
-                # Get advertiser_id from principal's platform_mappings (per-principal, not tenant-level)
-                # Support both old format (nested under "google_ad_manager") and new format (root "gam_advertiser_id")
-                advertiser_id: str | None = None
-                if principal.platform_mappings:
-                    # Try nested format first
-                    gam_mappings = principal.platform_mappings.get("google_ad_manager", {})
-                    advertiser_id = gam_mappings.get("advertiser_id")
-                    logger.info(
-                        f"[ADAPTER_CONFIG] principal_id={principal.principal_id}, platform_mappings={principal.platform_mappings}, gam_mappings={gam_mappings}, advertiser_id={advertiser_id}"
+                # Buyer-specific mapping wins; tenant default is the fallback
+                # before GAM order creation fails closed.
+                advertiser_id = _principal_gam_advertiser_id(principal)
+                if advertiser_id:
+                    logger.debug(
+                        f"[ADAPTER_CONFIG] principal_id={principal.principal_id}, "
+                        f"resolved buyer-specific GAM advertiser_id={advertiser_id}"
                     )
-
-                    # Fall back to root-level format if nested not found
-                    if not advertiser_id:
-                        advertiser_id = principal.platform_mappings.get("gam_advertiser_id")
-                        logger.info(f"[ADAPTER_CONFIG] Fell back to root-level gam_advertiser_id: {advertiser_id}")
-
-                    adapter_config["company_id"] = advertiser_id
-                    logger.info(f"[ADAPTER_CONFIG] Set adapter_config['company_id']={advertiser_id}")
                 else:
-                    adapter_config["company_id"] = None
-                    logger.info("[ADAPTER_CONFIG] principal.platform_mappings is None/empty, set company_id=None")
-            elif adapter_type == "kevel":
-                adapter_config["network_id"] = config_row.kevel_network_id or ""
-                adapter_config["api_key"] = config_row.kevel_api_key or ""
-                # Default to True (require approval) for safety
-                adapter_config["manual_approval_required"] = (
-                    config_row.kevel_manual_approval_required
-                    if config_row.kevel_manual_approval_required is not None
-                    else True
-                )
-            elif adapter_type == "triton":
-                adapter_config["station_id"] = config_row.triton_station_id or ""
-                adapter_config["api_key"] = config_row.triton_api_key or ""
+                    advertiser_id = _tenant_default_gam_advertiser_id(tenant)
+                    logger.debug(
+                        f"[ADAPTER_CONFIG] principal_id={principal.principal_id}, "
+                        f"using tenant default GAM advertiser_id={advertiser_id}"
+                    )
+                adapter_config["company_id"] = advertiser_id
+            elif adapter_type in {"triton", "triton_digital"}:
+                # Triton credentials live in config_json. Rehydrate via the
+                # connection schema so the field validator decrypts password,
+                # then pull each field through attribute access — model_dump()
+                # would re-run the field_serializer and re-encrypt, which would
+                # ship ciphertext to the upstream login endpoint instead of
+                # plaintext.
+                stored = config_row.config_json or {}
+                if stored:
+                    triton_validated = TritonAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "auth_type": triton_validated.auth_type,
+                            "username": triton_validated.username,
+                            "password": triton_validated.password,
+                            "base_url": triton_validated.base_url,
+                            "login_url": triton_validated.login_url,
+                            "default_advertiser_id": triton_validated.default_advertiser_id,
+                            "manual_approval_required": triton_validated.manual_approval_required,
+                        }
+                    )
+            elif adapter_type == "freewheel":
+                # FreeWheel credentials live in config_json. Same plaintext-via-
+                # attribute-access requirement as Triton above — model_dump()
+                # would re-encrypt password/api_token before they reach the
+                # HTTP layer.
+                stored = config_row.config_json or {}
+                if stored:
+                    fw_validated = FreeWheelAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "username": fw_validated.username,
+                            "password": fw_validated.password,
+                            "api_token": fw_validated.api_token,
+                            "environment": fw_validated.environment,
+                            "default_advertiser_id": fw_validated.default_advertiser_id,
+                            "manual_approval_required": fw_validated.manual_approval_required,
+                        }
+                    )
+            elif adapter_type == "broadstreet":
+                stored = config_row.config_json or {}
+                if stored:
+                    bs_validated = BroadstreetAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "network_id": bs_validated.network_id,
+                            "api_key": bs_validated.api_key,
+                            "default_advertiser_id": bs_validated.default_advertiser_id,
+                            "campaign_name_template": bs_validated.campaign_name_template,
+                            "manual_approval_required": bs_validated.manual_approval_required,
+                        }
+                    )
+            elif adapter_type == "springserve":
+                stored = config_row.config_json or {}
+                if stored:
+                    ss_validated = SpringServeAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "email": ss_validated.email,
+                            "password": ss_validated.password,
+                            "api_token": ss_validated.api_token,
+                            "environment": ss_validated.environment,
+                            "default_demand_partner_id": ss_validated.default_demand_partner_id,
+                            "rate_currency": ss_validated.rate_currency,
+                            "demand_class": ss_validated.demand_class,
+                            "enable_key_value_targeting": ss_validated.enable_key_value_targeting,
+                            "manual_approval_required": ss_validated.manual_approval_required,
+                        }
+                    )
 
     if not selected_adapter:
         # Default to mock if no adapter specified
@@ -155,9 +220,9 @@ def get_adapter(
             adapter_config = {"enabled": True}
 
     # Create the appropriate adapter instance with tenant_id and testing context
-    logger.info(f"[ADAPTER_SELECT] FINAL selected_adapter: {selected_adapter}")
+    logger.debug(f"[ADAPTER_SELECT] FINAL selected_adapter: {selected_adapter}")
     if selected_adapter == "mock":
-        logger.info("[ADAPTER_SELECT] Instantiating MockAdServerAdapter")
+        logger.debug("[ADAPTER_SELECT] Instantiating MockAdServerAdapter")
         return MockAdServerAdapter(
             adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
         )
@@ -167,8 +232,8 @@ def get_adapter(
         if not network_code or not isinstance(network_code, str):
             raise ValueError("network_code is required for GoogleAdManager adapter")
 
-        logger.info("[ADAPTER_SELECT] Instantiating GoogleAdManager")
-        logger.info(
+        logger.debug("[ADAPTER_SELECT] Instantiating GoogleAdManager")
+        logger.debug(
             f"[ADAPTER_SELECT] GAM params: network_code={adapter_config.get('network_code')}, advertiser_id={adapter_config.get('company_id')}, trafficker_id={adapter_config.get('trafficker_id')}, dry_run={dry_run}"
         )
         return GoogleAdManager(
@@ -182,10 +247,14 @@ def get_adapter(
             targeting_config=targeting_config,
             naming_templates=naming_templates,
         )
-    elif selected_adapter == "kevel":
-        return Kevel(adapter_config, principal, dry_run, tenant_id=tenant_id)
-    elif selected_adapter in ["triton", "triton_digital"]:
-        return TritonDigital(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter in {"triton", "triton_digital"}:
+        return TritonAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "freewheel":
+        return FreeWheelAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "broadstreet":
+        return BroadstreetAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "springserve":
+        return SpringServeAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
         # Default to mock for unsupported adapters
         return MockAdServerAdapter(

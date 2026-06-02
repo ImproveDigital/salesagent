@@ -91,6 +91,7 @@ def _patch_happy_path(
     # Mock MediaBuyUoW to prevent real DB connections
     mock_uow = MagicMock()
     mock_uow.media_buys = MagicMock()
+    mock_uow.media_buys.find_by_idempotency_key.return_value = None
     mock_uow.__enter__ = Mock(return_value=mock_uow)
     mock_uow.__exit__ = Mock(return_value=False)
     stack.enter_context(
@@ -274,6 +275,7 @@ class TestHighRiskMCP:
 
         mock_uow = MagicMock()
         mock_uow.media_buys = MagicMock()
+        mock_uow.media_buys.find_by_idempotency_key.return_value = None
         mock_uow.__enter__ = Mock(return_value=mock_uow)
         mock_uow.__exit__ = Mock(return_value=False)
 
@@ -346,75 +348,6 @@ class TestHighRiskMCP:
 
 
 # ===========================================================================
-# HIGH_RISK A2A-specific tests (H8-H9)
-# ===========================================================================
-
-
-class TestHighRiskA2A:
-    """HIGH_RISK behavioral tests for the A2A path."""
-
-    # H8 ---------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_a2a_validation_error_missing_params(self):
-        """H8: A2A handler returns validation error dict when params are empty.
-
-        Covers: #30 T-UC-009-ext-b-rest
-        Identity is resolved at transport boundary so the handler receives it directly.
-        """
-        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-
-        handler = AdCPRequestHandler()
-        mock_identity = _make_identity()
-
-        result = await handler._handle_update_performance_index_skill(
-            parameters={},
-            identity=mock_identity,
-        )
-
-        assert isinstance(result, dict)
-        assert result["success"] is False
-        assert "required_parameters" in result
-        assert result["required_parameters"] == ["media_buy_id", "performance_data"]
-
-    # H9 ---------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_a2a_happy_path_correct_params(self):
-        """H9: A2A handler with correct params delegates to shared impl successfully.
-
-        Covers: #4 T-UC-009-main-rest
-        """
-        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-
-        handler = AdCPRequestHandler()
-        mock_identity = _make_identity()
-
-        with patch(
-            "src.a2a_server.adcp_a2a_server.core_update_performance_index_tool",
-        ) as mock_core_tool:
-            # The A2A handler calls update_performance_index_raw which returns the response
-            from src.core.schemas import UpdatePerformanceIndexResponse
-
-            mock_response = UpdatePerformanceIndexResponse(
-                status="success",
-                detail="Performance index updated for 1 products",
-            )
-            mock_core_tool.return_value = mock_response
-
-            result = await handler._handle_update_performance_index_skill(
-                parameters={
-                    "media_buy_id": "mb_test_123",
-                    "performance_data": [{"product_id": "p1", "performance_index": 1.25}],
-                },
-                identity=mock_identity,
-            )
-
-        # Handler delegates to core tool and returns its result
-        mock_core_tool.assert_called_once()
-        # Result should be the response object (not just routing metadata)
-        assert result is mock_response
-
-
-# ===========================================================================
 # Error path and edge case tests (E1-E8)
 # Reference: beads salesagent-7xc7
 # ===========================================================================
@@ -473,6 +406,7 @@ class TestErrorPaths:
 
         mock_uow = MagicMock()
         mock_uow.media_buys = MagicMock()
+        mock_uow.media_buys.find_by_idempotency_key.return_value = None
         mock_uow.__enter__ = Mock(return_value=mock_uow)
         mock_uow.__exit__ = Mock(return_value=False)
 
@@ -498,6 +432,7 @@ class TestErrorPaths:
 
         mock_uow = MagicMock()
         mock_uow.media_buys = MagicMock()
+        mock_uow.media_buys.find_by_idempotency_key.return_value = None
         mock_uow.__enter__ = Mock(return_value=mock_uow)
         mock_uow.__exit__ = Mock(return_value=False)
 

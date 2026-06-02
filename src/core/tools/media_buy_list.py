@@ -13,17 +13,19 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, cast
 
-from fastmcp.exceptions import ToolError
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-from pydantic import RootModel, ValidationError
+from pydantic import RootModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.tool_context import ToolContext
+from src.core.tracing import traced
 
 logger = logging.getLogger(__name__)
+
+
+def _confirmed_at_for_wire(confirmed_at: datetime | None, created_at: datetime | None) -> datetime:
+    """Return a protocol-required commitment timestamp for legacy rows."""
+    return confirmed_at or created_at or datetime.now(UTC)
 
 
 @dataclass
@@ -40,6 +42,16 @@ class _MediaBuyData:
     raw_request: dict | None
     created_at: datetime | None
     updated_at: datetime | None
+    revision: int = 1
+    approved_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    # Persisted MediaBuy.status from the DB. Honored by ``_compute_status``
+    # for blocker / terminal states (pending_creatives, paused, rejected,
+    # canceled) that no clock can resolve.
+    status: str | None = None
+    # Pre-computed status for projected GAM buys (whose state comes from
+    # GAM, not just flight dates). None means use the date-derived status.
+    projected_status: object | None = None
 
 
 @dataclass
@@ -53,13 +65,12 @@ class _PackageData:
     bid_price: Decimal | None
 
 
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+from adcp.types import MediaBuyStatus
 
 from src.core.auth import get_principal_object
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyUoW
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import AdCPAuthenticationError
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.schemas import (
     ApprovalStatus,
@@ -70,31 +81,42 @@ from src.core.schemas import (
     GetMediaBuysResponse,
     Snapshot,
     SnapshotUnavailableReason,
+    Targeting,
 )
-from src.core.validation_helpers import format_validation_error
+from src.core.tools._gam_projection import (
+    build_buy_ext,
+    build_package_ext,
+    line_item_to_package_fields,
+    order_to_media_buy_fields,
+    project_gam_status,
+    project_orders_for_principal,
+)
 
 
+@traced
 def _get_media_buys_impl(
     req: GetMediaBuysRequest,
     identity: ResolvedIdentity | None = None,
-    include_snapshot: bool = False,
 ) -> GetMediaBuysResponse:
     """Get media buys with status, creative approval state, and optional delivery snapshots.
 
     Args:
-        req: Validated GetMediaBuysRequest with all protocol fields
+        req: Validated GetMediaBuysRequest with all protocol fields, including
+            ``include_snapshot`` (per AdCP spec) which when true causes each
+            package to carry a near-real-time delivery snapshot.
         identity: ResolvedIdentity with principal/tenant info (transport-agnostic)
-        include_snapshot: When True, include near-real-time delivery stats per package.
-            This is an internal flag controlled by transport wrappers, not by the request object.
 
     Returns:
         GetMediaBuysResponse with matching media buys
     """
+    include_snapshot = bool(req.include_snapshot)
     if identity is None:
         raise AdCPAuthenticationError("Identity is required")
 
-    if req.account is not None or req.account_id is not None:
-        raise AdCPValidationError("account filtering is not yet supported", recovery="correctable")
+    # ``req.account`` is an optional spec-defined scoping hint. The principal
+    # already scopes to a tenant, so we tolerate the field rather than reject
+    # the request — buyer agents (and storyboards) routinely pass it for
+    # routing context, not as a hostile filter.
 
     testing_ctx = identity.testing_context
     principal_id = identity.principal_id
@@ -104,7 +126,7 @@ def _get_media_buys_impl(
             errors=[{"code": "principal_id_missing", "message": "Principal ID not found in context"}],
         )
 
-    principal = get_principal_object(principal_id)
+    principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
     if not principal:
         return GetMediaBuysResponse(
             media_buys=[],
@@ -131,6 +153,34 @@ def _get_media_buys_impl(
         # Resolve package configs for all media buys in one batch query
         packages_by_media_buy = _fetch_packages(all_media_buy_ids, uow)
 
+        # Project GAM orders + line items for advertisers assigned to this
+        # principal. Projected buys appear alongside native ones; they have
+        # no creative approvals and their snapshots are looked up by
+        # platform_line_item_id like any other adapter package.
+        projected_buys, projected_packages = _project_gam_buys(
+            uow.session,
+            tenant_id,
+            principal_id,
+            req,
+            today,
+        )
+        target_media_buys.extend(projected_buys)
+        for media_buy_id, packages in projected_packages.items():
+            packages_by_media_buy[media_buy_id] = packages
+
+        # Webhook activity opt-in (#101). When ``ext.psa.include_webhook_activity``
+        # is true, fetch recent webhook_delivery_log rows for the
+        # returned buys (scoped to the calling principal so a buyer
+        # only sees its own deliveries even if multiple agents share
+        # visibility into the same buy).
+        webhook_activity_by_buy = _fetch_webhook_activity(
+            req,
+            uow.session,
+            tenant_id,
+            principal_id,
+            [b.media_buy_id for b in target_media_buys],
+        )
+
     # Get snapshots from adapter if requested
     snapshot_data: dict[str, dict[str, Snapshot | None]] = {}  # media_buy_id -> package_id -> Snapshot
     unavailable_reason: SnapshotUnavailableReason | None = None
@@ -140,6 +190,7 @@ def _get_media_buys_impl(
             principal,
             dry_run=testing_ctx.dry_run if testing_ctx else False,
             testing_context=testing_ctx,
+            tenant=tenant,
         )
         if adapter.capabilities.supports_realtime_reporting:
             # Build list of (media_buy_id, package_id, platform_line_item_id) for the adapter
@@ -185,14 +236,25 @@ def _get_media_buys_impl(
                     start_time=pkg_config.get("start_time"),
                     end_time=pkg_config.get("end_time"),
                     paused=pkg_config.get("paused"),
+                    targeting_overlay=_build_targeting_overlay(pkg_config),
                     creative_approvals=approvals if approvals else None,
                     snapshot=snapshot,
                     snapshot_unavailable_reason=snapshot_unavailable if include_snapshot else None,
+                    ext=build_package_ext(pkg_config),
                 )
             )
 
         total_budget = float(buy.budget) if buy.budget else 0.0
         buyer_campaign_ref = (buy.raw_request or {}).get("buyer_campaign_ref")
+
+        # Build the response ``ext`` field. ``ext.gam`` carries import
+        # provenance for projected/materialized GAM buys; ``ext.psa``
+        # carries publisher-side activity (webhook deliveries, future
+        # PSA-specific surfaces). Both vendors coexist under the same dict.
+        buy_ext = build_buy_ext(buy.raw_request)
+        webhook_deliveries = webhook_activity_by_buy.get(buy.media_buy_id)
+        if webhook_deliveries is not None:
+            buy_ext = (buy_ext or {}) | {"psa": {"webhook_deliveries": webhook_deliveries}}
 
         response_media_buys.append(
             GetMediaBuysMediaBuy(
@@ -204,6 +266,9 @@ def _get_media_buys_impl(
                 packages=response_packages,
                 created_at=buy.created_at,
                 updated_at=buy.updated_at,
+                revision=getattr(buy, "revision", 1) or 1,
+                confirmed_at=_confirmed_at_for_wire(buy.confirmed_at, buy.created_at),
+                ext=buy_ext,
             )
         )
 
@@ -213,82 +278,86 @@ def _get_media_buys_impl(
     )
 
 
-async def get_media_buys(
-    media_buy_ids: list[str] | None = None,
-    status_filter: MediaBuyStatus | list[MediaBuyStatus] | None = None,
-    include_snapshot: bool = False,
-    account: dict | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-):
-    """Get media buys with status, creative approval state, and optional delivery snapshots.
+_WEBHOOK_ACTIVITY_DEFAULT_LIMIT = 50
+_WEBHOOK_ACTIVITY_MAX_LIMIT = 200
 
-    MCP tool wrapper that resolves identity and delegates to the shared implementation.
 
-    Args:
-        media_buy_ids: Array of publisher media buy IDs to retrieve (optional)
-        status_filter: Filter by status - single status or array of MediaBuyStatus values (optional)
-        include_snapshot: When true, include near-real-time delivery stats per package (default: false)
-        account: Account reference per AdCP 3.x (optional). Legacy account_id is normalized by middleware.
-        context: Application level context object (optional)
-        ctx: FastMCP context (automatically provided)
+def _fetch_webhook_activity(
+    req: GetMediaBuysRequest,
+    session: Session,
+    tenant_id: str,
+    principal_id: str,
+    media_buy_ids: list[str],
+) -> dict[str, list[dict]]:
+    """Build the per-buy webhook delivery list when ``ext.psa`` opted in.
 
-    Returns:
-        ToolResult with GetMediaBuysResponse data
+    Returns a map of ``media_buy_id -> [delivery_dicts]``. Empty dict
+    when the request didn't opt in (so the caller can skip the merge
+    cheaply). Deliveries are scoped to the calling principal so a
+    buyer agent only sees its own webhook history even when multiple
+    agents share access to the same media buy.
     """
+    ext = req.ext or {}
+    psa = ext.get("psa") or {}
+    if not psa.get("include_webhook_activity"):
+        return {}
+    if not media_buy_ids:
+        return {}
+
+    raw_limit = psa.get("webhook_activity_limit", _WEBHOOK_ACTIVITY_DEFAULT_LIMIT)
     try:
-        req = GetMediaBuysRequest(
-            media_buy_ids=media_buy_ids,
-            status_filter=cast(MediaBuyStatus | list[MediaBuyStatus] | None, status_filter),
-            account=account,
-            context=cast(ContextObject | None, context),
-        )
-        # Read identity pre-resolved by MCPAuthMiddleware
-        identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-        response = _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
-        return ToolResult(content=str(response), structured_content=response)
-    except ValidationError as e:
-        raise ToolError(format_validation_error(e, context="get_media_buys request"))
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        limit = _WEBHOOK_ACTIVITY_DEFAULT_LIMIT
+    limit = max(1, min(_WEBHOOK_ACTIVITY_MAX_LIMIT, limit))
+
+    from src.core.database.repositories.delivery import DeliveryRepository
+
+    repo = DeliveryRepository(session, tenant_id)
+    activity: dict[str, list[dict]] = {}
+    for media_buy_id in media_buy_ids:
+        rows = repo.list_logs_for_buyer(media_buy_id, principal_id, limit=limit)
+        activity[media_buy_id] = [
+            {
+                "delivery_id": row.id,
+                "fired_at": row.created_at.isoformat() if row.created_at else None,
+                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+                "task_type": row.task_type,
+                "notification_type": row.notification_type,
+                "sequence_number": row.sequence_number,
+                "attempt": row.attempt_count,
+                "status": row.status,
+                "url": _redact_url_query(row.webhook_url),
+                "http_status_code": row.http_status_code,
+                "response_time_ms": row.response_time_ms,
+                "payload_size_bytes": row.payload_size_bytes,
+                "error_message": row.error_message,
+                # Bodies are pre-truncated at insert time (DeliveryRepository
+                # caps at 64KB). Surface as-is — buyers wanting full payload
+                # debug get what we stored.
+                "request_payload": row.request_payload,
+                "response_body": row.response_body,
+            }
+            for row in rows
+        ]
+    return activity
 
 
-def get_media_buys_raw(
-    media_buy_ids: list[str] | None = None,
-    status_filter: MediaBuyStatus | list[MediaBuyStatus] | None = None,
-    include_snapshot: bool = False,
-    account: dict | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """Get media buys (raw function for A2A server use).
+def _redact_url_query(url: str | None) -> str | None:
+    """Strip query string from a webhook URL before echoing to buyers.
 
-    Args:
-        media_buy_ids: Array of publisher media buy IDs to retrieve (optional)
-        status_filter: Filter by status - single status or array of MediaBuyStatus values (optional)
-        include_snapshot: When true, include near-real-time delivery stats per package (default: false)
-        account: Account reference per AdCP 3.x (optional). Legacy account_id is normalized by middleware.
-        context: Application level context (optional)
-        ctx: Context for authentication (used if identity not pre-resolved)
-        identity: Pre-resolved identity (preferred over ctx)
-
-    Returns:
-        GetMediaBuysResponse
+    Why: buyer-configured webhook URLs commonly carry bearer tokens or
+    signed-URL parameters in the query string. Even though the buyer
+    sent the URL to us originally, surfacing it back in API responses
+    risks accidental disclosure (screenshots, logs, third-party agents
+    in the buyer pipeline). Path is preserved for debug value.
     """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
+    if not url:
+        return url
+    from urllib.parse import urlsplit, urlunsplit
 
-        identity = resolve_identity_from_context(ctx, require_valid_token=True, protocol="a2a")
-
-    req = GetMediaBuysRequest(
-        media_buy_ids=media_buy_ids,
-        status_filter=cast(MediaBuyStatus | list[MediaBuyStatus] | None, status_filter),
-        account=account,
-        context=cast(ContextObject | None, context),
-    )
-    return _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
-
-
-# --- Helper functions ---
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _fetch_target_media_buys(
@@ -299,7 +368,14 @@ def _fetch_target_media_buys(
 ) -> list[_MediaBuyData]:
     """Fetch media buys from database matching the request filters."""
     assert uow.media_buys is not None
-    filter_statuses = _resolve_status_filter(req.status_filter)
+    # When the buyer explicitly names ``media_buy_ids`` *and* didn't supply a
+    # status_filter, honor the by-id request without applying the default-active
+    # gate — they're asking for those specific buys regardless of state.
+    # Storyboard ``inventory_list_targeting/get_after_create`` reads back a
+    # freshly-created (pending_creatives) buy by id; gating on ``active`` would
+    # silently return ``[]``. An explicit status_filter still narrows results.
+    skip_default_active = bool(req.media_buy_ids) and req.status_filter is None
+    filter_statuses = None if skip_default_active else _resolve_status_filter(req.status_filter)
 
     buys = uow.media_buys.get_by_principal(
         principal_id,
@@ -318,9 +394,13 @@ def _fetch_target_media_buys(
             raw_request=buy.raw_request,
             created_at=buy.created_at,
             updated_at=buy.updated_at,
+            revision=getattr(buy, "revision", 1) or 1,
+            approved_at=buy.approved_at,
+            confirmed_at=buy.confirmed_at,
+            status=buy.status,
         )
         for buy in buys
-        if _compute_status(buy, today) in filter_statuses
+        if filter_statuses is None or _compute_status(buy, today) in filter_statuses
     ]
 
 
@@ -341,16 +421,119 @@ def _resolve_status_filter(
     return {status_filter}
 
 
+# Statuses no clock can resolve: blockers awaiting a buyer / operator action,
+# and terminal explicit states. ``_compute_status`` returns these verbatim from
+# the persisted ``MediaBuy.status`` rather than overwriting them with a
+# date-derived value.
+_BLOCKER_STATUSES: frozenset[str] = frozenset(
+    {
+        MediaBuyStatus.pending_creatives.value,
+        MediaBuyStatus.paused.value,
+        MediaBuyStatus.rejected.value,
+        MediaBuyStatus.canceled.value,
+    }
+)
+
+
+def _to_wire_status(value: Any) -> str | None:
+    """Coerce arbitrary status input to a wire-valid ``MediaBuyStatus`` string.
+
+    Returns ``None`` for values that don't map onto a wire enum member —
+    including persisted-only DB statuses like ``draft`` and ``pending_approval``
+    that the wire schema does not accept.
+
+    Use this at every ``response.status`` emission site that reads from
+    ``MediaBuy.status`` directly (rather than via :func:`_compute_status`).
+    Without this coercion, a legacy persisted value reaches the wire and
+    fastmcp rejects the response with ``INVALID_REQUEST[status]`` (#374).
+
+    The persisted ``MediaBuy.status`` column accepts a broader set than the
+    wire enum: ``draft`` (model default), ``pending_approval`` (manual-approval
+    create path), etc. The wire schema (``MediaBuyStatus``) accepts only the
+    seven AdCP-spec values. Callers that need a guaranteed-non-None status
+    should fall back to :func:`_compute_status` (date-derived).
+    """
+    if value is None:
+        return None
+    if isinstance(value, MediaBuyStatus):
+        return value.value
+    if isinstance(value, str):
+        try:
+            return MediaBuyStatus(value.lower()).value
+        except ValueError:
+            return None
+    return None
+
+
 def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatus:
-    """Compute the current AdCP status of a media buy based on its dates."""
+    """Compute the current AdCP status of a media buy.
+
+    Precedence:
+    1. Projected GAM status (set by ``_project_gam_buys``) wins — GAM is the
+       source of truth for adapter-managed buys.
+    2. Persisted blocker / terminal statuses (``pending_creatives``, ``paused``,
+       ``rejected``, ``canceled``) win over date math — no clock can resolve a
+       missing creative or an explicit operator action.
+    3. Otherwise derive from flight dates: ``pending_start`` / ``active`` /
+       ``completed``.
+    """
+    if isinstance(buy, _MediaBuyData) and buy.projected_status is not None:
+        return cast(MediaBuyStatus, buy.projected_status)
+
+    persisted = (buy.status or "").lower()
+    if persisted in _BLOCKER_STATUSES:
+        return MediaBuyStatus(persisted)
+
     start = buy.start_time.date() if buy.start_time else cast(date, buy.start_date)
     end = buy.end_time.date() if buy.end_time else cast(date, buy.end_date)
 
     if today < start:
-        return MediaBuyStatus.pending_activation
+        return MediaBuyStatus.pending_start
     if today > end:
         return MediaBuyStatus.completed
     return MediaBuyStatus.active
+
+
+def _project_gam_buys(
+    session: Session,
+    tenant_id: str,
+    principal_id: str,
+    req: GetMediaBuysRequest,
+    today: date,
+) -> tuple[list[_MediaBuyData], dict[str, list[_PackageData]]]:
+    """Project GAM orders into _MediaBuyData / _PackageData for the response.
+
+    Applies the same status_filter and media_buy_ids filter as native
+    buys. Status is derived from the GAM order status (PAUSED / CANCELED /
+    DELETED short-circuit) combined with flight dates for non-terminal
+    states.
+    """
+    media_buy_ids_filter = req.media_buy_ids if req.media_buy_ids else None
+    orders, line_items_by_order = project_orders_for_principal(session, tenant_id, principal_id, media_buy_ids_filter)
+    if not orders:
+        return [], {}
+
+    # Mirror ``_fetch_target_media_buys``: explicit ``media_buy_ids`` without
+    # a status_filter bypasses the default-active gate.
+    skip_default_active = bool(media_buy_ids_filter) and req.status_filter is None
+    filter_statuses = None if skip_default_active else _resolve_status_filter(req.status_filter)
+
+    projected_buys: list[_MediaBuyData] = []
+    projected_packages: dict[str, list[_PackageData]] = {}
+    for order in orders:
+        fields = order_to_media_buy_fields(order)
+        status = project_gam_status(order.status, fields["start_date"], fields["end_date"], today)
+        if filter_statuses is not None and status not in filter_statuses:
+            continue
+        buy_data = _MediaBuyData(**fields, projected_status=status)
+        projected_buys.append(buy_data)
+
+        packages = [
+            _PackageData(**line_item_to_package_fields(li)) for li in line_items_by_order.get(order.order_id, [])
+        ]
+        projected_packages[buy_data.media_buy_id] = packages
+
+    return projected_buys, projected_packages
 
 
 def _fetch_packages(media_buy_ids: list[str], uow: MediaBuyUoW) -> dict[str, list[_PackageData]]:
@@ -434,3 +617,21 @@ def _map_creative_status(status: str) -> ApprovalStatus:
     if status == "rejected":
         return ApprovalStatus.rejected
     return ApprovalStatus.pending_review
+
+
+def _build_targeting_overlay(pkg_config: dict) -> Targeting | None:
+    """Hydrate the persisted targeting_overlay from package_config.
+
+    Per AdCP spec (``Package.targeting_overlay`` on get_media_buys), sellers
+    must echo the persisted targeting back so buyers can verify what was
+    stored. For sellers claiming the property-lists / collection-lists
+    specialisms, this includes the ``PropertyListReference`` and
+    ``CollectionListReference`` provided on create / update.
+
+    Falls back to the legacy ``targeting`` key for media buys written before
+    the storage migration to ``targeting_overlay``.
+    """
+    raw = pkg_config.get("targeting_overlay") or pkg_config.get("targeting")
+    if not raw:
+        return None
+    return Targeting.model_validate_persisted(raw)

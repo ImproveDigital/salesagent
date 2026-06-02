@@ -6,12 +6,22 @@ All classes are re-exported from ``src.core.schemas`` for backward compatibility
 beads: salesagent-x79
 """
 
+import uuid
+from typing import Any
+
+from adcp.types import Error, Setup
 from adcp.types import ListAccountsRequest as LibraryListAccountsRequest
 from adcp.types import ListAccountsResponse as LibraryListAccountsResponse
 from adcp.types import SyncAccountsRequest as LibrarySyncAccountsRequest
-from adcp.types.aliases import SyncAccountsSuccessResponse as LibrarySyncAccountsSuccess
-from adcp.types.generated_poc.core.account import Account as LibraryAccountDomain
-from pydantic import ConfigDict
+from adcp.types.base import AdCPBaseModel
+from adcp.types.generated_poc.account.sync_accounts_response import (
+    SyncAccountsResponse1 as LibrarySyncAccountsSuccess,
+)
+from adcp.types.generated_poc.core.account_with_authorization import (
+    AccountWithAuthorization as LibraryAccountDomain,
+)
+from adcp.types.generated_poc.core.brand_ref import BrandReference
+from pydantic import ConfigDict, Field, field_validator
 
 from src.core.config import get_pydantic_extra_mode
 from src.core.schemas._base import NestedModelSerializerMixin
@@ -26,10 +36,18 @@ class Account(LibraryAccountDomain):
 
     Library provides: account_id, name, advertiser, billing_proxy, status,
     brand, operator, billing, rate_card, payment_terms, credit_limit, setup,
-    account_scope, governance_agents, sandbox, ext.
+    account_scope, governance_agents, sandbox, authorization, ext.
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Keep optional account fields visible in default serialized output."""
+        result = super().model_dump(**kwargs)
+        if not kwargs.get("exclude_none"):
+            for field in ("advertiser", "rate_card", "payment_terms"):
+                result.setdefault(field, getattr(self, field, None))
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -49,16 +67,52 @@ class ListAccountsRequest(LibraryListAccountsRequest):
 class SyncAccountsRequest(LibrarySyncAccountsRequest):
     """Extends library SyncAccountsRequest.
 
-    Library provides: accounts, delete_missing, dry_run,
+    Library provides: accounts, delete_missing, dry_run, idempotency_key,
     push_notification_config, context, ext.
+
+    adcp 4.4.3 made ``idempotency_key`` required. Auto-default to a fresh
+    UUID so pre-v3 callers (and most internal tests) keep working without
+    minting a key by hand.
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    idempotency_key: str = Field(
+        default_factory=lambda: f"idem_{uuid.uuid4()}",
+        description="Client-generated unique key. Auto-defaults to a fresh UUID when omitted.",
+        min_length=16,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9_.:-]{16,255}$",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Response schemas
 # ---------------------------------------------------------------------------
+
+
+class SyncResponseAccount(AdCPBaseModel):
+    """One per-account result row in the sync_accounts response.
+
+    adcp 5.7 collapses the generated sync_accounts response to a loose
+    protocol envelope, so there is no longer a generated row model to extend.
+    Keep the row shape explicit locally because SalesAgent still emits the
+    historical ``accounts[]`` envelope and the SDK preserves it as extra data.
+    """
+
+    model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    brand: BrandReference
+    operator: str
+    action: str
+    status: str
+    account_id: str | None = None
+    name: str | None = None
+    billing: str | None = None
+    sandbox: bool | None = None
+    errors: list[Error] | None = None
+    setup: Setup | None = None
+    notification_configs: list[Any] | None = None
 
 
 class ListAccountsResponse(NestedModelSerializerMixin, LibraryListAccountsResponse):
@@ -69,6 +123,15 @@ class ListAccountsResponse(NestedModelSerializerMixin, LibraryListAccountsRespon
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    @field_validator("accounts", mode="after")
+    @classmethod
+    def _coerce_accounts_to_local_schema(cls, accounts: list[LibraryAccountDomain]) -> list[LibraryAccountDomain]:
+        """Use the local Account subclass so nested dumps include stable optional keys."""
+        return [
+            account if isinstance(account, Account) else Account.model_validate(account.model_dump())
+            for account in accounts
+        ]
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""
@@ -86,6 +149,10 @@ class SyncAccountsResponse(NestedModelSerializerMixin, LibrarySyncAccountsSucces
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    accounts: list[SyncResponseAccount]
+    dry_run: bool | None = None
+    context: Any | None = None
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""

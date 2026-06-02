@@ -3,15 +3,15 @@ name: audit
 description: >
   Run a repeatable code review audit on migration changes. Inventories files by
   architectural layer, reviews each layer against #1050/#1066 principles, and
-  files beads issues for findings. Re-run after remediation batches to track
-  progress.
+  produces a written report with findings. Re-run after remediation batches to
+  track progress.
 args: [audit-target]
 ---
 
 # Migration Audit
 
 Repeatable code review workflow for auditing migration changes. Produces
-structured review documents and beads issues for every finding.
+a structured review document with findings.
 
 ## Args
 
@@ -29,47 +29,21 @@ The audit target (optional, defaults to "full"):
 1. **Change inventory** by architectural layer (schema, business, boundary, transport, adapter, database, test)
 2. **Layer-specific reviews** against #1050/#1066 checklists
 3. **Consolidated report** in `docs/code-reviews/`
-4. **Beads issues** for every finding not already tracked
+4. **GitHub issues** for findings worth tracking (use `gh issue create`)
 
 ## Protocol
 
-### Step 1: Cook the molecule
+Walk the audit linearly in conversation:
 
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/migration-audit.yaml \
-  --var "AUDIT_TARGET={all_args}" \
-  --epic-title "Audit: {all_args}"
-```
+1. **inventory-changes** — list files modified in the target range, group by architectural layer
+2. **review-per-layer** — apply the layer checklist (below) to each group, capture findings
+3. **consolidate** — write the report to `docs/code-reviews/<descriptive-name>.md`
+4. **file-issues** — for findings worth tracking, run `gh issue create --title "..." --body "..."`
+5. **commit-report**
 
-If no target specified, use "full":
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/migration-audit.yaml \
-  --var "AUDIT_TARGET=full" \
-  --epic-title "Audit: full codebase"
-```
+### Done when report committed
 
-**Dry run first** (recommended):
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/migration-audit.yaml \
-  --var "AUDIT_TARGET={all_args}" \
-  --epic-title "Audit: {all_args}" \
-  --dry-run
-```
-
-### Step 2: Walk the molecule
-
-```
-bd ready → bd show <atom-id> → execute → bd close <atom-id> → repeat
-```
-
-Linear pipeline: inventory-changes → review-per-layer → consolidate → file-issues → commit-report.
-
-### Step 3: Done when report committed
-
-Audit report in `docs/code-reviews/`, beads issues filed for all findings.
+Audit report in `docs/code-reviews/`, follow-up GitHub issues filed where appropriate.
 
 ## Layer Review Checklists
 
@@ -99,4 +73,3 @@ Compare reports across runs to track progress.
 - `/surface` — Create entity test suites for coverage gaps found in audit
 - `/guard` — Structural guards enforce the principles audit checks for
 - `/remediate` — Fill test stubs to fix the issues audit finds
-- `/mol-execute` — Execute individual beads tasks for specific findings

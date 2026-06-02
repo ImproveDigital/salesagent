@@ -8,8 +8,14 @@ Supports two modes:
 import json
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import Any
+
+try:
+    from opentelemetry import trace
+except ImportError:
+    trace = None  # type: ignore[assignment]
 
 
 class ClientDisconnectFilter(logging.Filter):
@@ -36,6 +42,36 @@ class DeprecationFilter(logging.Filter):
         if "DeprecationWarning" in record.getMessage():
             return False
         return True
+
+
+class UvicornAccessNoiseFilter(logging.Filter):
+    """Drop ``uvicorn.access`` lines for the two endpoints that dominate
+    access-log volume: ``/mcp[/]`` (MCP pollers) and ``/health`` (Fly's
+    TCP+HTTP health checks). 1000s of lines per minute per machine on the
+    canonical-case 200 path.
+
+    Status-code policy differs per surface:
+
+    * ``/mcp[/]`` — drop ``2xx`` AND ``401``. The 401 carve-out matters
+      because anonymous internet traffic hammers ``/mcp`` constantly (bot
+      probes, misconfigured clients) and every rejection emits a 401
+      access line + a paired structured ``adcp.server.auth`` log. The
+      structured log is the actual signal; the access line is dupe noise.
+      Other 4xx (403/404/422/...) and all 5xx still log — those indicate
+      a real problem worth investigating.
+    * ``/health`` — drop ``2xx`` only. A 4xx/5xx on the health check
+      surface always means a config or platform bug worth seeing.
+
+    Any other path (admin UI, ``/a2a``, ``/.well-known/*``, etc.) is
+    unaffected regardless of status code.
+    """
+
+    _MCP_NOISE = re.compile(r'"(?:GET|POST|HEAD|OPTIONS) /mcp/?(?:\?\S*)? HTTP/[\d.]+" (?:2\d\d|401)')
+    _HEALTH_NOISE = re.compile(r'"(?:GET|POST|HEAD|OPTIONS) /health(?:\?\S*)? HTTP/[\d.]+" 2\d\d')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not (self._MCP_NOISE.search(msg) or self._HEALTH_NOISE.search(msg))
 
 
 class JSONFormatter(logging.Formatter):
@@ -85,6 +121,12 @@ class JSONFormatter(logging.Formatter):
         extra_fields = {k: v for k, v in record.__dict__.items() if k not in standard_attrs}
         if extra_fields:
             log_entry["extra"] = extra_fields
+
+        if trace is not None:
+            span = trace.get_current_span()
+            ctx = span.get_span_context() if span else None
+            if ctx and ctx.is_valid:
+                log_entry["trace_id"] = format(ctx.trace_id, "032x")
 
         return json.dumps(log_entry)
 
@@ -141,6 +183,11 @@ def setup_structured_logging() -> None:
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             force=True,
         )
+
+    # Suppress /mcp and /health access-log spam in BOTH modes. Pollers + Fly
+    # health checks generate the bulk of access-log volume; failures still
+    # surface because the filter only drops 2xx.
+    logging.getLogger("uvicorn.access").addFilter(UvicornAccessNoiseFilter())
 
 
 # Create custom logger for OAuth operations

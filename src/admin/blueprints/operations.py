@@ -9,7 +9,8 @@ from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
 from flask import Blueprint, request
 from sqlalchemy import select
 
-from src.admin.utils import require_auth, require_tenant_access
+from src.admin.utils import require_tenant_access
+from src.admin.utils.embedded_capabilities import capability_owned_response, publisher_owns
 from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.services.protocol_webhook_service import get_protocol_webhook_service
@@ -41,24 +42,23 @@ operations_bp = Blueprint("operations", __name__)
 
 
 @operations_bp.route("/reporting", methods=["GET"])
-@require_auth()
+@require_tenant_access()
 def reporting(tenant_id):
     """Display GAM reporting dashboard."""
     # Import needed for this function
-    from flask import render_template, session
+    from flask import render_template
 
     from src.core.database.database_session import get_db_session
     from src.core.database.models import Tenant
-
-    # Verify tenant access
-    if session.get("role") != "super_admin" and session.get("tenant_id") != tenant_id:
-        return "Access denied", 403
 
     with get_db_session() as db_session:
         tenant_obj = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
 
         if not tenant_obj:
             return "Tenant not found", 404
+
+        if tenant_obj.is_embedded:
+            return capability_owned_response("reporting")
 
         # Convert to dict for template compatibility
         tenant = {
@@ -97,6 +97,7 @@ def media_buy_detail(tenant_id, media_buy_id):
         CreativeAssignment,
         Principal,
         Product,
+        Tenant,
         WorkflowStep,
     )
 
@@ -107,6 +108,9 @@ def media_buy_detail(tenant_id, media_buy_id):
 
             if not media_buy:
                 return "Media buy not found", 404
+
+            # Tenant is needed for breadcrumb rendering (label + URL).
+            tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
 
             # Get principal info
             principal = None
@@ -265,8 +269,20 @@ def media_buy_detail(tenant_id, media_buy_id):
                     logger.warning(f"Could not fetch delivery metrics for {media_buy_id}: {e}")
                     # Continue without metrics - don't fail the whole page
 
+            # #101 — webhook delivery activity for the per-buy admin tab.
+            # Operator-scoped: shows deliveries from any principal that
+            # ever fired against this buy (no principal_id filter), so
+            # publisher ops can debug end-to-end without impersonating
+            # the buyer.
+            from src.core.database.repositories.delivery import DeliveryRepository
+
+            webhook_deliveries = DeliveryRepository(db_session, tenant_id).list_logs_for_operator(
+                media_buy_id, limit=200
+            )
+
             return render_template(
                 "media_buy_detail.html",
+                tenant=tenant,
                 tenant_id=tenant_id,
                 media_buy=media_buy,
                 principal=principal,
@@ -278,6 +294,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                 computed_state=computed_state,
                 readiness=readiness,
                 delivery_metrics=delivery_metrics,
+                webhook_deliveries=webhook_deliveries,
             )
     except Exception as e:
         logger.error(f"Error viewing media buy: {e}", exc_info=True)
@@ -285,7 +302,7 @@ def media_buy_detail(tenant_id, media_buy_id):
 
 
 @operations_bp.route("/media-buy/<media_buy_id>/approve", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
 def approve_media_buy(tenant_id, media_buy_id, **kwargs):
     """Approve a media buy by approving its workflow step."""
     from datetime import UTC, datetime
@@ -296,6 +313,9 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
     from src.core.database.database_session import get_db_session
     from src.core.database.models import Context as DBContext
     from src.core.database.models import ObjectWorkflowMapping, WorkflowStep
+
+    if not publisher_owns("campaign_approval"):
+        return capability_owned_response("campaign_approval")
 
     try:
         action = request.form.get("action")  # "approve" or "reject"
@@ -421,7 +441,10 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         # Use "draft" which will be displayed as "needs_approval" or "needs_creatives" by readiness service
                         media_buy.status = "draft"
 
-                    media_buy.approved_at = datetime.now(UTC)
+                    approved_at = datetime.now(UTC)
+                    media_buy.approved_at = approved_at
+                    if media_buy.confirmed_at is None:
+                        media_buy.confirmed_at = approved_at
                     media_buy.approved_by = user_email
                     db_session.commit()
 
@@ -494,8 +517,9 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         else:
                             create_media_buy_approved_payload = create_mcp_webhook_payload(
                                 task_id=step_data["step_id"],
-                                result=create_media_buy_approved_result,
                                 status=AdcpTaskStatus.completed,
+                                task_type="create_media_buy",
+                                result=create_media_buy_approved_result,
                             )
 
                         try:
@@ -584,8 +608,9 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     else:
                         create_media_buy_rejected_payload = create_mcp_webhook_payload(
                             task_id=step_data["step_id"],
-                            result=create_media_buy_rejected_result,
                             status=AdcpTaskStatus.rejected,
+                            task_type="create_media_buy",
+                            result=create_media_buy_rejected_result,
                         )
 
                     try:
@@ -613,14 +638,21 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
 
 
 @operations_bp.route("/media-buy/<media_buy_id>/trigger-delivery-webhook", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
 def trigger_delivery_webhook(tenant_id, media_buy_id, **kwargs):
     """Trigger a delivery report webhook for a media buy manually."""
     from flask import flash, redirect, url_for
 
+    from src.core.database.database_session import get_db_session
+    from src.core.database.repositories.tenant_config import TenantConfigRepository
     from src.services.delivery_webhook_scheduler import get_delivery_webhook_scheduler
 
     try:
+        with get_db_session() as db_session:
+            tenant_obj = TenantConfigRepository(db_session, tenant_id).get_tenant()
+            if tenant_obj and tenant_obj.is_embedded:
+                return capability_owned_response("reporting")
+
         # Trigger webhook using scheduler - pass IDs to avoid detached instance errors
         scheduler = get_delivery_webhook_scheduler()
         success = asyncio.run(scheduler.trigger_report_for_media_buy_by_id(media_buy_id, tenant_id))

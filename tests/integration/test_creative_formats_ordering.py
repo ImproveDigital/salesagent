@@ -18,11 +18,11 @@ AGENT_URL = "https://creative.adcontextprotocol.org"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
-# IMPL and A2A accept req= kwarg for filtering; MCP takes individual params.
+# IMPL accepts req= kwarg for filtering; MCP takes individual params.
 # REST build_rest_body discards filter kwargs, so REST only works for unfiltered tests.
-REQ_TRANSPORTS = [Transport.IMPL, Transport.A2A]
+REQ_TRANSPORTS = [Transport.IMPL]
 
 
 def _fmt(

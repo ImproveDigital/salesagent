@@ -71,6 +71,7 @@ class TestDeliveryLoopErrorHandling:
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
         mock_uow.media_buys = mock_repo
+        mock_uow.media_buys.find_by_idempotency_key.return_value = None
 
         with (
             patch("src.core.tools.media_buy_delivery.get_principal_object", return_value=MagicMock()),
@@ -99,6 +100,7 @@ class TestBrandExtractionFromPydanticModel:
     def test_brand_reference_is_not_dict_after_pydantic(self):
         """After Pydantic parsing, req.brand is BrandReference, not dict."""
         req = GetProductsRequest(
+            buying_mode="brief",
             brand={"domain": "example.com"},
             brief="test products",
         )
@@ -119,6 +121,7 @@ class TestBrandExtractionFromPydanticModel:
         from src.core.tools.products import _get_products_impl
 
         req = GetProductsRequest(
+            buying_mode="brief",
             brand={"domain": "nike.com"},
             brief="Athletic footwear",
         )
@@ -165,6 +168,7 @@ class TestAuditLogBrandFieldName:
         from src.core.tools.products import _get_products_impl
 
         req = GetProductsRequest(
+            buying_mode="brief",
             brand={"domain": "nike.com"},
             brief="Athletic footwear",
         )
@@ -202,6 +206,9 @@ class TestAuditLogBrandFieldName:
         call_kwargs = mock_logger.log_operation.call_args
         details = call_kwargs.kwargs.get("details") or call_kwargs[1].get("details")
 
-        assert "has_brand" in details, f"Audit log details missing 'has_brand' key: {details}"
+        # PR #24 (Ledger redesign) replaced the ``has_brand`` bool with the
+        # full ``brand_domain`` value — strictly more informative for the
+        # Pipeline grouping that consumes the audit ledger.
+        assert "brand_domain" in details, f"Audit log details missing 'brand_domain' key: {details}"
         assert "has_brand_manifest" not in details, f"Audit log still uses stale 'has_brand_manifest' key: {details}"
-        assert details["has_brand"] is True
+        assert details["brand_domain"] == "nike.com"

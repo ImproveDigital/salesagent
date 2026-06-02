@@ -83,7 +83,7 @@ class TestProductFormatOverrideMerge:
         format_overrides = {
             "display_300x250": {
                 "platform_config": {
-                    "kevel": {"zone_id": 99},
+                    "triton": {"zone_id": 99},
                 }
             }
         }
@@ -109,8 +109,8 @@ class TestProductFormatOverrideMerge:
         assert "gam" in result.platform_config, "Base format's platform_config was lost during override merge"
         assert result.platform_config["gam"] == {"width": 300, "height": 250}
         # Override config must also be present
-        assert "kevel" in result.platform_config
-        assert result.platform_config["kevel"] == {"zone_id": 99}
+        assert "triton" in result.platform_config
+        assert result.platform_config["triton"] == {"zone_id": 99}
 
     def test_override_merges_into_existing_platform(self):
         """When override targets same platform as base, values merge with override precedence."""

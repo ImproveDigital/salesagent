@@ -40,6 +40,7 @@ class TenantContext(BaseModel):
     name: str = ""
     subdomain: str = ""
     virtual_host: str | None = None
+    public_agent_url: str | None = None
     ad_server: str | None = None
     enable_axe_signals: bool = True
     authorized_emails: list[str] = []
@@ -60,6 +61,9 @@ class TenantContext(BaseModel):
     brand_manifest_policy: str = "require_auth"
     advertising_policy: dict[str, Any] | None = None
     product_ranking_prompt: str | None = None
+    creative_pre_approval_gate_enabled: bool = False
+    is_embedded: bool = False
+    external_org_id: str | None = None
 
     # --- Dict-like access for backward compatibility ---
 
@@ -101,6 +105,7 @@ class TenantContext(BaseModel):
             name=tenant.name or "",
             subdomain=tenant.subdomain or "",
             virtual_host=tenant.virtual_host,
+            public_agent_url=tenant.public_agent_url,
             ad_server=tenant.ad_server,
             enable_axe_signals=tenant.enable_axe_signals if tenant.enable_axe_signals is not None else True,
             authorized_emails=safe_json_loads(tenant.authorized_emails, []),
@@ -121,6 +126,9 @@ class TenantContext(BaseModel):
             brand_manifest_policy=tenant.brand_manifest_policy or "require_auth",
             advertising_policy=safe_json_loads(tenant.advertising_policy, None),
             product_ranking_prompt=tenant.product_ranking_prompt,
+            creative_pre_approval_gate_enabled=tenant.creative_pre_approval_gate_enabled,
+            is_embedded=tenant.is_embedded,
+            external_org_id=tenant.external_org_id,
         )
 
     @classmethod

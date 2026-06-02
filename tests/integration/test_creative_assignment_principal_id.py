@@ -19,17 +19,21 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from adcp.types import MediaBuyStatus
 from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative as DBCreative
 from src.core.database.models import CreativeAssignment as DBAssignment
+from src.core.database.models import MediaBuy as DBMediaBuy
 from src.core.database.models import Tenant as TenantModel
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
+    GetMediaBuysRequest,
     UpdateMediaBuyRequest,
 )
 from src.core.testing_hooks import AdCPTestContext
+from tests.factories.spec_required_kwargs import required_request_kwargs
 from tests.helpers.adcp_factories import create_test_format
 from tests.integration.media_buy_helpers import _get_tenant_dict, _make_create_request
 
@@ -228,9 +232,22 @@ class TestCreativeAssignmentPrincipalIdManualApproval:
         assert result.status in ("submitted", "completed"), f"Unexpected status: {result.status}"
         assert result.response is not None
 
-        # Extract media_buy_id from the response
+        # Submitted envelope (PR #183) drops ``media_buy_id`` in favor of
+        # ``task_id``. The DB row exists either way — look it up by
+        # tenant + principal (this test creates exactly one media buy).
         media_buy_id = getattr(result.response, "media_buy_id", None)
-        assert media_buy_id is not None, "Response should contain media_buy_id"
+        if media_buy_id is None:
+            with get_db_session() as session:
+                row = session.scalars(
+                    select(DBMediaBuy)
+                    .where(
+                        DBMediaBuy.tenant_id == ca_tenant_with_approval["tenant_id"],
+                        DBMediaBuy.principal_id == ca_principal["principal_id"],
+                    )
+                    .order_by(DBMediaBuy.created_at.desc())
+                ).first()
+                assert row is not None, "Manual-approval path created no MediaBuy row"
+                media_buy_id = row.media_buy_id
 
         # Verify creative_assignment rows have principal_id populated
         assignments = _query_assignments(ca_tenant_with_approval["tenant_id"], media_buy_id)
@@ -297,6 +314,60 @@ class TestCreativeAssignmentPrincipalIdAutoApprove:
                 f"{assignment.principal_id} != {ca_principal['principal_id']}"
             )
 
+    @pytest.mark.asyncio
+    async def test_create_with_creative_assignments_persists_assignments_and_approvals(
+        self,
+        ca_tenant,
+        ca_products,
+        ca_creatives,
+        ca_identity,
+    ):
+        """Create-time creative_assignments must attach creatives, not just affect status."""
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        req = _make_create_request(
+            packages=[
+                {
+                    "product_id": "guaranteed_display",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creative_assignments": [
+                        {"creative_id": ca_creatives[0], "weight": 25},
+                        {"creative_id": ca_creatives[1], "weight": 75},
+                    ],
+                }
+            ],
+        )
+
+        result = await _create_media_buy_impl(req=req, identity=ca_identity)
+
+        assert result.status == "completed"
+        assert result.response is not None
+        assert result.response.status == "completed"
+        assert result.response.media_buy_status == MediaBuyStatus.pending_start
+        media_buy_id = getattr(result.response, "media_buy_id", None)
+        assert media_buy_id is not None, "Response should contain media_buy_id"
+
+        assignments = _query_assignments(ca_tenant["tenant_id"], media_buy_id)
+        assert {assignment.creative_id for assignment in assignments} == set(ca_creatives)
+        assert {assignment.creative_id: assignment.weight for assignment in assignments} == {
+            ca_creatives[0]: 25,
+            ca_creatives[1]: 75,
+        }
+
+        list_response = _get_media_buys_impl(
+            GetMediaBuysRequest(media_buy_ids=[media_buy_id]),
+            identity=ca_identity,
+        )
+        assert list_response.media_buys, f"get_media_buys returned no buys: {list_response}"
+        echoed_buy = list_response.media_buys[0]
+        assert echoed_buy.status == MediaBuyStatus.pending_start
+        assert echoed_buy.packages, "echoed media buy has no packages"
+        approvals = echoed_buy.packages[0].creative_approvals
+        assert approvals is not None, "creative_approvals missing from read path"
+        assert {approval.creative_id for approval in approvals} == set(ca_creatives)
+
 
 # ---------------------------------------------------------------------------
 # Site 3: update path (media_buy_update.py ~line 769)
@@ -351,6 +422,7 @@ class TestCreativeAssignmentPrincipalIdUpdate:
         # Step 2: Update the media buy to add creative_ids
         # Note: AdCP oneOf constraint — provide media_buy_id OR buyer_ref, not both
         update_req = UpdateMediaBuyRequest(
+            **required_request_kwargs(),
             media_buy_id=media_buy_id,
             packages=[
                 {

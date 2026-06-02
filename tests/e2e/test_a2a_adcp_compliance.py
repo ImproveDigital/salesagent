@@ -259,7 +259,10 @@ def a2a_url(request, docker_services_e2e):
     if custom_url := getattr(request.config.option, "server_url", None):
         return custom_url
     port = docker_services_e2e["a2a_port"]
-    return f"http://localhost:{port}/a2a"
+    # A2A is served at host root per AdCP convention — see core/main.py
+    # "A2A at ``/`` (host root)" and adcp.server.serve()'s _dispatch
+    # which routes everything other than ``/mcp`` to the A2A app.
+    return f"http://localhost:{port}/"
 
 
 @pytest.fixture

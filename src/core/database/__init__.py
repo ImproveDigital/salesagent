@@ -12,4 +12,9 @@ Key components:
 - database_schema.py: Schema definitions and table creation
 - database_session.py: Session management and context handlers
 - models.py: SQLAlchemy ORM models for all entities
+- embedded_tenant_guard.py: model-layer write guard for platform-managed surfaces
 """
+
+# Importing the guard registers SQLAlchemy event listeners as a side effect.
+# Keep this import at module load time so listeners are always attached.
+from src.core.database import embedded_tenant_guard as _embedded_tenant_guard  # noqa: F401

@@ -6,35 +6,16 @@ implementation pattern from CLAUDE.md.
 
 import logging
 import time
-from typing import TypeVar
 
-from adcp import FormatId
 from adcp.types import Format as AdcpFormat
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.types.generated_poc.core.format import (
-    Assets,
-    Assets5,
-    Assets6,
-    Assets7,
-    Assets9,
-    Assets14,
-)
-from adcp.types.generated_poc.enums.asset_content_type import AssetContentType
 from adcp.utils.format_assets import get_format_assets
 
-# TypeVar for Format to preserve subclass type through backward compatibility function
-FormatT = TypeVar("FormatT", bound=AdcpFormat)
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
-from pydantic import ValidationError
-
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
-from src.core.tool_context import ToolContext
+from src.core.exceptions import AdCPAuthenticationError
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_backward_compatible_format(f: FormatT) -> FormatT:
+def _ensure_backward_compatible_format[FormatT: AdcpFormat](f: FormatT) -> FormatT:
     """Pass-through function for backward compatibility.
 
     Note: adcp 3.2.0 removed the deprecated `assets_required` field from Format.
@@ -51,58 +32,13 @@ def _ensure_backward_compatible_format(f: FormatT) -> FormatT:
 
 
 from src.core.audit_logger import get_audit_logger
+from src.core.format_cache import canonical_format_matches
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import ListCreativeFormatsRequest, ListCreativeFormatsResponse
-from src.core.validation_helpers import format_validation_error
+from src.core.tracing import traced
 
 
-def _infer_asset_type(asset_id: str) -> str:
-    """Infer asset type from asset ID naming convention.
-
-    Args:
-        asset_id: Asset identifier (e.g., "front_image", "youtube_url", "headline")
-
-    Returns:
-        Asset type string (image, video, text, url)
-    """
-    asset_lower = asset_id.lower()
-    if "image" in asset_lower or "logo" in asset_lower:
-        return "image"
-    elif "video" in asset_lower or "youtube" in asset_lower:
-        return "video"
-    elif "url" in asset_lower or "click" in asset_lower:
-        return "url"
-    elif "html" in asset_lower:
-        return "html"
-    else:
-        return "text"  # Default to text for headlines, body, captions, etc.
-
-
-# Each adcp Assets variant uses a Literal discriminator for asset_type.
-# Map asset type strings to the correct class.
-_ASSET_TYPE_TO_CLASS: dict[str, type] = {
-    "image": Assets,
-    "video": Assets5,
-    "audio": Assets6,
-    "text": Assets7,
-    "html": Assets9,
-    "url": Assets14,
-}
-
-
-def _make_asset(
-    asset_id: str, asset_type: str, required: bool
-) -> Assets | Assets5 | Assets6 | Assets7 | Assets9 | Assets14:
-    """Build the correct Assets variant for a given asset type string."""
-    cls = _ASSET_TYPE_TO_CLASS.get(asset_type, Assets7)  # default to text
-    return cls(
-        item_type="individual",
-        asset_id=asset_id,
-        asset_type=asset_type,
-        required=required,
-    )
-
-
+@traced
 def _list_creative_formats_impl(
     req: ListCreativeFormatsRequest | None, identity: ResolvedIdentity | None
 ) -> ListCreativeFormatsResponse:
@@ -135,7 +71,7 @@ def _list_creative_formats_impl(
     try:
         registry = get_creative_agent_registry()
     except Exception as e:
-        from adcp.types.generated_poc.core.error import Error as AdCPResponseError
+        from adcp.types import Error as AdCPResponseError
 
         logger.error(f"Failed to create creative agent registry: {e}", exc_info=True)
         return ListCreativeFormatsResponse(
@@ -170,8 +106,9 @@ def _list_creative_formats_impl(
     formats = fetch_result.formats
     agent_errors = fetch_result.errors
 
-    # Get formats from adapter if it provides them (e.g., Broadstreet acting as both sales and creative agent)
-    # Check adapter type from tenant config and load formats without instantiating the full adapter
+    # Add adapter-supported canonical formats when Broadstreet is acting as both
+    # sales and creative agent. Broadstreet-specific templates are not separate
+    # AdCP format IDs; they are creative asset metadata handled by the adapter.
     try:
         from src.core.database.repositories.uow import TenantConfigUoW
 
@@ -181,57 +118,30 @@ def _list_creative_formats_impl(
             adapter_type = config_row.adapter_type if config_row else None
 
             if adapter_type == "broadstreet":
-                # Import Broadstreet templates and convert to formats
-                from src.adapters.broadstreet.config_schema import BROADSTREET_TEMPLATES
-                from src.core.schemas import Format, FormatId, url
+                from src.adapters.broadstreet.formats import broadstreet_creative_format_models
 
-                agent_url = f"broadstreet://{tenant['tenant_id']}"
-
-                for template_id, template in BROADSTREET_TEMPLATES.items():
-                    try:
-                        format_id = FormatId(
-                            id=f"broadstreet_{template_id}",
-                            agent_url=url(agent_url),
-                        )
-
-                        # Build assets list using the correct Assets variant per type
-                        assets_list: list[Assets | Assets5 | Assets6 | Assets7 | Assets9 | Assets14] = []
-                        for asset_id in template.get("required_assets", []):
-                            asset_type = _infer_asset_type(asset_id)
-                            assets_list.append(_make_asset(asset_id, asset_type, required=True))
-                        for asset_id in template.get("optional_assets", []):
-                            asset_type = _infer_asset_type(asset_id)
-                            assets_list.append(_make_asset(asset_id, asset_type, required=False))
-
-                        fmt = Format(
-                            format_id=format_id,
-                            name=str(template["name"]),
-                            description=str(template["description"]) if template.get("description") else None,
-                            assets=assets_list if assets_list else None,
-                            is_standard=False,
-                            platform_config=None,
-                            category=None,
-                            requirements=None,
-                            iab_specification=None,
-                            accepts_3p_tags=None,
-                        )
-                        formats.append(fmt)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse Broadstreet template {template_id}: {e}")
+                existing_keys = {(str(f.format_id.agent_url).rstrip("/"), f.format_id.id) for f in formats}
+                added_count = 0
+                for fmt in broadstreet_creative_format_models():
+                    key = (str(fmt.format_id.agent_url).rstrip("/"), fmt.format_id.id)
+                    if key in existing_keys:
                         continue
+                    formats.append(fmt)
+                    existing_keys.add(key)
+                    added_count += 1
 
-                logger.info(f"Added {len(BROADSTREET_TEMPLATES)} Broadstreet formats")
+                logger.info("Added %s Broadstreet canonical formats", added_count)
     except Exception as e:
         # Don't fail if adapter formats can't be retrieved
         logger.debug(f"Could not get adapter formats: {e}")
 
     # Apply filters from request
     if req.format_ids:
-        # Filter to only the specified format IDs
-        # Extract the 'id' field from each FormatId object
-        format_ids_set = {fmt.id for fmt in req.format_ids}
-        # Compare format_id.id (handle both FormatId objects and strings)
-        formats = [f for f in formats if f.format_id.id in format_ids_set]
+        formats = [
+            f
+            for f in formats
+            if any(canonical_format_matches(requested_format_id, f.format_id) for requested_format_id in req.format_ids)
+        ]
 
     # Helper functions to extract properties from Format structure per AdCP spec
     def is_format_responsive(f) -> bool:
@@ -315,7 +225,7 @@ def _list_creative_formats_impl(
     # Filter by wcag_level - hierarchical: A < AA < AAA
     # Formats must meet at least the requested level; formats without accessibility are excluded
     if req.wcag_level is not None:
-        from adcp.types.generated_poc.enums.wcag_level import WcagLevel
+        from adcp.types import WcagLevel
 
         _WCAG_ORDER = {WcagLevel.A: 1, WcagLevel.AA: 2, WcagLevel.AAA: 3}
         min_level = _WCAG_ORDER.get(req.wcag_level, 0)
@@ -363,7 +273,7 @@ def _list_creative_formats_impl(
     page_formats = formats[start_index:end_index]
 
     # Build pagination response
-    from adcp.types.generated_poc.core.pagination_response import PaginationResponse
+    from adcp.types import PaginationResponse
 
     next_cursor = None
     if has_more:
@@ -377,8 +287,13 @@ def _list_creative_formats_impl(
         total_count=total_count,
     )
 
-    # Build creative_agents referrals from registry (POST-S4)
-    from adcp.types.generated_poc.enums.creative_agent_capability import CreativeAgentCapability
+    # Build creative_agents referrals from registry (POST-S4).
+    # ListCreativeFormatsResponse expects ``CreativeAgent`` from the
+    # media_buy module — there are two same-named classes in 4.4 and the
+    # top-level ``adcp.types.CreativeAgent`` resolves to the creative-side
+    # variant, which Pydantic rejects as the wrong model type even though
+    # they're shape-identical.
+    from adcp.types import CreativeAgentCapability
     from adcp.types.generated_poc.media_buy.list_creative_formats_response import (
         CreativeAgent as AdcpCreativeAgent,
     )
@@ -415,9 +330,9 @@ def _list_creative_formats_impl(
         details={
             "format_count": len(page_formats),
             "total_count": total_count,
-            "standard_formats": len([f for f in page_formats if f.is_standard]),
-            "custom_formats": len([f for f in page_formats if not f.is_standard]),
-            "format_count_standard": len([f for f in page_formats if f.is_standard]),
+            "standard_formats": len([f for f in page_formats if getattr(f, "is_standard", False)]),
+            "custom_formats": len([f for f in page_formats if not getattr(f, "is_standard", False)]),
+            "format_count_standard": len([f for f in page_formats if getattr(f, "is_standard", False)]),
         },
     )
 
@@ -434,84 +349,3 @@ def _list_creative_formats_impl(
     # Always return Pydantic model - MCP wrapper will handle serialization
     # Schema enhancement (if needed) should happen in the MCP wrapper, not here
     return response
-
-
-async def list_creative_formats(
-    format_ids: list[FormatId] | None = None,
-    is_responsive: bool | None = None,
-    name_search: str | None = None,
-    asset_types: list[AssetContentType] | None = None,
-    min_width: int | None = None,
-    max_width: int | None = None,
-    min_height: int | None = None,
-    max_height: int | None = None,
-    context: ContextObject | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-):
-    """List all available creative formats (AdCP spec endpoint).
-
-    MCP tool wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-
-    Args:
-        format_ids: Filter by FormatId objects
-        is_responsive: Filter for responsive formats (True/False)
-        name_search: Search formats by name (case-insensitive partial match)
-        asset_types: Filter by asset content types (e.g., ["image", "video"])
-        min_width: Minimum format width in pixels
-        max_width: Maximum format width in pixels
-        min_height: Minimum format height in pixels
-        max_height: Maximum format height in pixels
-        context: Application-level context per AdCP spec
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with ListCreativeFormatsResponse data
-    """
-    try:
-        # Coerce raw strings to enums at the transport boundary (Pattern #5).
-        # FastMCP normally coerces, but direct callers may pass raw strings.
-        asset_types_strs = (
-            [at.value if isinstance(at, AssetContentType) else str(at) for at in asset_types] if asset_types else None
-        )
-        req = ListCreativeFormatsRequest(
-            format_ids=format_ids,
-            is_responsive=is_responsive,
-            name_search=name_search,
-            asset_types=asset_types_strs,
-            min_width=min_width,
-            max_width=max_width,
-            min_height=min_height,
-            max_height=max_height,
-            context=context,
-        )
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="list_creative_formats request")) from e
-
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    response = _list_creative_formats_impl(req, identity)
-    return ToolResult(content=str(response), structured_content=response)
-
-
-def list_creative_formats_raw(
-    req: ListCreativeFormatsRequest | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> ListCreativeFormatsResponse:
-    """List all available creative formats (raw function for A2A server use).
-
-    Delegates to shared implementation.
-
-    Args:
-        req: Optional request with filter parameters
-        ctx: FastMCP context
-        identity: Pre-resolved identity (if available)
-
-    Returns:
-        ListCreativeFormatsResponse with all available formats
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-    return _list_creative_formats_impl(req, identity)

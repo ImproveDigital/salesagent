@@ -11,10 +11,10 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
-from adcp.types.generated_poc.core.format_id import FormatId
 from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
 from src.core.resolved_identity import ResolvedIdentity
+from src.core.schemas import FormatId
 from src.core.tools.creatives import _sync_creatives_impl
 from src.core.validation_helpers import run_async_in_sync_context
 from tests.harness import make_mock_uow
@@ -205,7 +205,7 @@ class TestSyncCreativesErrorHandling:
                     assert len(result.creatives) == 1
                     assert result.creatives[0].creative_id == "test_creative_456"
                     assert result.creatives[0].action == CreativeAction.failed
-                    assert any("preview" in err.lower() for err in result.creatives[0].errors)
+                    assert any("preview" in err.message.lower() for err in result.creatives[0].errors)
 
 
 class TestSyncCreativesAsyncScenario:

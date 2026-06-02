@@ -1,17 +1,26 @@
 """SQLAlchemy models for database schema."""
 
+import json
 import logging
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
-from adcp.types.generated_poc.core.account import CreditLimit, GovernanceAgent, Setup
-from adcp.types.generated_poc.core.brand_ref import BrandReference
+from adcp.types import BrandReference, CreditLimit, Setup
+
+# For storage we want the account response/core shape (URL-only), not the
+# sync_governance request shape where ``authentication`` is required. Sellers
+# don't always have credentials at the time the Account row is created.
+from adcp.types.generated_poc.core.account import (
+    GovernanceAgent,
+)
 from sqlalchemy import (
     DECIMAL,
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     Float,
@@ -29,8 +38,61 @@ from sqlalchemy.sql import func
 
 from src.core.database.json_type import JSONType
 from src.core.json_validators import JSONValidatorMixin
+from src.core.utils.encryption import SECRET_CIPHERTEXT_PREFIX
+
+# Minimal-but-spec-valid baseline for ``Product.reporting_capabilities`` per
+# adcp 4.4. The same value is used as both the SQL ``server_default`` (for
+# raw INSERTs) and the Python-side ``default`` (for in-memory ORM
+# construction); deriving the SQL default from this dict via ``json.dumps``
+# guarantees the two paths cannot drift.
+PRODUCT_REPORTING_CAPABILITIES_DEFAULT: dict = {
+    "available_reporting_frequencies": ["daily"],
+    "expected_delay_minutes": 0,
+    "timezone": "UTC",
+    "supports_webhooks": False,
+    "available_metrics": ["impressions"],
+    "date_range_support": "date_range",
+}
 
 logger = logging.getLogger(__name__)
+
+
+def _decrypt_optional_secret(
+    stored_value: str | None,
+    *,
+    secret_name: str,
+    owner_id: str,
+    allow_legacy_plaintext: bool = False,
+) -> str | None:
+    """Decrypt a Fernet-backed optional secret column.
+
+    ``allow_legacy_plaintext`` is for columns that were historically stored in
+    plaintext and may still contain old rows until the backfill migration runs.
+    """
+    if not stored_value:
+        return None
+
+    from src.core.exceptions import AdCPConfigurationError
+    from src.core.utils.encryption import decrypt_api_key
+
+    try:
+        has_prefix = stored_value.startswith(SECRET_CIPHERTEXT_PREFIX)
+        if allow_legacy_plaintext and not has_prefix:
+            return stored_value
+        ciphertext = stored_value.removeprefix(SECRET_CIPHERTEXT_PREFIX)
+        return decrypt_api_key(ciphertext)
+    except ValueError as exc:
+        raise AdCPConfigurationError(f"Failed to decrypt {secret_name} for {owner_id}") from exc
+
+
+def _encrypt_optional_secret(value: str | None) -> str | None:
+    """Encrypt an optional secret value for storage."""
+    if not value:
+        return None
+
+    from src.core.utils.encryption import encrypt_api_key
+
+    return f"{SECRET_CIPHERTEXT_PREFIX}{encrypt_api_key(value)}"
 
 
 class Base(DeclarativeBase):
@@ -103,6 +165,16 @@ class Tenant(Base, JSONValidatorMixin):
     line_item_name_template: Mapped[str | None] = mapped_column(
         String(500), nullable=True, server_default="{order_name} - {product_name}"
     )
+    # When False, skip the AI naming agent even if {auto_name} is in the
+    # template — caller falls back to the brand name. Lets tenants without a
+    # Gemini key opt out without rewriting templates.
+    auto_naming_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+
+    # When True, the delivery webhook scheduler also sends heartbeat reports
+    # for buys in pending_start (warm-up window) and paused — not just active
+    # and completed. Lets buyers stop polling for "did my flight start yet?"
+    # and "is the pause still in effect?". Default True. See issue #48.
+    report_pre_start_buys: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     # Measurement providers configuration
     # Structure: {"providers": ["Provider 1", "Provider 2"], "default": "Provider 1"}
@@ -123,6 +195,68 @@ class Tenant(Base, JSONValidatorMixin):
     # Favicon URL - custom favicon for the tenant's admin UI
     # Can be an absolute URL or a path to an uploaded file (e.g., /static/favicons/tenant_id/favicon.ico)
     favicon_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Embedded mode: platform-managed surfaces are locked to the Tenant Management API.
+    # When True, the model-layer write guard (embedded_tenant_guard) blocks non-API mutations
+    # to platform-managed columns/tables (Tenant core fields, AdapterConfig). Publisher-managed
+    # tables (Product, Principal, Creative, etc.) remain writable from the UI regardless.
+    is_embedded: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    # Identifier for the tenant in the upstream platform (e.g. Scope3 org id).
+    # Indexed but not unique — a single org may own multiple tenants in the future.
+    external_org_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Name of the upstream platform that owns this managed tenant ("scope3", etc.).
+    external_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # When True, _create_media_buy_impl auto-provisions GAM advertisers for
+    # Accounts in pending_provision (calls CompanyService.createCompanies on
+    # first buy). When False, returns ACCOUNT_NOT_PROVISIONED so publishers
+    # map manually via the Admin UI / Tenant Management API.
+    # Default False keeps today's open-instance behavior intact; embedded-mode
+    # provisioning sets True per-tenant.
+    auto_provision_advertisers: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    # public_agent_url is what publishers list in their adagents.json to
+    # authorize this tenant's agent. Embedded-mode tenants share one
+    # (https://interchange.io); self-hosted publishers use their own salesagent.
+    public_agent_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Absolute URL of the operator's brand.json (typically
+    # ``https://{operator_domain}/.well-known/brand.json``). Surfaced on
+    # ``get_adcp_capabilities → identity.brand_json_url`` so receivers verifying
+    # our outbound signatures can fetch our operator-side keys.
+    # See docs/design/signing-non-embedded.md.
+    brand_json_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    # Buyer-advertiser routing.
+    # Required-before-activation fallback advertiser. Buys whose
+    # (operator_domain, brand_house, brand_id) triple doesn't match a
+    # routing rule fall through to this advertiser; if NULL, the routing
+    # chain raises TENANT_NOT_ACTIVATED (Q3: implicit activation —
+    # buyer-protocol error IS the contract).
+    default_gam_advertiser_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Per-tenant sync cadence override (minutes). NULL = use the cron's
+    # default 6h. sync_all_tenants.py branches on this when picking
+    # tenants per run.
+    sync_cadence_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Embed-mode breadcrumb root override. Shape: ``{"label": str, "url": str}``.
+    # Only meaningful when ``is_embedded`` is True — open-instance tenants ignore
+    # the value. Replaces the default first crumb ("Dashboard") with the
+    # upstream host's storefront entry point so embedded breadcrumb trails feel
+    # native to the host.
+    embed_breadcrumb_root: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+
+    # Per-tenant gate (#145). When True, creatives at status='pending_review'
+    # are held back from the ad-server upload until a human flips them to
+    # 'approved' — closing the auto-create-path window where the local
+    # pending_review flag was informational only. Default False preserves
+    # today's behavior byte-for-byte.
+    creative_pre_approval_gate_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     # Relationships
     products = relationship("Product", back_populates="tenant", cascade="all, delete-orphan")
@@ -158,8 +292,10 @@ class Tenant(Base, JSONValidatorMixin):
     )
 
     __table_args__ = (
+        CheckConstraint("position(':' in tenant_id) = 0", name="ck_tenants_tenant_id_no_colon"),
         Index("idx_subdomain", "subdomain"),
         Index("ix_tenants_virtual_host", "virtual_host", unique=True),
+        Index("ix_tenants_external_org_id", "external_org_id"),
     )
 
     # JSON validators are inherited from JSONValidatorMixin
@@ -168,27 +304,16 @@ class Tenant(Base, JSONValidatorMixin):
     @property
     def gemini_api_key(self) -> str | None:
         """Get decrypted Gemini API key."""
-        if not self._gemini_api_key:
-            return None
-        from src.core.utils.encryption import decrypt_api_key
-
-        try:
-            return decrypt_api_key(self._gemini_api_key)
-        except ValueError as exc:
-            from src.core.exceptions import AdCPConfigurationError
-
-            raise AdCPConfigurationError(f"Failed to decrypt Gemini API key for tenant {self.tenant_id}") from exc
+        return _decrypt_optional_secret(
+            self._gemini_api_key,
+            secret_name="Gemini API key",
+            owner_id=f"tenant {self.tenant_id}",
+        )
 
     @gemini_api_key.setter
     def gemini_api_key(self, value: str | None) -> None:
         """Set encrypted Gemini API key."""
-        if not value:
-            self._gemini_api_key = None
-            return
-
-        from src.core.utils.encryption import encrypt_api_key
-
-        self._gemini_api_key = encrypt_api_key(value)
+        self._gemini_api_key = _encrypt_optional_secret(value)
 
     @property
     def primary_domain(self) -> str | None:
@@ -286,8 +411,17 @@ class Product(Base, JSONValidatorMixin):
     product_card_detailed: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     # Type hint: list of placement dicts (each with placement_id, name, description, format_ids)
     placements: Mapped[list[dict] | None] = mapped_column(JSONType, nullable=True)
-    # Type hint: reporting capabilities dict
-    reporting_capabilities: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: reporting capabilities dict (AdCP 4.4: required on wire)
+    # ``default`` populates the attribute on Python-side construction (in-memory
+    # models, factory helpers); ``server_default`` covers DB INSERTs that bypass
+    # the ORM (raw SQL, legacy clients). Both derive from the same dict
+    # constant so they cannot drift.
+    reporting_capabilities: Mapped[dict] = mapped_column(
+        JSONType,
+        nullable=False,
+        default=lambda: dict(PRODUCT_REPORTING_CAPABILITIES_DEFAULT),
+        server_default=text(f"'{json.dumps(PRODUCT_REPORTING_CAPABILITIES_DEFAULT)}'::jsonb"),
+    )
 
     # AdCP 3.6.0 product fields
     property_targeting_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -300,8 +434,22 @@ class Product(Base, JSONValidatorMixin):
     conversion_tracking: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     # Type hint: list of DataProviderSignalSelector objects
     data_provider_signals: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: list of SignalListing objects bundled into this product
+    included_signals: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: SignalTargetingRules object for product-level signal composition
+    signal_targeting_rules: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: list of ProductSignalTargetingOption objects selectable on this product
+    signal_targeting_options: Mapped[list | None] = mapped_column(JSONType, nullable=True)
     # Type hint: DeliveryForecast object (delivery predictions)
     forecast: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: list of ProductAction enum values allowed for this product
+    allowed_actions: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: list of FormatOption objects advertised by the product
+    format_options: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: list of VideoPlacementType enum values advertised by the product
+    video_placement_types: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: vendor metric optimization metadata
+    vendor_metric_optimization: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
 
     # Dynamic product fields
     # Type hint: whether this product is a dynamic template that generates variants
@@ -344,7 +492,7 @@ class Product(Base, JSONValidatorMixin):
 
     # Effective properties - auto-resolve from inventory profile if set
     @property
-    def effective_format_ids(self) -> list[dict[str, str]]:
+    def effective_format_ids(self) -> list[dict[str, Any]]:
         """Get format_ids from inventory profile (if set) or product itself.
 
         Returns format_ids as list of FormatId dicts: [{"agent_url": str, "id": str}, ...]
@@ -353,9 +501,11 @@ class Product(Base, JSONValidatorMixin):
 
         Database validation ensures all format_ids match AdCP FormatId spec.
         """
+        from src.core.canonical_formats import canonicalize_format_ref
+
         if self.inventory_profile_id and self.inventory_profile:
-            return self.inventory_profile.format_ids
-        return self.format_ids
+            return [canonicalize_format_ref(format_ref) for format_ref in self.inventory_profile.format_ids]
+        return [canonicalize_format_ref(format_ref) for format_ref in self.format_ids]
 
     @property
     def effective_properties(self) -> list[dict] | None:
@@ -426,26 +576,41 @@ class Product(Base, JSONValidatorMixin):
 
     @property
     def effective_implementation_config(self) -> dict:
-        """Get GAM implementation config from inventory profile (if set) or product itself.
+        """Get adapter implementation config from inventory profile (if set) or product itself.
 
-        Returns implementation_config dict with GAM-specific settings.
-        When inventory_profile_id is set, builds config from profile's inventory (auto-updates).
+        Returns implementation_config dict with adapter-specific settings.
+        When inventory_profile_id is set, overlays profile inventory onto product config (auto-updates).
         When inventory_profile_id is null, returns product's own config (legacy).
+
+        Generic fields for wholesale-product authoring:
+        - adapter: Adapter type for the execution selectors
+        - selectors: Adapter-specific inventory selectors
+        - format_bindings: Format-to-selector execution metadata
 
         Key fields for GAM adapter:
         - targeted_ad_unit_ids: List of GAM ad unit IDs
         - targeted_placement_ids: List of GAM placement IDs
         - include_descendants: Whether to include child ad units
         """
+        config = dict(self.implementation_config or {})
         if self.inventory_profile_id and self.inventory_profile:
             profile = self.inventory_profile
-            # Build config from profile's inventory configuration
-            return {
-                "targeted_ad_unit_ids": profile.inventory_config.get("ad_units", []),
-                "targeted_placement_ids": profile.inventory_config.get("placements", []),
-                "include_descendants": profile.inventory_config.get("include_descendants", True),
-            }
-        return self.implementation_config or {}
+            inventory_config = profile.inventory_config or {}
+            for key in ("adapter", "selectors", "format_bindings"):
+                if key in inventory_config:
+                    config[key] = inventory_config[key]
+
+            ad_units = inventory_config.get("ad_units") or []
+            placements = inventory_config.get("placements") or []
+
+            if ad_units:
+                config["targeted_ad_unit_ids"] = [str(ad_unit_id) for ad_unit_id in ad_units]
+            if placements:
+                config["targeted_placement_ids"] = [str(placement_id) for placement_id in placements]
+            if "include_descendants" in inventory_config:
+                config["include_descendants"] = bool(inventory_config.get("include_descendants"))
+
+        return config
 
     __table_args__ = (
         Index("idx_products_tenant", "tenant_id"),
@@ -541,7 +706,45 @@ class Principal(Base, JSONValidatorMixin):
     principal_id: Mapped[str] = mapped_column(String(50), primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     platform_mappings: Mapped[dict] = mapped_column(JSONType, nullable=False)
-    access_token: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # Bearer token for direct-to-/mcp authentication. Required for
+    # open-instance principals (buyer agents that hit the sales agent's
+    # AdCP surface directly). Nullable so embedded-mode principals — where
+    # the host (storefront) is the only agent and the sales agent never
+    # receives requests directly from a buyer — can be created without one.
+    access_token: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    # Buyer-agent URL — informational; populated from brand.json at admit
+    # time so it shows up in audit logs and the admin UI. NOT used by the
+    # verifier hot path; rotation of agent_url in brand.json doesn't need
+    # operator action because the verifier walks brand.json itself.
+    agent_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    # Operator-typed buyer domain. The TRUST ANCHOR — verifier constructs
+    # ``https://<brand_domain>/.well-known/brand.json`` and walks it via
+    # adcp.signing.BrandJsonJwksResolver, which auto-refreshes on cooldown
+    # + unknown-kid cascade. NULL means bearer-only auth (legacy path).
+    # See docs/design/signing-non-embedded.md.
+    brand_domain: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    # When True, unsigned requests from this principal are rejected. When False
+    # and agent_url is set, the verifier accepts signed requests but does not
+    # require them (mixed mode for migration). Ignored when agent_url is NULL
+    # (bearer-only principals can't sign). Replaces tenant-wide required_for.
+    signing_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Most-recent successful signed-request verification. Updated by the
+    # verifier middleware; reset to NULL when the operator changes
+    # ``brand_domain`` so the strict-admit guard doesn't carry stale
+    # evidence forward across trust-root changes. ``agent_url`` change
+    # does NOT reset — the verifier walks brand.json and the library
+    # handles agent_url rotation automatically.
+    last_signed_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Whether this buyer agent is allowed to be billed (i.e. accept Accounts
+    # with billing="agent"). Default True keeps existing principals billable.
+    # When False, the account-create / account-update path rejects requests
+    # that try to set billing="agent" for any account owned by this principal.
+    # billing="operator" / NULL is always allowed regardless. See BR-RULE-061.
+    billing_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    # Storefront-supplied stable identifier for idempotent principal
+    # creation via /api/v1/principals. Unique per (tenant, external_id)
+    # when non-null; NULL for principals created through legacy paths.
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -560,6 +763,19 @@ class Principal(Base, JSONValidatorMixin):
     __table_args__ = (
         Index("idx_principals_tenant", "tenant_id"),
         Index("idx_principals_token", "access_token"),
+        Index(
+            "idx_principals_agent_url",
+            "tenant_id",
+            "agent_url",
+            postgresql_where=text("agent_url IS NOT NULL"),
+        ),
+        Index(
+            "idx_principals_external_id",
+            "tenant_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
+        ),
     )
 
     def get_adapter_id(self, adapter_name: str) -> str | None:
@@ -592,7 +808,7 @@ class User(Base):
     tenant = relationship("Tenant", back_populates="users")
 
     __table_args__ = (
-        CheckConstraint("role IN ('admin', 'manager', 'viewer')"),
+        CheckConstraint("role IN ('admin', 'member', 'viewer')", name="ck_users_role"),
         UniqueConstraint("tenant_id", "email", name="uq_users_tenant_email"),  # Unique per tenant
         Index("idx_users_tenant", "tenant_id"),
         Index("idx_users_email", "email"),
@@ -635,26 +851,16 @@ class TenantAuthConfig(Base):
     @property
     def oidc_client_secret(self) -> str | None:
         """Decrypt and return the OIDC client secret."""
-        if not self.oidc_client_secret_encrypted:
-            return None
-        from src.core.utils.encryption import decrypt_api_key
-
-        try:
-            return decrypt_api_key(self.oidc_client_secret_encrypted)
-        except ValueError as exc:
-            from src.core.exceptions import AdCPConfigurationError
-
-            raise AdCPConfigurationError(f"Failed to decrypt OIDC client secret for tenant {self.tenant_id}") from exc
+        return _decrypt_optional_secret(
+            self.oidc_client_secret_encrypted,
+            secret_name="OIDC client secret",
+            owner_id=f"tenant {self.tenant_id}",
+        )
 
     @oidc_client_secret.setter
     def oidc_client_secret(self, value: str | None) -> None:
         """Encrypt and store the OIDC client secret."""
-        if value is None:
-            self.oidc_client_secret_encrypted = None
-        else:
-            from src.core.utils.encryption import encrypt_api_key
-
-            self.oidc_client_secret_encrypted = encrypt_api_key(value)
+        self.oidc_client_secret_encrypted = _encrypt_optional_secret(value)
 
 
 class Creative(Base):
@@ -832,6 +1038,11 @@ class Account(Base):
     # Internal fields (not in AdCP spec)
     principal_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     platform_mappings: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Sprint 1.8: which path the routing chain took to attach the
+    # gam_advertiser_id on this Account. Used by /recent-buyers to
+    # color-code matches vs fall-throughs without re-running resolution.
+    # Legacy rows are NULL; surfaces as "unknown" in API responses.
+    resolved_via: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -844,7 +1055,8 @@ class Account(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('active', 'pending_approval', 'rejected', 'payment_required', 'suspended', 'closed')",
+            "status IN ('active', 'pending_approval', 'pending_provision', 'rejected', "
+            "'payment_required', 'suspended', 'closed')",
             name="ck_accounts_status",
         ),
         CheckConstraint(
@@ -858,6 +1070,10 @@ class Account(Base):
         CheckConstraint(
             "account_scope IS NULL OR account_scope IN ('operator', 'brand', 'operator_brand', 'agent')",
             name="ck_accounts_account_scope",
+        ),
+        CheckConstraint(
+            "resolved_via IS NULL OR resolved_via IN ('account', 'sandbox', 'exact', 'house', 'operator', 'default')",
+            name="ck_accounts_resolved_via",
         ),
         Index("idx_accounts_tenant", "tenant_id"),
         Index("idx_accounts_status", "status"),
@@ -912,17 +1128,34 @@ class MediaBuy(Base):
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     raw_request: Mapped[dict] = mapped_column(JSONType, nullable=False)
     strategy_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Origin marker. ``adcp`` for buys created via the AdCP protocol;
+    # ``gam_import`` for buys materialized from gam_orders when an
+    # assigned buyer first updates an imported order.
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="adcp", server_default="adcp")
+    # Adapter-side ID (e.g. GAM order ID). Populated for both native and
+    # imported buys so lookups can resolve by either the canonical
+    # ``media_buy_id`` or the adapter ID.
+    external_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Delivery snapshot — populated opportunistically when a buyer calls
+    # get_media_buy_delivery, so the publisher dashboard can show pacing
+    # without making an adapter call on render. Nullable until first poll.
+    delivered_impressions: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    delivered_amount: Mapped[Decimal | None] = mapped_column(DECIMAL(15, 2), nullable=True)
+    delivery_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     tenant = relationship("Tenant", back_populates="media_buys", overlaps="media_buys")
@@ -970,6 +1203,13 @@ class MediaBuy(Base):
             "idempotency_key",
             unique=True,
             postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
+        Index(
+            "idx_media_buys_external_id",
+            "tenant_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
         ),
     )
 
@@ -1051,6 +1291,22 @@ class AuditLog(Base):
     details: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     strategy_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Managed-tenant external identity propagation (sprint 1 of managed tenant mode).
+    # Populated when a mutation originates from an upstream-platform user (e.g. Scope3
+    # Storefront). All four are optional — open-instance audit rows leave them NULL.
+    external_user_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_org_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # RFC 9421 signed-request verification trail. NULL on rows for unsigned
+    # requests and on legacy rows. Populated by SigningVerifyMiddleware when
+    # the verifier accepts a signature. The (verified_agent_url, verified_key_id)
+    # pair stamps "this row was signed with kid X published at agent_url Y."
+    # Calling principal is identified via principal_id (already on the row).
+    verified_agent_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    verified_key_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
     # Relationships
     tenant = relationship("Tenant", back_populates="audit_logs")
 
@@ -1080,6 +1336,51 @@ class TenantManagementConfig(Base):
 
 # Backwards compatibility alias
 SuperadminConfig = TenantManagementConfig
+
+
+class WebhookSubscription(Base):
+    """Outbound webhook subscription owned by a tenant.
+
+    [embedded-mode](../../../../docs/design/embedded-mode.md) publishes
+    tenant lifecycle events (workflow.created, workflow.decided,
+    media_buy.status_changed, sync.completed, sync.failed,
+    tenant.config_changed) to URLs registered here.
+
+    The subscription secret is stored hashed (sha256 hex) — the plaintext is
+    returned to the API caller exactly once at create time. Lost secrets
+    require re-registering the webhook.
+
+    ``event_types`` is the list of event types the receiver wants. Empty list
+    means "all events" (matching the spec's documented default).
+    """
+
+    __tablename__ = "webhook_subscriptions"
+
+    webhook_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    event_types: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    extra_headers: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_delivery_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_webhook_subscriptions_tenant", "tenant_id"),
+        Index(
+            "idx_webhook_subscriptions_active",
+            "tenant_id",
+            "is_active",
+        ),
+    )
 
 
 class AdapterConfig(Base):
@@ -1129,9 +1430,12 @@ class AdapterConfig(Base):
     gam_manual_approval_required: Mapped[bool] = mapped_column(Boolean, default=False)
     gam_order_name_template: Mapped[str | None] = mapped_column(String(500), nullable=True)
     gam_line_item_name_template: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    gam_advertiser_create_permission_proven_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # AXE (Audience Exchange) custom targeting keys (AdCP spec requires separate keys for each purpose)
-    # These are adapter-agnostic and work with GAM, Kevel, Mock, or any other adapter
+    # These are adapter-agnostic and work with GAM, Mock, or any other adapter
     # Note: gam_axe_custom_targeting_key was removed - use the three separate keys below
     axe_include_key: Mapped[str | None] = mapped_column(
         String(100),
@@ -1156,17 +1460,14 @@ class AdapterConfig(Base):
 
     # NOTE: gam_company_id (advertiser_id) is per-principal, stored in Principal.platform_mappings
 
-    # Kevel
-    kevel_network_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    kevel_api_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    kevel_manual_approval_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Sprint 1.8 + 1.6: per-tenant sandbox advertiser. Lazy-populated by
+    # ensure_sandbox_advertiser() on first sandbox call; the routing chain
+    # short-circuits sandbox=true buys to this advertiser (don't bill,
+    # don't pollute reports, don't count against inventory).
+    gam_sandbox_advertiser_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Mock
     mock_manual_approval_required: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # Triton
-    triton_station_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    triton_api_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Schema-driven configuration (coexists with legacy columns during migration)
     config_json: Mapped[dict] = mapped_column(
@@ -1189,29 +1490,16 @@ class AdapterConfig(Base):
     @property
     def gam_service_account_json(self) -> str | None:
         """Get decrypted GAM service account JSON."""
-        if not self._gam_service_account_json:
-            return None
-        from src.core.utils.encryption import decrypt_api_key
-
-        try:
-            return decrypt_api_key(self._gam_service_account_json)
-        except ValueError as exc:
-            from src.core.exceptions import AdCPConfigurationError
-
-            raise AdCPConfigurationError(
-                f"Failed to decrypt GAM service account JSON for tenant {self.tenant_id}"
-            ) from exc
+        return _decrypt_optional_secret(
+            self._gam_service_account_json,
+            secret_name="GAM service account JSON",
+            owner_id=f"tenant {self.tenant_id}",
+        )
 
     @gam_service_account_json.setter
     def gam_service_account_json(self, value: str | None) -> None:
         """Set encrypted GAM service account JSON."""
-        if not value:
-            self._gam_service_account_json = None
-            return
-
-        from src.core.utils.encryption import encrypt_api_key
-
-        self._gam_service_account_json = encrypt_api_key(value)
+        self._gam_service_account_json = _encrypt_optional_secret(value)
 
 
 class CreativeAgent(Base):
@@ -1235,7 +1523,7 @@ class CreativeAgent(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     auth_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     auth_header: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    auth_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+    _auth_credentials: Mapped[str | None] = mapped_column("auth_credentials", Text, nullable=True)
     timeout: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -1249,6 +1537,21 @@ class CreativeAgent(Base):
         Index("idx_creative_agents_tenant", "tenant_id"),
         Index("idx_creative_agents_enabled", "enabled"),
     )
+
+    @property
+    def auth_credentials(self) -> str | None:
+        """Get decrypted auth credentials for private creative agents."""
+        return _decrypt_optional_secret(
+            self._auth_credentials,
+            secret_name="creative agent auth credentials",
+            owner_id=f"creative_agent {self.id or 'new'} tenant {self.tenant_id}",
+            allow_legacy_plaintext=True,
+        )
+
+    @auth_credentials.setter
+    def auth_credentials(self, value: str | None) -> None:
+        """Set encrypted auth credentials for private creative agents."""
+        self._auth_credentials = _encrypt_optional_secret(value)
 
 
 class SignalsAgent(Base):
@@ -1271,7 +1574,7 @@ class SignalsAgent(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     auth_type: Mapped[str | None] = mapped_column(String(50), nullable=True)  # "bearer", "api_key", etc.
     auth_header: Mapped[str | None] = mapped_column(String(100), nullable=True)  # e.g., "x-api-key", "Authorization"
-    auth_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+    _auth_credentials: Mapped[str | None] = mapped_column("auth_credentials", Text, nullable=True)
     forward_promoted_offering: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     timeout: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -1286,6 +1589,21 @@ class SignalsAgent(Base):
         Index("idx_signals_agents_tenant", "tenant_id"),
         Index("idx_signals_agents_enabled", "enabled"),
     )
+
+    @property
+    def auth_credentials(self) -> str | None:
+        """Get decrypted auth credentials for private signals agents."""
+        return _decrypt_optional_secret(
+            self._auth_credentials,
+            secret_name="signals agent auth credentials",
+            owner_id=f"signals_agent {self.id or 'new'} tenant {self.tenant_id}",
+            allow_legacy_plaintext=True,
+        )
+
+    @auth_credentials.setter
+    def auth_credentials(self, value: str | None) -> None:
+        """Set encrypted auth credentials for private signals agents."""
+        self._auth_credentials = _encrypt_optional_secret(value)
 
 
 class GAMInventory(Base):
@@ -1377,6 +1695,21 @@ class InventoryProfile(Base, JSONValidatorMixin):
     gam_preset_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     gam_preset_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
+    # Typed AdCP capability narrowings (formats, channels, targeting_dimensions)
+    # so storefronts can pre-validate compositions client-side without
+    # round-tripping to the agent. Vocabulary references AdCP DecisioningCapabilities;
+    # bundles express narrowings, never redeclarations. Optional in v1.
+    # Shape: {"formats": [format_id, ...], "channels": [channel, ...],
+    #         "targeting_dimensions": [dim_name, ...]}
+    constraints: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Delivery forecast and pricing availability analytics produced by
+    # adapter syncs. Wholesale GetProducts projects these onto the bundle's
+    # buyer-facing Product shape without creating a durable products row.
+    forecast: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    pricing_availability: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Content hash for cache invalidation via If-None-Match on the REST API.
+    etag: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -1390,6 +1723,158 @@ class InventoryProfile(Base, JSONValidatorMixin):
     __table_args__ = (
         UniqueConstraint("tenant_id", "profile_id", name="uq_inventory_profile"),
         Index("idx_inventory_profiles_tenant", "tenant_id"),
+    )
+
+
+class InventoryBundleReference(Base):
+    """Denormalized "is this synced entity in ≥1 inventory bundle?" lookup.
+
+    Backs the Job 1 (Discovery) coverage analytics on the dashboard
+    (#485). A row's existence means the entity is referenced by at
+    least one ``InventoryProfile``. No state machine, no review/skip
+    semantics — operators don't review-each-ad-unit, they author
+    bundles and the same placement gets reused across many of them.
+
+    Used to compute "of N synced ad units, M appear in a bundle" without
+    forcing a JSON-blob JOIN over every ``InventoryProfile`` at request
+    time. The table is kept fresh at bundle-save time by
+    :func:`src.services.inventory_review_state_sync.recompute_in_bundle_status`.
+
+    Keyed by ``(tenant_id, adapter, entity_type, external_id)``. The
+    ``entity_type`` slot leaves room for future denormalizations
+    (e.g. signal candidates) without duplicating the schema.
+    """
+
+    __tablename__ = "inventory_bundle_reference"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # ``gam`` | ``freewheel`` | ``springserve`` — adapter that owns the entity.
+    adapter: Mapped[str] = mapped_column(String(50), nullable=False)
+    # ``ad_unit`` | ``placement`` today.
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Adapter-native id. Strings — adapters vary (some are int-like, some not).
+    external_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now()
+    )
+
+    tenant = relationship("Tenant")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "adapter",
+            "entity_type",
+            "external_id",
+            name="uq_inventory_bundle_reference",
+        ),
+        Index(
+            "idx_inventory_bundle_reference_tenant_type",
+            "tenant_id",
+            "entity_type",
+        ),
+        Index(
+            "idx_inventory_bundle_reference_tenant_adapter_type",
+            "tenant_id",
+            "adapter",
+            "entity_type",
+        ),
+    )
+
+
+class TenantSignal(Base, JSONValidatorMixin):
+    """Operator-authored map of one adapter targeting capability.
+
+    Replaces ``CustomTargetingProfile``. The previous shape baked
+    GAM-specific structure (``key_values``, ``audience_segments``) into the
+    schema, which doesn't generalize across Freewheel, Broadstreet,
+    SpringServe, or future adapters. The new shape mirrors AdCP's existing
+    ``Signal`` type so the storefront can render UI for any signal type —
+    categorical taxonomies, numeric ranges, binary toggles — without
+    per-adapter branching.
+
+    The storefront sees the AdCP-vocab fields (``signal_id``, ``name``,
+    ``value_type``, ``categories``, ``range``, ``targeting_dimension``).
+    The ``adapter_config`` blob is operator-authored, opaque to the
+    storefront, and consumed by the per-adapter materializer at compose
+    time to produce the right ``implementation_config`` for whichever ad
+    server the tenant uses.
+
+    Composition of multiple signals on a single buy (e.g. ``audience.X``
+    AND ``geo.Y`` AND NOT ``audience.Z``) reuses the existing
+    custom-targeting expression machinery — no parallel "signal bundle"
+    entity. Operators declare atomic capabilities; storefronts compose at
+    request time.
+    """
+
+    __tablename__ = "tenant_signals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Stable AdCP-style identifier (e.g. ``audience_sports_fans``,
+    # ``kv_vertical``, ``weather_temperature_f``). Storefront references this.
+    signal_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # AdCP SignalValueType — drives storefront UI rendering.
+    # ``binary`` (boolean toggle), ``categorical`` (multi-select), ``numeric``
+    # (slider / range picker).
+    value_type: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # Categorical taxonomy. Empty list for non-categorical signals.
+    categories: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list)
+
+    # AdCP ``Signal.tags`` — lowercase string labels for grouping / filtering
+    # within the catalog. Pattern enforced at the API boundary, not in the
+    # column itself (Postgres can't cheaply validate per-element).
+    tags: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list)
+
+    # Numeric bounds (when value_type='numeric'). NULL when N/A.
+    range_min: Mapped[Decimal | None] = mapped_column(DECIMAL(20, 6), nullable=True)
+    range_max: Mapped[Decimal | None] = mapped_column(DECIMAL(20, 6), nullable=True)
+
+    # Adapter-specific resolution map. Operator-authored, opaque to the
+    # storefront, consumed by the per-adapter materializer. Examples:
+    #   GAM custom KV: {"kind": "custom_key_value", "key_id": "12345",
+    #                   "value_ids": {"sports": "11111", "news": "22222"}}
+    #   GAM audience:  {"kind": "audience_segment", "segment_id": "98765"}
+    #   Freewheel:     {"kind": "audience_item", "audience_item_id": "..."}
+    #                | {"kind": "viewership_profile", "id": "..."}
+    # Adapter materializers validate shape at compose time.
+    adapter_config: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+
+    # Where the signal originates (publisher first-party, 3p data provider,
+    # derived). Informational only; storefront UX may surface it.
+    data_provider: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # AdCP-standard targeting-dimension this signal narrows. Cross-checked
+    # against ``InventoryProfile.constraints.targeting_dimensions`` so the
+    # storefront can pre-validate compositions client-side.
+    targeting_dimension: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    etag: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now()
+    )
+
+    tenant = relationship("Tenant")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "signal_id", name="uq_tenant_signal"),
+        Index("idx_tenant_signals_tenant", "tenant_id"),
     )
 
 
@@ -1623,7 +2108,7 @@ class SyncJob(Base):
         String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
     )
     adapter_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    sync_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    sync_type: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1883,6 +2368,137 @@ class AuthorizedProperty(Base, JSONValidatorMixin):
     )
 
 
+class AdvertiserRoutingRule(Base):
+    """Sprint 1.8 — buyer-advertiser routing rules.
+
+    Ordered overrides keyed by ``(operator_domain, brand_house, brand_id)``
+    with NULL-as-wildcard. The resolution chain in
+    :mod:`src.services.buyer_advertiser_routing` reads these rows
+    when a buy comes in carrying inline ``account: AccountReference``
+    (operator + brand + sandbox triple). Precedence: exact → house
+    wildcard → operator wildcard → tenant default → reject.
+    """
+
+    __tablename__ = "advertiser_routing_rules"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # "rule_<random>"
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    # Sprint 5 — buyer agent (Principal) the rule applies to. NULL = "any
+    # agent" (preserves Sprint 1.8 behavior; required for backward
+    # compatibility with rows that predate this column). Embedded tenants
+    # leave this NULL since the host is the only buyer.
+    principal_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Buyer agent's domain (e.g. interchange.io, buyer.scope3.com).
+    # Validated AAO-side on POST — must publish a valid adagents.json
+    # listing this tenant's public_agent_url. Always populated.
+    operator_domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Parent brand domain (e.g. coca-cola.com). NULL = "any house under
+    # this operator" (operator wildcard).
+    brand_house: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Specific brand within the house (e.g. sprite). NULL = "any brand
+    # under this house" (house wildcard).
+    brand_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Target advertiser. Validated against the synced gam advertisers
+    # cache on POST/PATCH (must reference a real advertiser in the
+    # tenant's GAM network).
+    gam_advertiser_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    tenant = relationship("Tenant", backref="advertiser_routing_rules")
+
+    __table_args__ = (
+        # Uniqueness on the natural key with NULLs participating via
+        # COALESCE coercion (Postgres treats NULL as distinct in UNIQUE
+        # by default). Mirrors the index alembic creates in
+        # 0042_e7a4c2b9d5f1; declared here so Base.metadata.create_all()
+        # (used by integration tests) builds the same constraint.
+        Index(
+            "uq_routing_rule_natural_key",
+            "tenant_id",
+            text("COALESCE(principal_id, '')"),
+            "operator_domain",
+            text("COALESCE(brand_house, '')"),
+            text("COALESCE(brand_id, '')"),
+            unique=True,
+        ),
+        Index("idx_routing_rules_tenant", "tenant_id"),
+        Index("idx_routing_rules_operator", "tenant_id", "operator_domain"),
+    )
+
+
+class GamAdvertiser(Base):
+    """Sprint 5 piece D — synced cache of GAM advertisers per tenant.
+
+    Powers the searchable picker in the Buyer Routing UI (default
+    advertiser + routing-rule rows). Hydrated by the
+    ``sync_advertisers`` worker reading
+    ``CompanyService.getCompaniesByStatement WHERE type = 'ADVERTISER'``.
+    The endpoint ``GET /tenants/{id}/gam/advertisers`` reads from this
+    cache, never from live GAM (10k+ advertiser networks make a per-
+    keystroke round-trip prohibitively slow).
+
+    Soft-delete on disappearance: advertisers that drop out of GAM are
+    flagged ``status='inactive'`` rather than hard-deleted, because
+    routing rules might reference them. The picker hides inactive rows
+    by default; the routing-rule editor surfaces a warning if a rule
+    points at an inactive advertiser.
+    """
+
+    __tablename__ = "gam_advertisers"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    advertiser_id: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    currency_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    # GAM company status surfaced verbatim ("active", "inactive") so
+    # the picker can render badges without a translation layer.
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    # Buyer agent (Principal) assigned to this advertiser. NULL means no
+    # agent has claimed it yet — orders for this advertiser are not
+    # surfaced to any buyer via get_media_buys. Set via the buyer
+    # mapping UI.
+    principal_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    tenant = relationship("Tenant", backref="gam_advertisers")
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "principal_id"],
+            ["principals.tenant_id", "principals.principal_id"],
+            ondelete="SET NULL",
+            name="fk_gam_advertisers_principal",
+        ),
+        Index("idx_gam_advertisers_tenant", "tenant_id"),
+        # Compound index supports the case-insensitive name search in
+        # GET /gam/advertisers. Mirrors the migration index so
+        # Base.metadata.create_all() (used by integration tests) builds
+        # the same constraint.
+        Index("idx_gam_advertisers_name", "tenant_id", "name"),
+        Index(
+            "idx_gam_advertisers_principal",
+            "tenant_id",
+            "principal_id",
+            postgresql_where=text("principal_id IS NOT NULL"),
+        ),
+    )
+
+
 class PropertyTag(Base, JSONValidatorMixin):
     """Metadata for property tags used in authorized properties.
 
@@ -1910,6 +2526,182 @@ class PropertyTag(Base, JSONValidatorMixin):
     )
 
 
+class FreeWheelInventory(Base, JSONValidatorMixin):
+    """Local cache of FreeWheel inventory taxonomy.
+
+    Stores FW Sites, SiteSections, SiteGroups, Series, VideoGroups,
+    AdUnitPackages, AdUnitNodes, and StandardAttributes as JSON-blob rows
+    keyed by ``(tenant_id, entity_type, entity_id)``. The cache is used by
+    the FreeWheel adapter's product configuration UI so publishers can
+    pick targeting from their FW inventory without round-tripping to the
+    FW API on every page render.
+
+    NOT exposed to AdCP buyers — buyer-facing property discovery goes
+    through the AAO lookup path (adagents.json + brand.json). This is a
+    private adapter-side cache.
+
+    Refreshed on demand via the adapter settings "Sync Inventory" button.
+    """
+
+    __tablename__ = "freewheel_inventory"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False, primary_key=True)
+    entity_type: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        primary_key=True,
+        comment=(
+            "FW entity kind: site, site_section, site_group, series, "
+            "video_group, ad_unit_package, ad_unit_node, standard_attribute"
+        ),
+    )
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False, primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    raw_json: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Relationships
+    tenant = relationship("Tenant", backref="freewheel_inventory")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+        Index("idx_freewheel_inventory_tenant_type", "tenant_id", "entity_type"),
+        Index("idx_freewheel_inventory_parent", "tenant_id", "parent_id"),
+    )
+
+
+class FreeWheelPlacementStats(Base):
+    """Per-placement delivery stats cache for the FreeWheel adapter.
+
+    Populated by a periodic Query Reporting API sync (pending Tier 2 FW
+    scope grant — see docs/adapters/freewheel/README.md). Read by
+    ``FreeWheelAdapter.get_packages_snapshot`` and
+    ``get_media_buy_delivery`` so AdCP delivery surfaces can serve results
+    without round-tripping to FreeWheel on every request.
+
+    Stays empty until the reporting sync is wired up. Adapter reads are
+    defensive — missing rows surface as ``None`` snapshots / zero
+    delivery, never errors.
+
+    Spend is stored as currency-minor-unit micros (1 EUR = 1_000_000
+    micros) to avoid floating-point precision loss when aggregating.
+    """
+
+    __tablename__ = "freewheel_placement_stats"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False, primary_key=True)
+    placement_id: Mapped[str] = mapped_column(String(64), nullable=False, primary_key=True)
+    insertion_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    impressions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    completed_views: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    clicks: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    tenant = relationship("Tenant", backref="freewheel_placement_stats")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+        Index("idx_fw_placement_stats_tenant_io", "tenant_id", "insertion_order_id"),
+    )
+
+
+class SpringServeInventory(Base, JSONValidatorMixin):
+    """Local cache of SpringServe inventory taxonomy.
+
+    Stores SpringServe Supply Partners, Supply Tags, Supply Groups, and
+    Accounts as JSON-blob rows keyed by ``(tenant_id, entity_type,
+    entity_id)``. The cache is used by the SpringServe adapter's product
+    configuration UI so publishers can pick targeting from their
+    SpringServe inventory without round-tripping to the SpringServe API
+    on every page render.
+
+    NOT exposed to AdCP buyers -- buyer-facing property discovery goes
+    through the AAO lookup path (adagents.json + brand.json). This is
+    a private adapter-side cache.
+
+    Refreshed on demand via the adapter settings "Sync Inventory" button
+    or the periodic AdapterSyncScheduler.
+    """
+
+    __tablename__ = "springserve_inventory"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False, primary_key=True)
+    entity_type: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        primary_key=True,
+        comment=("SpringServe entity kind: supply_partner, supply_router, supply_tag, key, value_list"),
+    )
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False, primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Explicit foreign-key columns rather than a polymorphic ``parent_id``.
+    # Each row populates only the FKs that apply to its entity_type:
+    #   supply_partner row  -> all FKs NULL
+    #   supply_router row   -> supply_partner_id set
+    #   supply_tag row      -> supply_partner_id set; supply_router_id set
+    #                         iff the tag belongs to a router (orphans allowed)
+    #   key row             -> all FKs NULL
+    #   value_list row      -> key_id set
+    supply_partner_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    supply_router_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    key_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    raw_json: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    tenant = relationship("Tenant", backref="springserve_inventory")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+        Index("idx_springserve_inventory_tenant_type", "tenant_id", "entity_type"),
+        Index("idx_springserve_inventory_router", "tenant_id", "supply_router_id"),
+        Index("idx_springserve_inventory_key", "tenant_id", "key_id"),
+    )
+
+
+class SpringServeDemandTagStats(Base):
+    """Per-demand-tag delivery stats cache for the SpringServe adapter.
+
+    Populated by a periodic Reporting API sync (Stage 4 -- the sync
+    writer is wired but the SpringServe Reporting scope grant lands
+    separately). Read by ``SpringServeAdapter.get_packages_snapshot``
+    and ``get_media_buy_delivery`` so AdCP delivery surfaces serve
+    results without round-tripping to SpringServe on every request.
+
+    Stays empty until the reporting sync is wired and scope is granted.
+    Adapter reads raise ``DeliveryDataUnavailable`` on empty cache --
+    we don't fabricate zeros for missing data.
+
+    Spend is stored as currency-minor-unit micros (1 EUR = 1_000_000
+    micros) to avoid floating-point precision loss when aggregating.
+    """
+
+    __tablename__ = "springserve_demand_tag_stats"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False, primary_key=True)
+    demand_tag_id: Mapped[str] = mapped_column(String(64), nullable=False, primary_key=True)
+    campaign_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    impressions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    completed_views: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    clicks: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    tenant = relationship("Tenant", backref="springserve_demand_tag_stats")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+        Index("idx_ss_demand_tag_stats_tenant_campaign", "tenant_id", "campaign_id"),
+    )
+
+
 class PublisherPartner(Base, JSONValidatorMixin):
     """Publisher domains that this tenant has partnerships with.
 
@@ -1932,6 +2724,21 @@ class PublisherPartner(Base, JSONValidatorMixin):
         String(20), nullable=False, default="pending", comment="pending, success, error"
     )
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AAO status counts — populated by sync_publisher_partners + the per-row
+    # refresh endpoint. Drive the "47 / 200 authorized" UI without re-hitting
+    # AAO on every page render.
+    total_properties: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    authorized_properties: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Literal PublisherPartnerStatusKind ("authorized" | "unbound" |
+    # "pending" | "no_properties" | "unreachable"). Persisted so
+    # _partner_to_dict can render the operationally-different post-fetch
+    # states the prior derivation collapsed together (e.g. "unbound"
+    # publisher whose products bind permissively vs "no_properties"
+    # publisher who has no inventory at all). See salesagent#377. NULL on
+    # rows that haven't been refreshed since the column was added.
+    aao_status_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -1965,16 +2772,25 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
     principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
     session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)
+    operation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    subscriber_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    event_types: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
     authentication_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     authentication_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     webhook_secret: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    purpose: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="async_task", server_default=text("'async_task'")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     auth_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signing_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="hmac", server_default=text("'hmac'"))
 
     # Relationships
     tenant = relationship("Tenant", backref="push_notification_configs", overlaps="principal")
@@ -1992,6 +2808,7 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
         ),
         Index("idx_push_notification_configs_tenant", "tenant_id"),
         Index("idx_push_notification_configs_principal", "tenant_id", "principal_id"),
+        Index("idx_push_notification_configs_account", "tenant_id", "account_id"),
     )
 
     def __repr__(self):
@@ -2002,6 +2819,10 @@ class PushNotificationConfig(Base, JSONValidatorMixin):
             f"principal_id='{self.principal_id}', "
             f"session_id='{self.session_id}', "
             f"url='{self.url}', "
+            f"operation_id='{self.operation_id}', "
+            f"account_id='{self.account_id}', "
+            f"subscriber_id='{self.subscriber_id}', "
+            f"purpose='{self.purpose}', "
             f"authentication_type='{self.authentication_type}', "
             f"authentication_token='***', "
             f"validation_token='***', "
@@ -2091,6 +2912,13 @@ class WebhookDeliveryLog(Base):
     payload_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     response_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Body capture for buyer-side debug visibility (#101). Truncated to
+    # ~64KB at insert time by the persistence helper. Both nullable:
+    # older rows pre-date these columns, and non-HTTP failures
+    # (connection refused, timeout) have no response_body.
+    request_payload: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    response_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -2110,4 +2938,176 @@ class WebhookDeliveryLog(Base):
         Index("idx_webhook_log_tenant", "tenant_id"),
         Index("idx_webhook_log_status", "status"),
         Index("idx_webhook_log_created_at", "created_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Signing (non-embedded mode) — per-buyer-agent trust model
+# ---------------------------------------------------------------------------
+# See docs/design/signing-non-embedded.md (rev 5). Each buyer-protocol
+# Principal optionally carries an ``agent_url``. When set, the verifier
+# fetches JWKS from ``<agent_url>/.well-known/jwks.json`` and verifies inbound
+# signatures. The salesagent trusts the buyer agent for its operator
+# identity — no brand.json chain walk, no operator-attestation step. Operators
+# and brands are orthogonal dimensions of Accounts (Account.{operator, brand,
+# billing}), NOT auth subjects.
+
+
+class TenantSigningPolicy(Base):
+    """Per-tenant request-signing policy. One row per tenant."""
+
+    __tablename__ = "tenant_signing_policy"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Master switch — when False the verifier never runs.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # List of AdCP operation names that REQUIRE a signature. Empty list => signing optional.
+    required_for: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list)
+    # required | forbidden | either
+    covers_digest_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="either")
+    max_skew_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    max_window_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "covers_digest_policy IN ('required', 'forbidden', 'either')",
+            name="chk_tenant_signing_policy_digest",
+        ),
+    )
+
+
+class TenantSigningCredential(Base):
+    """Salesagent's own outbound signing key reference.
+
+    Stores a KMS reference (or local PEM file path in dev) plus the cached public
+    JWK so the admin UI can render a copy-paste-ready brand.json snippet for the
+    operator to publish at their house_domain. Private bytes never live in our
+    process for KMS-backed credentials.
+    """
+
+    __tablename__ = "tenant_signing_credentials"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    purpose: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # local_pem | gcp_kms | aws_kms | hashicorp_vault
+    backend: Mapped[str] = mapped_column(String(32), nullable=False)
+    # KMS key resource name OR file path; format depends on backend.
+    backend_ref: Mapped[str] = mapped_column(String(1024), nullable=False)
+    public_jwk: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    key_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    rotated_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "backend IN ('local_pem', 'gcp_kms', 'aws_kms', 'hashicorp_vault')",
+            name="chk_tenant_signing_credentials_backend",
+        ),
+        Index(
+            "idx_tenant_signing_credentials_active",
+            "tenant_id",
+            "purpose",
+            "is_active",
+            postgresql_where=text("is_active"),
+        ),
+        # At-most-one-active per (tenant, purpose). Mirrored in the
+        # alembic migration so production gets the same enforcement.
+        # Without this, two concurrent admin sessions both creating an
+        # active credential succeed; the snapshot loader then picks one
+        # arbitrarily and the operator-published JWKS may list the other.
+        Index(
+            "ux_tenant_signing_credentials_active",
+            "tenant_id",
+            "purpose",
+            unique=True,
+            postgresql_where=text("is_active = TRUE"),
+        ),
+    )
+
+
+class Proposal(Base):
+    """``proposals`` table schema mirror — table-creation-only declaration.
+
+    The runtime owner of this table is
+    :class:`adcp.decisioning.pg.proposal_store.PgProposalStore` (adcp
+    5.5.0), which speaks raw psycopg3 with explicit-column INSERTs.
+    salesagent code MUST NOT query through this ORM model — every read
+    and write goes through :func:`core.decisioning.proposal_store.get_proposal_store`.
+
+    This class exists so :data:`Base.metadata` knows the table when
+    :func:`sqlalchemy.MetaData.create_all` runs (every integration test
+    fixture rebuilds per-test DBs via ``Base.metadata.create_all``,
+    bypassing Alembic). Without it, the table is missing from the test
+    DB and ``PgProposalStore`` raises ``UndefinedTable`` on every
+    proposal-path dispatch.
+
+    Production runs Alembic (migration ``t2u3v4w5x6y7``), which is the
+    source of truth for the schema. The column types here are chosen
+    to produce the same DDL ``create_all`` would emit — namely they
+    omit ``COLLATE "C"`` (test-only perf optimization) but otherwise
+    match. The ``CheckConstraint`` on ``state`` and the partial unique
+    + partial expires_at indexes are replicated so test DBs match
+    production behavior for any SQL we ever might add against this
+    table (we don't today, but the principle stands).
+
+    The generated ``tenant_id`` column is declared via
+    :class:`sqlalchemy.Computed` so SQLAlchemy emits the matching
+    ``GENERATED ALWAYS AS ... STORED`` clause. The FK + cascade to
+    ``tenants`` is preserved.
+    """
+
+    __tablename__ = "proposals"
+
+    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    recipes: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    proposal_payload: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    media_buy_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recipe_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        Computed("split_part(account_id, ':', 1)", persisted=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('draft', 'committed', 'consuming', 'consumed')",
+            name="ck_proposals_state",
+        ),
+        Index(
+            "ux_proposals_account_media_buy",
+            "account_id",
+            "media_buy_id",
+            unique=True,
+            postgresql_where=text("media_buy_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_proposals_expires_at",
+            "expires_at",
+            postgresql_where=text("expires_at IS NOT NULL"),
+        ),
+        Index("ix_proposals_tenant_id", "tenant_id"),
     )

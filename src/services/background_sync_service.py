@@ -7,6 +7,7 @@ and losing progress on container restarts.
 
 import logging
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,12 +23,35 @@ _active_syncs: dict[str, threading.Thread] = {}
 _sync_lock = threading.Lock()
 
 
+@contextmanager
+def _sync_session():
+    """Open a DB session flagged as a platform background worker.
+
+    Inventory sync writes platform-managed columns (notably
+    ``adapter_config.custom_targeting_keys``, which the GAM targeting
+    manager reads at media-buy approval time). The embedded-tenant guard
+    in :mod:`src.core.database.embedded_tenant_guard` blocks writes to
+    those surfaces unless the session is flagged. Sync workers run on
+    behalf of the platform — kicked off by the Tenant Management API's
+    first-sync-on-provision hook, by ``POST /tenants/{tid}/refresh``, or
+    by cron — so every sync session is platform-authorized.
+    """
+    with get_db_session() as db:
+        db.info["platform_background_worker"] = True
+        yield db
+
+
 def start_inventory_sync_background(
     tenant_id: str,
     sync_mode: str = "incremental",
     sync_types: list[str] | None = None,
     custom_targeting_limit: int | None = None,
     audience_segment_limit: int | None = None,
+    *,
+    pending_sync_id: str | None = None,
+    targeting_sync_id: str | None = None,
+    triggered_by: str = "admin_ui",
+    triggered_by_id: str | None = "system",
 ) -> str:
     """
     Start an inventory sync in the background.
@@ -38,6 +62,18 @@ def start_inventory_sync_background(
         sync_types: Optional list of inventory types to sync
         custom_targeting_limit: Optional limit on custom targeting values
         audience_segment_limit: Optional limit on audience segments
+        pending_sync_id: If provided, transition that existing pending row
+            from ``pending → running`` instead of creating a new SyncJob.
+            Lets ``POST /tenants/{tid}/refresh`` own the row creation while
+            this function spawns the worker. When omitted (admin-button
+            path), creates a fresh row as before.
+        targeting_sync_id: Optional companion ``custom_targeting`` SyncJob
+            row id. Inventory sync does targeting work internally; the
+            companion row is transitioned alongside the inventory row so
+            the publisher's per-type progress UI reflects reality.
+        triggered_by: Provenance stamped on newly-created rows. Ignored
+            when ``pending_sync_id`` points at an existing row.
+        triggered_by_id: Optional actor/source stamped on newly-created rows.
 
     Returns:
         sync_id: The sync job ID for tracking progress
@@ -47,7 +83,7 @@ def start_inventory_sync_background(
     """
 
     # Create sync job record
-    with get_db_session() as db:
+    with _sync_session() as db:
         # Get adapter type for the tenant via repository
         from src.core.database.repositories.adapter_config import AdapterConfigRepository
 
@@ -60,7 +96,12 @@ def start_inventory_sync_background(
         )
         existing_sync = db.scalars(stmt).first()
 
-        if existing_sync:
+        # When the caller passed a pending_sync_id, "already running" means
+        # something OTHER than this row — the row we're about to transition
+        # is in pending state, not running, so it shouldn't trip the
+        # in-progress guard. Skip the guard if the running row matches our
+        # pending id (defensive — shouldn't happen).
+        if existing_sync and existing_sync.sync_id != pending_sync_id:
             # Check if sync is stale (running for >1 hour with no progress updates)
             from datetime import timedelta
 
@@ -92,32 +133,79 @@ def start_inventory_sync_background(
                     f"Sync already running for tenant {tenant_id}: {existing_sync.sync_id} (started {started_at_value})"
                 )
 
-        # Create new sync job
-        sync_id = f"sync_{tenant_id}_{int(datetime.now(UTC).timestamp())}"
-
-        sync_job = SyncJob(
-            sync_id=sync_id,
-            tenant_id=tenant_id,
-            adapter_type=adapter_type,
-            sync_type="inventory",
-            status="running",
-            started_at=datetime.now(UTC),
-            triggered_by="admin_ui",
-            triggered_by_id="system",
-            progress={
+        # Use the caller-supplied pending row when provided; otherwise create
+        # a fresh row (admin-button / cron path).
+        if pending_sync_id is not None:
+            pending_row = db.scalars(select(SyncJob).filter_by(sync_id=pending_sync_id)).first()
+            if pending_row is None:
+                # Caller said "use this id" but it doesn't exist — be loud,
+                # don't silently fall through to creating a new row.
+                raise ValueError(
+                    f"start_inventory_sync_background called with pending_sync_id="
+                    f"{pending_sync_id!r} but no SyncJob row matches"
+                )
+            sync_id = pending_row.sync_id
+            pending_row.status = "running"
+            # Restamp ``started_at`` so the value reflects when the worker
+            # actually picked up the row, not when /refresh queued it.
+            # The 60s idempotency window in ``_create_and_spawn_refresh``
+            # compares against ``started_at`` — without restamping, a row
+            # that sat pending for >60s and just transitioned to running
+            # would falsely look like a stale in-flight conflict on the
+            # next /refresh.
+            pending_row.started_at = datetime.now(UTC)
+            pending_row.progress = {
                 "phase": "Starting",
                 "sync_types": sync_types,
                 "custom_targeting_limit": custom_targeting_limit,
                 "audience_segment_limit": audience_segment_limit,
-            },
-        )
-        db.add(sync_job)
+            }
+        else:
+            sync_id = f"sync_{tenant_id}_{int(datetime.now(UTC).timestamp())}"
+            sync_job = SyncJob(
+                sync_id=sync_id,
+                tenant_id=tenant_id,
+                adapter_type=adapter_type,
+                sync_type="inventory",
+                status="running",
+                started_at=datetime.now(UTC),
+                triggered_by=triggered_by,
+                triggered_by_id=triggered_by_id,
+                progress={
+                    "phase": "Starting",
+                    "sync_types": sync_types,
+                    "custom_targeting_limit": custom_targeting_limit,
+                    "audience_segment_limit": audience_segment_limit,
+                },
+            )
+            db.add(sync_job)
+
+        # Transition the companion custom_targeting row when /refresh fanned
+        # one out — inventory sync covers targeting internally, so the
+        # companion row tracks the same lifecycle.
+        if targeting_sync_id is not None:
+            targeting_row = db.scalars(select(SyncJob).filter_by(sync_id=targeting_sync_id)).first()
+            if targeting_row is not None:
+                targeting_row.status = "running"
+                # Restamp so the worker-pickup time is what ``/refresh``
+                # idempotency compares against (see comment on
+                # ``pending_row.started_at`` above).
+                targeting_row.started_at = datetime.now(UTC)
+
         db.commit()
 
     # Start background thread
     thread = threading.Thread(
         target=_run_sync_thread,
-        args=(tenant_id, sync_id, sync_mode, sync_types, custom_targeting_limit, audience_segment_limit),
+        args=(
+            tenant_id,
+            sync_id,
+            sync_mode,
+            sync_types,
+            custom_targeting_limit,
+            audience_segment_limit,
+            targeting_sync_id,
+        ),
         daemon=True,
         name=f"sync-{sync_id}",
     )
@@ -138,6 +226,7 @@ def _run_sync_thread(
     sync_types: list[str] | None,
     custom_targeting_limit: int | None,
     audience_segment_limit: int | None,
+    targeting_sync_id: str | None = None,
 ):
     """
     Run the actual sync in a background thread with detailed phase-by-phase progress.
@@ -159,17 +248,13 @@ def _run_sync_thread(
         logger.info(f"[{sync_id}] Starting inventory sync for {tenant_id}")
 
         # Import here to avoid circular dependencies
-        import os
-
-        import google.oauth2.service_account
-        from googleads import ad_manager, oauth2
-
+        from src.adapters.gam import GAMClientManager, build_gam_config_from_adapter
         from src.adapters.gam_inventory_discovery import GAMInventoryDiscovery
         from src.core.database.models import Tenant
         from src.services.gam_inventory_service import GAMInventoryService
 
         # Get tenant and adapter config (fresh session per thread)
-        with get_db_session() as db:
+        with _sync_session() as db:
             tenant = db.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
             if not tenant:
                 _mark_sync_failed(sync_id, "Tenant not found")
@@ -188,48 +273,21 @@ def _run_sync_thread(
                 _mark_sync_failed(sync_id, "GAM not configured")
                 return
 
-            # Determine auth method
-            auth_method = getattr(adapter_config, "gam_auth_method", None)
-            if not auth_method:
-                if adapter_config.gam_refresh_token:
-                    auth_method = "oauth"
-                elif hasattr(adapter_config, "gam_service_account_json") and adapter_config.gam_service_account_json:
-                    auth_method = "service_account"
-                else:
-                    _mark_sync_failed(sync_id, "No GAM authentication configured")
-                    return
+            # build_gam_config_from_adapter detects auth method from credential
+            # presence (service_account_json wins over refresh_token), so this
+            # path stays consistent with the connection-test and advertisers
+            # sync paths even when the row's gam_auth_method column is stale.
+            gam_config = build_gam_config_from_adapter(adapter_config)
+            if "service_account_json" not in gam_config and "refresh_token" not in gam_config:
+                _mark_sync_failed(sync_id, "No GAM authentication configured")
+                return
 
-            # Create GAM client based on auth method
-            if auth_method == "service_account":
-                service_account_json_str = adapter_config.gam_service_account_json
-                if not service_account_json_str:
-                    _mark_sync_failed(sync_id, "Service account JSON not found")
-                    return
-
-                import json as json_mod
-
-                service_account_info = json_mod.loads(service_account_json_str)
-                credentials = google.oauth2.service_account.Credentials.from_service_account_info(
-                    service_account_info, scopes=["https://www.googleapis.com/auth/dfp"]
-                )
-                oauth2_client = oauth2.GoogleCredentialsClient(credentials)
-                client = ad_manager.AdManagerClient(
-                    oauth2_client, "Prebid Sales Agent", network_code=adapter_config.gam_network_code
-                )
-            else:  # OAuth
-                oauth2_client = oauth2.GoogleRefreshTokenClient(
-                    client_id=os.environ.get("GAM_OAUTH_CLIENT_ID"),
-                    client_secret=os.environ.get("GAM_OAUTH_CLIENT_SECRET"),
-                    refresh_token=adapter_config.gam_refresh_token,
-                )
-                client = ad_manager.AdManagerClient(
-                    oauth2_client, "Prebid Sales Agent", network_code=adapter_config.gam_network_code
-                )
+            client = GAMClientManager(gam_config, network_code=adapter_config.gam_network_code).get_client()
 
         # Get last successful sync time for incremental mode
         last_sync_time = None
         if sync_mode == "incremental":
-            with get_db_session() as db:
+            with _sync_session() as db:
                 from sqlalchemy import desc
 
                 last_successful_sync = db.scalars(
@@ -277,7 +335,7 @@ def _run_sync_thread(
         # Phase 0: Full reset - delete all existing inventory (only for full sync)
         if sync_mode == "full":
             update_progress("Deleting Existing Inventory", 1)
-            with get_db_session() as db:
+            with _sync_session() as db:
                 from sqlalchemy import delete
 
                 from src.core.database.models import GAMInventory
@@ -288,7 +346,7 @@ def _run_sync_thread(
                 logger.info(f"[{sync_id}] Full reset: deleted all existing inventory for tenant {tenant_id}")
 
         # Initialize inventory service for streaming writes
-        with get_db_session() as db:
+        with _sync_session() as db:
             inventory_service = GAMInventoryService(db)
             sync_time = datetime.now(UTC)
 
@@ -369,7 +427,7 @@ def _run_sync_thread(
 
         # For incremental sync, also report total counts from database (not just newly synced items)
         if sync_mode == "incremental":
-            with get_db_session() as db:
+            with _sync_session() as db:
                 # Import here to avoid circular imports
                 from sqlalchemy import func
 
@@ -457,6 +515,12 @@ def _run_sync_thread(
 
         # Mark complete
         _mark_sync_complete(sync_id, result)
+        # Mirror completion onto the companion custom_targeting row when
+        # /refresh fanned one out — same lifecycle, bundled work.
+        if targeting_sync_id is not None:
+            _mark_sync_complete(
+                targeting_sync_id, {"bundled_with": sync_id, "summary": "custom_targeting synced as part of inventory"}
+            )
         logger.info(f"[{sync_id}] Sync completed successfully")
 
         # Invalidate inventory tree cache after successful sync
@@ -475,6 +539,9 @@ def _run_sync_thread(
     except Exception as e:
         logger.error(f"[{sync_id}] Sync failed: {e}", exc_info=True)
         _mark_sync_failed(sync_id, str(e))
+        # Targeting companion row tracks the inventory lifecycle.
+        if targeting_sync_id is not None:
+            _mark_sync_failed(targeting_sync_id, f"Bundled inventory sync failed: {e}")
 
     finally:
         # Remove from active syncs
@@ -485,7 +552,7 @@ def _run_sync_thread(
 def _update_sync_progress(sync_id: str, progress_data: dict[str, Any]):
     """Update sync job progress in database."""
     try:
-        with get_db_session() as db:
+        with _sync_session() as db:
             stmt = select(SyncJob).where(SyncJob.sync_id == sync_id)
             sync_job = db.scalars(stmt).first()
             if sync_job:
@@ -498,7 +565,7 @@ def _update_sync_progress(sync_id: str, progress_data: dict[str, Any]):
 def _mark_sync_complete(sync_id: str, summary: dict[str, Any]):
     """Mark sync as completed with summary."""
     try:
-        with get_db_session() as db:
+        with _sync_session() as db:
             import json
 
             stmt = select(SyncJob).where(SyncJob.sync_id == sync_id)
@@ -517,7 +584,7 @@ def _mark_sync_complete(sync_id: str, summary: dict[str, Any]):
 def _mark_sync_failed(sync_id: str, error_message: str):
     """Mark sync as failed with error message."""
     try:
-        with get_db_session() as db:
+        with _sync_session() as db:
             stmt = select(SyncJob).where(SyncJob.sync_id == sync_id)
             sync_job = db.scalars(stmt).first()
             if sync_job:

@@ -1,6 +1,6 @@
 """ProductEnv — unit test environment for _get_products_impl.
 
-Patches: ProductUoW, get_principal_object, convert_product_model_to_schema,
+Patches: ProductUoW, get_principal_object, convert_product_model_to_resolved,
          PolicyCheckService, generate_variants_for_brief, DynamicPricingService,
          get_factory (ranking), resolve_property_list, get_adapter.
 
@@ -15,7 +15,7 @@ Usage::
 Available mocks via env.mock:
     "uow"                  -- ProductUoW class mock
     "principal"            -- get_principal_object mock
-    "convert"              -- convert_product_model_to_schema mock (identity)
+    "convert_resolved"     -- convert_product_model_to_resolved mock (wraps as ResolvedProduct)
     "policy_service"       -- PolicyCheckService class mock
     "dynamic_variants"     -- generate_variants_for_brief AsyncMock
     "ranking_factory"      -- get_factory mock (AI ranking)
@@ -45,6 +45,11 @@ _DEFAULT_PUBLISHER_PROPERTY = {
     "publisher_domain": "test-publisher.com",
 }
 
+# adcp 4.4: Product.reporting_capabilities is required on the wire. Use the
+# same default as the column server_default so unit tests don't have to
+# declare this on every product they construct.
+from src.core.database.models import PRODUCT_REPORTING_CAPABILITIES_DEFAULT
+
 
 def _make_product(
     product_id: str = "prod_001",
@@ -59,6 +64,7 @@ def _make_product(
     delivery_measurement: dict[str, str] | None = None,
     publisher_properties: list[dict[str, Any]] | None = None,
     estimated_exposures: int | None = None,
+    reporting_capabilities: dict[str, Any] | None = None,
     **extra: Any,
 ) -> Product:
     """Build a Product schema instance for unit testing."""
@@ -75,6 +81,7 @@ def _make_product(
         delivery_measurement=delivery_measurement or {"provider": "publisher"},
         publisher_properties=publisher_properties or [_DEFAULT_PUBLISHER_PROPERTY],
         estimated_exposures=estimated_exposures,
+        reporting_capabilities=reporting_capabilities or dict(PRODUCT_REPORTING_CAPABILITIES_DEFAULT),
         **extra,
     )
 
@@ -100,7 +107,10 @@ class ProductEnv(ProductMixin, BaseTestEnv):
     EXTERNAL_PATCHES = {
         "uow": "src.core.database.repositories.uow.ProductUoW",
         "principal": f"{MODULE}.get_principal_object",
-        "convert": f"{MODULE}.convert_product_model_to_schema",
+        # Phase 2 slice 4: production calls only convert_product_model_to_resolved
+        # at this module. The patch wraps the harness's schema-shape input
+        # (add_product feeds Product instances into list_all) into a ResolvedProduct.
+        "convert_resolved": f"{MODULE}.convert_product_model_to_resolved",
         "policy_service": f"{MODULE}.PolicyCheckService",
         "dynamic_variants": "src.services.dynamic_products.generate_variants_for_brief",
         "ranking_factory": "src.services.ai.factory.get_factory",
@@ -132,8 +142,23 @@ class ProductEnv(ProductMixin, BaseTestEnv):
         self._uow_instance.__exit__ = MagicMock(return_value=False)
         self.mock["uow"].return_value = self._uow_instance
 
-        # Convert: identity function (return product as-is)
-        self.mock["convert"].side_effect = lambda product_obj, **kw: product_obj
+        # convert_resolved: wrap the schema-shape ``product_obj`` into a
+        # ResolvedProduct, pulling internal fields off the schema's own
+        # exclude=True attributes (the harness puts schema instances into
+        # the UoW; production puts ORM instances and Phase 2 slice 2's
+        # convert_product_model_to_resolved consumes those).
+        from src.core.resolved_product import ResolvedProduct
+
+        def _wrap_as_resolved(product_obj: Any, **_kw: Any) -> ResolvedProduct:
+            return ResolvedProduct(
+                wire=product_obj,
+                implementation_config=getattr(product_obj, "implementation_config", None),
+                countries=getattr(product_obj, "countries", None),
+                device_types=getattr(product_obj, "device_types", None),
+                allowed_principal_ids=getattr(product_obj, "allowed_principal_ids", None),
+            )
+
+        self.mock["convert_resolved"].side_effect = _wrap_as_resolved
 
         # Adapter: mock with supported pricing models
         mock_adapter = MagicMock()

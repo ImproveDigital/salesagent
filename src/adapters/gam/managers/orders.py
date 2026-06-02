@@ -9,17 +9,77 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from googleads import ad_manager
 
 from src.adapters.gam.utils.timeout_handler import timeout
 from src.core.exceptions import AdCPAdapterError, AdCPNotFoundError
+from src.core.sandbox import (
+    SANDBOX_TRAFFICKING_COST_TYPE,
+    SANDBOX_TRAFFICKING_LINE_ITEM_TYPE,
+    SANDBOX_TRAFFICKING_PRICING_MODEL,
+    SANDBOX_TRAFFICKING_PRIORITY,
+)
 
 logger = logging.getLogger(__name__)
 
 # Line item type constants for GAM automation
 GUARANTEED_LINE_ITEM_TYPES = {"STANDARD", "SPONSORSHIP"}
 NON_GUARANTEED_LINE_ITEM_TYPES = {"NETWORK", "BULK", "PRICE_PRIORITY", "HOUSE"}
+
+# GAM Order builder has no timeZoneId field; line items default to the network
+# default unless overridden via impl_config.time_zone.
+DEFAULT_GAM_TIME_ZONE = "America/New_York"
+
+# LineItem forecast warmup is typically ~60 min after create or any
+# targeting change. GAM rejects mutations during this window with
+# ForecastingError.NO_FORECAST_YET. Backoff sleeps between retries
+# total ~3 min over 8 attempts (mirrors `update_line_item_budget`).
+NO_FORECAST_RETRY_BACKOFF: tuple[int, ...] = (5, 10, 20, 30, 30, 30, 30, 30)
+
+
+def _gam_datetime(dt: datetime, tz_id: str) -> dict[str, Any]:
+    """Build a GAM DateTime payload for ``dt`` expressed in ``tz_id``.
+
+    GAM interprets the wall-clock fields under ``timeZoneId``, so a tz-aware
+    datetime must be converted to that zone before extraction or the emitted
+    instant shifts by the UTC offset. Naive datetimes pass through unchanged
+    on the assumption they are already in network-local time.
+    """
+    local = dt.astimezone(ZoneInfo(tz_id)) if dt.tzinfo is not None else dt
+    return {
+        "date": {"year": local.year, "month": local.month, "day": local.day},
+        "hour": local.hour,
+        "minute": local.minute,
+        "second": local.second,
+    }
+
+
+def _build_custom_criteria_set(custom_targeting_keys: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a GAM ``CustomCriteriaSet`` from ``{key_id: {values, operator}}``.
+
+    Returns ``None`` when no children would be produced (empty input,
+    non-dict specs, or missing ``values``).
+    """
+    children: list[dict[str, Any]] = []
+    for key_id, value_spec in custom_targeting_keys.items():
+        if not isinstance(value_spec, dict):
+            continue
+        raw_values = value_spec.get("values") or []
+        if not raw_values:
+            continue
+        children.append(
+            {
+                "xsi_type": "CustomCriteria",
+                "keyId": str(key_id),
+                "valueIds": [str(v) for v in raw_values],
+                "operator": value_spec.get("operator", "IS"),
+            }
+        )
+    if not children:
+        return None
+    return {"logicalOperator": "AND", "children": children}
 
 
 class GAMOrdersManager:
@@ -84,18 +144,8 @@ class GAMOrdersManager:
             "traffickerId": self.trafficker_id,
             "status": "DRAFT",  # Start as DRAFT - will approve after line items are created
             "totalBudget": {"currencyCode": currency, "microAmount": int(total_budget * 1_000_000)},
-            "startDateTime": {
-                "date": {"year": start_time.year, "month": start_time.month, "day": start_time.day},
-                "hour": start_time.hour,
-                "minute": start_time.minute,
-                "second": start_time.second,
-            },
-            "endDateTime": {
-                "date": {"year": end_time.year, "month": end_time.month, "day": end_time.day},
-                "hour": end_time.hour,
-                "minute": end_time.minute,
-                "second": end_time.second,
-            },
+            "startDateTime": _gam_datetime(start_time, DEFAULT_GAM_TIME_ZONE),
+            "endDateTime": _gam_datetime(end_time, DEFAULT_GAM_TIME_ZONE),
         }
 
         # Add PO number if provided
@@ -433,7 +483,9 @@ class GAMOrdersManager:
             if impl_config.get("targeted_placement_ids"):
                 if "inventoryTargeting" not in line_item_targeting:
                     line_item_targeting["inventoryTargeting"] = {}
-                line_item_targeting["inventoryTargeting"]["targetedPlacementIds"] = list(impl_config["targeted_placement_ids"])
+                line_item_targeting["inventoryTargeting"]["targetedPlacementIds"] = [
+                    str(placement_id) for placement_id in impl_config["targeted_placement_ids"]
+                ]
 
             # Require inventory targeting - no fallback
             if "inventoryTargeting" not in line_item_targeting or not line_item_targeting["inventoryTargeting"]:
@@ -449,25 +501,20 @@ class GAMOrdersManager:
                 log(f"[red]Error: {error_msg}[/red]")
                 raise ValueError(error_msg)
 
-            # Add custom targeting from product config
-            # IMPORTANT: Merge without overwriting buyer's targeting (e.g., AEE signals from key_value_pairs)
-            if impl_config.get("custom_targeting_keys"):
-                if "customTargeting" not in line_item_targeting:
-                    line_item_targeting["customTargeting"] = {}
-                # Add product custom targeting, but don't overwrite existing keys from buyer
-                for key, value in impl_config["custom_targeting_keys"].items():
-                    if key not in line_item_targeting["customTargeting"]:
-                        line_item_targeting["customTargeting"][key] = value
-                    else:
-                        log(
-                            f"[yellow]Product config custom targeting key '{key}' conflicts with buyer targeting, keeping buyer value[/yellow]"
-                        )
+            # Add custom targeting from product config as a CustomCriteriaSet.
+            # Skip if the buyer already supplied customTargeting (e.g., AEE signals
+            # from key_value_pairs) so we don't clobber upstream merges.
+            if impl_config.get("custom_targeting_keys") and not line_item_targeting.get("customTargeting"):
+                criteria_set = _build_custom_criteria_set(impl_config["custom_targeting_keys"])
+                if criteria_set is not None:
+                    line_item_targeting["customTargeting"] = criteria_set
 
             # Build creative placeholders from format_ids
             # First try to get from package.format_ids (buyer-specified)
             creative_placeholders: list[dict[str, Any]] = []
 
             if package.format_ids:
+                from src.adapters.gam.formats import build_gam_creative_placeholder, gam_format_type
                 from src.core.format_resolver import get_format
 
                 # Validate format types against product supported types
@@ -476,12 +523,19 @@ class GAMOrdersManager:
                 for format_id_obj in package.format_ids:
                     # format_id_obj is a FormatId object with agent_url and id fields
                     # Extract the ID string and agent_url for format lookup
-                    format_id_str = format_id_obj.id
-                    agent_url = format_id_obj.agent_url
+                    from src.core.format_cache import upgrade_legacy_format_id
+
+                    format_id_payload = (
+                        format_id_obj.model_dump() if hasattr(format_id_obj, "model_dump") else format_id_obj
+                    )
+                    canonical_format_id = upgrade_legacy_format_id(format_id_payload)
+                    format_id_str = canonical_format_id.id
+                    agent_url = canonical_format_id.agent_url
+                    agent_url_str = str(agent_url).rstrip("/") if agent_url else None
 
                     # Use format resolver to support custom formats and product overrides
                     # Include agent_url in format strings for clarity (different agents may have same format IDs)
-                    format_display = f"{agent_url}/{format_id_str}" if agent_url else format_id_str
+                    format_display = f"{agent_url_str}/{format_id_str}" if agent_url_str else format_id_str
 
                     try:
                         # Pass product_id (not package_id) to enable format_overrides lookup
@@ -489,26 +543,20 @@ class GAMOrdersManager:
                             package.product_id if hasattr(package, "product_id") else package.package_id
                         )
                         format_obj = get_format(
-                            format_id_str, agent_url=agent_url, tenant_id=tenant_id, product_id=product_id_for_format
+                            format_id_str,
+                            agent_url=agent_url_str,
+                            tenant_id=tenant_id,
+                            product_id=product_id_for_format,
                         )
                     except (ValueError, AdCPNotFoundError, AdCPAdapterError) as e:
                         error_msg = f"Format lookup failed for '{format_display}': {e}"
                         log(f"[red]Error: {error_msg}[/red]")
-                        raise ValueError(error_msg)
+                        raise ValueError(error_msg) from e
 
-                    # Check if format type is supported by product
-                    # adcp 3.12: Format.type removed. Infer from format_id string.
-                    fid_str = (
-                        format_obj.format_id.id if hasattr(format_obj.format_id, "id") else str(format_obj.format_id)
-                    )
-                    if "video" in fid_str:
-                        format_type_str = "video"
-                    elif "native" in fid_str:
-                        format_type_str = "native"
-                    elif "audio" in fid_str:
-                        format_type_str = "audio"
-                    else:
-                        format_type_str = "display"
+                    # Check if format type is supported by product. GAM maps from
+                    # canonical AdCP format IDs to its own creative types in
+                    # src.adapters.gam.formats.
+                    format_type_str = gam_format_type(format_id_str)
                     if format_type_str not in supported_format_types:
                         error_msg = (
                             f"Format '{format_display}' (type: {format_type_str}) is not supported by product {package.package_id}. "
@@ -524,98 +572,28 @@ class GAMOrdersManager:
                             f"Audio format '{format_display}' is not supported. "
                             f"GAM does not support standalone audio line items. "
                             f"Audio can only be used as companion creatives to video ads. "
-                            f"To deliver audio ads, use a different ad server (e.g., Triton, Kevel) that supports audio."
+                            f"To deliver audio ads, use a different ad server (e.g., Triton) that supports audio."
                         )
                         log(f"[red]Error: {error_msg}[/red]")
                         raise ValueError(error_msg)
 
-                    # Check if format has GAM-specific config
-                    platform_cfg = format_obj.platform_config or {}
-                    gam_cfg = platform_cfg.get("gam", {})
-                    placeholder_cfg = gam_cfg.get("creative_placeholder", {})
-
-                    # Build creative placeholder
-                    placeholder: dict[str, Any] = {
-                        "expectedCreativeCount": 1,
-                    }
-
-                    # Check for GAM custom creative template (1x1 placeholder)
-                    if "creative_template_id" in placeholder_cfg:
-                        # Use 1x1 placeholder with custom template
-                        placeholder["size"] = {
-                            "width": 1,
-                            "height": 1,
-                            "isAspectRatio": False,
-                        }
-                        placeholder["creativeTemplateId"] = placeholder_cfg["creative_template_id"]
-                        log(
-                            f"  Custom template placeholder: 1x1 with template_id={placeholder_cfg['creative_template_id']}"
+                    try:
+                        placeholder = build_gam_creative_placeholder(
+                            canonical_format_id,
+                            format_obj=format_obj,
+                            impl_config=impl_config,
                         )
+                    except ValueError as e:
+                        error_msg = f"Format '{format_display}' cannot be trafficked in GAM: {e}"
+                        log(f"[red]Error: {error_msg}[/red]")
+                        raise ValueError(error_msg) from e
 
-                    else:
-                        # Use platform config if available, otherwise fall back to requirements
-                        if placeholder_cfg:
-                            width = placeholder_cfg.get("width")
-                            height = placeholder_cfg.get("height")
-                            creative_size_type = placeholder_cfg.get("creative_size_type", "PIXEL")
-                        else:
-                            # Fallback to requirements (legacy formats)
-                            requirements = format_obj.requirements or {}
-                            width = requirements.get("width")
-                            height = requirements.get("height")
-                            # Infer creative size type from format_id name since Format.type was removed in adcp 3.12
-                            creative_size_type = "NATIVE" if "native" in format_id_str.lower() else "PIXEL"
-
-                        # Check FormatId parameters (AdCP 2.5 parameterized formats)
-                        # The buyer can specify width/height directly in the FormatId object
-                        if not (width and height):
-                            # Handle both FormatId objects and dicts (from database JSONB)
-                            if hasattr(format_id_obj, "width") and hasattr(format_id_obj, "height"):
-                                if format_id_obj.width and format_id_obj.height:
-                                    width = format_id_obj.width
-                                    height = format_id_obj.height
-                                    log(f"  [blue]Using dimensions from FormatId parameters: {width}x{height}[/blue]")
-                            elif isinstance(format_id_obj, dict):
-                                # Fallback for dict format (shouldn't happen after fix, but defensive)
-                                dict_width = format_id_obj.get("width")
-                                dict_height = format_id_obj.get("height")
-                                if dict_width and dict_height:
-                                    width = int(dict_width)
-                                    height = int(dict_height)
-                                    log(f"  [blue]Using dimensions from FormatId dict: {width}x{height}[/blue]")
-
-                        # Last resort: Try to extract dimensions from format_id (e.g., "display_970x250_image")
-                        if not (width and height):
-                            import re
-
-                            match = re.search(r"(\d+)x(\d+)", format_id_str)
-                            if match:
-                                width = int(match.group(1))
-                                height = int(match.group(2))
-                                log(f"  [yellow]Extracted dimensions from format ID: {width}x{height}[/yellow]")
-
-                        if width and height:
-                            placeholder["size"] = {"width": width, "height": height}
-                            placeholder["creativeSizeType"] = creative_size_type
-
-                            # Log video-specific info
-                            if "video" in format_id_str.lower():
-                                aspect_ratio = (
-                                    format_obj.requirements.get("aspect_ratio", "unknown")
-                                    if format_obj.requirements
-                                    else "unknown"
-                                )
-                                log(f"  Video placeholder: {width}x{height} ({aspect_ratio} aspect ratio)")
-                        else:
-                            # For formats without dimensions
-                            error_msg = (
-                                f"Format '{format_display}' has no width/height configuration for GAM. "
-                                f"For parameterized formats like 'display_image', specify width/height in the FormatId "
-                                f"(e.g., {{'id': 'display_image', 'width': 300, 'height': 250}}), "
-                                f"or add 'platform_config.gam.creative_placeholder' to the format definition."
-                            )
-                            log(f"[red]Error: {error_msg}[/red]")
-                            raise ValueError(error_msg)
+                    size = placeholder.get("size") or {}
+                    log(
+                        "  GAM placeholder: "
+                        f"{size.get('width')}x{size.get('height')} "
+                        f"({placeholder.get('creativeSizeType', 'PIXEL')}) for {format_id_str}"
+                    )
 
                     creative_placeholders.append(placeholder)
 
@@ -756,6 +734,7 @@ class GAMOrdersManager:
                 pricing_model = pricing_info["pricing_model"]
                 is_fixed_price = pricing_info["is_fixed"]  # Fixed vs auction pricing (pricing type)
                 currency = pricing_info["currency"]
+                sandbox_trafficking = bool(pricing_info.get("sandbox_trafficking"))
 
                 # Determine delivery guarantee from product (not pricing)
                 # IMPORTANT: delivery_type (guaranteed/non-guaranteed inventory) is SEPARATE from
@@ -821,7 +800,21 @@ class GAMOrdersManager:
                 # NETWORK: Only supports DAILY goal type (percentage-based)
                 # STANDARD: Supports LIFETIME goal type (impression-based)
                 # PRICE_PRIORITY: Supports NONE, LIFETIME, DAILY goal types (impression-based)
-                if line_item_type == "SPONSORSHIP":
+                if sandbox_trafficking:
+                    pricing_model = SANDBOX_TRAFFICKING_PRICING_MODEL
+                    rate = 0.0
+                    cost_type = SANDBOX_TRAFFICKING_COST_TYPE
+                    cost_per_unit_micro = 0
+                    line_item_type = SANDBOX_TRAFFICKING_LINE_ITEM_TYPE
+                    priority = SANDBOX_TRAFFICKING_PRIORITY
+                    goal_type = "DAILY"
+                    goal_unit_type = "IMPRESSIONS"
+                    goal_units = 100
+                    log(
+                        "  [SANDBOX] Ignoring buyer price for GAM trafficking: "
+                        f"{line_item_type} @ $0.00 {currency}, priority={priority}"
+                    )
+                elif line_item_type == "SPONSORSHIP":
                     # SPONSORSHIP line items require DAILY goals with percentage-based units
                     goal_type = "DAILY"
 
@@ -843,7 +836,7 @@ class GAMOrdersManager:
                     pass  # Keep goal_type from impl_config (set earlier)
 
                 # Update goal units based on pricing model (for non-SPONSORSHIP or non-FLAT_RATE)
-                if pricing_model != "flat_rate":
+                if not sandbox_trafficking and pricing_model != "flat_rate":
                     if pricing_model == "cpc":
                         # CPC: goal should be in clicks, not impressions
                         goal_unit_type = "CLICKS"
@@ -894,18 +887,12 @@ class GAMOrdersManager:
                 "creativeRotationType": impl_config.get("creative_rotation_type", "EVEN"),
                 "deliveryRateType": impl_config.get("delivery_rate_type", "EVENLY"),
                 "startDateTime": {
-                    "date": {"year": start_time.year, "month": start_time.month, "day": start_time.day},
-                    "hour": start_time.hour,
-                    "minute": start_time.minute,
-                    "second": start_time.second,
-                    "timeZoneId": impl_config.get("time_zone", "America/New_York"),
+                    **_gam_datetime(start_time, impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE)),
+                    "timeZoneId": impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE),
                 },
                 "endDateTime": {
-                    "date": {"year": end_time.year, "month": end_time.month, "day": end_time.day},
-                    "hour": end_time.hour,
-                    "minute": end_time.minute,
-                    "second": end_time.second,
-                    "timeZoneId": impl_config.get("time_zone", "America/New_York"),
+                    **_gam_datetime(end_time, impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE)),
+                    "timeZoneId": impl_config.get("time_zone", DEFAULT_GAM_TIME_ZONE),
                 },
                 # Set status based on whether manual approval is required
                 # DRAFT = needs manual approval, READY = ready to serve (when creatives added)
@@ -1022,7 +1009,7 @@ class GAMOrdersManager:
                 log(f"  Package: {package.name}")
                 log(f"  Line Item Type: {impl_config.get('line_item_type', 'STANDARD')}")
                 log(f"  Priority: {impl_config.get('priority', 8)}")
-                log(f"  CPM: ${package.cpm}")
+                log(f"  Rate: ${rate:,.2f} ({pricing_model.upper()})")
                 log(f"  Impressions Goal: {package.impressions:,}")
                 log(f"  Creative Placeholders: {len(creative_placeholders)} sizes")
                 for cp in creative_placeholders[:3]:
@@ -1182,6 +1169,141 @@ class GAMOrdersManager:
         # All retries exhausted
         logger.error(f"Failed to update line item {line_item_id} budget after {max_retries} attempts")
         return False
+
+    def update_order_dates(
+        self,
+        order_id: str,
+        start_time: datetime | None,
+        end_time: datetime | None,
+        time_zone_id: str = DEFAULT_GAM_TIME_ZONE,
+    ) -> bool:
+        """Push flight-date changes from an approved update_media_buy to GAM.
+
+        Patches the Order's ``startDateTime``/``endDateTime`` and every
+        child LineItem's flight bounds. The Order has no ``timeZoneId``
+        field (GAM uses the network default); LineItems carry an explicit
+        ``timeZoneId`` so it's set on the per-item payload to match.
+
+        Returns ``True`` only when both the Order update and every
+        LineItem update succeed. Partial failures are logged at ERROR and
+        return ``False`` so the caller can surface drift; the DB record
+        is not rolled back since the buyer's intent is durable and a
+        retry can re-apply GAM-side without losing it.
+        """
+        if start_time is None and end_time is None:
+            return True
+
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] Would update Order {order_id} dates: start={start_time} end={end_time} tz={time_zone_id}"
+            )
+            return True
+
+        try:
+            order_service = self.client_manager.get_service("OrderService")
+
+            statement = ad_manager.StatementBuilder().Where("id = :id").WithBindVariable("id", int(order_id)).Limit(1)
+            order_response = order_service.getOrdersByStatement(statement.ToStatement())
+            orders = order_response["results"] if order_response and "results" in order_response else []
+            if not orders:
+                logger.error(f"Order {order_id} not found in GAM")
+                return False
+            order = orders[0]
+
+            new_order_start = _gam_datetime(start_time, time_zone_id) if start_time else None
+            new_order_end = _gam_datetime(end_time, time_zone_id) if end_time else None
+
+            if isinstance(order, dict):
+                if new_order_start is not None:
+                    order["startDateTime"] = new_order_start
+                if new_order_end is not None:
+                    order["endDateTime"] = new_order_end
+            else:
+                if new_order_start is not None:
+                    order.startDateTime = new_order_start
+                if new_order_end is not None:
+                    order.endDateTime = new_order_end
+
+            updated_orders = order_service.updateOrders([order])
+            if not updated_orders:
+                logger.error(f"GAM updateOrders returned no results for Order {order_id}")
+                return False
+            logger.info(f"✓ Updated Order {order_id} dates")
+        except Exception as e:
+            logger.error(f"Error updating Order {order_id} dates: {e}", exc_info=True)
+            return False
+
+        try:
+            line_item_service = self.client_manager.get_service("LineItemService")
+
+            li_statement = (
+                ad_manager.StatementBuilder().Where("orderId = :orderId").WithBindVariable("orderId", int(order_id))
+            )
+            li_response = line_item_service.getLineItemsByStatement(li_statement.ToStatement())
+            line_items = li_response["results"] if li_response and "results" in li_response else []
+            if not line_items:
+                logger.info(f"Order {order_id} has no line items to update")
+                return True
+
+            new_li_start = (
+                {**_gam_datetime(start_time, time_zone_id), "timeZoneId": time_zone_id} if start_time else None
+            )
+            new_li_end = {**_gam_datetime(end_time, time_zone_id), "timeZoneId": time_zone_id} if end_time else None
+
+            for li in line_items:
+                if isinstance(li, dict):
+                    if new_li_start is not None:
+                        li["startDateTime"] = new_li_start
+                    if new_li_end is not None:
+                        li["endDateTime"] = new_li_end
+                else:
+                    if new_li_start is not None:
+                        li.startDateTime = new_li_start
+                    if new_li_end is not None:
+                        li.endDateTime = new_li_end
+
+            # Forecast warmup: GAM rejects LineItem mutations with
+            # ForecastingError.NO_FORECAST_YET for ~60min after creation
+            # or any targeting change. Mirror the retry pattern in
+            # `update_line_item_budget` and `approve_order`. Order's
+            # updateOrders above is not subject to forecasting and was
+            # already applied; if every retry exhausts, the caller sees
+            # Order new + LineItem stale and can re-trigger this lane.
+            import time
+
+            updated_line_items = None
+            for attempt, delay in enumerate(NO_FORECAST_RETRY_BACKOFF, start=1):
+                try:
+                    updated_line_items = line_item_service.updateLineItems(line_items)
+                    break
+                except Exception as e:
+                    err = str(e)
+                    is_warmup = "NO_FORECAST_YET" in err or "ForecastingError" in err
+                    if is_warmup and attempt < len(NO_FORECAST_RETRY_BACKOFF):
+                        logger.info(
+                            f"NO_FORECAST_YET on Order {order_id} LineItems "
+                            f"(attempt {attempt}/{len(NO_FORECAST_RETRY_BACKOFF)}); sleeping {delay}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise
+            else:
+                logger.error(
+                    f"LineItem update gave up after {len(NO_FORECAST_RETRY_BACKOFF)} attempts on Order {order_id}"
+                )
+                return False
+
+            if not updated_line_items or len(updated_line_items) != len(line_items):
+                logger.error(
+                    f"GAM updateLineItems returned {len(updated_line_items) if updated_line_items else 0}"
+                    f" of {len(line_items)} expected for Order {order_id}"
+                )
+                return False
+            logger.info(f"✓ Updated {len(line_items)} line item(s) under Order {order_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating line items under Order {order_id}: {e}", exc_info=True)
+            return False
 
     def pause_line_item(self, line_item_id: str) -> bool:
         """Pause line item in GAM by setting status to PAUSED.

@@ -3,11 +3,20 @@
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 # Import our new utilities
-from src.core.database.database_session import DatabaseManager, get_db_session, get_or_404, get_or_create
-from src.core.database.models import Context, Principal, Product, Tenant, WorkflowStep
+from src.core.database.database_session import (
+    DatabaseManager,
+    execute_with_retry,
+    get_db_session,
+    get_or_404,
+    get_or_create,
+    reset_health_state,
+)
+from src.core.database.models import Context, MediaBuy, Principal, Product, Tenant, WorkflowStep
 from src.core.json_validators import (
     CommentModel,
     PlatformMappingModel,
@@ -57,6 +66,55 @@ class TestSessionManagement:
             assert retrieved is not None
             assert retrieved.name == "Test Tenant"
             assert retrieved.authorized_emails == ["admin@test.com"]
+
+    def test_nested_context_managers_use_independent_sessions(self, test_db):
+        """Nested get_db_session blocks must not share the same Session."""
+        with get_db_session() as outer_session:
+            with get_db_session() as inner_session:
+                assert inner_session is not outer_session
+
+            assert outer_session.scalars(select(1)).one() == 1
+
+    def test_inner_context_does_not_detach_outer_orm_instances(self, test_db):
+        """An inner get_db_session close must not detach rows loaded outside it."""
+        from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+        from tests.helpers.managed_tenant_api import bind_factories_to_session
+
+        with bind_factories_to_session():
+            tenant = TenantFactory(tenant_id="tenant_nested_session")
+            principal = PrincipalFactory(tenant=tenant, principal_id="principal_nested_session")
+            MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id="mb_nested_session",
+            )
+
+        with get_db_session() as outer_session:
+            media_buy = outer_session.scalars(select(MediaBuy).filter_by(media_buy_id="mb_nested_session")).one()
+
+            with get_db_session() as inner_session:
+                assert inner_session is not outer_session
+                assert inner_session.scalars(select(1)).one() == 1
+
+            assert sa_inspect(media_buy).detached is False
+            assert media_buy.tenant.name == "Test Publisher tenant_nested_session"
+
+    def test_execute_with_retry_bypasses_fail_fast_after_retryable_error(self, test_db):
+        """Retry attempts should not be short-circuited by the health breaker."""
+        attempts = 0
+
+        def flaky_lookup(session):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError("transient failure", None, None)
+            return session.scalars(select(1)).one()
+
+        try:
+            assert execute_with_retry(flaky_lookup, max_retries=2) == 1
+            assert attempts == 2
+        finally:
+            reset_health_state()
 
     def test_database_manager_class(self, test_db):
         """Test the DatabaseManager class pattern."""

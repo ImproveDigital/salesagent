@@ -7,7 +7,7 @@ Covers:
 from __future__ import annotations
 
 import pytest
-from adcp.types.generated_poc.core.format import Assets, Assets5, Dimensions, Renders
+from adcp.types import Dimensions, ImageFormatAsset, Renders, VideoFormatAsset
 
 from src.core.schemas import Format, FormatId, ListCreativeFormatsResponse
 from tests.factories import TenantFactory
@@ -18,7 +18,7 @@ AGENT_URL = "https://creative.adcontextprotocol.org"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 
 def _make_format(
@@ -59,14 +59,14 @@ class TestFullCatalogNoFilters:
                 "Medium Rectangle",
                 type="display",
                 renders=[Renders(role="primary", dimensions=Dimensions(width=300, height=250))],
-                assets=[Assets(item_type="individual", asset_id="hero_image", required=True)],
+                assets=[ImageFormatAsset(item_type="individual", asset_id="hero_image", required=True)],
             ),
             _make_format(
                 "video_preroll_15s",
                 "Pre-roll 15s",
                 type="video",
                 renders=[Renders(role="primary", dimensions=Dimensions(width=640, height=360))],
-                assets=[Assets5(item_type="individual", asset_id="video_file", required=True)],
+                assets=[VideoFormatAsset(item_type="individual", asset_id="video_file", required=True)],
             ),
             _make_format(
                 "audio_companion",
@@ -91,7 +91,7 @@ class TestFullCatalogNoFilters:
 
         Verifies that each format in the response contains the required
         structural fields: format_id (with agent_url and id), name, and type.
-        Assets with type, dimensions, and required flags are also verified
+        ImageFormatAsset with type, dimensions, and required flags are also verified
         when present.
         """
         formats = [
@@ -101,7 +101,7 @@ class TestFullCatalogNoFilters:
                 type="display",
                 renders=[Renders(role="primary", dimensions=Dimensions(width=728, height=90))],
                 assets=[
-                    Assets(
+                    ImageFormatAsset(
                         item_type="individual",
                         asset_id="banner_image",
                         required=True,
@@ -113,7 +113,7 @@ class TestFullCatalogNoFilters:
                 "Mid-roll Video",
                 type="video",
                 assets=[
-                    Assets5(
+                    VideoFormatAsset(
                         item_type="individual",
                         asset_id="video_asset",
                         required=True,

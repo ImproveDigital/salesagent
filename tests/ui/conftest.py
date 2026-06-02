@@ -55,6 +55,18 @@ def _ensure_test_auth_enabled():
                 " ON CONFLICT DO NOTHING"
             )
         )
+        conn.execute(
+            text(
+                "INSERT INTO gam_inventory"
+                " (tenant_id, inventory_type, inventory_id, name, path, status,"
+                "  inventory_metadata, last_synced, created_at, updated_at)"
+                " VALUES ('default', 'placement', 'smoke-placement-001', 'Smoke Test Placement',"
+                "  '[\"Smoke Test Placement\"]'::jsonb, 'ACTIVE',"
+                '  \'{"ad_unit_ids": ["smoke-au-001"]}\'::jsonb,'
+                "  NOW(), NOW(), NOW())"
+                " ON CONFLICT DO NOTHING"
+            )
+        )
         conn.commit()
     engine.dispose()
 
@@ -66,8 +78,9 @@ def authenticated_page(page, base_url):
     page.wait_for_load_state("domcontentloaded")
 
     # Inject tenant_id into the last form (needed for multi-tenant e2e stacks)
-    page.evaluate("""() => {
-        const forms = document.querySelectorAll('form[action="/test/auth"]');
+    page.evaluate(
+        """() => {
+        const forms = document.querySelectorAll('form[action="/test/auth"], form[action$="/test/auth"]');
         const form = forms[forms.length - 1];
         if (form && !form.querySelector('input[name="tenant_id"]')) {
             const input = document.createElement('input');
@@ -76,9 +89,12 @@ def authenticated_page(page, base_url):
             input.value = 'default';
             form.appendChild(input);
         }
-    }""")
+    }"""
+    )
 
-    buttons = page.locator('form[action="/test/auth"] button[type="submit"]')
+    buttons = page.locator(
+        'form[action="/test/auth"] button[type="submit"], form[action$="/test/auth"] button[type="submit"]'
+    )
     buttons.last.click()
     page.wait_for_load_state("networkidle")
 

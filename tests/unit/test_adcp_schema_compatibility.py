@@ -58,6 +58,11 @@ class TestADCPSchemaCompatibility:
         # Simulate signal data as returned by adcp library (all required fields)
         # adcp 3.9: pricing_options replaces the old pricing field
         adcp_signal_data = {
+            "signal_id": {
+                "source": "agent",
+                "agent_url": "https://test.example/signals",
+                "id": "segment_123",
+            },
             "signal_agent_segment_id": "segment_123",
             "name": "Automotive Enthusiasts",
             "description": "Users interested in automotive content",
@@ -74,7 +79,7 @@ class TestADCPSchemaCompatibility:
 
         assert signal.signal_agent_segment_id == "segment_123"
         assert signal.name == "Automotive Enthusiasts"
-        assert signal.signal_type == "marketplace"
+        assert signal.signal_type.value == "marketplace"
         assert signal.data_provider == "Optable"
         assert signal.coverage_percentage == 85.0
         assert len(signal.deployments) == 1
@@ -134,16 +139,21 @@ class TestADCPSchemaCompatibility:
             "format_id": {"agent_url": "https://test.com", "id": "test_format"},
             "name": "Test Format",
             "type": "display",
-            "platform_config": {"gam": {"creative_template_id": "123"}, "kevel": {"template_id": "456"}},
+            "platform_config": {"gam": {"creative_template_id": "123"}, "triton": {"template_id": "456"}},
         }
 
         format_obj = Format(**format_data)
-        assert format_obj.platform_config == {"gam": {"creative_template_id": "123"}, "kevel": {"template_id": "456"}}
+        assert format_obj.platform_config == {"gam": {"creative_template_id": "123"}, "triton": {"template_id": "456"}}
 
     def test_signal_roundtrip_with_model_dump(self):
         """Test Signal can roundtrip through model_dump and reconstruction."""
         # adcp 3.9: pricing_options replaces the old pricing field
         original_data = {
+            "signal_id": {
+                "source": "agent",
+                "agent_url": "https://test.example/signals",
+                "id": "roundtrip_seg",
+            },
             "signal_agent_segment_id": "roundtrip_seg",
             "name": "Roundtrip Signal",
             "description": "Test signal for roundtrip",
@@ -169,7 +179,7 @@ class TestADCPSchemaCompatibility:
         assert reconstructed.signal_agent_segment_id == original_data["signal_agent_segment_id"]
         assert reconstructed.name == original_data["name"]
         assert reconstructed.description == original_data["description"]
-        assert reconstructed.signal_type == original_data["signal_type"]
+        assert reconstructed.signal_type.value == original_data["signal_type"]
         assert reconstructed.data_provider == original_data["data_provider"]
         assert reconstructed.coverage_percentage == original_data["coverage_percentage"]
 

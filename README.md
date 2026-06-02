@@ -28,7 +28,7 @@ Try the sales agent locally:
 # Clone and start
 git clone https://github.com/prebid/salesagent.git
 cd salesagent
-docker compose up -d
+CONDUCTOR_PORT=8000 make compose-up
 
 # Test the MCP interface
 uvx adcp http://localhost:8000/mcp/ --auth test-token list_tools
@@ -143,6 +143,8 @@ docker compose logs adcp-server | head -50
 - **[Development Guide](docs/development/README.md)** - Local development and contributing
 - **[Architecture](docs/development/architecture.md)** - System design and database schema
 - **[Troubleshooting Guide](docs/development/troubleshooting.md)** - Monitoring and debugging
+- **[Tenant Management API spec](openapi.yaml)** ([JSON](openapi.json)) - OpenAPI 3.x spec for the platform-management REST surface; served live at `/api/v1/tenant-management/docs/openapi.json` with Swagger UI at `/api/v1/tenant-management/docs/swagger` (Redoc at `/docs/redoc`). When the admin app is WSGI-mounted under `/admin/` in production, the public URLs gain the `/admin` prefix.
+- **[Embedded Wholesale Products API](docs/integration/embedded-wholesale-products-api.md)** - API-only flow for embedded storefronts to provision tenants, discover publisher properties/selectors/creative formats, and create wholesale products.
 
 ## Key Features
 

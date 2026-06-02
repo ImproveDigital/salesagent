@@ -3,7 +3,7 @@
 # For local development with hot-reload.
 #
 # Usage:
-#   docker compose up
+#   CONDUCTOR_PORT=8000 make compose-up
 #
 # Endpoints (default port 8000):
 #   http://localhost:8000/       - Admin UI (login here)
@@ -17,7 +17,7 @@
 #   3. Disable Setup Mode once SSO is working
 #
 # Environment variables (optional, via .env file):
-#   CONDUCTOR_PORT: Change proxy port (default: 8000, useful for multiple worktrees)
+#   CONDUCTOR_PORT: Required. Proxy host port (set per worktree by Conductor; no default to prevent silent collisions).
 #   CREATE_DEMO_TENANT=true: Create demo tenant with mock adapter
 
 services:
@@ -41,6 +41,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Same image as adcp-server (rebuilt independently by Compose
+      # for db-init's own service). Thread the lockfile hash through
+      # so the install layer's cache key invalidates on uv.lock change
+      # — see the comment on adcp-server.build.args for the full why.
+      args:
+        LOCKFILE_HASH: ${LOCKFILE_HASH:-set-this-build-arg}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
     entrypoint: []
     env_file:
       - path: .env
@@ -48,13 +56,19 @@ services:
     environment:
       DATABASE_URL: postgresql://adcp_user:secure_password_change_me@postgres:5432/adcp?sslmode=disable
       PYTHONPATH: "/app"
+      SEED_DEMO_AUTO_APPROVE: "${SEED_DEMO_AUTO_APPROVE:-0}"
+      WEBHOOK_SIGNING_KEYS_DIR: "/app/signing_keys"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - .:/app
-      - /app/.venv
-    command: ["python", "scripts/ops/migrate.py"]
+      - ./audit_logs:/app/audit_logs
+      - adcp_signing_keys:/app/signing_keys
+    # ``migrate.py`` then ``seed_demo_data.py``: the second step is dev-only —
+    # the seed is idempotent so re-runs are safe, and the env-gated mock-adapter
+    # setup it relies on (``ADCP_TESTING``/``ADCP_MULTI_TENANT``) is set on the
+    # adcp-server below. Production deployments should override the command.
+    command: ["sh", "-c", "python scripts/ops/migrate.py && python scripts/ops/seed_demo_data.py"]
 
   proxy:
     image: nginx:stable
@@ -63,9 +77,9 @@ services:
     depends_on:
       - adcp-server
     ports:
-      - "${CONDUCTOR_PORT:-8000}:8000"
+      - "${CONDUCTOR_PORT:?CONDUCTOR_PORT is required (set per worktree by Conductor) — refusing to fall back to 8000 and risk colliding with another worktree}:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "nginx -t >/dev/null 2>&1 && test -s /var/run/nginx.pid"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -74,6 +88,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Force the install layer to invalidate when uv.lock changes.
+      # ``make compose-build`` / ``make compose-up`` set this to the
+      # current uv.lock content hash. Bare ``docker compose build``
+      # without the env var fails fast inside the Dockerfile — silently
+      # regressing dependency bumps is worse than a build error.
+      args:
+        LOCKFILE_HASH: ${LOCKFILE_HASH:-set-this-build-arg}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
     entrypoint: [] # Override image entrypoint for local dev
     env_file:
       - path: .env
@@ -82,20 +105,25 @@ services:
       DATABASE_URL: postgresql://adcp_user:secure_password_change_me@postgres:5432/adcp?sslmode=disable
       SKIP_NGINX: "true"
       SKIP_CRON: "true"
+      # Per-tenant Setup Mode enables test credentials for new tenants
+      # Override .env ports to match nginx-development.conf expectations
       ADCP_SALES_PORT: "8080"
-      PYTHONPATH: "/app/.venv/lib/python3.12/site-packages"
+      # Enable test login mode for development
+      ADCP_AUTH_TEST_MODE: "true"
+      # Allow mock-adapter setup to satisfy the "Ad Server Configured" gate.
+      # Skip the SSO gate (multi-tenant deployments treat auth as platform-managed).
+      ADCP_TESTING: "true"
+      ADCP_MULTI_TENANT: "true"
+      # Dev-only Fernet key so quickstart works without `make setup` first.
+      # The .env file (if present) overrides this — production deployments
+      # MUST set ENCRYPTION_KEY via their own env. Validate_configuration()
+      # refuses to start without one. Mirrors scripts/test-stack.sh.
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:-PEg0SNGQyvzi4Nft-ForSzK8AGXyhRtql1MgoUsfUHk=}"
+      # Development settings
+      PYTHONPATH: "/app/.venv/lib/python3.13/site-packages"
       PYTHONUNBUFFERED: "1"
-      # All vars below are read from .env (project root) with safe defaults
-      ADCP_AUTH_TEST_MODE: "${ADCP_AUTH_TEST_MODE:-true}"
-      FLASK_ENV: "${FLASK_ENV:-development}"
-      SUPER_ADMIN_EMAILS: "${SUPER_ADMIN_EMAILS:-}"
-      SUPER_ADMIN_DOMAINS: "${SUPER_ADMIN_DOMAINS:-}"
-      OAUTH_DISCOVERY_URL: "${OAUTH_DISCOVERY_URL:-}"
-      OAUTH_CLIENT_ID: "${OAUTH_CLIENT_ID:-}"
-      OAUTH_CLIENT_SECRET: "${OAUTH_CLIENT_SECRET:-}"
-      ENCRYPTION_KEY: "${ENCRYPTION_KEY:-}"
-      CREATE_DEMO_TENANT: "${CREATE_DEMO_TENANT:-false}"
-      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      FLASK_ENV: development
+      WEBHOOK_SIGNING_KEYS_DIR: "/app/signing_keys"
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,26 +132,37 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # Mount source code for hot reloading
-      - .:/app
-      - /app/.venv
+      # Mount source code for hot reloading without shadowing the image venv.
+      - ./src:/app/src
+      - ./core:/app/core
+      - ./scripts:/app/scripts
+      - ./templates:/app/templates
+      - ./static:/app/static
+      - ./config:/app/config
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+      - ./crontab:/app/crontab:ro
 
       # Mount local adcp library directly into venv (replaces installed package)
-      # - ../adcp-client-python/src/adcp:/app/.venv/lib/python3.12/site-packages/adcp:ro - Uncomment this if you want to use locally installed adcp-python-client for e2e testing purposes
+      # - ../adcp-client-python/src/adcp:/app/.venv/lib/python3.13/site-packages/adcp:ro - Uncomment this if you want to use locally installed adcp-python-client for e2e testing purposes
 
       # Optional: Mount audit logs
       - ./audit_logs:/app/audit_logs
+      - adcp_signing_keys:/app/signing_keys
       # Shared cache volumes for faster builds
       - adcp_global_pip_cache:/root/.cache/pip
       - adcp_global_uv_cache:/cache/uv
     command: ["python", "scripts/run_server.py"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "python", "scripts/healthcheck.py", "8080"]
       interval: 30s
       timeout: 10s
       retries: 3
 
 volumes:
   adcp_postgres_data:
+  adcp_signing_keys:
   adcp_global_pip_cache:
   adcp_global_uv_cache:

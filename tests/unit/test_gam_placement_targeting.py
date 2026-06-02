@@ -9,6 +9,8 @@ These tests verify the creative-level placement targeting implementation:
 
 from unittest.mock import MagicMock
 
+from tests.factories.spec_required_kwargs import required_request_kwargs
+
 
 class TestPlacementTargetingSchema:
     """Test PlacementTargeting schema in GAM implementation config."""
@@ -135,6 +137,7 @@ class TestPlacementIdsValidation:
         mock_uow = MagicMock()
         mock_uow.session = mock_session
         mock_uow.media_buys = MagicMock()
+        mock_uow.media_buys.find_by_idempotency_key.return_value = None
         mock_uow.__enter__ = Mock(return_value=mock_uow)
         mock_uow.__exit__ = Mock(return_value=False)
 
@@ -189,6 +192,7 @@ class TestPlacementIdsValidation:
             mock_session.scalars.return_value = mock_scalars
 
             req = UpdateMediaBuyRequest(
+                **required_request_kwargs(),
                 media_buy_id="mb_placement",
                 packages=[
                     {
@@ -239,6 +243,7 @@ class TestPlacementIdsValidation:
         mock_uow = MagicMock()
         mock_uow.session = mock_session
         mock_uow.media_buys = MagicMock()
+        mock_uow.media_buys.find_by_idempotency_key.return_value = None
         mock_uow.__enter__ = Mock(return_value=mock_uow)
         mock_uow.__exit__ = Mock(return_value=False)
 
@@ -289,6 +294,7 @@ class TestPlacementIdsValidation:
             mock_session.scalars.return_value = mock_scalars
 
             req = UpdateMediaBuyRequest(
+                **required_request_kwargs(),
                 media_buy_id="mb_no_placements",
                 packages=[
                     {

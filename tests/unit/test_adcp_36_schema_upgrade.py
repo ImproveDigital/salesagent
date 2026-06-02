@@ -22,10 +22,12 @@ class TestCreativeListingBoundary:
     """
 
     def test_creative_without_format_id_is_rejected(self):
-        """Creative missing format_id field must raise ValidationError."""
+        """adcp 4.4 made ``format_id`` optional (formats inferable from assets);
+        ``name`` remains required and is what the spec enforces now.
+        """
         from src.core.schemas import Creative
 
-        with pytest.raises(ValidationError, match="format_id"):
+        with pytest.raises(ValidationError, match="name"):
             Creative(creative_id="c1")
 
     def test_creative_with_minimal_fields_is_valid(self):
@@ -39,10 +41,15 @@ class TestCreativeListingBoundary:
         )
         assert c.creative_id == "c1"
         assert c.name == "Test Creative"
-        assert c.format_id.id == "display_300x250"
+        assert c.format_id.id == "display_image"
+        assert c.format_id.width == 300
+        assert c.format_id.height == 250
 
     def test_creative_variants_silently_stripped(self):
-        """Passing variants= (from old delivery base) is silently stripped, not rejected."""
+        """``variants`` belongs to the delivery-response Creative variant, not
+        the listing variant we extend. The before-validator drops it on input
+        rather than rejecting — preserves backward-compat with old callers.
+        """
         from src.core.schemas import Creative, FormatId
 
         c = Creative(

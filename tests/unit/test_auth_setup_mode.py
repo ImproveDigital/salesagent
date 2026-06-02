@@ -39,11 +39,28 @@ Auth setup mode allows test credentials to work per-tenant:
 import os
 from unittest.mock import patch
 
+import pytest
+
 from src.core.database.models import Tenant
+
+# Values for session["auth_method"] that must NOT grant access to the
+# setup-mode endpoints. "oidc" is the only acceptable value; everything else
+# (including the absent case, test-credentials sessions, and case-variants)
+# must 403. Pinned here so a refactor from `!= "oidc"` to a looser comparison
+# fails the parametrized regression tests below.
+NON_SSO_AUTH_METHODS = [
+    pytest.param(None, id="absent"),
+    pytest.param("test", id="test-credentials"),
+    pytest.param("password", id="password-login"),
+    pytest.param("header", id="header-auth"),
+    pytest.param("OIDC", id="case-variant-upper"),
+    pytest.param("Oidc", id="case-variant-mixed"),
+    pytest.param("", id="empty-string"),
+]
 
 
 class TestTenantAuthSetupMode:
-    """Characterization tests for the auth_setup_mode field on the Tenant ORM model."""
+    """Tests for the auth_setup_mode field on Tenant model."""
 
     def test_tenant_has_auth_setup_mode_field(self):
         """Tenant model should have auth_setup_mode field."""
@@ -80,9 +97,17 @@ class TestDisableSetupModeEndpoint:
     real route so a broken endpoint would actually fail.
     """
 
-    def test_disable_setup_mode_rejects_when_not_sso_logged_in(self, make_users_test_client):
-        """POST disable-setup-mode returns 403 when session auth_method is not 'oidc'."""
+    @pytest.mark.parametrize("auth_method", NON_SSO_AUTH_METHODS)
+    def test_disable_setup_mode_rejects_when_not_sso_logged_in(self, make_users_test_client, auth_method):
+        """POST disable-setup-mode returns 403 for any auth_method that is not exactly 'oidc'.
+
+        Locks in the strict equality check — including case-sensitivity and the
+        non-SSO method values that other auth paths can write (test, password, header).
+        """
         with make_users_test_client(auth_setup_mode=True, oidc_enabled=True) as (client, _):
+            if auth_method is not None:
+                with client.session_transaction() as sess:
+                    sess["auth_method"] = auth_method
             response = client.post("/tenant/default/users/disable-setup-mode")
         assert response.status_code == 403
         body = response.get_json()
@@ -115,12 +140,9 @@ class TestDisableSetupModeEndpoint:
 class TestTestAuthEndpoint:
     """Endpoint-level tests for the /test/auth gate.
 
-    F-02 fix: test auth requires BOTH ADCP_AUTH_TEST_MODE=true AND
+    F-02 fix: test auth now requires BOTH ADCP_AUTH_TEST_MODE=true AND
     the tenant's auth_setup_mode=True. These tests exercise the actual
-    Flask endpoint so a gate change in auth.py causes a real failure.
-
-    (Previously removed in e1dbe47d and replaced with tests that
-    re-implemented the endpoint conditional inline — restored here.)
+    Flask endpoint so a gate change in auth.py would cause a real failure.
     """
 
     def test_test_auth_allowed_when_both_enabled(self, make_auth_test_client):
@@ -176,6 +198,8 @@ class TestMigration:
 
     def test_migration_file_exists(self):
         """Migration file for auth_setup_mode should exist."""
+        import os
+
         migration_path = "alembic/versions/add_auth_setup_mode.py"
         assert os.path.exists(migration_path), f"Migration file not found: {migration_path}"
 
@@ -188,6 +212,7 @@ class TestMigration:
         migration = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(migration)
 
+        # Check revision chain
         assert migration.revision == "add_auth_setup_mode"
         assert migration.down_revision == "add_tenant_auth_config"
         assert callable(migration.upgrade)
@@ -199,14 +224,40 @@ class TestEnableSetupModeEndpoint:
 
     Replaces the SUSPECT MagicMock-only test that was unable to detect
     a broken endpoint. Uses make_users_test_client to call the real route.
+
+    Re-enabling setup mode requires an SSO session: the test-credentials
+    backdoor must not be reachable via header-auth or via test credentials
+    themselves, otherwise an attacker can flip the tenant back into setup
+    mode and chain into full OAuth-equivalent access.
     """
 
-    def test_enable_setup_mode_returns_success(self, make_users_test_client):
-        """POST enable-setup-mode returns {"success": True} regardless of current state."""
+    @pytest.mark.parametrize("auth_method", NON_SSO_AUTH_METHODS)
+    def test_enable_setup_mode_rejects_when_not_sso_logged_in(self, make_users_test_client, auth_method):
+        """POST enable-setup-mode returns 403 for any auth_method that is not exactly 'oidc'.
+
+        Re-enabling the test-credentials backdoor must not be reachable via
+        test-credentials, header-auth, or any case-variant — only a genuine
+        OIDC callback writes ``session["auth_method"] = "oidc"``.
+        """
         with make_users_test_client(auth_setup_mode=False) as (client, _):
+            if auth_method is not None:
+                with client.session_transaction() as sess:
+                    sess["auth_method"] = auth_method
+            response = client.post("/tenant/default/users/enable-setup-mode")
+        assert response.status_code == 403
+        body = response.get_json()
+        assert body["success"] is False
+        assert "logged in via SSO" in body["error"]
+
+    def test_enable_setup_mode_succeeds_when_sso_logged_in(self, make_users_test_client):
+        """POST enable-setup-mode returns 200 and sets auth_setup_mode=True when SSO-logged-in."""
+        with make_users_test_client(auth_setup_mode=False) as (client, mock_session):
+            with client.session_transaction() as sess:
+                sess["auth_method"] = "oidc"
             response = client.post("/tenant/default/users/enable-setup-mode")
         assert response.status_code == 200
         assert response.get_json()["success"] is True
+        mock_session.commit.assert_called()
 
 
 class TestTenantLoginEndpoint:

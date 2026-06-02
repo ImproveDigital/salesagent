@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from html.parser import HTMLParser
 from typing import Any
 
 from sqlalchemy import delete
@@ -22,6 +23,27 @@ from src.core.database.models import Account, Tenant
 from tests.utils.database_helpers import create_tenant_with_timestamps
 
 logger = logging.getLogger(__name__)
+
+
+class _CsrfMetaParser(HTMLParser):
+    """Extract the admin CSRF token from the base template's meta tag."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.token: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "meta":
+            return
+        attr_map = dict(attrs)
+        if attr_map.get("name") == "csrf-token":
+            self.token = attr_map.get("content") or None
+
+
+def _extract_csrf_token(html: str) -> str | None:
+    parser = _CsrfMetaParser()
+    parser.feed(html)
+    return parser.token
 
 
 class _AdminResponse:
@@ -64,9 +86,9 @@ class _AdminResponse:
             status_code=response.status_code,
             data=response.content,
             headers=dict(response.headers),
-            json_data=response.json()
-            if response.headers.get("content-type", "").startswith("application/json")
-            else None,
+            json_data=(
+                response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+            ),
         )
 
 
@@ -98,6 +120,7 @@ class AdminAccountEnv:
         # E2E mode: requests.Session
         self._session: Any = None
         self._base_url: str = ""
+        self._csrf_token: str | None = None
 
         self._tenant_id: str = self.DEFAULT_TENANT_ID
         self._created_account_ids: list[str] = []
@@ -180,6 +203,11 @@ class AdminAccountEnv:
                 "password": "test123",
                 "tenant_id": tenant_id,
             },
+            # Same-origin Origin so the admin's CSRF before_request guard
+            # (#32) treats us as a legitimate browser submission. Without
+            # this, the POST is rejected with 403 before the auth handler
+            # ever sees the form.
+            headers={"Origin": self._base_url.rstrip("/")},
             allow_redirects=False,
         )
         # /test/auth redirects on success (302) — session cookie is stored
@@ -198,6 +226,7 @@ class AdminAccountEnv:
             if self._session is not None:
                 self._session.close()
             self._session = requests.Session()
+            self._csrf_token = None
 
     # ── Routes ────────────────────────────────────────────────────────────
 
@@ -241,17 +270,45 @@ class AdminAccountEnv:
     def _get(self, url: str) -> _AdminResponse:
         if self._mode == "integration":
             return _AdminResponse.from_flask(self._flask_client.get(url))
-        return _AdminResponse.from_requests(self._session.get(url, allow_redirects=False))
+        response = self._session.get(url, allow_redirects=False)
+        self._capture_e2e_csrf_token(response)
+        return _AdminResponse.from_requests(response)
+
+    def _e2e_csrf_headers(self) -> dict[str, str]:
+        """Headers that make e2e requests match browser-submitted admin requests."""
+        self._ensure_e2e_csrf_token()
+        headers = {"Origin": self._base_url.rstrip("/")}
+        if self._csrf_token:
+            headers["X-CSRF-Token"] = self._csrf_token
+        return headers
+
+    def _capture_e2e_csrf_token(self, response: Any) -> None:
+        content_type = response.headers.get("content-type", "")
+        if not content_type.startswith("text/html"):
+            return
+        token = _extract_csrf_token(response.text)
+        if token:
+            self._csrf_token = token
+
+    def _ensure_e2e_csrf_token(self) -> None:
+        if self._csrf_token:
+            return
+        response = self._session.get(self._url(), allow_redirects=False)
+        self._capture_e2e_csrf_token(response)
+        if not self._csrf_token:
+            raise RuntimeError(f"E2E admin CSRF token bootstrap failed: {response.status_code} {response.text[:200]}")
 
     def _post_form(self, url: str, data: dict[str, str]) -> _AdminResponse:
         if self._mode == "integration":
             return _AdminResponse.from_flask(self._flask_client.post(url, data=data, follow_redirects=False))
-        return _AdminResponse.from_requests(self._session.post(url, data=data, allow_redirects=False))
+        return _AdminResponse.from_requests(
+            self._session.post(url, data=data, headers=self._e2e_csrf_headers(), allow_redirects=False)
+        )
 
     def _post_json(self, url: str, data: dict[str, Any]) -> _AdminResponse:
         if self._mode == "integration":
             return _AdminResponse.from_flask(self._flask_client.post(url, json=data))
-        return _AdminResponse.from_requests(self._session.post(url, json=data))
+        return _AdminResponse.from_requests(self._session.post(url, json=data, headers=self._e2e_csrf_headers()))
 
     # ── Data setup ────────────────────────────────────────────────────────
 

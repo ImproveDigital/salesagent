@@ -3,7 +3,7 @@
 import html
 import os
 
-from adcp import get_adcp_version
+from adcp import get_adcp_spec_version
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from src.core.domain_config import (
@@ -181,7 +181,7 @@ def _generate_pending_configuration_page(tenant: dict, virtual_host: str | None 
                 <p><strong>This sales agent is not yet configured.</strong></p>
                 <p>To activate this agent, the owner needs to:</p>
                 <ul style="text-align: left; margin: 1rem 0;">
-                    <li>Connect an ad server (Google Ad Manager, Kevel, etc.)</li>
+                    <li>Connect an ad server (Google Ad Manager, etc.)</li>
                     <li>Configure inventory and products</li>
                     <li>Complete initial setup</li>
                 </ul>
@@ -283,7 +283,7 @@ def generate_tenant_landing_page(tenant: dict, virtual_host: str | None = None) 
         # Additional context
         "page_title": f"{tenant.get('name', 'Publisher')} Sales Agent",
         "version": get_version(),
-        "adcp_version": get_adcp_version(),
+        "adcp_version": get_adcp_spec_version(),
     }
 
     # Load and render template

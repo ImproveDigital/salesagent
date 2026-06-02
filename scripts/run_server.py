@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run the AdCP Sales Agent with HTTP transport.
 
-Starts the unified FastAPI application via uvicorn, serving MCP, A2A,
-and Admin UI from a single process.
+Delegates to ``core.main.main()`` — one Starlette binary serves MCP at /mcp,
+A2A at /, and Flask admin via WSGI middleware.
 """
 
 import os
@@ -11,9 +11,7 @@ import sys
 
 def main():
     """Run the server with configurable port."""
-    # Initialize application with startup validation
     try:
-        # Add current directory to path for imports
         sys.path.insert(0, ".")
         from src.core.startup import initialize_application
 
@@ -30,21 +28,17 @@ def main():
 
     port = int(os.environ.get("ADCP_SALES_PORT", "8080"))
     host = os.environ.get("ADCP_SALES_HOST", "0.0.0.0")
-
-    # Check if we're in production (Docker or Fly.io)
-    is_production = bool(os.environ.get("FLY_APP_NAME") or os.environ.get("PRODUCTION"))
-
-    if is_production:
-        # In production, bind to all interfaces
+    if os.environ.get("FLY_APP_NAME") or os.environ.get("PRODUCTION"):
         host = "0.0.0.0"
 
     print(f"Starting AdCP Sales Agent on {host}:{port}")
     print(f"Server endpoint: http://{host}:{port}/")
 
-    import uvicorn
+    os.environ.setdefault("ADCP_PORT", str(port))
+    from core.main import main as _core_main
 
     try:
-        uvicorn.run("src.app:app", host=host, port=port, log_level="info")
+        _core_main()
     except KeyboardInterrupt:
         print("\nServer stopped.")
         sys.exit(0)

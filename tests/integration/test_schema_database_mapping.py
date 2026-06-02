@@ -19,7 +19,7 @@ from src.core.database.models import PricingOption as DBPricingOption
 from src.core.database.models import Product as ProductModel
 from src.core.schemas import Principal as PrincipalSchema
 from src.core.schemas import Product
-from tests.helpers.adcp_factories import create_test_db_product
+from tests.helpers.adcp_factories import create_test_db_product, create_test_reporting_capabilities
 from tests.utils.database_helpers import (
     create_tenant_with_timestamps,
 )
@@ -52,8 +52,8 @@ class TestSchemaFieldMapping:
             "publisher_properties",  # Populated from property_tags database column
             # AdCP 2.12.0+ protocol extension field - not stored in database
             "ext",  # Protocol extension field for future protocol additions
-            # Device type targeting - populated from targeting_template.device_targets during conversion
-            "device_types",  # Internal field for device type filtering
+            # device_types: lives on ResolvedProduct (not the wire schema) post Phase 2 slice 5;
+            # listed here only because the schema cross-check still iterates legacy field names.
             # property_targeting_allowed: now persisted (salesagent-kntn migration)
             # AdCP 3.9+ fields - inherited from library Product, not yet stored in database
             "max_optimization_goals",  # Max optimization goals from adcp 3.9 spec
@@ -71,6 +71,10 @@ class TestSchemaFieldMapping:
             "material_submission",  # Material submission config from adcp 3.12 spec
             "measurement_readiness",  # Measurement readiness from adcp 3.12 spec
             "trusted_match",  # Trusted match config from adcp 3.12 spec
+            # AdCP 4.4+ fields - inherited from library Product, not yet stored in database
+            "cancellation_policy",  # Cancellation policy from adcp 4.4 spec
+            "measurement_terms",  # Measurement terms from adcp 4.4 spec
+            "performance_standards",  # Performance standards from adcp 4.4 spec
         }
 
         # Fields that exist in database but should NOT be in external schema (internal only)
@@ -268,6 +272,7 @@ class TestSchemaFieldMapping:
                 }
             ],
             "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
         }
 
         product = Product(**product_data)
@@ -404,6 +409,7 @@ class TestSchemaFieldMapping:
                     }
                 ],
                 "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+                "reporting_capabilities": create_test_reporting_capabilities(),
             }
 
             # This should succeed without validation errors
@@ -412,7 +418,7 @@ class TestSchemaFieldMapping:
                 assert validated_product.product_id == "validation_test_001"
                 # adcp 2.14.0+ uses RootModel wrapper - access via .root
                 pricing = validated_product.pricing_options[0]
-                pricing_inner = pricing.root if hasattr(pricing, "root") else pricing
+                pricing_inner = pricing.root if hasattr(pricing, "root") else pricing  # noqa: rootmodel
                 assert pricing_inner.rate == 7.25
                 assert pricing_inner.pricing_model == "cpm"
             except Exception as e:
@@ -452,6 +458,7 @@ class TestFieldAccessPatterns:
                 }
             ],
             "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
         }
 
         product = Product(**product_data)
@@ -505,6 +512,7 @@ class TestFieldAccessPatterns:
                 }
             ],
             "delivery_measurement": {"provider": "Test Provider", "notes": "Test measurement methodology"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
         }
 
         product = Product(**product_data)

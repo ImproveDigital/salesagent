@@ -42,8 +42,8 @@ Database-backed tenant isolation with:
 
 ### Authentication Flow
 
-1. **MCP API** - Token-based via x-adcp-auth header
-2. **A2A API** - Token-based via x-adcp-auth or Authorization: Bearer
+1. **MCP API** - Token-based via `x-adcp-auth: <token>` header (legacy, raw token, no Bearer prefix)
+2. **A2A API** - Token-based via `Authorization: Bearer <token>` (RFC 6750)
 3. **Admin UI** - Google OAuth with role-based access
 4. **UnifiedAuthMiddleware** - Single ASGI middleware extracts token into scope["state"]
 5. **Principal Resolution** - Token → Principal → Tenant → Adapter
@@ -131,8 +131,10 @@ class AdServerAdapter(ABC):
 
 - **GoogleAdManagerAdapter** - Full GAM integration
 - **KevelAdapter** - Kevel ad server
+- **BroadstreetAdapter** - Broadstreet Ads
+- **TritonAdapter** - Triton Digital TAP (streaming audio + podcast)
+- **FreeWheelAdapter** - Comcast/FreeWheel Publisher API (video + CTV)
 - **MockAdapter** - Testing and development
-- **TritonAdapter** - Audio advertising
 
 Each adapter handles:
 - Platform authentication

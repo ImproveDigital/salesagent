@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_capabilities import require_capability_blueprint
 from src.core.database.database_session import get_db_session
 from src.core.database.models import SignalsAgent, Tenant
 from src.core.security.url_validator import check_url_ssrf
@@ -15,6 +16,12 @@ logger = logging.getLogger(__name__)
 
 # Create Blueprint
 signals_agents_bp = Blueprint("signals_agents", __name__)
+
+# Headless gate (Sprint 7 Phase 4b): when the storefront centralizes
+# signals agents on this embedded instance, every route under this
+# blueprint returns 403. The Tenant Settings page hides the link too;
+# the before_request hook is defense-in-depth against direct URLs.
+signals_agents_bp.before_request(require_capability_blueprint("signals_agents"))
 
 
 @signals_agents_bp.route("/")
@@ -66,7 +73,7 @@ def list_signals_agents(tenant_id):
 
 @signals_agents_bp.route("/add", methods=["GET", "POST"])
 @log_admin_action("add_signals_agent")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def add_signals_agent(tenant_id):
     """Add a new signals agent."""
     if request.method == "GET":
@@ -142,7 +149,7 @@ def add_signals_agent(tenant_id):
 
 @signals_agents_bp.route("/<int:agent_id>/edit", methods=["GET", "POST"])
 @log_admin_action("edit_signals_agent")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def edit_signals_agent(tenant_id, agent_id):
     """Edit an existing signals agent."""
     if request.method == "GET":
@@ -165,7 +172,7 @@ def edit_signals_agent(tenant_id, agent_id):
                 "enabled": agent.enabled,
                 "auth_type": agent.auth_type,
                 "auth_header": agent.auth_header,
-                "auth_credentials": agent.auth_credentials,
+                "has_auth": bool(agent.auth_credentials),
                 "forward_promoted_offering": agent.forward_promoted_offering,
                 "timeout": agent.timeout,
             }
@@ -230,7 +237,7 @@ def edit_signals_agent(tenant_id, agent_id):
 
 
 @signals_agents_bp.route("/<int:agent_id>/delete", methods=["DELETE"])
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def delete_signals_agent(tenant_id, agent_id):
     """Delete a signals agent."""
     try:
@@ -253,7 +260,7 @@ def delete_signals_agent(tenant_id, agent_id):
 
 @signals_agents_bp.route("/<int:agent_id>/test", methods=["POST"])
 @log_admin_action("test_signals_agent")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def test_signals_agent(tenant_id, agent_id):
     """Test connection to a signals agent."""
     try:

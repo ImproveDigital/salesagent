@@ -113,6 +113,7 @@ def tree_data(authenticated_admin_client, _bind_factories):
                 inventory_metadata={},
             )
 
+    _bind_factories.commit()  # Make seed data visible to endpoint sessions.
     return tenant
 
 

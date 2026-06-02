@@ -26,6 +26,7 @@ from tests.e2e.adcp_request_builder import (
     build_adcp_media_buy_request,
     build_creative,
     build_sync_creatives_request,
+    build_update_media_buy_request,
     get_test_date_range,
     parse_tool_result,
 )
@@ -275,19 +276,19 @@ class TestAdCPReferenceImplementation:
             # Clear any previous webhooks
             webhook_server["received"].clear()
 
-            # Update budget (AdCP spec: budget is a number, not an object)
-            update_result = await client.call_tool(
-                "update_media_buy",
-                {
-                    "media_buy_id": media_buy_id,
-                    "budget": 7500.0,  # AdCP spec: budget is a number
-                    "context": {"e2e": "update_media_buy"},
-                    "push_notification_config": {
-                        "url": webhook_server["url"],
-                        "authentication": {"type": "none"},
-                    },
-                },
+            # Update budget via per-package update — AdCP spec has no
+            # media-buy-level ``budget`` update field (adcontextprotocol/adcp#4241).
+            # Per-package shape is the canonical way to change spend allocation.
+            packages_in_buy = media_buy_data.get("packages") or []
+            assert packages_in_buy, "media buy must report packages so we can update budgets"
+            package_id_for_update = packages_in_buy[0]["package_id"]
+            update_request = build_update_media_buy_request(
+                media_buy_id=media_buy_id,
+                packages=[{"package_id": package_id_for_update, "budget": 7500.0}],
+                webhook_url=webhook_server["url"],
+                context={"e2e": "update_media_buy"},
             )
+            update_result = await client.call_tool("update_media_buy", update_request)
             update_data = parse_tool_result(update_result)
 
             assert "media_buy_id" in update_data

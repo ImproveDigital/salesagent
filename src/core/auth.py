@@ -231,6 +231,19 @@ def get_principal_from_context(
         logger.info("Auth token found via: %s", auth_source)
 
     if not auth_token:
+        # Embedded-mode buyer-protocol identity-from-headers path
+        # (docs/design/embedded-mode.md §2): when a tenant is provisioned with
+        # ``is_embedded=True`` and the deployment opts in via
+        # ``MANAGED_INSTANCE=true``, callers identify the acting principal via
+        # ``X-Principal-Id`` (and the descriptive ``X-Identity-*`` headers from
+        # the same propagation contract used by the admin UI proxy). No
+        # protocol-level token check — trust is established by the network
+        # layer (the salesagent binds to a private interface and accepts
+        # buyer-protocol traffic only from the configured host product proxy).
+        embedded_principal_id = _try_resolve_embedded_buyer_identity(headers, tenant_context, require_valid_token)
+        if embedded_principal_id is not None:
+            return (embedded_principal_id, tenant_context)
+
         logger.debug("No auth token found - OK for discovery endpoints")
         return (None, tenant_context)
 
@@ -277,6 +290,130 @@ def get_principal_from_context(
     return (principal_id, tenant_context)
 
 
+def _try_resolve_embedded_buyer_identity(
+    headers: dict[str, str],
+    tenant_context: dict | None,
+    require_valid_token: bool,
+) -> str | None:
+    """Resolve principal from X-Principal-Id for an embedded-mode buyer-protocol call.
+
+    Returns the principal_id when:
+      * ``MANAGED_INSTANCE=true`` (deployment-level opt-in)
+      * the resolved tenant has ``is_embedded=True``
+      * an explicit ``X-Principal-Id`` header is present and names a
+        principal in this tenant
+      * required ``X-Identity-*`` headers are present and valid
+      * when configured, the tenant's embedding entity id matches
+        ``X-Identity-Org-Id``
+
+    Returns ``None`` when any precondition fails — caller falls through to
+    the standard token-or-anonymous flow. Raises ``AdCPAuthenticationError``
+    when ``require_valid_token`` is true AND embedded identity headers were
+    present but missing, malformed, or unauthorized; this mirrors how an
+    invalid bearer token is handled by the existing flow.
+
+    See ``docs/design/embedded-mode.md`` §2 for the contract.
+    """
+    # Lazy import: avoid pulling the admin module at core/auth.py import time.
+    from src.admin.utils.embedded_mode_auth import is_managed_instance
+
+    if not is_managed_instance():
+        return None
+    if not tenant_context or not tenant_context.get("is_embedded"):
+        return None
+
+    explicit_principal_id = _get_header_case_insensitive(headers, "X-Principal-Id")
+    tenant_id = tenant_context["tenant_id"]
+    propagated_identity = _read_embedded_buyer_identity(headers, require_valid_token)
+    if propagated_identity is None:
+        return None
+    embedding_entity_id = tenant_context.get("external_org_id")
+    if embedding_entity_id and propagated_identity.org_id != embedding_entity_id:
+        if require_valid_token:
+            from src.core.exceptions import AdCPAuthenticationError
+
+            raise AdCPAuthenticationError(
+                f"X-Identity-Org-Id {propagated_identity.org_id!r} does not match tenant {tenant_id!r}'s "
+                "embedding entity id.",
+                details={"error_code": "IDENTITY_ORG_MISMATCH"},
+            )
+        return None
+
+    if not explicit_principal_id:
+        if require_valid_token:
+            from src.core.exceptions import AdCPAuthenticationError
+
+            raise AdCPAuthenticationError(
+                "Embedded buyer identity requires X-Principal-Id.",
+                details={"error_code": "IDENTITY_REQUIRED"},
+            )
+        return None
+
+    def _execute(session_factory):
+        # Validate explicit principal_id against (tenant_id, principal_id)
+        # — partial index already enforces uniqueness, so this is a single
+        # indexed point-lookup.
+        stmt = select(ModelPrincipal).filter_by(principal_id=explicit_principal_id, tenant_id=tenant_id)
+        principal = session_factory.scalars(stmt).first()
+        return principal.principal_id if principal else None
+
+    with get_db_session() as session:
+        resolved_principal_id = _execute(session)
+
+    if resolved_principal_id:
+        if _VERBOSE_AUTH_LOG:
+            logger.info(
+                "Embedded buyer-protocol identity resolved: principal=%s tenant=%s source=%s",
+                resolved_principal_id,
+                tenant_id,
+                _get_header_case_insensitive(headers, "X-Identity-Source") or "<unset>",
+            )
+        return resolved_principal_id
+
+    # Explicit principal_id was sent but did not match — surface this the
+    # same way an invalid bearer token would be surfaced.
+    if explicit_principal_id and require_valid_token:
+        from src.core.exceptions import AdCPAuthenticationError
+
+        raise AdCPAuthenticationError(
+            f"X-Principal-Id {explicit_principal_id!r} does not match any principal in tenant {tenant_id!r}.",
+            details={"error_code": "INVALID_PRINCIPAL_ID"},
+        )
+
+    return None
+
+
+def _read_embedded_buyer_identity(headers: dict[str, str], require_valid_token: bool):
+    """Read required X-Identity-* headers for embedded buyer-protocol auth."""
+    from src.admin.middleware.identity_propagation import (
+        REQUIRED_HEADERS,
+        InvalidPropagatedIdentity,
+        read_identity_from_request,
+    )
+
+    canonical_headers = {
+        name: _get_header_case_insensitive(headers, name)
+        for name in (*REQUIRED_HEADERS, "X-Identity-User-Id", "X-Identity-Signature")
+    }
+    try:
+        identity = read_identity_from_request(canonical_headers)
+    except InvalidPropagatedIdentity as exc:
+        if require_valid_token:
+            from src.core.exceptions import AdCPAuthenticationError
+
+            raise AdCPAuthenticationError(str(exc), details={"error_code": "IDENTITY_REQUIRED"}) from exc
+        return None
+
+    if identity is None and require_valid_token:
+        from src.core.exceptions import AdCPAuthenticationError
+
+        raise AdCPAuthenticationError(
+            "Embedded buyer identity requires X-Identity-* headers.",
+            details={"error_code": "IDENTITY_REQUIRED"},
+        )
+    return identity
+
+
 def get_principal_adapter_mapping(principal_id: str, tenant_id: str | None = None) -> dict[str, Any]:
     """Get the platform mappings for a principal."""
     if tenant_id is None:
@@ -313,8 +450,8 @@ def get_adapter_principal_id(principal_id: str, adapter: str, tenant_id: str | N
     # Map adapter names to their specific fields
     adapter_field_map = {
         "gam": "gam_advertiser_id",
-        "kevel": "kevel_advertiser_id",
         "triton": "triton_advertiser_id",
+        "freewheel": "freewheel_advertiser_id",
         "mock": "mock_advertiser_id",
     }
 

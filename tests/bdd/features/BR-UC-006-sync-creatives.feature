@@ -658,13 +658,13 @@ Feature: BR-UC-006 Sync Creative Assets
     Then the existing assignment should be updated (not duplicated)
 
   @T-UC-006-rule-038-inv4 @invariant @BR-RULE-038
-  Scenario: INV-4 — draft media buy with approved_at transitions to pending_creatives
+  Scenario: INV-4 — approved draft media buy leaves creative-blocked status
     Given the Buyer is authenticated with a valid principal_id
     And a media buy with status "draft" and approved_at set
     And a creative with a known format_id
     And assignments to a package in that media buy
     When the Buyer Agent syncs the creative with assignments
-    Then the media buy status should transition to "pending_creatives"
+    Then the media buy status should transition to "pending_start"
 
   @T-UC-006-rule-038-inv4-violated @invariant @BR-RULE-038
   Scenario: INV-4 violated — draft media buy without approved_at does not transition
@@ -744,12 +744,12 @@ Feature: BR-UC-006 Sync Creative Assets
     # --- BR-RULE-040: Media Buy Status Transition ---
 
   @T-UC-006-rule-040-inv1 @invariant @BR-RULE-040
-  Scenario: INV-1 — draft with approved_at transitions to pending_creatives
+  Scenario: INV-1 — draft with approved_at transitions to pending_start
     Given the Buyer is authenticated with a valid principal_id
     And a media buy with status "draft" and approved_at set
     And assignments to a package in that media buy
     When the Buyer Agent syncs the creative with assignments
-    Then the media buy status should transition to "pending_creatives"
+    Then the media buy status should transition to "pending_start"
 
   @T-UC-006-rule-040-inv2 @invariant @BR-RULE-040
   Scenario: INV-2 — draft without approved_at stays draft
@@ -760,7 +760,7 @@ Feature: BR-UC-006 Sync Creative Assets
     Then the media buy status should remain "draft"
 
   @T-UC-006-rule-040-inv3 @invariant @BR-RULE-040
-  Scenario: INV-3 — non-draft status unchanged
+  Scenario: INV-3 — active status unchanged
     Given the Buyer is authenticated with a valid principal_id
     And a media buy with status "active" (non-draft)
     And assignments to a package in that media buy
@@ -774,7 +774,7 @@ Feature: BR-UC-006 Sync Creative Assets
     And an existing assignment to a package in that media buy
     And a new assignment to another package in the same media buy
     When the Buyer Agent syncs the creative with assignments
-    Then the media buy status should transition to "pending_creatives"
+    Then the media buy status should transition to "pending_start"
     # --- BR-RULE-093: Assignment Weight and Delivery Semantics ---
 
   @T-UC-006-rule-093-inv1 @invariant @BR-RULE-093
@@ -978,7 +978,7 @@ Feature: BR-UC-006 Sync Creative Assets
 
     Examples: Status transition partitions
       | partition          | mb_status | approved_at | final_status      |
-      | draft_approved     | draft     | set         | pending_creatives |
+      | draft_approved     | draft     | set         | pending_start     |
       | draft_not_approved | draft     | null        | draft             |
       | non_draft          | active    | set         | active            |
 
@@ -1075,7 +1075,7 @@ Feature: BR-UC-006 Sync Creative Assets
       | missing_account            | not provided                                                                | the error should be INVALID_REQUEST with suggestion           |
       | invalid_oneOf_both         | {"account_id": "acc_001", "brand": {"domain": "x.com"}, "operator": "x"}   | the error should be INVALID_REQUEST with suggestion           |
       | explicit_not_found         | {"account_id": "acc_nonexistent"}                                           | the error should be ACCOUNT_NOT_FOUND with suggestion         |
-      | natural_key_not_found      | {"brand": {"domain": "unknown.com"}, "operator": "unknown.com"}            | the error should be ACCOUNT_NOT_FOUND with suggestion         |
+      | natural_key_not_found      | {"brand": {"domain": "unknown.com"}, "operator": "unknown.com"}            | the error should be TENANT_NOT_ACTIVATED with suggestion      |
       | natural_key_ambiguous      | {"brand": {"domain": "multi.com"}, "operator": "agency.com"}               | the error should be ACCOUNT_AMBIGUOUS with suggestion         |
       | account_setup_required     | {"account_id": "acc_new_unconfigured"}                                      | the error should be ACCOUNT_SETUP_REQUIRED with suggestion    |
       | account_payment_required   | {"account_id": "acc_overdue"}                                               | the error should be ACCOUNT_PAYMENT_REQUIRED with suggestion  |
@@ -1194,7 +1194,7 @@ Feature: BR-UC-006 Sync Creative Assets
 
     Examples:
       | boundary_point                          | buy_state                        | expected                                                   |
-      | draft + approved_at (transitions)       | status=draft and approved_at set | the media buy should transition to pending_creatives       |
+      | draft + approved_at (transitions)       | status=draft and approved_at set | the media buy should transition to pending_start           |
       | draft + no approved_at (stays draft)    | status=draft and no approved_at  | the media buy should remain in draft status                |
       | non-draft status (no transition)        | status=active                    | the media buy status should not change                     |
 
@@ -1316,7 +1316,7 @@ Feature: BR-UC-006 Sync Creative Assets
       | account_id present + account exists + active    | {"account_id": "acc_acme_001"}                                             | the request should proceed with resolved account              |
       | account_id present + not found                  | {"account_id": "acc_nonexistent"}                                          | the error should be ACCOUNT_NOT_FOUND with suggestion         |
       | brand + operator present + single match + active | {"brand": {"domain": "acme.com"}, "operator": "acme.com"}                 | the request should proceed with resolved account              |
-      | brand + operator present + no match             | {"brand": {"domain": "unknown.com"}, "operator": "unknown.com"}           | the error should be ACCOUNT_NOT_FOUND with suggestion         |
+      | brand + operator present + no match             | {"brand": {"domain": "unknown.com"}, "operator": "unknown.com"}           | the error should be TENANT_NOT_ACTIVATED with suggestion      |
       | brand + operator present + multiple matches     | {"brand": {"domain": "multi.com"}, "operator": "agency.com"}              | the error should be ACCOUNT_AMBIGUOUS with suggestion         |
       | account resolved + setup incomplete             | {"account_id": "acc_new_unconfigured"}                                     | the error should be ACCOUNT_SETUP_REQUIRED with suggestion    |
       | account resolved + payment due                  | {"account_id": "acc_overdue"}                                              | the error should be ACCOUNT_PAYMENT_REQUIRED with suggestion  |
@@ -1379,4 +1379,3 @@ Feature: BR-UC-006 Sync Creative Assets
     And the error should include a suggestion for how to fix the issue
     # BR-RULE-209 INV-7: sandbox validation errors are real
     # POST-F3: suggestion field present
-

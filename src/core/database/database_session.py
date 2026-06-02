@@ -92,6 +92,21 @@ def get_engine():
         connect_timeout = int(os.environ.get("DATABASE_CONNECT_TIMEOUT", "10"))  # 10s default
         pool_timeout = int(os.environ.get("DATABASE_POOL_TIMEOUT", "30"))  # 30s default
 
+        # TCP keepalive settings — let the OS detect half-open sockets quickly
+        # so SQLAlchemy's pool can replace evicted connections instead of handing
+        # back a dead one. Without these, a PgBouncer client_idle_timeout eviction
+        # leaves a half-open TCP socket that any subsequent operation
+        # (cursor.execute, SELECT 1, etc.) blocks on indefinitely.
+        # libpq keepalive params: keepalives_idle (start probing after Ns idle),
+        # keepalives_interval (gap between probes), keepalives_count (probes
+        # before declaring dead).
+        keepalive_args = {
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 3,
+        }
+
         # Detect PgBouncer usage (typically port 6543)
         # PgBouncer requires different pooling strategy since it manages connections
         is_pgbouncer = _is_pgbouncer_connection(connection_string)
@@ -100,20 +115,28 @@ def get_engine():
             logger.info("PgBouncer detected - using optimized connection pool settings")
             # PgBouncer-optimized settings:
             # - Smaller pool_size (PgBouncer handles pooling)
-            # - No pool_pre_ping (can cause issues with transaction pooling)
+            # - pool_pre_ping=True: cheap SELECT 1 round-trip on checkout. Safe in
+            #   transaction-pooling mode (one transaction = one server backend),
+            #   and required to detect PgBouncer client_idle_timeout evictions
+            #   that close the connection between checkouts.
             # - Shorter pool_recycle (PgBouncer recycles for us)
-            # - statement_timeout set via event listener (PgBouncer doesn't support startup parameters)
+            # - statement_timeout set via event listener: PgBouncer rejects
+            #   statement_timeout as a libpq startup parameter
+            #   ("unsupported startup parameter in options: statement_timeout")
+            #   unless the operator adds it to ignore_startup_parameters in
+            #   pgbouncer.ini. We use SET on connect instead.
             _engine = create_engine(
                 connection_string,
                 pool_size=2,  # Small pool - PgBouncer does the pooling
                 max_overflow=5,  # Limited overflow
                 pool_timeout=pool_timeout,
                 pool_recycle=300,  # 5 minutes - shorter since PgBouncer manages connections
-                pool_pre_ping=False,  # Disable pre-ping with PgBouncer transaction pooling
+                pool_pre_ping=True,
                 echo=False,
                 json_serializer=_pydantic_json_serializer,
                 connect_args={
                     "connect_timeout": connect_timeout,
+                    **keepalive_args,
                 },
             )
         else:
@@ -130,12 +153,17 @@ def get_engine():
                 json_serializer=_pydantic_json_serializer,
                 connect_args={
                     "connect_timeout": connect_timeout,  # Connection timeout in seconds
+                    **keepalive_args,
                 },
             )
 
-        # Set statement_timeout after connection is established
-        # This works with both direct PostgreSQL and PgBouncer
-        # PgBouncer doesn't support startup parameters, so we must use SET command
+        # Set statement_timeout after connection is established.
+        # We can't pass it via libpq startup options because PgBouncer rejects
+        # unknown startup parameters by default (see comment above). The cursor
+        # execute below CAN itself hang on a stale TCP socket, but the keepalive
+        # settings + pool_pre_ping above mean we should never see a stale socket
+        # at this point: the OS-level keepalive probes will tear down dead
+        # sockets before they reach this listener.
         @event.listens_for(_engine, "connect")
         def set_statement_timeout(dbapi_conn, connection_record):
             """Set statement_timeout on new connections."""
@@ -152,7 +180,7 @@ def get_engine():
 
 def reset_engine():
     """Reset engine for testing - closes existing connections and clears global state."""
-    global _engine, _session_factory, _scoped_session
+    global _engine, _session_factory, _scoped_session, _is_healthy, _last_health_check
 
     if _scoped_session is not None:
         _scoped_session.remove()
@@ -163,6 +191,8 @@ def reset_engine():
         _engine = None
 
     _session_factory = None
+    _is_healthy = True
+    _last_health_check = 0.0
 
 
 def reset_health_state():
@@ -191,8 +221,16 @@ def get_scoped_session():
     return _scoped_session
 
 
+def _create_db_session() -> Session:
+    """Create a new independent database session."""
+    get_engine()
+    if _session_factory is None:
+        raise RuntimeError("Database session factory was not initialized")
+    return _session_factory()
+
+
 @contextmanager
-def get_db_session() -> Generator[Session, None, None]:
+def get_db_session(*, allow_unhealthy: bool = False) -> Generator[Session]:
     """
     Context manager for database sessions with automatic cleanup and retry logic.
 
@@ -206,6 +244,16 @@ def get_db_session() -> Generator[Session, None, None]:
     The session will automatically rollback on exception and
     always be properly closed. Connection errors are logged with more detail.
 
+    Each context manager entry owns an independent Session. Do not route this
+    through scoped_session(): nested get_db_session() blocks in the same thread
+    must not share a Session, because the inner cleanup would detach ORM
+    instances still in use by the outer block.
+
+    Args:
+        allow_unhealthy: When True, bypass the short fail-fast health gate.
+            Intended for execute_with_retry() after it has already handled a
+            retryable connection error and is deliberately making a new attempt.
+
     Note: Query timeout is enforced at the database level via statement_timeout.
     Queries exceeding DATABASE_QUERY_TIMEOUT will raise OperationalError.
     """
@@ -214,20 +262,17 @@ def get_db_session() -> Generator[Session, None, None]:
     global _is_healthy, _last_health_check
 
     # Check if we should fail fast due to repeated database failures
-    if not _is_healthy:
+    if not allow_unhealthy and not _is_healthy:
         time_since_check = time.time() - _last_health_check
         if time_since_check < 10:  # Fail fast for 10 seconds after unhealthy check
             raise RuntimeError("Database is unhealthy - failing fast to prevent cascading failures")
 
-    scoped = get_scoped_session()
-    session = scoped()
+    session = _create_db_session()
     try:
         yield session
     except (OperationalError, DisconnectionError) as e:
         logger.error(f"Database connection error: {e}")
         session.rollback()
-        # Remove session from registry to force reconnection
-        scoped.remove()
         # Mark as unhealthy for circuit breaker
         _is_healthy = False
         _last_health_check = time.time()
@@ -238,7 +283,6 @@ def get_db_session() -> Generator[Session, None, None]:
         raise
     finally:
         session.close()
-        scoped.remove()
 
 
 def execute_with_retry(func, max_retries: int = 3, retry_on: tuple = (OperationalError, DisconnectionError)) -> Any:
@@ -259,9 +303,10 @@ def execute_with_retry(func, max_retries: int = 3, retry_on: tuple = (Operationa
 
     for attempt in range(max_retries):
         try:
-            with get_db_session() as session:
+            with get_db_session(allow_unhealthy=attempt > 0) as session:
                 result = func(session)
                 session.commit()
+                reset_health_state()
                 return result
         except retry_on as e:
             last_exception = e
@@ -271,8 +316,6 @@ def execute_with_retry(func, max_retries: int = 3, retry_on: tuple = (Operationa
                 wait_time = 0.5 * (2**attempt)
                 logger.info(f"Waiting {wait_time}s before retry...")
                 time.sleep(wait_time)
-                scoped = get_scoped_session()
-                scoped.remove()  # Clear the session registry
                 continue
             raise
         except SQLAlchemyError as e:

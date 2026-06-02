@@ -123,7 +123,6 @@ class TestSchemaInheritance:
             "AdCPBaseModel",  # Used as base for SalesAgentBaseModel (different naming)
             "BrandManifest",  # TypeAlias
             "GetSignalsRequest",  # Direct alias
-            "PackageUpdate",  # Local PackageUpdate is a simplified model; AdCPPackageUpdate extends library
             "Property",  # TypeAlias
             "PromotedProducts",  # Imported but unused (cleanup candidate)
             "ResponsePagination",  # Named differently in local code (Pagination)
@@ -164,7 +163,6 @@ class TestSchemaInheritance:
             "AdCPBaseModel",
             "BrandManifest",
             "GetSignalsRequest",
-            "PackageUpdate",
             "Property",
             "PromotedProducts",
             "ResponsePagination",
@@ -220,6 +218,42 @@ class TestSchemaInheritance:
             ("UpdateMediaBuyRequest", "end_time"),  # datetime|None (library uses AwareDatetime)
             ("UpdateMediaBuyRequest", "packages"),  # list[AdCPPackageUpdate] (local subclass type)
             ("UpdateMediaBuyRequest", "start_time"),  # datetime|Literal["asap"]|None (wider type)
+            # Library declares `canceled: Literal[True] = True` which silently
+            # injects canceled=True into every validated payload — latent
+            # data-loss vector. Override default to None so omission means
+            # "not a cancellation request". (#155)
+            ("UpdateMediaBuyRequest", "canceled"),
+            ("AdCPPackageUpdate", "canceled"),
+            # adcp 4.4 made these fields required at the library level. Salesagent
+            # resolves identity at the transport boundary (ResolvedIdentity) and
+            # the impl is idempotent at the DB layer regardless of caller key, so
+            # we keep them optional with None defaults for backward-compat.
+            ("CreateMediaBuyRequest", "idempotency_key"),
+            ("UpdateMediaBuyRequest", "account"),
+            ("UpdateMediaBuyRequest", "idempotency_key"),
+            ("SyncCreativesRequest", "idempotency_key"),
+            ("ActivateSignalRequest", "idempotency_key"),
+            ("SyncAccountsRequest", "idempotency_key"),
+            # Schema overrides for partial-construction tolerance / wider types
+            ("Creative", "variants"),
+            ("SyncCreativeResult", "status"),
+            # TargetingOverlay overrides:
+            # - frequency_cap: Pattern #4, override to use local FrequencyCap subclass
+            # - geo_*_exclude: widen from library's *ExcludeItem subclass to the include-side
+            #   type (e.g. GeoCountry instead of GeoCountriesExcludeItem) so adapters can
+            #   use a single helper for both include and exclude. The library exclude types
+            #   are bare subclasses of the include types — same wire shape, same root values.
+            ("TargetingOverlay", "frequency_cap"),
+            ("TargetingOverlay", "geo_countries_exclude"),
+            ("TargetingOverlay", "geo_regions_exclude"),
+            ("TargetingOverlay", "geo_metros_exclude"),
+            ("TargetingOverlay", "geo_postal_areas_exclude"),
+            # GetMediaBuysRequest.ext — custom description documenting psa.* keys
+            # (include_webhook_activity, webhook_activity_limit) used by salesagent.
+            ("GetMediaBuysRequest", "ext"),
+            # GetMediaBuysResponse.media_buys — local GetMediaBuysMediaBuy carries
+            # snapshot_unavailable_reason and ext for GAM-projection provenance.
+            ("GetMediaBuysResponse", "media_buys"),
         }
 
         violations = []

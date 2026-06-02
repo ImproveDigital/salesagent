@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
+from src.admin.app import create_app
 from src.core.database.models import (
     AdapterConfig,
     AuthorizedProperty,
@@ -26,6 +27,16 @@ from src.services.setup_checklist_service import (
 from tests.helpers.adcp_factories import create_test_db_product
 
 pytestmark = pytest.mark.requires_db
+
+
+@pytest.fixture(autouse=True)
+def _flask_request_context():
+    """SetupChecklistService.action_url uses Flask url_for(), which needs a
+    request context. These tests invoke the service outside a real Flask
+    handler, so we provide one."""
+    app = create_app({"TESTING": True, "SECRET_KEY": "test", "WTF_CSRF_ENABLED": False})
+    with app.test_request_context():
+        yield
 
 
 @pytest.fixture
@@ -97,18 +108,22 @@ def setup_complete_tenant(integration_db, test_tenant_id):
 
         now = datetime.now(UTC)
 
-        # Create tenant with SSO configured (auth_setup_mode=False)
+        # Create tenant with SSO configured (auth_setup_mode=False).
+        # The AAO checklist is complete when public_agent_url is set;
+        # sprint 1.8 §6 hides it on managed tenants.
         tenant = Tenant(
             tenant_id=test_tenant_id,
             name="Complete Tenant",
             subdomain="complete",
             ad_server="google_ad_manager",
+            default_gam_advertiser_id="12345",
             human_review_required=True,
             auto_approve_format_ids=["display_300x250"],
             slack_webhook_url="https://hooks.slack.com/test",
             enable_axe_signals=True,
             authorized_emails=["test@example.com"],  # Required for access control
             auth_setup_mode=False,  # SSO configured, setup mode disabled
+            public_agent_url="https://agent.example.com/complete",
             created_at=now,
             updated_at=now,
             is_active=True,
@@ -424,6 +439,10 @@ class TestSetupChecklistService:
                 name="Bulk Test Tenant 3",
                 subdomain="bulk3",
                 ad_server="mock",  # Mock adapter is accepted in test environments
+                # Sprint 1.7 + 1.8 §6: AAO model fields are critical-tier
+                # checklist items; populated here so tenant 3 hits its
+                # "near complete" progress assertion.
+                public_agent_url="https://agent.example.com/bulk3",
                 created_at=now,
                 updated_at=now,
                 is_active=True,
@@ -771,6 +790,9 @@ class TestTaskDetails:
                 name="Multi-tenant Publisher",
                 subdomain="test_mtp",
                 ad_server="mock",
+                # Sprint 1.7 + 1.8: AAO model fields are critical-tier
+                # checklist items and must be populated for ready_for_orders.
+                public_agent_url="https://agent.example.com/mtp",
                 created_at=now,
                 updated_at=now,
                 is_active=True,
@@ -828,3 +850,172 @@ class TestTaskDetails:
             # All critical tasks should be complete
             incomplete_critical = [t for t in status["critical"] if not t["is_complete"]]
             assert len(incomplete_critical) == 0, f"Incomplete critical tasks: {incomplete_critical}"
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1.8 §6 — public_agent_url checklist hide-when-set
+# ---------------------------------------------------------------------------
+
+
+class TestSprint18AaoChecklistHide:
+    """The public_agent_url AAO item disappears from the critical-tasks list
+    when the tenant is_embedded AND the field is populated.
+
+    Open-instance tenants always see it (legacy behavior). Embedded tenants
+    with NULL still see it — that signals the platform hasn't finished
+    provisioning.
+    """
+
+    def _make_tenant(self, tenant_id: str, *, is_embedded: bool, public_agent_url: str | None):
+        """Create a tenant directly (architecture guard allowlist applies to this file)."""
+        from datetime import UTC, datetime
+
+        from src.core.database.database_session import get_db_session
+
+        with get_db_session() as session:
+            session.info["management_api_caller"] = True
+            now = datetime.now(UTC)
+            tenant = Tenant(
+                tenant_id=tenant_id,
+                name=f"Test {tenant_id}",
+                subdomain=tenant_id.replace("_", "-"),
+                ad_server="mock",
+                created_at=now,
+                updated_at=now,
+                is_active=True,
+                is_embedded=is_embedded,
+                external_org_id=tenant_id if is_embedded else None,
+                external_source="scope3" if is_embedded else None,
+                public_agent_url=public_agent_url,
+            )
+            session.add(tenant)
+            session.commit()
+
+    def _cleanup(self, tenant_id: str):
+        from src.core.database.database_session import get_db_session
+
+        with get_db_session() as session:
+            session.info["management_api_caller"] = True
+            existing = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if existing:
+                session.delete(existing)
+                session.commit()
+
+    def test_managed_tenant_with_field_set_hides_aao_item(self, integration_db):
+        tid = "tid_aao_hide_managed"
+        self._make_tenant(
+            tid,
+            is_embedded=True,
+            public_agent_url="https://agent.scope3.com/x",
+        )
+        try:
+            service = SetupChecklistService(tid)
+            status = service.get_setup_status()
+            keys = {t["key"] for t in status["critical"]}
+            assert "public_agent_url" not in keys
+        finally:
+            self._cleanup(tid)
+
+    def test_open_instance_tenant_always_shows_aao_item(self, integration_db):
+        tid = "tid_aao_open_instance"
+        self._make_tenant(
+            tid,
+            is_embedded=False,
+            public_agent_url="https://agent.scope3.com/x",
+        )
+        try:
+            service = SetupChecklistService(tid)
+            status = service.get_setup_status()
+            keys = {t["key"] for t in status["critical"]}
+            assert "public_agent_url" in keys
+        finally:
+            self._cleanup(tid)
+
+    def test_managed_tenant_with_null_public_agent_url_still_shows_item(self, integration_db):
+        """Managed tenant with incomplete provisioning — Storefront's
+        Scope3-side checklist surfaces this as a platform gap to escalate."""
+        tid = "tid_aao_managed_partial"
+        self._make_tenant(
+            tid,
+            is_embedded=True,
+            public_agent_url=None,
+        )
+        try:
+            service = SetupChecklistService(tid)
+            status = service.get_setup_status()
+            keys = {t["key"] for t in status["critical"]}
+            assert "public_agent_url" in keys
+        finally:
+            self._cleanup(tid)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7 IA cleanup — principals_created skip on embedded
+# ---------------------------------------------------------------------------
+
+
+class TestSprint7PrincipalsCreatedHideOnEmbedded:
+    """``principals_created`` task disappears from the critical-tasks list
+    on embedded tenants. Principal provisioning is platform-managed (Tenant
+    Management API + embedded-auth header bypass), so there is no operator
+    action available — and the Buyer Agents settings tab the task would link
+    to is hidden in embedded mode (Sprint 7 IA cleanup).
+
+    Open-instance tenants still see the task — that's where standalone
+    operators set up their Principals via Settings → Buyer Agents.
+    """
+
+    def _make_tenant(self, tenant_id: str, *, is_embedded: bool):
+        from datetime import UTC, datetime
+
+        from src.core.database.database_session import get_db_session
+
+        with get_db_session() as session:
+            session.info["management_api_caller"] = True
+            now = datetime.now(UTC)
+            tenant = Tenant(
+                tenant_id=tenant_id,
+                name=f"Test {tenant_id}",
+                subdomain=tenant_id.replace("_", "-"),
+                ad_server="mock",
+                created_at=now,
+                updated_at=now,
+                is_active=True,
+                is_embedded=is_embedded,
+                external_org_id=tenant_id if is_embedded else None,
+                external_source="scope3" if is_embedded else None,
+            )
+            session.add(tenant)
+            session.commit()
+
+    def _cleanup(self, tenant_id: str):
+        from src.core.database.database_session import get_db_session
+
+        with get_db_session() as session:
+            session.info["management_api_caller"] = True
+            existing = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if existing:
+                session.delete(existing)
+                session.commit()
+
+    def test_embedded_tenant_omits_principals_created_task(self, integration_db):
+        tid = "tid_principals_hide_embedded"
+        self._make_tenant(tid, is_embedded=True)
+        try:
+            service = SetupChecklistService(tid)
+            status = service.get_setup_status()
+            keys = {t["key"] for t in status["critical"]}
+            assert "principals_created" not in keys
+        finally:
+            self._cleanup(tid)
+
+    def test_open_instance_tenant_keeps_principals_created_task(self, integration_db):
+        tid = "tid_principals_show_open"
+        self._make_tenant(tid, is_embedded=False)
+        try:
+            service = SetupChecklistService(tid)
+            status = service.get_setup_status()
+            keys = {t["key"] for t in status["critical"]}
+            assert "principals_created" in keys
+        finally:
+            self._cleanup(tid)

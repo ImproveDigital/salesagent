@@ -72,6 +72,10 @@ class TestTemplateUrlValidation:
                             test_params["media_buy_id"] = "test_buy"
                         if "task_id" in params:
                             test_params["task_id"] = "test_task"
+                        if "step_id" in params:
+                            test_params["step_id"] = "test_step"
+                        if "workflow_id" in params:
+                            test_params["workflow_id"] = "test_workflow"
                         if "property_id" in params:
                             test_params["property_id"] = "test_property"
                         if "config_id" in params:
@@ -86,6 +90,10 @@ class TestTemplateUrlValidation:
                             test_params["user_id"] = "test_user"
                         if "account_id" in params:
                             test_params["account_id"] = "test_account"
+                        if "key_id" in params:
+                            test_params["key_id"] = "test_key"
+                        if "signal_id" in params:
+                            test_params["signal_id"] = "test_signal"
 
                         # Try to build the URL
                         url = url_for(endpoint, **test_params)
@@ -188,6 +196,24 @@ class TestTemplateUrlValidation:
                             # Add user_id for user endpoints
                             if "user" in endpoint and "toggle" in endpoint:
                                 test_params["user_id"] = "test_user"
+
+                            # Add task_id for policy review endpoints
+                            if "review_task" in endpoint or endpoint == "policy.review_task":
+                                test_params["task_id"] = "test_task"
+
+                            # Add key_id for signing-key rotate endpoints
+                            if "rotate_out" in endpoint or "signing_key" in endpoint:
+                                test_params["key_id"] = "test_key"
+
+                            # Add signal_id for tenant_signals form actions
+                            if "tenant_signals" in endpoint and ("edit" in endpoint or "delete" in endpoint):
+                                test_params["signal_id"] = "test_signal"
+
+                            # Add profile_id for inventory_profiles per-bundle actions
+                            if "inventory_profiles" in endpoint and (
+                                "edit" in endpoint or "delete" in endpoint or "duplicate" in endpoint
+                            ):
+                                test_params["profile_id"] = 1
 
                             url_for(endpoint, **test_params)
                         except BuildError as e:

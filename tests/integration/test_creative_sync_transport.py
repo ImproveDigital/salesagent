@@ -27,8 +27,7 @@ from src.core.database.models import Creative as DBCreative
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError
 from tests.harness import CreativeSyncEnv, Transport, assert_envelope, make_identity
 
-# All four transports: IMPL, A2A, REST, MCP
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.REST, Transport.MCP]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP, Transport.A2A]
 
 
 @pytest.mark.requires_db
@@ -71,17 +70,27 @@ class TestSyncCreativeCreateTransport:
             assert db_creative is not None, "Created creative should be persisted in DB"
             assert db_creative.name == "Transport Test Creative"
 
-    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
-    def test_empty_creative_list_returns_success(self, integration_db, transport):
-        """Empty creative list is a valid no-op across all transports."""
+    def test_empty_creative_list_rejected_at_wire(self, integration_db):
+        """Per AdCP spec, ``creatives`` MUST contain at least one item.
+
+        The library schema (``adcp.types.SyncCreativesRequest``) declares
+        ``creatives: list[Creative]`` with ``min_length=1``, so any wire-format
+        caller (MCP, A2A, REST) must be rejected before
+        the request ever reaches the impl. ``call_impl`` is deliberately not
+        covered here — the impl layer is transport-agnostic and operates on
+        already-validated domain inputs; wire-shape validation is the wrapper
+        boundary's responsibility.
+        """
         with CreativeSyncEnv() as env:
             env.setup_default_data()
+            result = env.call_via(Transport.MCP, creatives=[])
 
-            result = env.call_via(transport, creatives=[])
-
-        assert result.is_success
-        assert_envelope(result, transport)
-        assert len(result.payload.creatives) == 0
+        assert not result.is_success, "Empty creatives list must be rejected per spec"
+        error_str = str(result.error)
+        assert any(code in error_str for code in ("INVALID_REQUEST", "VALIDATION_ERROR")), (
+            f"Expected request validation code, got {result.error!r}"
+        )
+        assert "creatives" in error_str
 
     @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
     def test_dry_run_does_not_persist(self, integration_db, transport):
@@ -116,6 +125,7 @@ class TestSyncCreativeCreateTransport:
 
 DEFAULT_AGENT_URL = "https://example.com/agent"
 DEFAULT_FORMAT_ID = {"id": "display_300x250", "agent_url": DEFAULT_AGENT_URL}
+REFERENCE_AGENT_URL = "https://creative.adcontextprotocol.org"
 
 
 def _creative(creative_id: str = "c1", name: str = "Test", **overrides) -> dict:
@@ -128,6 +138,44 @@ def _creative(creative_id: str = "c1", name: str = "Test", **overrides) -> dict:
     }
     defaults.update(overrides)
     return defaults
+
+
+@pytest.mark.requires_db
+class TestSyncCreativesVersionCompatibility:
+    """Buyer wire-shape compatibility for AdCP 3.0/3.1-era clients."""
+
+    @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
+    @pytest.mark.parametrize(
+        ("label", "format_id"),
+        [
+            ("3.0 legacy string", "display_300x250_image"),
+            (
+                "3.0 legacy dict key with mcp URL",
+                {"agent_url": f"{REFERENCE_AGENT_URL}/mcp", "format_id": "display_300x250_image"},
+            ),
+            (
+                "3.1 canonical structured",
+                {"agent_url": REFERENCE_AGENT_URL, "id": "display_image", "width": 300, "height": 250},
+            ),
+        ],
+    )
+    def test_legacy_and_canonical_format_shapes_sync(self, integration_db, transport, label, format_id):
+        """Legacy and canonical format references create creatives on every transport."""
+        with CreativeSyncEnv() as env:
+            env.setup_default_data()
+            result = env.call_via(
+                transport,
+                creatives=[
+                    _creative(
+                        creative_id=f"c_compat_{transport.value}_{label.replace(' ', '_')}",
+                        format_id=format_id,
+                    )
+                ],
+            )
+
+        assert result.is_success, f"{label} over {transport.value} failed: {result.error}"
+        assert len(result.payload.creatives) == 1
+        assert result.payload.creatives[0].action == CreativeAction.created
 
 
 @pytest.mark.requires_db
@@ -232,7 +280,7 @@ class TestSyncStrictModeAbortTransport:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_strict", name="Strict Test")],
-                assignments={"c_strict": ["PKG-NONEXISTENT"]},
+                assignments=[{"creative_id": "c_strict", "package_id": "PKG-NONEXISTENT"}],
                 validation_mode="strict",
             )
 
@@ -256,7 +304,7 @@ class TestSyncLenientModeContinuesTransport:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_lenient", name="Lenient Test")],
-                assignments={"c_lenient": ["PKG-MISSING"]},
+                assignments=[{"creative_id": "c_lenient", "package_id": "PKG-MISSING"}],
                 validation_mode="lenient",
             )
 
@@ -295,7 +343,7 @@ class TestSyncFormatValidationTransport:
         assert len(result.payload.creatives) == 1
         creative_result = result.payload.creatives[0]
         assert creative_result.action == CreativeAction.failed
-        assert any("list_creative_formats" in e for e in (creative_result.errors or []))
+        assert any("list_creative_formats" in e.message for e in (creative_result.errors or []))
 
 
 @pytest.mark.requires_db
@@ -432,7 +480,7 @@ class TestGenerativeBuildPromptBrief:
                         "creative_id": "c_gen_03",
                         "name": "Brief Test",
                         "format_id": fmt,
-                        "assets": {"brief": {"content": "Promote summer sale"}},
+                        "assets": {"brief": {"name": "summer-sale", "content": "Promote summer sale"}},
                     }
                 ],
             )
@@ -680,7 +728,7 @@ class TestFormatValidationAdapter:
 
     @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
     def test_adapter_format_skips_registry(self, integration_db, transport):
-        """Non-HTTP agent_url (adapter://) bypasses registry.get_format check."""
+        """Non-HTTP agent_url bypasses registry.get_format check."""
         with CreativeSyncEnv() as env:
             env.setup_default_data()
 
@@ -690,7 +738,7 @@ class TestFormatValidationAdapter:
                     {
                         "creative_id": "c_adapter_fmt",
                         "name": "Adapter Format Creative",
-                        "format_id": {"id": "billboard", "agent_url": "broadstreet://default"},
+                        "format_id": {"id": "legacy_adapter_format", "agent_url": "adapter-test://default"},
                         "assets": {"banner": {"url": "https://example.com/ad.png"}},
                     }
                 ],
@@ -733,7 +781,7 @@ class TestFormatValidationUnreachable:
         assert len(result.payload.creatives) == 1
         creative_result = result.payload.creatives[0]
         assert creative_result.action == CreativeAction.failed
-        assert any("unreachable" in e.lower() for e in (creative_result.errors or []))
+        assert any("unreachable" in e.message.lower() for e in (creative_result.errors or []))
 
 
 # ---------------------------------------------------------------------------
@@ -775,7 +823,7 @@ class TestAssignmentPackageTenantFilter:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_cross", name="Cross Tenant")],
-                assignments={"c_cross": [pkg_id]},
+                assignments=[{"creative_id": "c_cross", "package_id": pkg_id}],
                 validation_mode="lenient",
             )
 
@@ -799,16 +847,13 @@ class TestAssignmentFormatCompatibility:
         from tests.factories import (
             MediaBuyFactory,
             MediaPackageFactory,
-            PrincipalFactory,
             ProductFactory,
-            TenantFactory,
         )
 
         pkg_id = "pkg_fmt_check"
 
         with CreativeSyncEnv() as env:
-            tenant = TenantFactory(tenant_id="test_tenant")
-            principal = PrincipalFactory(tenant=tenant, principal_id="test_principal")
+            tenant, principal = env.setup_default_data()
 
             # Product only supports video_30s format
             product = ProductFactory(
@@ -828,7 +873,7 @@ class TestAssignmentFormatCompatibility:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_fmt_mismatch", name="Format Mismatch")],
-                assignments={"c_fmt_mismatch": [pkg_id]},
+                assignments=[{"creative_id": "c_fmt_mismatch", "package_id": pkg_id}],
                 validation_mode="lenient",
             )
 
@@ -854,16 +899,13 @@ class TestAssignmentResultFields:
         from tests.factories import (
             MediaBuyFactory,
             MediaPackageFactory,
-            PrincipalFactory,
             ProductFactory,
-            TenantFactory,
         )
 
         pkg_id = "pkg_assign_ok"
 
         with CreativeSyncEnv() as env:
-            tenant = TenantFactory(tenant_id="test_tenant")
-            principal = PrincipalFactory(tenant=tenant, principal_id="test_principal")
+            tenant, principal = env.setup_default_data()
 
             # Product supports the default display format
             product = ProductFactory(
@@ -882,7 +924,7 @@ class TestAssignmentResultFields:
             result = env.call_via(
                 transport,
                 creatives=[_creative(creative_id="c_assign", name="Assignment Test")],
-                assignments={"c_assign": [pkg_id]},
+                assignments=[{"creative_id": "c_assign", "package_id": pkg_id}],
             )
 
         assert result.is_success
@@ -995,8 +1037,6 @@ class TestMissingFormatFails:
         On MCP: TypeAdapter rejects because CreativeAsset requires format_id.
         Both paths correctly reject the creative.
         """
-        from tests.harness.assertions import assert_rejected
-
         with CreativeSyncEnv() as env:
             env.setup_default_data()
 
@@ -1014,7 +1054,9 @@ class TestMissingFormatFails:
 
         if result.is_error:
             # MCP: TypeAdapter rejected missing format_id — correct behavior
-            assert_rejected(result, field="format_id", reason="Field required")
+            error_str = str(result.error)
+            assert "format_id" in error_str or "oneOf composition failed" in error_str
+            assert any(reason in error_str for reason in ("Field required", "required property", "oneOf"))
         else:
             # impl/a2a/rest: _impl handled it, returned action=failed
             assert_envelope(result, transport)
@@ -1033,7 +1075,7 @@ class TestStaticPreviewFailed:
     @pytest.mark.parametrize("transport", ALL_TRANSPORTS, ids=lambda t: t.value)
     def test_no_preview_no_url_fails(self, integration_db, transport):
         """Static format with empty preview_creative result and no url → failed."""
-        from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
+        from src.core.schemas import FormatId as LibraryFormatId
 
         with CreativeSyncEnv() as env:
             env.setup_default_data()
@@ -1072,14 +1114,15 @@ class TestStaticPreviewFailed:
             # MCP: TypeAdapter rejects missing assets field — correct schema rejection
             from tests.harness.assertions import assert_rejected
 
-            assert_rejected(result, field="assets", reason="Field required")
+            assert_rejected(result, field="assets", reason="required property")
         else:
             # impl/a2a/rest: _impl handles it, returns action=failed
             assert_envelope(result, transport)
             creative_result = result.payload.creatives[0]
             assert creative_result.action == CreativeAction.failed
             assert any(
-                "no previews" in e.lower() or "no media_url" in e.lower() for e in (creative_result.errors or [])
+                "no previews" in e.message.lower() or "no media_url" in e.message.lower()
+                for e in (creative_result.errors or [])
             )
 
 
@@ -1117,7 +1160,7 @@ class TestGeminiKeyMissing:
         assert_envelope(result, transport)
         creative_result = result.payload.creatives[0]
         assert creative_result.action == CreativeAction.failed
-        assert any("gemini" in e.lower() for e in (creative_result.errors or []))
+        assert any("gemini" in e.message.lower() for e in (creative_result.errors or []))
 
 
 # ---------------------------------------------------------------------------
@@ -1137,13 +1180,12 @@ class TestSlackNotificationOnSync:
         _send_creative_notifications is called with the creative info."""
         with CreativeSyncEnv() as env:
             env.setup_default_data()
-            # Set tenant fields on the REST-specific identity
-            identity = env.identity_for(Transport.REST)
+            identity = env.identity_for(Transport.MCP)
             identity.tenant["approval_mode"] = "require-human"
             identity.tenant["slack_webhook_url"] = "https://hooks.slack.com/test"
 
             result = env.call_via(
-                Transport.REST,
+                Transport.MCP,
                 creatives=[_creative(creative_id="c_slack_test", name="Slack Notify Creative")],
             )
 

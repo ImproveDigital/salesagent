@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_mode_auth import is_embedded_view
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantAuthConfig, User
 
@@ -21,12 +22,25 @@ users_bp = Blueprint("users", __name__, url_prefix="/tenant/<tenant_id>/users")
 @users_bp.route("")
 @require_tenant_access()
 def list_users(tenant_id):
-    """List users for a tenant."""
+    """List users for a tenant.
+
+    On embedded views the page is replaced with the platform-managed
+    lock banner — identity flows through ``X-Identity-*`` headers per the
+    embedded-mode identity contract, so there are no salesagent-side User
+    records to manage. Returns 200 (not 404) so deep-links from the
+    setup-task panel land on a "managed by your platform" explanation
+    rather than a dead end. Also fires for *preview* requests on a
+    non-embedded tenant authenticated via headers, so the iframe view
+    matches what production-embedded looks like.
+    """
     with get_db_session() as db_session:
         tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
         if not tenant:
             flash("Tenant not found", "error")
             return redirect(url_for("core.index"))
+
+        if is_embedded_view(tenant):
+            return render_template("_embedded_locked_page.html", tenant=tenant), 200
 
         stmt = select(User).filter_by(tenant_id=tenant_id).order_by(User.email)
         users = db_session.scalars(stmt).all()
@@ -68,7 +82,7 @@ def list_users(tenant_id):
 
 
 @users_bp.route("/add", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action(
     "add_user", extract_details=lambda r, **kw: {"email": request.form.get("email"), "role": request.form.get("role")}
 )
@@ -80,6 +94,16 @@ def add_user(tenant_id):
 
         if not email:
             flash("Email is required", "error")
+            return redirect(url_for("users.list_users", tenant_id=tenant_id))
+
+        # Application-layer role validation. The ``ck_users_role`` CHECK
+        # constraint is the hard backstop, but rejecting at the boundary
+        # gives a clear UX message instead of an opaque DB exception.
+        from src.core.validation import FormValidator
+
+        role_err = FormValidator.validate_role(role)
+        if role_err:
+            flash(role_err, "error")
             return redirect(url_for("users.list_users", tenant_id=tenant_id))
 
         # Validate email format
@@ -126,7 +150,7 @@ def add_user(tenant_id):
 
 @users_bp.route("/<user_id>/toggle", methods=["POST"])
 @log_admin_action("toggle_user")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def toggle_user(tenant_id, user_id):
     """Toggle user active status."""
     try:
@@ -151,12 +175,15 @@ def toggle_user(tenant_id, user_id):
 
 @users_bp.route("/<user_id>/update_role", methods=["POST"])
 @log_admin_action("update_role")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def update_role(tenant_id, user_id):
     """Update user role."""
     try:
         new_role = request.form.get("role")
-        if not new_role or new_role not in ["admin", "manager", "viewer"]:
+        # Canonical role enum aligned with the embedded-mode contract.
+        # Legacy ``manager`` rows are migrated to ``member`` — see
+        # alembic/versions/8407a32e9b07_rename_user_role_manager_to_member.py.
+        if not new_role or new_role not in ["admin", "member", "viewer"]:
             flash("Invalid role", "error")
             return redirect(url_for("users.list_users", tenant_id=tenant_id))
 
@@ -179,7 +206,7 @@ def update_role(tenant_id, user_id):
 
 
 @users_bp.route("/domains", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action("add_domain", extract_details=lambda r, **kw: {"domain": request.json.get("domain")})
 def add_domain(tenant_id):
     """Add an authorized domain for the tenant."""
@@ -222,7 +249,7 @@ def add_domain(tenant_id):
 
 
 @users_bp.route("/domains", methods=["DELETE"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action("remove_domain", extract_details=lambda r, **kw: {"domain": request.json.get("domain")})
 def remove_domain(tenant_id):
     """Remove an authorized domain from the tenant."""
@@ -258,7 +285,7 @@ def remove_domain(tenant_id):
 
 
 @users_bp.route("/disable-setup-mode", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action("disable_auth_setup_mode")
 def disable_setup_mode(tenant_id):
     """Disable auth setup mode for the tenant.
@@ -311,13 +338,29 @@ def disable_setup_mode(tenant_id):
 
 
 @users_bp.route("/enable-setup-mode", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action("enable_auth_setup_mode")
 def enable_setup_mode(tenant_id):
     """Re-enable auth setup mode for the tenant.
 
     This allows test credentials to work again, useful for troubleshooting.
+    Requires an authenticated SSO session: re-enabling the test-credentials
+    backdoor must not be reachable via header-auth (preview / embedded) or
+    via the test-credentials password backdoor itself, otherwise an attacker
+    who reaches this endpoint can flip the tenant back into setup mode and
+    chain into full OAuth-equivalent access.
     """
+    auth_method = session.get("auth_method")
+    if auth_method != "oidc":
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "You must be logged in via SSO to re-enable setup mode.",
+                }
+            ),
+            403,
+        )
     try:
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()

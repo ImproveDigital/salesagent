@@ -12,7 +12,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from adcp.types.generated_poc.core.account_ref import AccountReference
+    from adcp.types import AccountReference
 
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import get_http_headers
@@ -51,8 +51,13 @@ def resolve_identity_from_context(
     Returns:
         ResolvedIdentity, or None if ctx is None and no headers available
     """
-    # Handle ToolContext directly (already has resolved identity info)
-    if isinstance(ctx, ToolContext):
+    # Handle ToolContext directly (already has resolved identity info).
+    # Skip when both ``tenant_id`` and ``principal_id`` are ``None`` —
+    # this happens on discovery-tool calls where ``BearerTokenAuth``
+    # bypasses validation at the transport gate, so ``request.state``
+    # carries no principal even when the buyer sent a valid token.
+    # Fall through to header-based resolution in that case.
+    if isinstance(ctx, ToolContext) and (ctx.tenant_id is not None or ctx.principal_id is not None):
         # Create lazy tenant — DB query deferred until a field beyond
         # tenant_id is accessed. Most _impl paths only need tenant_id
         # for DB queries, so the full load often never happens.
@@ -95,12 +100,28 @@ def resolve_identity_from_context(
     except Exception:
         logger.debug("Could not extract testing context", exc_info=True)
 
-    return resolve_identity(
+    identity = resolve_identity(
         headers=headers,
         require_valid_token=require_valid_token,
         protocol=protocol,
         testing_context=testing_context,
     )
+
+    # If the SigningVerifyMiddleware verified an inbound signature on this
+    # request, fold the verified agent_url/key into the identity so downstream
+    # _impl functions and audit-log writers can record it.
+    from src.core.signing.verified_state import get_verified_state
+
+    verified = get_verified_state()
+    if verified is not None:
+        identity = identity.model_copy(
+            update={
+                "verified_agent_url": verified.agent_url,
+                "verified_key_id": verified.key_id,
+            }
+        )
+
+    return identity
 
 
 def enrich_identity_with_account(
@@ -127,6 +148,11 @@ def enrich_identity_with_account(
 
     if identity.tenant_id is None:
         return identity
+
+    if isinstance(account_ref, dict):
+        from adcp.types import AccountReference
+
+        account_ref = AccountReference.model_validate(account_ref)
 
     from src.core.database.repositories.uow import AccountUoW
     from src.core.helpers.account_helpers import resolve_account

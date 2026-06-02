@@ -9,14 +9,24 @@ BR-RULE-061 (delete_missing), BR-RULE-062 (dry_run)
 """
 
 import pytest
+from adcp.types import PaginationRequest
 
-from src.core.schemas.account import SyncAccountsRequest
+from src.core.schemas.account import ListAccountsRequest, SyncAccountsRequest
+from src.core.tools.accounts import _list_accounts_impl, _sync_accounts_impl
+from tests.factories import PrincipalFactory
 from tests.harness import Transport
 from tests.harness.account_sync import AccountSyncEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.REST, Transport.MCP]
+# sync_accounts isn't yet auto-registered as an MCP tool by the SDK —
+# it lives on the AccountStoreUpsert protocol (separate from the sales
+# specialism's tool surface). Until we wire SalesagentAccountStore.upsert
+# and the framework auto-advertises sync_accounts, only the IMPL
+# transport exercises the impl path. FIXME(salesagent-sync-accounts-mcp):
+# when SDK exposes sync_accounts via AccountStoreUpsert, add Transport.MCP
+# back here.
+ALL_TRANSPORTS = [Transport.IMPL]
 
 
 def _action_value(action):
@@ -27,6 +37,29 @@ def _action_value(action):
 def _status_value(status):
     """Extract string value from Status enum or return as-is."""
     return status.value if hasattr(status, "value") else str(status)
+
+
+def _pagination_integrity_accounts() -> list[dict]:
+    return [
+        {
+            "brand": {"domain": "acme-corp.com"},
+            "operator": "pinnacle-media.com",
+            "billing": "operator",
+            "sandbox": True,
+        },
+        {
+            "brand": {"domain": "nova-brands.com"},
+            "operator": "pinnacle-media.com",
+            "billing": "operator",
+            "sandbox": True,
+        },
+        {
+            "brand": {"domain": "pinnacle-media.com"},
+            "operator": "pinnacle-media.com",
+            "billing": "operator",
+            "sandbox": True,
+        },
+    ]
 
 
 class TestSyncAccountsCreate:
@@ -96,18 +129,23 @@ class TestSyncAccountsUpdate:
                         "brand": {"domain": "acme.com"},
                         "operator": "example.com",
                         "billing": "operator",
+                        "payment_terms": "net_30",
                     }
                 ],
             )
             await env.call_impl_async(req=req1)
 
-            # Sync again with updated billing
+            # Sync again with updated payment_terms (same natural key — billing
+            # stays "operator" so the (operator, brand, sandbox) tuple matches).
+            # Switching billing model to "agent" would scope the natural key by
+            # principal_id and intentionally produce a separate account.
             req2 = SyncAccountsRequest(
                 accounts=[
                     {
                         "brand": {"domain": "acme.com"},
                         "operator": "example.com",
-                        "billing": "agent",
+                        "billing": "operator",
+                        "payment_terms": "net_60",
                     }
                 ],
             )
@@ -138,6 +176,83 @@ class TestSyncAccountsUpdate:
 
         assert len(response.accounts) == 1
         assert _action_value(response.accounts[0].action) == "unchanged"
+
+    @pytest.mark.asyncio
+    async def test_account_notification_configs_roundtrip_and_replace(self, integration_db):
+        with AccountSyncEnv(tenant_id="sync_notifications_t1", principal_id="agent_notifications") as env:
+            env.setup_default_data()
+
+            req = SyncAccountsRequest(
+                accounts=[
+                    {
+                        "brand": {"domain": "notify-acme.com"},
+                        "operator": "example.com",
+                        "billing": "operator",
+                        "notification_configs": [
+                            {
+                                "subscriber_id": "primary",
+                                "url": "https://example.com/primary-webhook",
+                                "event_types": ["product.updated", "signal.updated"],
+                                "active": False,
+                                "authentication": {
+                                    "schemes": ["HMAC-SHA256"],
+                                    "credentials": "shared-secret-with-at-least-32-chars",
+                                },
+                            },
+                            {
+                                "subscriber_id": "audit",
+                                "url": "https://example.com/audit-webhook",
+                                "event_types": ["product.removed"],
+                                "active": False,
+                                "authentication": {
+                                    "schemes": ["HMAC-SHA256"],
+                                    "credentials": "another-shared-secret-with-32-chars",
+                                },
+                            },
+                        ],
+                    }
+                ],
+            )
+            created = await env.call_impl_async(req=req)
+            created_account = created.accounts[0].model_dump(mode="json", exclude_none=True)
+
+            omitted = await env.call_impl_async(
+                req=SyncAccountsRequest(
+                    accounts=[
+                        {
+                            "brand": {"domain": "notify-acme.com"},
+                            "operator": "example.com",
+                            "billing": "operator",
+                        }
+                    ],
+                )
+            )
+            omitted_account = omitted.accounts[0].model_dump(mode="json", exclude_none=True)
+
+            from src.core.tools.accounts import _list_accounts_impl
+
+            listed = _list_accounts_impl(identity=env.identity)
+            listed_account = listed.accounts[0].model_dump(mode="json", exclude_none=True)
+
+            removed = await env.call_impl_async(
+                req=SyncAccountsRequest(
+                    accounts=[
+                        {
+                            "brand": {"domain": "notify-acme.com"},
+                            "operator": "example.com",
+                            "billing": "operator",
+                            "notification_configs": [],
+                        }
+                    ],
+                )
+            )
+            removed_account = removed.accounts[0].model_dump(mode="json", exclude_none=True)
+
+        assert [config["subscriber_id"] for config in created_account["notification_configs"]] == ["audit", "primary"]
+        assert "authentication" not in created_account["notification_configs"][0]
+        assert omitted_account["notification_configs"] == created_account["notification_configs"]
+        assert listed_account["notification_configs"] == created_account["notification_configs"]
+        assert "notification_configs" not in removed_account
 
 
 class TestSyncAccountsAuth:
@@ -582,3 +697,211 @@ class TestSyncAccountsApprovalTransport:
         acct = result.payload.accounts[0]
         assert _status_value(acct.status) == "active"
         assert acct.setup is None
+
+
+class TestSyncAccountsAccountId:
+    """Storyboard ``media_buy_seller/refine_products/sync_accounts`` (3.0.9):
+    every created account must carry a non-null platform-assigned ``account_id``
+    that is stable across re-syncs of the same natural key.
+
+    Regression for: storyboard ``field_present`` assertion on
+    ``accounts[0].account_id`` failing against production. PR #313 wired
+    sync_accounts but the reserved-TLD gate rejected the storyboard's
+    RFC 2606 ``acmeoutdoor.example`` domain in production mode, producing a
+    rejected result with no ``account_id``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_account_id_present_on_create(self, integration_db, monkeypatch):
+        # Production-mode (ADCP_TESTING off): the storyboard runner hits a
+        # plain compliance endpoint with no testing escape hatch set.
+        monkeypatch.delenv("ADCP_TESTING", raising=False)
+        with AccountSyncEnv(tenant_id="aid_t1", principal_id="agent_aid1") as env:
+            env.setup_default_data()
+            req = SyncAccountsRequest(
+                accounts=[
+                    {
+                        "brand": {"domain": "acmeoutdoor.example"},
+                        "operator": "pinnacle-agency.example",
+                        "billing": "operator",
+                        "payment_terms": "net_30",
+                    }
+                ],
+            )
+            response = await env.call_impl_async(req=req)
+
+        assert len(response.accounts) == 1
+        acct = response.accounts[0]
+        assert _action_value(acct.action) == "created"
+        assert acct.account_id is not None
+        assert acct.account_id.startswith("acc_")
+
+    @pytest.mark.asyncio
+    async def test_account_id_stable_across_resync(self, integration_db, monkeypatch):
+        monkeypatch.delenv("ADCP_TESTING", raising=False)
+        with AccountSyncEnv(tenant_id="aid_t2", principal_id="agent_aid2") as env:
+            env.setup_default_data()
+            req = SyncAccountsRequest(
+                accounts=[
+                    {
+                        "brand": {"domain": "acmeoutdoor.example"},
+                        "operator": "pinnacle-agency.example",
+                        "billing": "operator",
+                        "payment_terms": "net_30",
+                    }
+                ],
+            )
+            first = await env.call_impl_async(req=req)
+            second = await env.call_impl_async(req=req)
+
+        first_id = first.accounts[0].account_id
+        second_id = second.accounts[0].account_id
+        assert first_id is not None
+        assert first_id == second_id, "sync_accounts must be idempotent — same natural key → same account_id"
+
+    @pytest.mark.asyncio
+    async def test_distinct_natural_keys_get_distinct_account_ids(self, integration_db, monkeypatch):
+        monkeypatch.delenv("ADCP_TESTING", raising=False)
+        with AccountSyncEnv(tenant_id="aid_t3", principal_id="agent_aid3") as env:
+            env.setup_default_data()
+            req = SyncAccountsRequest(
+                accounts=[
+                    {
+                        "brand": {"domain": "acmeoutdoor.example"},
+                        "operator": "pinnacle-agency.example",
+                        "billing": "operator",
+                    },
+                    {
+                        "brand": {"domain": "betaoutdoor.example"},
+                        "operator": "pinnacle-agency.example",
+                        "billing": "operator",
+                    },
+                ],
+            )
+            response = await env.call_impl_async(req=req)
+
+        ids = [a.account_id for a in response.accounts]
+        assert all(i is not None for i in ids)
+        assert len(set(ids)) == 2, "Different (brand, operator) tuples must mint different account_ids"
+
+    @pytest.mark.asyncio
+    async def test_existing_operator_accounts_grant_access_to_resyncing_principal(self, integration_db):
+        with AccountSyncEnv(tenant_id="story_accounts_t1", principal_id="agent_story_a") as env:
+            tenant, _principal = env.setup_default_data()
+            second_principal = PrincipalFactory(tenant=tenant, principal_id="agent_story_b")
+            second_identity = PrincipalFactory.make_identity(
+                principal_id=second_principal.principal_id,
+                tenant_id=tenant.tenant_id,
+                tenant=env.identity.tenant,
+            )
+
+            req = SyncAccountsRequest(accounts=_pagination_integrity_accounts())
+            first_response = await env.call_impl_async(req=req)
+            second_response = await _sync_accounts_impl(req=req, identity=second_identity)
+
+            list_response = _list_accounts_impl(
+                req=ListAccountsRequest(pagination=PaginationRequest(max_results=2)),
+                identity=second_identity,
+            )
+
+        assert [_action_value(acct.action) for acct in first_response.accounts] == ["created", "created", "created"]
+        assert [_action_value(acct.action) for acct in second_response.accounts] == ["updated", "updated", "updated"]
+        assert len(list_response.accounts) == 2
+        assert list_response.pagination is not None
+        assert list_response.pagination.has_more is True
+        assert list_response.pagination.cursor is not None
+        assert list_response.pagination.total_count is None
+
+
+class TestSyncAccountsWireStatusEnum:
+    """#332: response.accounts[*].status must be a spec-valid AccountStatus.
+
+    Internal lifecycle state ``pending_provision`` (auto-approved + GAM tenant +
+    not sandbox + no pre-mapped advertiser) is collapsed to the spec value
+    ``pending_approval`` at the wire-emit boundary. Both mean "buyer can't use
+    this account yet, operator-side work pending"; the AdCP Account.status enum
+    doesn't distinguish the two.
+    """
+
+    @pytest.mark.asyncio
+    async def test_gam_tenant_new_account_wire_status_is_pending_approval(self, integration_db):
+        """GAM tenant + auto-approve + no pre-mapping → DB=pending_provision,
+        wire=pending_approval. Without the wire-side translation, Pydantic
+        validation of SyncAccountsSuccessResponse fails with:
+
+            1 validation error for Account / status / Input should be ...
+        """
+        with AccountSyncEnv(
+            tenant_id="wire_status_t1",
+            principal_id="agent_wire1",
+            ad_server="google_ad_manager",
+            account_approval_mode="auto",
+        ) as env:
+            env.setup_default_data()
+
+            req = SyncAccountsRequest(
+                accounts=[
+                    {
+                        "brand": {"domain": "cocacola.com"},
+                        "operator": "accuweather.com",
+                        "billing": "operator",
+                    }
+                ],
+            )
+            response = await env.call_impl_async(req=req)
+
+        assert len(response.accounts) == 1
+        result = response.accounts[0]
+        assert _action_value(result.action) == "created"
+        # Wire-shape: spec enum value (not the internal pending_provision)
+        assert _status_value(result.status) == "pending_approval", (
+            "wire status must be a spec-valid AccountStatus; pending_provision "
+            "is an internal lifecycle state and must be translated at wire-emit"
+        )
+
+        # Internal DB state still uses pending_provision — the routing logic in
+        # _create_media_buy_impl + account_provisioning.py depends on it.
+        from src.core.database.repositories.uow import AccountUoW
+
+        with AccountUoW("wire_status_t1") as uow:
+            assert uow.accounts is not None
+            db_accounts = uow.accounts.list_all()
+            assert len(db_accounts) == 1
+            assert db_accounts[0].status == "pending_provision", (
+                "internal DB status must remain pending_provision so the "
+                "provisioning chain in media_buy_create / account_provisioning "
+                "can still distinguish 'waiting for provision' from 'waiting "
+                "for human approval'"
+            )
+
+    @pytest.mark.asyncio
+    async def test_response_validates_against_spec_schema(self, integration_db):
+        """The full SyncAccountsResponse must round-trip through Pydantic
+        without raising — i.e. every nested Account.status must be in the
+        spec enum. This is the symptom #332 reported."""
+        from adcp.types.aliases import SyncAccountsSuccessResponse
+
+        with AccountSyncEnv(
+            tenant_id="wire_status_t2",
+            principal_id="agent_wire2",
+            ad_server="google_ad_manager",
+            account_approval_mode="auto",
+        ) as env:
+            env.setup_default_data()
+
+            req = SyncAccountsRequest(
+                accounts=[
+                    {
+                        "brand": {"domain": "cocacola.com"},
+                        "operator": "accuweather.com",
+                        "billing": "operator",
+                    }
+                ],
+            )
+            response = await env.call_impl_async(req=req)
+
+        # Round-trip: dump and re-validate as the library success-response
+        # type. Fails on origin/main with the same Pydantic enum error the
+        # MCP layer surfaces (#332).
+        dumped = response.model_dump(mode="json", exclude_none=True)
+        SyncAccountsSuccessResponse.model_validate(dumped)

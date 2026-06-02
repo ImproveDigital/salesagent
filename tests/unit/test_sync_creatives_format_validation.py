@@ -9,8 +9,11 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
+from src.core.creative_agent_registry import CreativeAgent, CreativeAgentRegistry
 from src.core.resolved_identity import ResolvedIdentity
+from src.core.schemas import CreativeAsset
 from src.core.tools.creatives import _sync_creatives_impl
+from src.core.tools.creatives._validation import _validate_creative_input, get_registered_creative_agent_urls
 from tests.harness import make_mock_uow
 
 
@@ -69,7 +72,14 @@ class TestSyncCreativesFormatValidation:
             "creative_id": "creative_123",
             "name": "Test Banner",
             "format_id": {"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250_image"},
-            "assets": {"banner_image": {"url": "https://example.com/banner.png", "width": 300, "height": 250}},
+            "assets": {
+                "banner_image": {
+                    "asset_type": "image",
+                    "url": "https://example.com/banner.png",
+                    "width": 300,
+                    "height": 250,
+                }
+            },
             "variants": [],  # Required in adcp 3.6.0
         }
 
@@ -77,9 +87,9 @@ class TestSyncCreativesFormatValidation:
     def mock_format_spec(self):
         """Mock format specification from creative agent."""
         format_spec = Mock()
-        format_spec.format_id = "display_300x250_image"
+        format_spec.format_id = "display_image"
         format_spec.agent_url = "https://creative.adcontextprotocol.org"
-        format_spec.name = "Medium Rectangle - Image"
+        format_spec.name = "Display Image"
         return format_spec
 
     def test_format_validation_success(self, identity, mock_tenant, valid_creative_dict, mock_format_spec):
@@ -149,8 +159,8 @@ class TestSyncCreativesFormatValidation:
             assert response.creatives[0].creative_id == "creative_123"
             assert len(response.creatives[0].errors) == 1
 
-            error_msg = response.creatives[0].errors[0]
-            assert "Unknown format 'display_300x250_image'" in error_msg
+            error_msg = response.creatives[0].errors[0].message
+            assert "Unknown format 'display_image'" in error_msg
             assert "https://creative.adcontextprotocol.org" in error_msg
             assert "list_creative_formats" in error_msg  # Helpful suggestion
 
@@ -187,19 +197,26 @@ class TestSyncCreativesFormatValidation:
             assert response.creatives[0].action == CreativeAction.failed
             assert len(response.creatives[0].errors) == 1
 
-            error_msg = response.creatives[0].errors[0]
+            error_msg = response.creatives[0].errors[0].message
             assert "Cannot validate format" in error_msg
             assert "unreachable or returned an error" in error_msg
             assert "Connection refused" in error_msg  # Original error included
 
     def test_format_validation_with_string_format_id(self, identity, mock_tenant, mock_format_spec):
-        """Test that string format_ids are rejected (FormatId object required)."""
-        # Creative with string format_id (legacy format - no longer supported)
+        """Test that legacy string format_ids are accepted and normalized."""
+        # Creative with string format_id (legacy compatibility input)
         creative_dict = {
             "creative_id": "creative_456",
             "name": "Legacy Creative",
             "format_id": "display_300x250_image",  # String instead of FormatId object
-            "assets": {"banner_image": {"url": "https://example.com/banner.png", "width": 300, "height": 250}},
+            "assets": {
+                "banner_image": {
+                    "asset_type": "image",
+                    "url": "https://example.com/banner.png",
+                    "width": 300,
+                    "height": 250,
+                }
+            },
             "variants": [],  # Required in adcp 3.6.0
         }
 
@@ -229,12 +246,95 @@ class TestSyncCreativesFormatValidation:
             # Execute
             response = _sync_creatives_impl(creatives=[creative_dict], identity=identity)
 
-            # Verify creative failed validation (string format_id rejected by schema)
-            # AdCP spec requires format_id to be a FormatId object with agent_url and id
+            # Verify creative was accepted through the backwards-compatibility path.
             assert len(response.creatives) == 1
-            assert response.creatives[0].action == CreativeAction.failed
+            assert response.creatives[0].action == CreativeAction.created
             assert response.creatives[0].creative_id == "creative_456"
-            # Error message will be from Pydantic validation, not our format validation
+
+            create_kwargs = mock_creative_repo.create.call_args.kwargs
+            assert create_kwargs["format"] == "display_image"
+            assert create_kwargs["format_parameters"] == {"width": 300, "height": 250}
+
+    def test_format_validation_accepts_reference_agent_without_network(self):
+        """A product-advertised reference-agent format validates from the local catalog."""
+        creative = CreativeAsset(
+            creative_id="creative_reference_agent",
+            name="Product Format Creative",
+            format_id={"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"},
+            assets={
+                "main": {
+                    "asset_type": "image",
+                    "url": "https://example.com/ad.png",
+                    "width": 300,
+                    "height": 250,
+                    "format": "png",
+                }
+            },
+            variants=[],
+        )
+        registry = CreativeAgentRegistry()
+
+        with patch.object(registry, "get_formats_for_agent") as mock_network:
+            validated = _validate_creative_input(
+                creative,
+                registry,
+                "principal_123",
+                registered_agent_urls={"https://creative.adcontextprotocol.org"},
+            )
+
+        assert validated.format_id.id == "display_image"
+        assert validated.format_id.width == 300
+        assert validated.format_id.height == 250
+        mock_network.assert_not_called()
+
+    def test_format_validation_accepts_legacy_reference_agent_url_without_network(self):
+        """Product-advertised legacy reference-agent URLs canonicalize to the registered agent."""
+        creative = CreativeAsset(
+            creative_id="creative_legacy_reference_agent",
+            name="Legacy Reference Agent Creative",
+            format_id={"agent_url": "https://adcontextprotocol.org/agents/formats", "id": "display_300x250"},
+            assets={
+                "main": {
+                    "asset_type": "image",
+                    "url": "https://example.com/ad.png",
+                    "width": 300,
+                    "height": 250,
+                    "format": "png",
+                }
+            },
+            variants=[],
+        )
+        registry = CreativeAgentRegistry()
+
+        with patch.object(registry, "get_formats_for_agent") as mock_network:
+            validated = _validate_creative_input(
+                creative,
+                registry,
+                "principal_123",
+                registered_agent_urls={"https://creative.adcontextprotocol.org"},
+            )
+
+        assert str(validated.format_id.agent_url).rstrip("/") == "https://creative.adcontextprotocol.org"
+        assert validated.format_id.id == "display_image"
+        assert validated.format_id.width == 300
+        assert validated.format_id.height == 250
+        mock_network.assert_not_called()
+
+    def test_reference_agent_alias_registered_when_default_agent_is_local(self):
+        """Canonical product refs validate when the default agent runs at a local URL."""
+        registry = Mock()
+        registry.DEFAULT_AGENT = CreativeAgent(
+            agent_url="http://localhost:9999/api/creative-agent",
+            name="AdCP Standard Creative Agent",
+        )
+        registry._get_tenant_agents.return_value = [registry.DEFAULT_AGENT]
+
+        registered = get_registered_creative_agent_urls(registry, "test_tenant")
+
+        assert registered == {
+            "http://localhost:9999/api/creative-agent",
+            "https://creative.adcontextprotocol.org",
+        }
 
     def test_format_validation_multiple_creatives(self, identity, mock_tenant, mock_format_spec):
         """Test that format validation works correctly with multiple creatives."""
@@ -243,21 +343,42 @@ class TestSyncCreativesFormatValidation:
                 "creative_id": "creative_1",
                 "name": "Valid Creative",
                 "format_id": {"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250_image"},
-                "assets": {"banner_image": {"url": "https://example.com/1.png"}},
+                "assets": {
+                    "banner_image": {
+                        "asset_type": "image",
+                        "url": "https://example.com/1.png",
+                        "width": 300,
+                        "height": 250,
+                    }
+                },
                 "variants": [],
             },
             {
                 "creative_id": "creative_2",
                 "name": "Invalid Format",
                 "format_id": {"agent_url": "https://creative.adcontextprotocol.org", "id": "unknown_format"},
-                "assets": {"banner_image": {"url": "https://example.com/2.png"}},
+                "assets": {
+                    "banner_image": {
+                        "asset_type": "image",
+                        "url": "https://example.com/2.png",
+                        "width": 300,
+                        "height": 250,
+                    }
+                },
                 "variants": [],
             },
             {
                 "creative_id": "creative_3",
                 "name": "Valid Creative 2",
                 "format_id": {"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250_image"},
-                "assets": {"banner_image": {"url": "https://example.com/3.png"}},
+                "assets": {
+                    "banner_image": {
+                        "asset_type": "image",
+                        "url": "https://example.com/3.png",
+                        "width": 300,
+                        "height": 250,
+                    }
+                },
                 "variants": [],
             },
         ]
@@ -279,7 +400,7 @@ class TestSyncCreativesFormatValidation:
 
             # Mock get_format to return format_spec for valid format, None for invalid
             async def mock_get_format(agent_url, format_id):
-                if format_id == "display_300x250_image":
+                if format_id == "display_image":
                     return mock_format_spec
                 return None
 
@@ -301,7 +422,7 @@ class TestSyncCreativesFormatValidation:
             # Second creative: failed (unknown format)
             assert response.creatives[1].creative_id == "creative_2"
             assert response.creatives[1].action == CreativeAction.failed
-            assert "Unknown format 'unknown_format'" in response.creatives[1].errors[0]
+            assert "Unknown format 'unknown_format'" in response.creatives[1].errors[0].message
 
             # Third creative: success
             assert response.creatives[2].creative_id == "creative_3"
@@ -353,7 +474,14 @@ class TestSyncCreativesFormatValidation:
             "creative_id": "creative_no_format",
             "name": "Creative Without Format",
             # Missing format_id
-            "assets": {"banner_image": {"url": "https://example.com/banner.png"}},
+            "assets": {
+                "banner_image": {
+                    "asset_type": "image",
+                    "url": "https://example.com/banner.png",
+                    "width": 300,
+                    "height": 250,
+                }
+            },
         }
 
         mock_uow, mock_creative_repo = _make_creative_uow()
@@ -382,7 +510,7 @@ class TestSyncCreativesFormatValidation:
             assert len(response.creatives) == 1
             assert response.creatives[0].action == CreativeAction.failed
             # Error message comes from Pydantic schema validation
-            assert "format_id" in response.creatives[0].errors[0]
+            assert "format_id" in response.creatives[0].errors[0].message
 
     def test_error_messages_distinguish_scenarios(self, identity, mock_tenant):
         """Test that error messages clearly distinguish between different failure scenarios."""
@@ -391,7 +519,9 @@ class TestSyncCreativesFormatValidation:
             "creative_id": "creative_unknown",
             "name": "Unknown Format",
             "format_id": {"agent_url": "https://creative.adcontextprotocol.org", "id": "nonexistent_format"},
-            "assets": {"image": {"url": "https://example.com/1.png"}},
+            "assets": {
+                "image": {"asset_type": "image", "url": "https://example.com/1.png", "width": 300, "height": 250}
+            },
         }
 
         # Test 2: Agent unreachable (network error)
@@ -399,7 +529,9 @@ class TestSyncCreativesFormatValidation:
             "creative_id": "creative_unreachable",
             "name": "Unreachable Agent",
             "format_id": {"agent_url": "https://offline.example.com", "id": "display_300x250_image"},
-            "assets": {"image": {"url": "https://example.com/2.png"}},
+            "assets": {
+                "image": {"asset_type": "image", "url": "https://example.com/2.png", "width": 300, "height": 250}
+            },
         }
 
         mock_uow, mock_creative_repo = _make_creative_uow()
@@ -429,7 +561,7 @@ class TestSyncCreativesFormatValidation:
             # Test unknown format error
             response1 = _sync_creatives_impl(creatives=[creative_unknown_format], identity=identity)
 
-            error1 = response1.creatives[0].errors[0]
+            error1 = response1.creatives[0].errors[0].message
             assert "Unknown format" in error1
             assert "list_creative_formats" in error1
             assert "unreachable" not in error1  # Should NOT mention unreachability
@@ -437,7 +569,7 @@ class TestSyncCreativesFormatValidation:
             # Test agent unreachable error
             response2 = _sync_creatives_impl(creatives=[creative_unreachable], identity=identity)
 
-            error2 = response2.creatives[0].errors[0]
+            error2 = response2.creatives[0].errors[0].message
             assert "Cannot validate format" in error2
             assert "unreachable or returned an error" in error2
             assert "Connection refused" in error2

@@ -16,9 +16,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
-from pydantic import ValidationError
-
 from src.adapters import get_adapter_default_delivery_measurement
 from src.core.database.models import PricingOption
 from src.core.database.models import Product as ProductModel
@@ -28,6 +25,7 @@ from tests.helpers.adcp_factories import (
     create_test_cpm_pricing_option,
     create_test_db_product,
     create_test_publisher_properties_by_tag,
+    create_test_reporting_capabilities,
 )
 
 # ---------------------------------------------------------------------------
@@ -46,6 +44,7 @@ def _make_schema_product(**overrides) -> Product:
         "delivery_measurement": {"provider": "test_provider"},
         "publisher_properties": [create_test_publisher_properties_by_tag()],
         "pricing_options": [create_test_cpm_pricing_option()],
+        "reporting_capabilities": create_test_reporting_capabilities(),
     }
     defaults.update(overrides)
     return Product(**defaults)
@@ -93,6 +92,7 @@ class TestDeliveryMeasurementOptional:
             publisher_properties=[create_test_publisher_properties_by_tag()],
             pricing_options=[create_test_cpm_pricing_option()],
             # delivery_measurement intentionally omitted — now optional per adcp 3.10
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
         assert product.delivery_measurement is None
 
@@ -101,10 +101,12 @@ class TestDeliveryMeasurementOptional:
         product = _make_schema_product()
         assert product.delivery_measurement is not None
 
-    def test_delivery_measurement_requires_provider(self):
-        """delivery_measurement must have a provider field."""
-        with pytest.raises(ValidationError, match="provider"):
-            _make_schema_product(delivery_measurement={"notes": "no provider"})
+    def test_delivery_measurement_provider_is_optional(self):
+        """delivery_measurement.provider is deprecated and optional in adcp 5.7."""
+        product = _make_schema_product(delivery_measurement={"notes": "no provider"})
+        assert product.delivery_measurement is not None
+        assert product.delivery_measurement.provider is None
+        assert product.delivery_measurement.notes == "no provider"
 
 
 # ---------------------------------------------------------------------------

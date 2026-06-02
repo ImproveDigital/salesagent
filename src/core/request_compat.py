@@ -63,6 +63,7 @@ def _normalize_packages(packages: list[dict[str, Any]]) -> tuple[list[dict[str, 
     Handles:
     - optimization_goal (scalar) → optimization_goals (array)
     - catalog (scalar) → catalogs (array)
+    - format_ids[].format_id → format_ids[].id
     """
     translations: list[str] = []
     result = []
@@ -81,7 +82,47 @@ def _normalize_packages(packages: list[dict[str, Any]]) -> tuple[list[dict[str, 
                 translations.append("catalog → catalogs")
             del pkg["catalog"]
 
+        if isinstance(pkg.get("format_ids"), list):
+            pkg["format_ids"], format_translations = _normalize_format_ref_list(pkg["format_ids"])
+            translations.extend(format_translations)
+
         result.append(pkg)
+    return result, translations
+
+
+def _normalize_format_ref(value: Any) -> tuple[Any, list[str]]:
+    """Normalize a single format reference object before SDK validation."""
+    if not isinstance(value, dict):
+        return value, []
+
+    result = dict(value)
+    if "format_id" in result and "id" not in result:
+        result["id"] = result.pop("format_id")
+        return result, ["format_id.format_id → format_id.id"]
+    return result, []
+
+
+def _normalize_format_ref_list(values: list[Any]) -> tuple[list[Any], list[str]]:
+    """Normalize a list of format reference objects."""
+    normalized = []
+    translations: list[str] = []
+    for value in values:
+        item, item_translations = _normalize_format_ref(value)
+        normalized.append(item)
+        translations.extend(item_translations)
+    return normalized, translations
+
+
+def _normalize_creatives(creatives: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Normalize deprecated fields inside sync_creatives creative dicts."""
+    result = []
+    translations: list[str] = []
+    for creative in creatives:
+        creative = dict(creative)
+        if "format_id" in creative:
+            creative["format_id"], format_translations = _normalize_format_ref(creative["format_id"])
+            translations.extend(format_translations)
+        result.append(creative)
     return result, translations
 
 
@@ -116,12 +157,10 @@ def normalize_request_params(
 
     # --- Tool-scoped translations ---
 
-    # campaign_ref → buyer_campaign_ref (create_media_buy only)
-    if "campaign_ref" in result:
-        if tool_name == "create_media_buy" and "buyer_campaign_ref" not in result:
-            result["buyer_campaign_ref"] = result["campaign_ref"]
-            translations.append("campaign_ref → buyer_campaign_ref")
-        del result["campaign_ref"]
+    # campaign_ref was removed from create_media_buy alongside
+    # buyer_campaign_ref. Leave it visible so strict validation rejects the
+    # actual unsupported buyer field instead of translating it to another
+    # unsupported name.
 
     # brand_manifest → brand (get_products, create_media_buy only)
     if "brand_manifest" in result:
@@ -130,19 +169,25 @@ def normalize_request_params(
             if brand_ref is not None:
                 result["brand"] = brand_ref
                 translations.append("brand_manifest → brand")
-        del result["brand_manifest"]
+        if tool_name in _BRAND_TOOLS:
+            del result["brand_manifest"]
 
     # promoted_offerings → catalogs (get_products)
     if "promoted_offerings" in result:
-        if "catalogs" not in result:
+        if tool_name == "get_products" and "catalogs" not in result:
             result["catalogs"] = result["promoted_offerings"]
             translations.append("promoted_offerings → catalogs")
-        del result["promoted_offerings"]
+        if tool_name == "get_products":
+            del result["promoted_offerings"]
 
     # --- Package-level translations ---
     if "packages" in result and isinstance(result["packages"], list):
         result["packages"], pkg_translations = _normalize_packages(result["packages"])
         translations.extend(pkg_translations)
+
+    if tool_name == "sync_creatives" and "creatives" in result and isinstance(result["creatives"], list):
+        result["creatives"], creative_translations = _normalize_creatives(result["creatives"])
+        translations.extend(creative_translations)
 
     if translations:
         logger.info(

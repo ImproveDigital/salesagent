@@ -243,8 +243,26 @@ def run_mcp_server():
     print("MCP server stopped")
 
 
+def exec_mcp_server():
+    """Replace this wrapper process with the unified MCP/A2A/Admin server."""
+    print("Starting MCP server on port 8080...")
+    env = os.environ.copy()
+    env["ADCP_SALES_PORT"] = "8080"
+    os.execvpe(sys.executable, [sys.executable, "scripts/run_server.py"], env)
+
+
 def run_nginx():
     """Run nginx as reverse proxy."""
+    import shutil as _shutil
+
+    if _shutil.which("nginx") is None:
+        print(
+            "❌ run_nginx() invoked but nginx binary is not installed in this image. "
+            "The runtime image dropped the bundled nginx (see PR #29). "
+            "Set SKIP_NGINX=true (the image default) or use a separate nginx sidecar."
+        )
+        sys.exit(1)
+
     print("Starting nginx reverse proxy on port 8000...")
 
     # Create nginx directories if they don't exist
@@ -357,6 +375,15 @@ def main():
     # Start services in threads
     threads = []
 
+    skip_cron = os.environ.get("SKIP_CRON", "false").lower() == "true"
+    skip_nginx = os.environ.get("SKIP_NGINX", "false").lower() == "true"
+    if skip_cron and skip_nginx:
+        # In the single-process runtime used by e2e and most deployments, run
+        # the ASGI server as PID 1 after migrations/init. Keeping a Python
+        # wrapper plus child process here can leave the container alive after
+        # the child exits, which surfaces as nginx 502s in the test stack.
+        exec_mcp_server()
+
     # MCP Server thread (serves MCP, A2A, and Admin in a single FastAPI process)
     mcp_thread = threading.Thread(target=run_mcp_server, daemon=True)
     mcp_thread.start()
@@ -365,15 +392,12 @@ def main():
     # A2A and Admin UI are now integrated into the MCP server process (src/app.py)
 
     # Cron thread for scheduled tasks (syncing GAM tenants, etc.)
-    skip_cron = os.environ.get("SKIP_CRON", "false").lower() == "true"
     if not skip_cron:
         cron_thread = threading.Thread(target=run_cron, daemon=True)
         cron_thread.start()
         threads.append(cron_thread)
 
     # Check if we should skip nginx (useful for docker-compose with separate services)
-    skip_nginx = os.environ.get("SKIP_NGINX", "false").lower() == "true"
-
     if not skip_nginx:
         # Give services more time to start before nginx
         print("⏳ Waiting for backend services to be ready before starting nginx...")

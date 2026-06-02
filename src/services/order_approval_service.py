@@ -10,17 +10,23 @@ import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import SyncJob
+from src.core.webhook_validator import WebhookURLValidator
 
 logger = logging.getLogger(__name__)
 
 # Global registry of running approval threads
 _active_approvals: dict[str, threading.Thread] = {}
 _approval_lock = threading.Lock()
+
+
+def _generate_approval_id(order_id: str) -> str:
+    return f"approval_{order_id}_{uuid4().hex}"
 
 
 def start_order_approval_background(
@@ -63,7 +69,7 @@ def start_order_approval_background(
                 raise ValueError(f"Approval already running for order {order_id}: {approval.sync_id}")
 
         # Create new approval job
-        approval_id = f"approval_{order_id}_{int(datetime.now(UTC).timestamp())}"
+        approval_id = _generate_approval_id(order_id)
 
         approval_job = SyncJob(
             sync_id=approval_id,
@@ -355,6 +361,11 @@ def _send_approval_webhook(
     """
     try:
         import httpx
+
+        is_valid, error = WebhookURLValidator.validate_delivery_url(webhook_url)
+        if not is_valid:
+            logger.error("Refusing approval webhook delivery to %s: %s", webhook_url, error)
+            return
 
         payload: dict[str, Any] = {
             "event": "order_approval_update",

@@ -326,9 +326,23 @@ def admin_index():
 
 
 @core_bp.route("/debug/headers")
+@require_auth(admin_only=True)
 def debug_headers():
-    """Debug endpoint to inspect all incoming headers (for Approximated routing testing)."""
-    headers_dict = dict(request.headers)
+    """Inspect inbound headers for proxy / Approximated routing debugging.
+
+    Gated by ``@require_auth(admin_only=True)`` so the response — which
+    reflects every header on the request — never reaches an
+    unauthenticated caller. Token-bearing headers (``Authorization``,
+    ``x-adcp-auth``, ``Cookie``, ...) are masked via
+    :func:`redact_headers` even for authenticated admins, so a shared
+    debugging session can't leak a buyer's live bearer through the
+    response body. Routing-relevant fields (Host, X-Forwarded-Host,
+    Apx-Incoming-Host) pass through unchanged — the whole point of
+    this endpoint.
+    """
+    from src.admin.utils.audit_decorator import redact_headers
+
+    headers_dict = redact_headers(request.headers)
     detected_tenant = get_tenant_from_hostname()
 
     debug_info = {
@@ -378,15 +392,20 @@ def health():
 def health_config():
     """Configuration health check endpoint."""
     try:
+        from src.core.config import get_config, get_pydantic_extra_mode, is_production
         from src.core.startup import validate_startup_requirements
 
         validate_startup_requirements()
+        config = get_config()
         return (
             jsonify(
                 {
                     "status": "healthy",
                     "service": "admin-ui",
                     "component": "configuration",
+                    "environment": config.environment,
+                    "is_production": is_production(),
+                    "pydantic_extra_mode": get_pydantic_extra_mode(),
                     "message": "All configuration validation passed",
                 }
             ),
@@ -492,7 +511,7 @@ def create_tenant():
             db_session.commit()
 
             # Note: No default principal created - principals must be added manually
-            # to map to real advertiser accounts in the ad server (GAM, Kevel, etc.)
+            # to map to real advertiser accounts in the ad server (GAM, etc.)
 
             flash(f"Tenant '{tenant_name}' created successfully!", "success")
             return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))

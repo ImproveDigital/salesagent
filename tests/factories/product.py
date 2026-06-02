@@ -7,7 +7,7 @@ from decimal import Decimal
 import factory
 from factory import LazyAttribute, Sequence, SubFactory
 
-from src.core.database.models import PricingOption, Product
+from src.core.database.models import PRODUCT_REPORTING_CAPABILITIES_DEFAULT, PricingOption, Product
 from tests.factories.core import TenantFactory
 
 
@@ -29,6 +29,8 @@ class ProductFactory(factory.alchemy.SQLAlchemyModelFactory):
     delivery_type = "guaranteed"
     property_tags = factory.LazyFunction(lambda: ["all_inventory"])
     delivery_measurement = factory.LazyFunction(lambda: {"provider": "publisher"})
+    # AdCP 4.4 requires reporting_capabilities. Same dict as the column server_default.
+    reporting_capabilities = factory.LazyFunction(lambda: dict(PRODUCT_REPORTING_CAPABILITIES_DEFAULT))
 
 
 class PricingOptionFactory(factory.alchemy.SQLAlchemyModelFactory):

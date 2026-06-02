@@ -1,30 +1,201 @@
 """Blueprint for managing publisher partnerships."""
 
 import asyncio
+import ipaddress
 import logging
+import re
 from datetime import UTC, datetime
 
 from adcp.adagents import (
     AuthorizationContext,
     fetch_adagents,
-    get_properties_by_agent,
-    verify_agent_authorization,
 )
 from adcp.exceptions import AdagentsNotFoundError, AdagentsTimeoutError, AdagentsValidationError
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import select
 
+from src.admin.utils import require_tenant_access
 from src.core.config import get_config
 from src.core.database.database_session import get_db_session
-from src.core.database.models import PublisherPartner, Tenant
+from src.core.database.models import AuthorizedProperty, PublisherPartner, Tenant
 from src.core.domain_config import get_tenant_url
+from src.core.security.url_validator import BLOCKED_HOSTNAMES, check_url_ssrf
+from src.services._adagents_shapes import get_authorized_properties_by_agent
+from src.services.aao_lookup_service import (
+    PublisherPartnerStatus,
+    get_publisher_partner_status,
+)
+from src.services.agent_url_resolver import resolve_agent_url as _resolve_agent_url
 
 logger = logging.getLogger(__name__)
 
 publisher_partners_bp = Blueprint("publisher_partners", __name__)
 
 
+def _persist_status(partner: PublisherPartner, status: PublisherPartnerStatus) -> None:
+    """Copy a fresh AAO status snapshot onto a PublisherPartner row.
+
+    Single source of truth for translating the in-memory status object into
+    persistence — used by both the per-row refresh endpoint and the bulk
+    Verify-All path so they can't drift."""
+    partner.total_properties = status.total_properties
+    partner.authorized_properties = status.authorized_properties
+    partner.last_refreshed_at = datetime.now(UTC)
+    partner.aao_status_kind = status.status
+    # last_fetch_error is reserved for the "fetch failed" path so the
+    # legacy derivation in _partner_to_dict (used when aao_status_kind is
+    # NULL, e.g. after a column rollback) doesn't mis-render unbound or
+    # no_properties rows as "unreachable". Diagnostic hints for the
+    # post-fetch states live in sync_error instead, which the UI surfaces
+    # alongside the chip.
+    if status.status == "unreachable":
+        partner.last_fetch_error = status.error
+        partner.sync_status = "error"
+        partner.sync_error = status.error
+        partner.is_verified = False
+    elif status.status in ("authorized", "unbound"):
+        # Operational states — products can bind. "unbound" is non-conformant
+        # (no authorization_type on the publisher's entry) but the salesagent
+        # resolves permissively against top-level properties[] so the row is
+        # usable today. The chip + sync_error hint nudge the publisher to add
+        # a typed binding for spec conformance.
+        partner.last_fetch_error = None
+        partner.sync_status = "success"
+        partner.sync_error = status.error  # hint copy for unbound, None for authorized
+        partner.is_verified = True
+        partner.last_synced_at = datetime.now(UTC)
+    elif status.status == "no_properties":
+        # File fetched cleanly but exposes zero usable inventory. Counted
+        # as an error by the bulk sync handler (no inventory = nothing to
+        # do), so sync_status mirrors that for consistency with the
+        # response payload's `errors` count.
+        partner.last_fetch_error = None
+        partner.sync_status = "error"
+        partner.sync_error = status.error
+        partner.is_verified = False
+        partner.last_synced_at = datetime.now(UTC)
+    else:  # pending — file fetched cleanly, publisher just hasn't authorized us
+        partner.last_fetch_error = None
+        partner.sync_status = "success"
+        partner.sync_error = status.error  # may be None or a typed-binding-empty hint
+        partner.is_verified = False
+        partner.last_synced_at = datetime.now(UTC)
+
+
+def _partner_to_dict(partner: PublisherPartner) -> dict:
+    """Serialize a PublisherPartner row for the JSON list endpoint."""
+    aao_url = f"https://agenticadvertising.org/publisher/{partner.publisher_domain}"
+    is_legacy_unrefreshed = partner.total_properties is None and partner.aao_status_kind is None
+    if is_legacy_unrefreshed:
+        # Pre-AAO row, or a row invalidated after public_agent_url changed.
+        # Do not project AuthorizedProperty fallback counts here: those rows
+        # may have been verified under an old agent URL, and rendering them as
+        # "Authorized 1/1" is precisely the stale-state bug this endpoint must
+        # prevent. The next explicit refresh/sync repopulates the AAO columns.
+        total = 0
+        authorized = 0
+        ui_status = "stale"
+    elif partner.aao_status_kind is not None:
+        # Persisted kind from aao_lookup_service is the source of truth —
+        # distinguishes "invalid" (schema-broken file) from "unreachable"
+        # (fetch failed), which legacy derivation collapsed together.
+        total = partner.total_properties or 0
+        authorized = partner.authorized_properties or 0
+        ui_status = partner.aao_status_kind
+    elif partner.last_fetch_error:
+        total = partner.total_properties or 0
+        authorized = partner.authorized_properties or 0
+        ui_status = "unreachable"
+    elif (partner.authorized_properties or 0) > 0:
+        total = partner.total_properties or 0
+        authorized = partner.authorized_properties or 0
+        ui_status = "authorized"
+    else:
+        total = partner.total_properties or 0
+        authorized = partner.authorized_properties or 0
+        ui_status = "pending"
+
+    return {
+        "id": partner.id,
+        "publisher_domain": partner.publisher_domain,
+        "display_name": partner.display_name,
+        "is_verified": False if is_legacy_unrefreshed else partner.is_verified,
+        "last_synced_at": partner.last_synced_at.isoformat() if partner.last_synced_at else None,
+        "last_refreshed_at": partner.last_refreshed_at.isoformat() if partner.last_refreshed_at else None,
+        "sync_status": partner.sync_status,
+        "sync_error": partner.sync_error,
+        "last_fetch_error": partner.last_fetch_error,
+        "total_properties": total,
+        "authorized_properties": authorized,
+        "aao_status": ui_status,
+        "aao_onboarding_url": aao_url,
+        "created_at": partner.created_at.isoformat(),
+        # Legacy alias for unmigrated callers.
+        "property_count": total,
+    }
+
+
+# RFC 1035-ish — each label up to 63 chars, total up to 253. Conservative
+# subset of the spec (ASCII, no underscores, no leading/trailing hyphens).
+# Real publisher domains all match this; the regex doubles as an SSRF gate
+# by rejecting non-hostname strings before they reach any outbound call.
+_DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+def _validate_publisher_domain(domain: str) -> tuple[bool, str]:
+    """Format-only validation for publisher_domain at create time.
+
+    Rejects IP literals, localhost-likes, Docker-internal hostnames, and
+    structurally-malformed strings. Does NOT do DNS resolution — a brand-
+    new publisher domain may not resolve yet but should still be acceptable
+    to register; the DNS-time SSRF check fires inside ``check_publisher``
+    before the actual outbound HTTP call.
+
+    Returns ``(is_safe, error_message)``.
+    """
+    if not domain or len(domain) > 253:
+        return False, "Publisher domain must be 1-253 characters"
+    if domain in BLOCKED_HOSTNAMES:
+        return False, f"Publisher domain '{domain}' is blocked (internal/private)"
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        return False, "Publisher domain must be a hostname, not an IP address"
+    if not _DOMAIN_RE.match(domain):
+        return False, "Publisher domain has invalid format"
+    return True, ""
+
+
+def _normalize_publisher_domain_input(domain: str) -> str:
+    """Normalize operator-entered publisher domain values."""
+    normalized = (domain or "").strip().lower()
+    normalized = normalized.replace("https://", "").replace("http://", "")
+    return normalized.rstrip("/")
+
+
+@publisher_partners_bp.route("/<tenant_id>/publishers/", methods=["GET"])
+@require_tenant_access()
+def publishers_page(tenant_id: str):
+    """Render the standalone Publishers page (Sprint 7 Phase 2).
+
+    Promoted out of ``tenant_settings.html`` into a Configure → Workspace
+    peer page. The API endpoints on this blueprint power the page's
+    AJAX behavior — see ``static/js/publishers.js``.
+    """
+    from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+    with get_db_session() as session:
+        tenant = TenantConfigRepository(session, tenant_id).get_tenant()
+        if not tenant:
+            flash("Tenant not found", "error")
+            return redirect(url_for("core.index"))
+        return render_template("publishers.html", tenant=tenant)
+
+
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners", methods=["GET"])
+@require_tenant_access(api_mode=True)
 def list_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
     """List all publisher partners for a tenant."""
     try:
@@ -41,34 +212,11 @@ def list_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
             )
             partners = session.scalars(stmt_partners).all()
 
-            # Get property counts per publisher domain
-            from sqlalchemy import func
-
-            from src.core.database.models import AuthorizedProperty
-
-            property_counts_stmt = (
-                select(AuthorizedProperty.publisher_domain, func.count(AuthorizedProperty.property_id))
-                .filter(AuthorizedProperty.tenant_id == tenant_id)
-                .group_by(AuthorizedProperty.publisher_domain)
-            )
-            property_counts = {row[0]: row[1] for row in session.execute(property_counts_stmt).all()}
-
             # Convert to dict
-            partners_list = []
-            for partner in partners:
-                partners_list.append(
-                    {
-                        "id": partner.id,
-                        "publisher_domain": partner.publisher_domain,
-                        "display_name": partner.display_name,
-                        "is_verified": partner.is_verified,
-                        "last_synced_at": partner.last_synced_at.isoformat() if partner.last_synced_at else None,
-                        "sync_status": partner.sync_status,
-                        "sync_error": partner.sync_error,
-                        "created_at": partner.created_at.isoformat(),
-                        "property_count": property_counts.get(partner.publisher_domain, 0),
-                    }
-                )
+            partners_list = [_partner_to_dict(partner) for partner in partners]
+
+            total_properties = sum(p["total_properties"] or 0 for p in partners_list)
+            authorized_properties = sum(p["authorized_properties"] or 0 for p in partners_list)
 
             return jsonify(
                 {
@@ -76,6 +224,8 @@ def list_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
                     "total": len(partners_list),
                     "verified": sum(1 for p in partners_list if p["is_verified"]),
                     "pending": sum(1 for p in partners_list if p["sync_status"] == "pending"),
+                    "total_properties": total_properties,
+                    "authorized_properties": authorized_properties,
                 }
             )
 
@@ -85,20 +235,28 @@ def list_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
 
 
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners", methods=["POST"])
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def add_publisher_partner(tenant_id: str) -> Response | tuple[Response, int]:
     """Add a new publisher partner."""
     try:
         data = request.get_json()
-        publisher_domain = data.get("publisher_domain", "").strip().lower()
+        publisher_domain = _normalize_publisher_domain_input(data.get("publisher_domain", ""))
         display_name = data.get("display_name", "").strip()
 
         if not publisher_domain:
             return jsonify({"error": "Publisher domain is required"}), 400
 
-        # Remove http:// or https:// if present
-        publisher_domain = publisher_domain.replace("https://", "").replace("http://", "")
-        # Remove trailing slash
-        publisher_domain = publisher_domain.rstrip("/")
+        # Bound the display_name so a hostile or buggy caller can't persist
+        # multi-MB strings that later render into the admin UI / API responses.
+        if len(display_name) > 255:
+            return jsonify({"error": "Display name must be 255 characters or fewer"}), 400
+
+        # SSRF gate at the boundary — IP literals, localhost-likes, malformed
+        # strings can't be persisted, so downstream callers (sync, property
+        # discovery) never see them. See ``_validate_publisher_domain``.
+        ok, err = _validate_publisher_domain(publisher_domain)
+        if not ok:
+            return jsonify({"error": err}), 400
 
         with get_db_session() as session:
             # Check tenant adapter type
@@ -121,15 +279,22 @@ def add_publisher_partner(tenant_id: str) -> Response | tuple[Response, int]:
             if existing:
                 return jsonify({"error": "Publisher already exists"}), 409
 
-            # Create new partner
-            # Auto-verify for dev environment or mock adapters (no real adagents.json to check)
+            # Create new partner. Auto-verify for dev environment or mock
+            # adapters (no real adagents.json to check). For auto-verified
+            # rows we also stamp ``last_refreshed_at`` so the UI renders
+            # them as "authorized" instead of the "refresh needed" placeholder
+            # — mock tenants never round-trip through the real AAO path.
+            now = datetime.now(UTC)
             partner = PublisherPartner(
                 tenant_id=tenant_id,
                 publisher_domain=publisher_domain,
                 display_name=display_name or publisher_domain,
                 sync_status="success" if should_auto_verify else "pending",
                 is_verified=should_auto_verify,
-                last_synced_at=datetime.now(UTC) if should_auto_verify else None,
+                last_synced_at=now if should_auto_verify else None,
+                last_refreshed_at=now if should_auto_verify else None,
+                total_properties=0 if should_auto_verify else None,
+                authorized_properties=0 if should_auto_verify else None,
             )
             session.add(partner)
             session.commit()
@@ -164,10 +329,15 @@ def add_publisher_partner(tenant_id: str) -> Response | tuple[Response, int]:
 
 
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners/<int:partner_id>", methods=["DELETE"])
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def delete_publisher_partner(tenant_id: str, partner_id: int) -> Response | tuple[Response, int]:
     """Delete a publisher partner."""
     try:
         with get_db_session() as session:
+            tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if not tenant:
+                return jsonify({"error": "Tenant not found"}), 404
+
             stmt = select(PublisherPartner).filter_by(id=partner_id, tenant_id=tenant_id)
             partner = session.scalars(stmt).first()
 
@@ -185,6 +355,7 @@ def delete_publisher_partner(tenant_id: str, partner_id: int) -> Response | tupl
 
 
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners/sync", methods=["POST"])
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
     """Sync verification status for all publisher partners."""
     try:
@@ -220,11 +391,21 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
 
                 logger.info(f"{reason_str} detected - auto-verifying {len(partners)} publishers")
                 verified_domains = []
+                now = datetime.now(UTC)
                 for partner in partners:
                     partner.sync_status = "success"
                     partner.sync_error = None
                     partner.is_verified = True
-                    partner.last_synced_at = datetime.now(UTC)
+                    partner.last_synced_at = now
+                    # Stamp the AAO columns so _partner_to_dict renders these
+                    # as authorized rather than perpetual "refresh needed".
+                    # Mock/dev partners can't be probed against a real AAO.
+                    partner.last_refreshed_at = now
+                    partner.last_fetch_error = None
+                    if partner.total_properties is None:
+                        partner.total_properties = 0
+                    if partner.authorized_properties is None:
+                        partner.authorized_properties = 0
                     verified_domains.append(partner.publisher_domain)
 
                 session.commit()
@@ -328,114 +509,72 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
                     }
                 )
 
-            # Get our agent URL - use virtual_host if configured, otherwise construct from subdomain
-            if tenant.virtual_host:
-                agent_url: str = f"https://{tenant.virtual_host}"
-            else:
-                maybe_url = get_tenant_url(tenant.subdomain)
-                if not maybe_url:
-                    return jsonify({"error": "Agent URL not configured (SALES_AGENT_DOMAIN not set)"}), 500
-                agent_url = maybe_url
-
-            # Fetch authorization for each publisher (real verification for non-mock tenants)
-            logger.info(f"Fetching authorizations for {len(partners)} publishers")
-
-            synced = 0
-            verified = 0
-            errors = 0
-
-            async def check_publisher(domain: str) -> tuple[str, dict]:
-                """Check a single publisher and return status."""
-                try:
-                    # Fetch adagents.json
-                    adagents_data = await fetch_adagents(domain, timeout=10.0)
-
-                    # Check if agent is authorized
-                    is_authorized = verify_agent_authorization(adagents_data, agent_url)
-
-                    if is_authorized:
-                        # Get properties for this agent
-                        properties = get_properties_by_agent(adagents_data, agent_url)
-                        ctx = AuthorizationContext(properties)
-
-                        return (domain, {"status": "success", "is_verified": True, "error": None, "context": ctx})
-                    else:
-                        # Agent not authorized
-                        return (
-                            domain,
-                            {
-                                "status": "error",
-                                "is_verified": False,
-                                "error": f"Agent {agent_url} is not authorized by this publisher",
-                                "context": None,
-                            },
-                        )
-
-                except AdagentsNotFoundError:
-                    return (
-                        domain,
+            agent_url = _resolve_agent_url(tenant)
+            if not agent_url:
+                return (
+                    jsonify(
                         {
-                            "status": "error",
-                            "is_verified": False,
-                            "error": "Publisher adagents.json not found (404)",
-                            "context": None,
-                        },
-                    )
-                except AdagentsTimeoutError:
-                    return (
-                        domain,
-                        {"status": "error", "is_verified": False, "error": "Request timed out", "context": None},
-                    )
-                except AdagentsValidationError as e:
-                    return (
-                        domain,
-                        {
-                            "status": "error",
-                            "is_verified": False,
-                            "error": f"Invalid adagents.json: {str(e)}",
-                            "context": None,
-                        },
-                    )
-                except Exception as e:
-                    return (
-                        domain,
-                        {
-                            "status": "error",
-                            "is_verified": False,
-                            "error": f"Unexpected error: {str(e)}",
-                            "context": None,
-                        },
-                    )
+                            "error": "Agent URL not configured (set public_agent_url, virtual_host, or SALES_AGENT_DOMAIN)"
+                        }
+                    ),
+                    500,
+                )
 
-            # Run async checks with overall timeout
+            logger.info(f"Fetching AAO status for {len(partners)} publishers (agent_url={agent_url})")
+
+            # DNS-time SSRF check — defense in depth on top of the create-time
+            # format gate (_validate_publisher_domain at row insert). Catches
+            # a domain whose resolution flips to a private/loopback/metadata
+            # IP after it was registered. Failed partners are persisted as
+            # errors and skipped from the AAO fetch batch.
+            now = datetime.now(UTC)
+            safe_partners: list[PublisherPartner] = []
+            ssrf_errors = 0
+            for partner in partners:
+                ssrf_ok, ssrf_err = check_url_ssrf(f"https://{partner.publisher_domain}")
+                if not ssrf_ok:
+                    partner.sync_status = "error"
+                    partner.sync_error = f"Refused: {ssrf_err}"
+                    partner.last_fetch_error = ssrf_err
+                    partner.last_refreshed_at = now
+                    partner.is_verified = False
+                    ssrf_errors += 1
+                    continue
+                safe_partners.append(partner)
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                tasks = [check_publisher(p.publisher_domain) for p in partners]
-                # Add 30s overall timeout to prevent infinite hangs (individual checks have 10s timeout)
-                results = loop.run_until_complete(asyncio.wait_for(asyncio.gather(*tasks), timeout=30.0))
-                results_dict = dict(results)
+                tasks = [
+                    get_publisher_partner_status(p.publisher_domain, agent_url, force_refresh=True)
+                    for p in safe_partners
+                ]
+                statuses = loop.run_until_complete(asyncio.wait_for(asyncio.gather(*tasks), timeout=30.0))
             finally:
                 loop.close()
 
-            # Update each partner with results
-            verified_domains = []
-            for partner in partners:
-                result = results_dict.get(partner.publisher_domain)
+            statuses_by_domain = {s.publisher_domain: s for s in statuses}
 
-                if result and result["status"] == "success":
-                    partner.sync_status = "success"
-                    partner.sync_error = None
-                    partner.is_verified = result["is_verified"]
-                    partner.last_synced_at = datetime.now(UTC)
+            verified_domains = []
+            synced = 0
+            verified = 0
+            errors = ssrf_errors
+            for partner in safe_partners:
+                status = statuses_by_domain.get(partner.publisher_domain)
+                if status is None:
+                    continue
+                _persist_status(partner, status)
+                if status.status in ("authorized", "unbound"):
+                    # Both states are operational — products can bind. Run
+                    # property discovery so AuthorizedProperty rows populate
+                    # for the products page (unbound publishers like
+                    # wonderstruck.org depend on this).
+                    verified += 1
+                    verified_domains.append(partner.publisher_domain)
                     synced += 1
-                    if result["is_verified"]:
-                        verified += 1
-                        verified_domains.append(partner.publisher_domain)
-                elif result:
-                    partner.sync_status = "error"
-                    partner.sync_error = result["error"]
-                    partner.is_verified = False
+                elif status.status == "pending":
+                    synced += 1
+                else:  # no_properties or unreachable
                     errors += 1
 
             session.commit()
@@ -472,7 +611,190 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
         return jsonify({"error": str(e)}), 500
 
 
+@publisher_partners_bp.route("/<tenant_id>/publisher-partners/sync-from-directory", methods=["POST"])
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
+def sync_publisher_partners_from_directory(tenant_id: str) -> Response | tuple[Response, int]:
+    """Retired inverse AAO directory lookup.
+
+    Inventory bundles now use the safer domain-first lookup:
+    ``POST /tenant/<tenant_id>/publisher-properties/lookup``. The inverse
+    agent-URL directory endpoint is intentionally unavailable because it can
+    return platform-wide publisher sets for embedded/shared-agent tenants.
+    """
+    return (
+        jsonify(
+            {
+                "error": (
+                    "AAO agent URL directory sync has been retired. Add publisher domains to inventory bundles "
+                    "and use per-domain AAO lookup to discover property IDs and tags."
+                )
+            }
+        ),
+        410,
+    )
+
+
+@publisher_partners_bp.route("/<tenant_id>/publisher-partners/<int:partner_id>/refresh", methods=["POST"])
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
+def refresh_publisher_partner(tenant_id: str, partner_id: int) -> Response | tuple[Response, int]:
+    """Force-refresh AAO status for a single publisher partner.
+
+    Bypasses the 6h adagents.json cache and re-queries the publisher's
+    adagents.json. Persists ``total_properties`` / ``authorized_properties``
+    so the UI renders the fresh "47 / 200 authorized" picture immediately.
+    """
+    try:
+        with get_db_session() as session:
+            tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if not tenant:
+                return jsonify({"error": "Tenant not found"}), 404
+
+            partner = session.scalars(select(PublisherPartner).filter_by(id=partner_id, tenant_id=tenant_id)).first()
+            if not partner:
+                return jsonify({"error": "Publisher not found"}), 404
+
+            agent_url = _resolve_agent_url(tenant)
+            if not agent_url:
+                return jsonify({"error": "Agent URL not configured"}), 500
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                status = loop.run_until_complete(
+                    asyncio.wait_for(
+                        get_publisher_partner_status(partner.publisher_domain, agent_url, force_refresh=True),
+                        timeout=15.0,
+                    )
+                )
+            finally:
+                loop.close()
+
+            _persist_status(partner, status)
+            session.commit()
+
+            return jsonify(_partner_to_dict(partner))
+
+    except Exception as e:
+        logger.error(f"Error refreshing publisher partner: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _authorized_property_to_lookup_dict(prop: AuthorizedProperty) -> dict:
+    """Serialize an authorized property for bundle-scope lookup."""
+    return {
+        "property_id": prop.property_id,
+        "name": prop.name,
+        "property_type": prop.property_type,
+        "publisher_domain": prop.publisher_domain,
+        "identifiers": prop.identifiers,
+        "tags": prop.tags or [],
+        "verification_status": prop.verification_status,
+    }
+
+
+@publisher_partners_bp.route("/<tenant_id>/publisher-properties/lookup", methods=["POST"])
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
+def lookup_publisher_properties(tenant_id: str) -> Response | tuple[Response, int]:
+    """Lookup one publisher domain and return its AAO property structure.
+
+    This is the domain-first primitive used by inventory bundles. It replaces
+    the old inverse "agent URL -> all publishers" discovery flow: callers name
+    the publisher domain they want to sell, and AAO supplies the cached
+    property IDs/tags this agent is authorized to use.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        publisher_domain = _normalize_publisher_domain_input(data.get("publisher_domain", ""))
+        force_refresh = bool(data.get("force_refresh"))
+
+        if not publisher_domain:
+            return jsonify({"error": "Publisher domain is required"}), 400
+
+        ok, err = _validate_publisher_domain(publisher_domain)
+        if not ok:
+            return jsonify({"error": err}), 400
+
+        ssrf_ok, ssrf_err = check_url_ssrf(f"https://{publisher_domain}")
+        if not ssrf_ok:
+            return jsonify({"error": f"Refused: {ssrf_err}"}), 400
+
+        from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+        with get_db_session() as session:
+            repo = TenantConfigRepository(session, tenant_id)
+            tenant = repo.get_tenant()
+            if not tenant:
+                return jsonify({"error": "Tenant not found"}), 404
+
+            agent_url = _resolve_agent_url(tenant)
+            if not agent_url:
+                return (
+                    jsonify(
+                        {
+                            "error": "Agent URL not configured (set public_agent_url, virtual_host, or SALES_AGENT_DOMAIN)"
+                        }
+                    ),
+                    500,
+                )
+
+            partner = repo.get_publisher_partner_by_domain(publisher_domain)
+            if partner is None:
+                partner = repo.create_publisher_partner(publisher_domain)
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                status = loop.run_until_complete(
+                    get_publisher_partner_status(publisher_domain, agent_url, force_refresh=force_refresh)
+                )
+            finally:
+                loop.close()
+
+            _persist_status(partner, status)
+            session.commit()
+
+        property_stats = None
+        if status.status in ("authorized", "unbound"):
+            from src.services.property_discovery_service import get_property_discovery_service
+
+            discovery_service = get_property_discovery_service()
+            property_stats = discovery_service.sync_properties_from_adagents_sync(
+                tenant_id,
+                publisher_domains=[publisher_domain],
+                dry_run=False,
+                agent_url=agent_url,
+            )
+
+        with get_db_session() as session:
+            repo = TenantConfigRepository(session, tenant_id)
+            properties = [
+                prop for prop in repo.list_authorized_properties() if prop.publisher_domain == publisher_domain
+            ]
+
+        tags = sorted({tag for prop in properties for tag in (prop.tags or [])})
+        return jsonify(
+            {
+                "publisher_domain": publisher_domain,
+                "agent_url": agent_url,
+                "is_authorized": status.status in ("authorized", "unbound"),
+                "aao_status": status.status,
+                "error": status.error,
+                "total_properties": status.total_properties,
+                "authorized_properties": status.authorized_properties,
+                "properties": [_authorized_property_to_lookup_dict(prop) for prop in properties],
+                "property_ids": [prop.property_id for prop in properties],
+                "property_tags": tags,
+                "sync": property_stats,
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error looking up publisher properties: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners/<int:partner_id>/properties", methods=["GET"])
+@require_tenant_access(api_mode=True)
 def get_publisher_properties(tenant_id: str, partner_id: int) -> Response | tuple[Response, int]:
     """Get properties for a specific publisher (fetched fresh from adagents.json)."""
     try:
@@ -512,7 +834,8 @@ def get_publisher_properties(tenant_id: str, partner_id: int) -> Response | tupl
                     loop.close()
 
                 # Check if agent is authorized
-                is_authorized = verify_agent_authorization(adagents_data, agent_url)
+                properties = get_authorized_properties_by_agent(adagents_data, agent_url)
+                is_authorized = bool(properties)
 
                 if not is_authorized:
                     return (
@@ -522,8 +845,6 @@ def get_publisher_properties(tenant_id: str, partner_id: int) -> Response | tupl
                         200,
                     )
 
-                # Get properties for this agent
-                properties = get_properties_by_agent(adagents_data, agent_url)
                 ctx = AuthorizationContext(properties)
 
                 # Return authorization context

@@ -9,22 +9,29 @@ import hashlib
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 from adcp import (
     AdagentsNotFoundError,
     AdagentsTimeoutError,
     AdagentsValidationError,
-    fetch_adagents,
     get_all_properties,
     get_all_tags,
 )
-from adcp.adagents import get_properties_by_agent, normalize_url
 from sqlalchemy import select
 from sqlalchemy.sql import Select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import AuthorizedProperty, PropertyTag
+from src.services._adagents_shapes import (
+    find_agent_entry,
+    is_bare_entry,
+    top_level_properties,
+)
+from src.services._adagents_shapes import (
+    get_authorized_properties_by_agent as get_properties_by_agent,
+)
+from src.services.adagents_fetch import fetch_adagents_permissive as fetch_adagents
 
 logger = logging.getLogger(__name__)
 
@@ -90,51 +97,83 @@ def _log_fetch_error(domain: str, error: Exception, stats: dict[str, Any]) -> No
         logger.error(f"\u274c Error syncing {domain}: {error}", exc_info=True)
 
 
+def _agent_entry_is_unbound(adagents_data: dict[str, Any], agent_url: str) -> bool:
+    """True when ``agent_url`` is listed in ``authorized_agents`` but the
+    entry has no ``authorization_type`` and no selector. Delegates to the
+    shared shape helpers so the predicate stays in sync with
+    :mod:`src.services.aao_lookup_service`'s classifier."""
+    entry = find_agent_entry(adagents_data, agent_url)
+    return entry is not None and is_bare_entry(entry)
+
+
+def _agent_uses_publisher_properties(adagents_data: dict[str, Any], agent_url: str) -> bool:
+    """True when the agent is authorized through cross-publisher selectors."""
+    entry = find_agent_entry(adagents_data, agent_url)
+    return isinstance(entry, dict) and entry.get("authorization_type") == "publisher_properties"
+
+
+def _has_matching_domain_identifier(prop: dict[str, Any], publisher_domain: str) -> bool:
+    """True when ``prop`` carries a ``type=domain`` identifier matching
+    ``publisher_domain`` under :func:`_domains_match`'s normalization.
+
+    Used to gate the unbound permissive branch: when we bind to top-level
+    properties on behalf of a bare entry, we MUST require each property
+    to carry a domain identifier that matches the publisher we're talking
+    to. Otherwise an attacker who controls ``attacker.example`` adagents.
+    json can bare-list our agent and claim arbitrary app bundle IDs,
+    podcast GUIDs, or DOOH venue identifiers — none of which carry a
+    domain identifier the operator can verify. Strict bindings don't need
+    this check because the publisher's typed binding is itself the
+    attestation.
+    """
+    identifiers = prop.get("identifiers", [])
+    if not isinstance(identifiers, list):
+        return False
+    domains = [
+        ident.get("value", "")
+        for ident in identifiers
+        if isinstance(ident, dict) and ident.get("type") == "domain" and ident.get("value")
+    ]
+    return bool(domains) and _domains_match(publisher_domain, domains)
+
+
 def _extract_properties(
     adagents_data: dict[str, Any],
     domain: str,
     agent_url: str | None,
 ) -> list[dict[str, Any]]:
-    """Extract properties from adagents.json data.
+    """Resolve adagents.json into the property list this agent (or any agent)
+    is authorized for.
 
-    Checks for unrestricted agent access and uses the appropriate adcp extraction
-    method based on whether an agent_url is provided.
+    Path A (strict, spec-conformant): SDK's ``get_properties_by_agent`` /
+    ``get_all_properties`` dispatch on each entry's ``authorization_type``.
+    Works for typed bindings: ``inline_properties``, ``property_ids``,
+    ``property_tags``, ``publisher_properties``.
+
+    Path B (permissive, unbound fallback): when ``agent_url`` is provided
+    and Path A returns nothing AND the agent's entry is bare, fall back to
+    the file's top-level ``properties[]`` block — RESTRICTED to properties
+    that carry a ``type=domain`` identifier matching ``domain``. The
+    domain gate is load-bearing: without it, a publisher whose file we've
+    added could bare-list our agent and claim app/podcast/DOOH properties
+    we have no way to verify. Strict typed bindings don't need this gate
+    because the publisher's ``authorization_type`` is the attestation;
+    permissive resolution has no such attestation, so we substitute the
+    domain match.
     """
-    all_properties_from_file = adagents_data.get("properties", [])
-
-    # Check if the relevant agent has no property restrictions
-    authorized_agents = adagents_data.get("authorized_agents", [])
-    has_unrestricted_agent = False
-    for agent in authorized_agents:
-        if not isinstance(agent, dict):
-            continue
-        if agent_url and normalize_url(agent.get("url", "")) != normalize_url(agent_url):
-            continue
-        has_property_ids = bool(agent.get("property_ids"))
-        has_property_tags = bool(agent.get("property_tags"))
-        has_properties = bool(agent.get("properties"))
-        has_publisher_properties = bool(agent.get("publisher_properties"))
-
-        if not (has_property_ids or has_property_tags or has_properties or has_publisher_properties):
-            has_unrestricted_agent = True
-            logger.info(f"Found unrestricted agent {agent.get('url')} - authorized for ALL properties from {domain}")
-            break
-
     if agent_url:
-        properties_from_agents = get_properties_by_agent(adagents_data, agent_url)
-        properties_from_agents = [p for p in properties_from_agents if p.get("property_type")]
-    else:
-        properties_from_agents = get_all_properties(adagents_data)
-
-    if has_unrestricted_agent and all_properties_from_file:
-        logger.info(
-            f"Syncing all {len(all_properties_from_file)} top-level properties (unrestricted agent has access to all)"
-        )
-        return all_properties_from_file
-    elif properties_from_agents:
-        return properties_from_agents
-    else:
+        properties = get_properties_by_agent(adagents_data, agent_url)
+        properties = [p for p in properties if p.get("property_type")]
+        if properties:
+            return properties
+        if _agent_entry_is_unbound(adagents_data, agent_url):
+            return [
+                p
+                for p in top_level_properties(adagents_data)
+                if p.get("property_type") and _has_matching_domain_identifier(p, domain)
+            ]
         return []
+    return get_all_properties(adagents_data)
 
 
 def _filter_properties_by_domain(
@@ -234,7 +273,7 @@ class PropertyDiscoveryService:
 
             logger.info(f"Syncing properties from {len(publisher_domains)} publisher domains")
 
-            async def fetch_domain_data(domain: str, delay: float) -> tuple[str, dict | Exception]:
+            async def fetch_domain_data(domain: str, delay: float) -> tuple[str, dict[str, Any] | Exception]:
                 """Fetch adagents.json from a domain with rate limiting delay."""
                 try:
                     await asyncio.sleep(delay)
@@ -245,24 +284,22 @@ class PropertyDiscoveryService:
                     return (domain, e)
 
             fetch_tasks = [fetch_domain_data(domain, i * 0.5) for i, domain in enumerate(publisher_domains)]
-            fetch_results_raw = await asyncio.gather(*fetch_tasks, return_exceptions=False)
-            fetch_results_list = cast(list[tuple[str, dict[str, Any] | Exception]], list(fetch_results_raw))
+            fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=False)
 
-            for domain, result in fetch_results_list:  # type: ignore[assignment]
+            for domain, fetch_result in fetch_results:
                 try:
-                    if isinstance(result, Exception):
-                        _log_fetch_error(domain, result, stats)
+                    if isinstance(fetch_result, Exception):
+                        _log_fetch_error(domain, fetch_result, stats)
                         continue
 
-                    adagents_data: dict[str, Any] = result  # type: ignore[assignment]
-
-                    properties = _extract_properties(adagents_data, domain, agent_url)
-                    properties = _filter_properties_by_domain(properties, domain)
+                    properties = _extract_properties(fetch_result, domain, agent_url)
+                    if agent_url is None or not _agent_uses_publisher_properties(fetch_result, agent_url):
+                        properties = _filter_properties_by_domain(properties, domain)
 
                     stats["properties_found"] += len(properties)
                     logger.info(f"Found {len(properties)} properties from {domain}")
 
-                    tags = get_all_tags(adagents_data)
+                    tags = get_all_tags(fetch_result)
                     stats["tags_found"] += len(tags)
                     logger.info(f"Found {len(tags)} unique tags from {domain}")
 
@@ -290,13 +327,13 @@ class PropertyDiscoveryService:
         stats: dict[str, Any],
     ) -> None:
         """Batch-check and create/update property records."""
-        property_ids_to_check = []
-        properties_data = []
+        properties_by_id: dict[str, dict[str, Any]] = {}
         for prop in properties:
             property_id = self._generate_property_id(tenant_id, domain, prop)
             if property_id:
-                property_ids_to_check.append(property_id)
-                properties_data.append((property_id, prop))
+                properties_by_id[property_id] = prop
+
+        property_ids_to_check = list(properties_by_id)
 
         stmt_props: Select[tuple[AuthorizedProperty]] = select(AuthorizedProperty).where(
             AuthorizedProperty.tenant_id == tenant_id,
@@ -305,7 +342,7 @@ class PropertyDiscoveryService:
         existing_properties_objs = list(session.scalars(stmt_props).all())
         existing_properties: dict[str, AuthorizedProperty] = {p.property_id: p for p in existing_properties_objs}
 
-        for property_id, prop in properties_data:
+        for property_id, prop in properties_by_id.items():
             was_created = self._create_or_update_property(
                 session, tenant_id, domain, prop, property_id, existing_properties
             )
@@ -338,6 +375,10 @@ class PropertyDiscoveryService:
 
         Returns None if property is invalid (missing required fields).
         """
+        source_property_id = (prop_data.get("property_id") or "").strip()
+        if source_property_id:
+            return re.sub(r"[^a-zA-Z0-9_-]+", "_", source_property_id)[:100]
+
         property_type = prop_data.get("property_type")
         if not property_type:
             logger.warning(f"Property missing property_type: {prop_data}")

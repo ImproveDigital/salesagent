@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_capabilities import require_capability_blueprint
 from src.core.database.database_session import get_db_session
 from src.core.database.models import CreativeAgent, Tenant
 
@@ -14,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 # Create Blueprint
 creative_agents_bp = Blueprint("creative_agents", __name__)
+
+# Headless gate (Sprint 7 Phase 4b): when the storefront centralizes
+# creative agents on this embedded instance, every route under this
+# blueprint returns 403. The Tenant Settings page hides the link too;
+# the before_request hook is defense-in-depth against direct URLs.
+creative_agents_bp.before_request(require_capability_blueprint("creative_agents"))
 
 
 @creative_agents_bp.route("/")
@@ -64,7 +71,7 @@ def list_creative_agents(tenant_id):
 
 @creative_agents_bp.route("/add", methods=["GET", "POST"])
 @log_admin_action("add_creative_agent")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def add_creative_agent(tenant_id):
     """Add a new creative agent."""
     if request.method == "GET":
@@ -130,7 +137,7 @@ def add_creative_agent(tenant_id):
 
 @creative_agents_bp.route("/<int:agent_id>/edit", methods=["GET", "POST"])
 @log_admin_action("edit_creative_agent")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def edit_creative_agent(tenant_id, agent_id):
     """Edit an existing creative agent."""
     if request.method == "GET":
@@ -153,7 +160,7 @@ def edit_creative_agent(tenant_id, agent_id):
                 "enabled": agent.enabled,
                 "priority": agent.priority,
                 "auth_type": agent.auth_type,
-                "auth_credentials": agent.auth_credentials,
+                "has_auth": bool(agent.auth_credentials),
             }
 
             return render_template(
@@ -205,7 +212,7 @@ def edit_creative_agent(tenant_id, agent_id):
 
 
 @creative_agents_bp.route("/<int:agent_id>/delete", methods=["DELETE"])
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def delete_creative_agent(tenant_id, agent_id):
     """Delete a creative agent."""
     try:
@@ -228,7 +235,7 @@ def delete_creative_agent(tenant_id, agent_id):
 
 @creative_agents_bp.route("/<int:agent_id>/test", methods=["POST"])
 @log_admin_action("test_creative_agent")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def test_creative_agent(tenant_id, agent_id):
     """Test connection to a creative agent."""
     try:

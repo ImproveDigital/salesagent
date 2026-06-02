@@ -21,27 +21,30 @@
     /* Ensure list items are visible */
     .targeting-browser .list-group-item {
         display: block;
-        padding: 0.5rem 0.75rem;
+        padding: var(--sa-space-2) var(--sa-space-3);
         margin-bottom: -1px;
-        background-color: #fff;
-        border: 1px solid rgba(0,0,0,.125);
-        color: #212529;
+        background-color: var(--sa-bg-surface);
+        border: 1px solid var(--sa-border);
+        color: var(--sa-text-default);
         text-decoration: none;
         width: 100%;
         min-height: 40px;
+        transition: background-color var(--sa-duration-fast) var(--sa-easing);
     }
 
     /* Compact key titles */
     .targeting-browser .list-group-item h6 {
-        font-size: 0.9rem;
+        font-size: var(--sa-text-sm);
         margin-bottom: 0.15rem;
         font-weight: 600;
+        color: var(--sa-text-strong);
     }
 
     /* Compact key subtitles */
     .targeting-browser .list-group-item small {
-        font-size: 0.75rem;
+        font-size: var(--sa-text-xs);
         line-height: 1.2;
+        color: var(--sa-text-muted);
     }
 
     /* Compact badge spacing */
@@ -51,34 +54,40 @@
     }
 
     .targeting-browser .list-group-item:hover {
-        background-color: #f8f9fa;
+        background-color: var(--sa-gray-50);
         cursor: pointer;
     }
 
     .targeting-browser .list-group-item.active {
-        background-color: #007bff;
-        border-color: #007bff;
-        color: white;
+        background-color: var(--sa-primary);
+        border-color: var(--sa-primary);
+        color: #fff;
     }
+    .targeting-browser .list-group-item.active h6,
+    .targeting-browser .list-group-item.active small { color: #fff; }
 </style>
 <div class="container-fluid targeting-browser">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h1>Targeting Criteria Browser</h1>
-        <div>
+    <header class="sa-page-header">
+        <h1 class="sa-page-header__title">Targeting Criteria Browser</h1>
+        <div class="sa-page-header__actions">
+            {% if not embedded_view %}
             <button id="sync-targeting-btn" class="btn btn-primary" onclick="syncTargetingData()">
                 <i class="fas fa-sync"></i> <span id="sync-btn-text">Sync Targeting Data</span>
             </button>
-            <a href="{{ url_for('inventory.inventory_browser', tenant_id=tenant.tenant_id) }}" class="btn btn-secondary">
-                ← Back to Inventory
+            {% endif %}
+            <a href="{{ url_for('inventory.inventory_browse', tenant_id=tenant.tenant_id) }}" class="btn btn-ghost">
+                ← Back to Browse Inventory
             </a>
         </div>
-    </div>
+    </header>
 
     <!-- Sync Info Alert -->
     <div class="alert alert-info">
         <i class="fas fa-info-circle"></i>
         <strong>Note:</strong> This page displays targeting criteria (custom targeting keys, audience segments, and labels) synced from your ad server.
-        To sync ad units and placements, visit the <a href="{{ url_for('inventory.inventory_browser', tenant_id=tenant.tenant_id) }}" class="alert-link">Inventory Browser</a>.
+        {% if not embedded_view %}
+        To sync ad units and placements, visit <a href="{{ url_for('inventory.inventory_browser', tenant_id=tenant.tenant_id) }}" class="alert-link">Sync Inventory</a>.
+        {% endif %}
     </div>
 
     <!-- Last Sync Info -->
@@ -134,6 +143,14 @@
                         Per AdCP spec, you need three separate keys for different purposes.
                     </p>
 
+                    {% if tenant.is_embedded %}
+                    <div class="alert alert-info mb-0" role="alert">
+                        <i class="bi bi-info-circle"></i>
+                        <strong>Managed by platform.</strong>
+                        AXE segment keys for this tenant are configured by the upstream platform via the Tenant Management API.
+                        You can still browse keys and values below to reference them when authoring products.
+                    </div>
+                    {% else %}
                     <!-- Include Segments Row -->
                     <div class="row mb-3 align-items-center">
                         <div class="col-md-3">
@@ -217,6 +234,7 @@
                             </div>
                         </details>
                     </div>
+                    {% endif %}
                 </div>
             </div>
 
@@ -385,6 +403,7 @@
 <script>
 const tenantId = '{{ tenant.tenant_id }}';
 const scriptRoot = '{{ request.script_root }}';  // Base path for URLs (e.g., '/admin' or '')
+const isEmbedded = {{ 'true' if embedded_view else 'false' }};
 let currentKeyId = null;
 let targetingData = {
     customKeys: [],
@@ -393,11 +412,18 @@ let targetingData = {
     labels: []
 };
 
-// Sync targeting data from ad server
+// Sync targeting data from ad server. Hidden on embedded tenants —
+// the upstream platform drives sync via the Tenant Management API.
 async function syncTargetingData() {
     const btn = document.getElementById('sync-targeting-btn');
     const btnText = document.getElementById('sync-btn-text');
     const syncMessage = document.getElementById('sync-message');
+
+    if (!btn) {
+        // Embedded tenant — sync trigger is suppressed.
+        if (syncMessage) syncMessage.textContent = 'Sync is managed by your platform.';
+        return;
+    }
 
     // Disable button and show loading state
     btn.disabled = true;
@@ -405,7 +431,7 @@ async function syncTargetingData() {
     syncMessage.textContent = 'Starting sync...';
 
     try {
-        const response = await fetch(`{{ script_name }}/api/tenant/${tenantId}/inventory/sync`, {
+        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/inventory/sync`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -447,7 +473,7 @@ async function syncTargetingData() {
 // Load all targeting data
 async function loadTargetingData() {
     try {
-        const response = await fetch(`{{ script_name }}/api/tenant/${tenantId}/targeting/all`, {
+        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/targeting/all`, {
             credentials: 'same-origin'
         });
 
@@ -557,13 +583,14 @@ function renderCustomKeys() {
     console.log('filteredKeys count:', filteredKeys.length);
 
     if (filteredKeys.length === 0) {
+        const syncCta = isEmbedded
+            ? '<p class="text-muted small">Sync is managed by your platform.</p>'
+            : '<button class="btn btn-primary btn-sm" onclick="syncTargetingData()"><i class="fas fa-sync"></i> Sync from GAM</button>';
         keysList.innerHTML = `
             <div class="text-center p-4">
                 <i class="bi bi-search text-muted" style="font-size: 3rem;"></i>
                 <p class="text-muted mt-2">No custom targeting keys found</p>
-                <button class="btn btn-primary btn-sm" onclick="syncTargetingData()">
-                    <i class="fas fa-sync"></i> Sync from GAM
-                </button>
+                ${syncCta}
             </div>
         `;
         return;
@@ -691,9 +718,13 @@ function populateAxeDropdowns() {
     const excludeKey = document.getElementById('axe_exclude_key').value;
     const macroKey = document.getElementById('axe_macro_key').value;
 
-    if (includeKey) document.getElementById('axe-include-key-select').value = includeKey;
-    if (excludeKey) document.getElementById('axe-exclude-key-select').value = excludeKey;
-    if (macroKey) document.getElementById('axe-macro-key-select').value = macroKey;
+    const setIfPresent = (id, value) => {
+        const el = document.getElementById(id);
+        if (el && value) el.value = value;
+    };
+    setIfPresent('axe-include-key-select', includeKey);
+    setIfPresent('axe-exclude-key-select', excludeKey);
+    setIfPresent('axe-macro-key-select', macroKey);
 }
 
 // Select a custom targeting key
@@ -729,7 +760,7 @@ async function selectKey(key) {
 // Load custom targeting values from API
 async function loadCustomValues(keyId) {
     try {
-        const response = await fetch(`{{ script_name }}/api/tenant/${tenantId}/targeting/values/${keyId}`, {
+        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/targeting/values/${keyId}`, {
             credentials: 'same-origin'
         });
 
@@ -968,6 +999,7 @@ async function saveAxeKey(keyType) {
 // Update status display for a specific AXE key type
 function updateAxeKeyStatus(keyType, keyName) {
     const statusElement = document.getElementById(`axe-${keyType}-status`);
+    if (!statusElement) return;
     if (keyName && keyName !== '') {
         statusElement.innerHTML = `<small class="text-success"><i class="bi bi-check-circle-fill"></i> <code>${keyName}</code></small>`;
     } else {

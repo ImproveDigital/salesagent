@@ -29,6 +29,39 @@ from tests.integration.migration_helpers import parse_postgres_url
 # It is available here via tests/conftest.py -> from tests.conftest_db import *
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register integration-suite markers."""
+    config.addinivalue_line(
+        "markers",
+        "requires_gam: requires real GAM credentials — skip when env vars absent",
+    )
+
+
+@pytest.fixture
+def factory_session(integration_db):
+    """Bind factory-boy factories to a fresh session against the integration DB.
+
+    Used by GAM projection / materialization tests that need to seed
+    ``gam_orders``, ``gam_line_items``, and ``gam_advertisers`` rows.
+    """
+    from sqlalchemy.orm import Session as SASession
+
+    from src.core.database.database_session import get_engine
+    from tests.factories import ALL_FACTORIES
+
+    engine = get_engine()
+    session = SASession(bind=engine)
+    originals = {f: f._meta.sqlalchemy_session for f in ALL_FACTORIES}
+    try:
+        for f in ALL_FACTORIES:
+            f._meta.sqlalchemy_session = session
+        yield session
+    finally:
+        for f, orig in originals.items():
+            f._meta.sqlalchemy_session = orig
+        session.close()
+
+
 def cleanup_tenant(tenant_id: str) -> None:
     """Delete tenant and all dependent data (correct FK order)."""
     with get_db_session() as session:
@@ -143,6 +176,7 @@ def test_tenant_with_data(integration_db):
             subdomain=tenant_data["subdomain"],
             is_active=tenant_data["is_active"],
             ad_server="mock",  # Mock adapter is accepted in test environments (ADCP_TESTING=true)
+            default_gam_advertiser_id="test_adv",
             auth_setup_mode=False,  # Disable setup mode for production-ready auth
             auto_approve_format_ids=[],  # JSONType expects list, not json.dumps()
             human_review_required=False,
@@ -188,14 +222,12 @@ def test_tenant_with_data(integration_db):
         db_session.add(auth_property)
 
         # Principal (required for setup completion)
-        # Include both kevel and mock mappings to support ad_server="kevel" (which is production-ready)
         principal = Principal(
             tenant_id=tenant_id,
             principal_id=f"{tenant_id}_principal",
             name="Test Principal",
             access_token=f"{tenant_id}_token",
             platform_mappings={
-                "kevel": {"advertiser_id": f"kevel_adv_{tenant_id}"},
                 "mock": {"advertiser_id": f"mock_adv_{tenant_id}"},
             },
         )
@@ -275,6 +307,7 @@ def sample_tenant(integration_db):
             subdomain="test",
             is_active=True,
             ad_server="mock",  # Mock adapter is accepted in test environments (ADCP_TESTING=true)
+            default_gam_advertiser_id="test_adv",
             auth_setup_mode=False,  # Disable setup mode for production-ready auth
             enable_axe_signals=True,
             authorized_emails=["test@example.com"],
@@ -282,6 +315,12 @@ def sample_tenant(integration_db):
             auto_approve_format_ids=["display_300x250"],
             human_review_required=False,
             admin_token="test_admin_token",
+            # AAO setup-checklist prerequisite — without it,
+            # ``validate_setup_complete`` raises in ``_create_media_buy_impl``
+            # and tests have to set ``test_session_id`` to short-circuit it.
+            # Seeding here lets the production validator path run end-to-end
+            # against the fixture (closes #43).
+            public_agent_url="https://test.example.com/agent",
             created_at=now,
             updated_at=now,
         )
@@ -378,9 +417,7 @@ def sample_principal(integration_db, sample_tenant):
             principal_id="test_principal",
             name="Test Advertiser",
             access_token="test_token_12345",
-            # Include both kevel and mock mappings for compatibility
             platform_mappings={
-                "kevel": {"advertiser_id": "test_advertiser"},
                 "mock": {"id": "test_advertiser"},
             },
             created_at=now,
@@ -550,19 +587,61 @@ def mcp_server(integration_db):
         raise RuntimeError(f"Failed to parse DATABASE_URL: {postgres_url}")
 
     env = os.environ.copy()
+    # core.main.main() reads ADCP_PORT (or PORT) — keep ADCP_SALES_PORT
+    # set too for backwards-compat consumers, but ADCP_PORT is what
+    # core.main actually binds.
     env["ADCP_SALES_PORT"] = str(port)
+    env["ADCP_PORT"] = str(port)
     env["DATABASE_URL"] = server_db_url
     env["DB_TYPE"] = "postgresql"
     env["ADCP_TESTING"] = "true"
     env["PYTHONUNBUFFERED"] = "1"  # Force unbuffered output for better debugging
 
-    # Start the server process using mcp.run() instead of uvicorn directly
-    server_script = f"""
+    # Start the unified MCP+A2A server via the new entrypoint.
+    # ``core.main.main()`` reads ``ADCP_PORT`` (already set in env above)
+    # and binds uvicorn to that port.
+    server_script = """
 import sys
 sys.path.insert(0, '.')
-from src.core.main import mcp
-mcp.run(transport='http', host='0.0.0.0', port={port})
+from core.main import main
+main()
 """
+
+    # Seed a "default" tenant so the bare-localhost route resolves. The MCP
+    # subprocess connects to ``localhost:port``, which ``_resolve_tenant``
+    # in ``core/main.py`` maps to ``tenant_id='default'``. ``integration_db``
+    # creates schema via ``Base.metadata.create_all`` but never runs the
+    # production seed, so without this every MCP call lands on the
+    # bare-host fallback and gets 404.
+    #
+    # Stub field values: public_agent_url / authorized_emails are
+    # placeholders, not asserted on by any test that uses this fixture.
+    # If a future test reads them, override at the test-fixture layer.
+    from datetime import UTC
+    from datetime import datetime as _datetime
+
+    from src.core.database.database_session import get_db_session
+    from src.core.database.models import Tenant as _Tenant
+
+    with get_db_session() as _session:
+        _existing = _session.scalars(select(_Tenant).filter_by(tenant_id="default")).first()
+        if _existing is None:
+            _now = _datetime.now(UTC)
+            _session.add(
+                _Tenant(
+                    tenant_id="default",
+                    name="Default Tenant",
+                    subdomain="default",
+                    is_active=True,
+                    ad_server="mock",
+                    authorized_emails=[],
+                    authorized_domains=[],
+                    public_agent_url="https://default.example.com/agent",
+                    created_at=_now,
+                    updated_at=_now,
+                )
+            )
+            _session.commit()
 
     process = subprocess.Popen(
         [sys.executable, "-c", server_script],
@@ -572,28 +651,41 @@ mcp.run(transport='http', host='0.0.0.0', port={port})
         bufsize=1,  # Line buffered
     )
 
-    # Wait for server to be ready
-    max_wait = 20  # seconds (increased for server initialization)
+    # Wait for server to be ready.
+    #
+    # TCP `connect()` succeeds once uvicorn binds the socket — but the ASGI
+    # app's startup hooks (StreamableHTTP session manager, route mounts) run
+    # AFTER the bind. A TCP-only probe lets the test issue requests during
+    # the startup gap, where /mcp/ returns 404 because the MCP transport
+    # isn't mounted yet. Probe HTTP and wait until /mcp/ stops returning 404
+    # (any other status — 401 unauthenticated, 405 GET-not-allowed, etc. —
+    # means the route is mounted and the test can proceed).
+    import http.client as _http_client
+
+    max_wait = int(os.environ.get("MCP_SERVER_STARTUP_TIMEOUT", "90" if os.environ.get("CI") else "30"))
     start_time = time.time()
     server_ready = False
 
     while time.time() - start_time < max_wait:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"MCP server process died unexpectedly.\n"
+                f"STDOUT: {stdout.decode() if stdout else 'N/A'}\n"
+                f"STDERR: {stderr.decode() if stderr else 'N/A'}"
+            )
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
-                s.connect(("localhost", port))
+            conn = _http_client.HTTPConnection("localhost", port, timeout=1)
+            conn.request("GET", "/mcp/")
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            if resp.status != 404:
                 server_ready = True
                 break
-        except (ConnectionRefusedError, OSError):
-            # Check if process has died
-            if process.poll() is not None:
-                stdout, stderr = process.communicate()
-                raise RuntimeError(
-                    f"MCP server process died unexpectedly.\n"
-                    f"STDOUT: {stdout.decode() if stdout else 'N/A'}\n"
-                    f"STDERR: {stderr.decode() if stderr else 'N/A'}"
-                )
-            time.sleep(0.3)
+        except (ConnectionRefusedError, OSError, _http_client.HTTPException):
+            pass
+        time.sleep(0.3)
 
     if not server_ready:
         # Capture output for debugging
@@ -1122,15 +1214,12 @@ def add_required_setup_data(session, tenant_id: str):
             name="Default Test Principal",
             access_token=f"{tenant_id}_default_token",
             platform_mappings={
-                "kevel": {"advertiser_id": f"kevel_adv_{tenant_id}"},
                 "mock": {"advertiser_id": f"mock_adv_{tenant_id}"},
             },
         )
         session.add(principal)
-    elif existing_principal.platform_mappings and "kevel" not in existing_principal.platform_mappings:
-        existing_principal.platform_mappings["kevel"] = {
-            "advertiser_id": f"kevel_adv_{existing_principal.principal_id}"
-        }
+    elif existing_principal.platform_mappings and "mock" not in existing_principal.platform_mappings:
+        existing_principal.platform_mappings["mock"] = {"advertiser_id": f"mock_adv_{existing_principal.principal_id}"}
         attributes.flag_modified(existing_principal, "platform_mappings")
 
     # GAMInventory
@@ -1158,3 +1247,43 @@ def add_required_setup_data(session, tenant_id: str):
         ]
         for item in inventory_items:
             session.add(item)
+
+
+# ---------------------------------------------------------------------------
+# Embedded-mode admin UI fixtures (Sprint 4 + Sprint 7 Phase 4b)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def embedded_app(integration_db, monkeypatch):
+    """Full admin Flask app for per-tenant UI tests.
+
+    Delvars ``MANAGED_INSTANCE`` and ``EMBEDDED_CAPABILITIES`` by default
+    so the test super-admin session bypass works on open tenants. Tests
+    that want managed-instance behavior re-set the env vars in-body via
+    monkeypatch.
+    """
+    monkeypatch.setenv("ADCP_AUTH_TEST_MODE", "true")
+    monkeypatch.delenv("MANAGED_INSTANCE", raising=False)
+    monkeypatch.delenv("EMBEDDED_CAPABILITIES", raising=False)
+
+    from src.admin.app import create_app
+
+    return create_app({"TESTING": True, "WTF_CSRF_ENABLED": False})
+
+
+@pytest.fixture
+def embedded_client(embedded_app):
+    """Flask test client with a super-admin test session.
+
+    The session bypasses OAuth — see ``require_tenant_access``. Open
+    tenants pass through cleanly; managed-instance + ``is_embedded=True``
+    tenants still hit the X-Identity middleware, so route tests against
+    those need to send the headers explicitly.
+    """
+    c = embedded_app.test_client()
+    with c.session_transaction() as sess:
+        sess["test_user"] = {"email": "admin@example.com", "name": "Admin"}
+        sess["test_user_role"] = "super_admin"
+        sess["test_tenant_id"] = "*"
+    return c

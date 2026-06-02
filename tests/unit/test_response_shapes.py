@@ -211,6 +211,24 @@ class TestCreateMediaBuyResponseShape:
 
         assert "workflow_step_id" not in data
 
+    def test_revision_and_confirmed_at_serialize_when_confirmed(self):
+        """Confirmed create responses include concurrency and audit fields."""
+        from datetime import UTC, datetime
+
+        from src.core.schemas import CreateMediaBuySuccess
+
+        confirmed_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        resp = CreateMediaBuySuccess(
+            media_buy_id="buy_confirmed",
+            packages=[],
+            revision=3,
+            confirmed_at=confirmed_at,
+        )
+        data = resp.model_dump(mode="json")
+
+        assert data["revision"] == 3
+        assert data["confirmed_at"] == "2026-01-01T12:00:00Z"
+
 
 # ===========================================================================
 # 3. SyncCreativesResponse
@@ -274,6 +292,7 @@ class TestSyncCreativesResponseShape:
 
     def test_sync_response_failed_creative_has_errors(self):
         """Failed creative includes errors list."""
+        from adcp.types import Error
         from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
         from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
@@ -281,7 +300,10 @@ class TestSyncCreativesResponseShape:
         result = SyncCreativeResult(
             creative_id="creative_003",
             action=CreativeAction.failed,
-            errors=["Format not supported", "Missing required asset"],
+            errors=[
+                Error(code="format_not_supported", message="Format not supported"),
+                Error(code="missing_asset", message="Missing required asset"),
+            ],
         )
         resp = SyncCreativesResponse(creatives=[result], dry_run=False)  # type: ignore[call-arg]
         data = resp.model_dump(mode="json")
@@ -289,7 +311,7 @@ class TestSyncCreativesResponseShape:
         c = data["creatives"][0]
         assert_field_type(c, "errors", list)
         assert len(c["errors"]) == 2
-        assert all(isinstance(e, str) for e in c["errors"])
+        assert all(isinstance(e, dict) and "code" in e and "message" in e for e in c["errors"])
 
 
 # ===========================================================================
@@ -324,7 +346,7 @@ class TestGetMediaBuyDeliveryResponseShape:
                 impressions=50000.0,
                 spend=500.0,
                 clicks=250.0,
-                video_completions=None,
+                completed_views=None,
                 media_buy_count=1,
             ),
             media_buy_deliveries=[
@@ -612,8 +634,8 @@ class TestUpdateMediaBuyResponseShape:
         assert_field_type(pkg, "paused", bool)
         assert pkg["package_id"] == "pkg_001"
 
-    def test_internal_fields_excluded(self):
-        """Internal fields (workflow_step_id, changes_applied, buyer_package_ref) are excluded."""
+    def test_package_internal_fields_excluded(self):
+        """AffectedPackage internal fields (changes_applied, buyer_package_ref) stay excluded."""
         from src.core.schemas import AffectedPackage, UpdateMediaBuySuccess
 
         package = AffectedPackage(
@@ -629,11 +651,22 @@ class TestUpdateMediaBuyResponseShape:
         )
         data = resp.model_dump(mode="json")
 
-        assert "workflow_step_id" not in data
-
+        # workflow_step_id is now wire-visible per #158 — buyers need it
+        # to disambiguate "deferred for approval" from "applied with no
+        # package effect". The two payloads were otherwise byte-identical.
+        assert data["workflow_step_id"] == "wf_456"
         pkg = data["affected_packages"][0]
         assert "changes_applied" not in pkg, "Internal 'changes_applied' field should be excluded"
         assert "buyer_package_ref" not in pkg, "Internal 'buyer_package_ref' field should be excluded"
+
+    def test_revision_serializes_on_success_response(self):
+        """Update responses expose the post-update revision."""
+        from src.core.schemas import UpdateMediaBuySuccess
+
+        resp = UpdateMediaBuySuccess(media_buy_id="buy_103", revision=4)
+        data = resp.model_dump(mode="json")
+
+        assert data["revision"] == 4
 
 
 # ===========================================================================
@@ -760,7 +793,9 @@ class TestListCreativesResponseShape:
         fid = data["creatives"][0]["format_id"]
         assert_field_type(fid, "id", str)
         assert_field_type(fid, "agent_url", str)
-        assert fid["id"] == "video_1920x1080"
+        assert fid["id"] == "video_standard"
+        assert fid["width"] == 1920
+        assert fid["height"] == 1080
 
 
 # ===========================================================================
@@ -868,6 +903,7 @@ class TestSerializationConsistency:
         """SyncCreativesResponse is JSON-serializable."""
         import json
 
+        from adcp.types import Error
         from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
         from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
@@ -881,7 +917,7 @@ class TestSerializationConsistency:
                 SyncCreativeResult(
                     creative_id="c2",
                     action=CreativeAction.failed,
-                    errors=["Bad format"],
+                    errors=[Error(code="bad_format", message="Bad format")],
                 ),
             ],
             dry_run=False,

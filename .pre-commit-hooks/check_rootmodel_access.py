@@ -24,9 +24,7 @@ import sys
 PATTERN = re.compile(r"""hasattr\([^,]+,\s*["']root["']\)""")
 
 # Files with legitimate uses (pre-validators with mixed input types, a2a-sdk types)
-ALLOWED_FILES = {
-    "src/a2a_server/adcp_a2a_server.py",  # a2a-sdk TextPart/DataPart — genuinely polymorphic
-}
+ALLOWED_FILES: set[str] = set()
 
 
 def check_file(filepath: str) -> list[str]:

@@ -15,6 +15,7 @@ from src.core.schemas import CreateMediaBuyRequest, GetProductsRequest, PricingM
 from src.core.testing_hooks import AdCPTestContext
 from src.core.tools.media_buy_create import _create_media_buy_impl
 from src.core.tools.products import _get_products_impl
+from tests.factories.spec_required_kwargs import required_request_kwargs
 from tests.helpers.adcp_factories import create_test_package_request
 from tests.utils.database_helpers import create_tenant_with_timestamps
 
@@ -242,7 +243,7 @@ def setup_tenant_with_pricing_products(integration_db):
 @pytest.mark.requires_db
 async def test_get_products_returns_pricing_options(setup_tenant_with_pricing_products):
     """Test that get_products returns pricing_options for products."""
-    request = GetProductsRequest(brief="display ads", brand={"domain": "testbrand.com"})
+    request = GetProductsRequest(buying_mode="brief", brief="display ads", brand={"domain": "testbrand.com"})
 
     # Create identity
     identity = ResolvedIdentity(
@@ -286,6 +287,7 @@ async def test_create_media_buy_with_cpm_fixed_pricing(setup_tenant_with_pricing
     """Test creating media buy with fixed CPM pricing."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "testbrand.com"},
         packages=[
             create_test_package_request(
@@ -321,6 +323,7 @@ async def test_create_media_buy_with_cpm_auction_pricing(setup_tenant_with_prici
     """Test creating media buy with auction CPM pricing."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "testbrand.com"},
         packages=[
             create_test_package_request(
@@ -357,6 +360,7 @@ async def test_create_media_buy_auction_bid_below_floor_fails(setup_tenant_with_
     """Test that auction bid below floor price fails."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "testbrand.com"},
         packages=[
             create_test_package_request(
@@ -392,6 +396,7 @@ async def test_create_media_buy_with_cpcv_pricing(setup_tenant_with_pricing_prod
     """Test creating media buy with CPCV pricing."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "testbrand.com"},
         packages=[
             create_test_package_request(
@@ -427,6 +432,7 @@ async def test_create_media_buy_below_min_spend_fails(setup_tenant_with_pricing_
     """Test that budget below min_spend_per_package fails."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "testbrand.com"},
         packages=[
             create_test_package_request(
@@ -461,6 +467,7 @@ async def test_create_media_buy_multi_pricing_choose_cpp(setup_tenant_with_prici
     """Test creating media buy choosing CPP from multi-pricing product."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "testbrand.com"},
         packages=[
             create_test_package_request(
@@ -496,6 +503,7 @@ async def test_create_media_buy_invalid_pricing_model_fails(setup_tenant_with_pr
     """Test that requesting unavailable pricing model fails."""
     start_time, end_time = _get_future_date_range()
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "testbrand.com"},
         packages=[
             create_test_package_request(

@@ -5,7 +5,7 @@
 ### 1. Red — Write Failing Test
 
 Before writing implementation code:
-1. Understand requirements from beads task + CLAUDE.md patterns
+1. Understand requirements from the prompt + CLAUDE.md patterns
 2. Write a test that describes the desired behavior
 3. Run it and confirm it fails:
 
@@ -44,7 +44,7 @@ make quality  # Full quality gate after refactoring
 ## Requirements Sources
 
 For salesagent, requirements come from:
-1. **Beads task description** — acceptance criteria
+1. **The user's prompt or GitHub issue** — acceptance criteria
 2. **CLAUDE.md** — 7 critical architecture patterns
 3. **AdCP spec** — protocol compliance (`tests/unit/test_adcp_contract.py`)
 4. **Existing test patterns** — conventions in `tests/unit/`

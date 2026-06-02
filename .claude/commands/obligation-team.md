@@ -455,6 +455,5 @@ git commit -m "feat: add UC-004 obligation tests ({N} obligations)"
 
 ## See Also
 
-- `/obligation-test` — Sequential per-obligation formula (single agent, beads-tracked)
 - `/surface` — Map complete test surface for an entity
 - `/remediate` — Fill existing test stubs

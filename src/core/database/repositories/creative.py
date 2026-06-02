@@ -81,7 +81,10 @@ class CreativeRepository:
         principal_id: str,
         *,
         status: str | None = None,
+        statuses: list[str] | None = None,
         format: str | None = None,
+        format_ids: list[str] | None = None,
+        creative_ids: list[str] | None = None,
         tags: list[str] | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
@@ -112,11 +115,20 @@ class CreativeRepository:
                 Creative.creative_id == CreativeAssignment.creative_id,
             ).where(CreativeAssignment.media_buy_id.in_(media_buy_ids))
 
+        if creative_ids:
+            stmt = stmt.where(Creative.creative_id.in_(creative_ids))
+
         if status:
             stmt = stmt.where(Creative.status == status)
 
+        if statuses:
+            stmt = stmt.where(Creative.status.in_(statuses))
+
         if format:
             stmt = stmt.where(Creative.format == format)
+
+        if format_ids:
+            stmt = stmt.where(Creative.format.in_(format_ids))
 
         if tags:
             for tag in tags:
@@ -282,6 +294,32 @@ class CreativeRepository:
             )
         ).first()
 
+    def admin_mark_approved(
+        self,
+        creative_id: str,
+        *,
+        approved_by: str,
+        approved_at: datetime | None = None,
+    ) -> Creative | None:
+        """Mark a creative approved (admin use — no principal filter).
+
+        Mirrors the inline write in
+        ``src/admin/blueprints/creatives.py::approve_creative``. Centralises
+        the (status, approved_at, approved_by) field set so callers — admin
+        UI route, integration tests simulating approval — can't drift.
+
+        Returns the updated Creative, or None if not found in this tenant.
+        Does NOT commit; the caller / UoW commits at the boundary.
+        """
+        creative = self.admin_get_by_id(creative_id)
+        if creative is None:
+            return None
+        creative.status = "approved"
+        creative.approved_at = approved_at or datetime.now(UTC)
+        creative.approved_by = approved_by
+        self._session.flush()
+        return creative
+
     def admin_list_all(self) -> list[Creative]:
         """Get all creatives for the tenant ordered by status then date (admin use)."""
         return list(
@@ -427,7 +465,12 @@ class CreativeAssignmentRepository:
     # Cross-model lookups (for assignment workflow)
     # ------------------------------------------------------------------
 
-    def find_package_with_media_buy(self, package_id: str) -> tuple[MediaPackage, MediaBuy] | None:
+    def find_package_with_media_buy(
+        self,
+        package_id: str,
+        *,
+        principal_id: str | None = None,
+    ) -> tuple[MediaPackage, MediaBuy] | None:
         """Find a package and its parent media buy within the tenant.
 
         Delegates to MediaBuyRepository — all MediaPackage queries are owned by
@@ -438,7 +481,7 @@ class CreativeAssignmentRepository:
         from src.core.database.repositories.media_buy import MediaBuyRepository
 
         mb_repo = MediaBuyRepository(self._session, self._tenant_id)
-        return mb_repo.find_package_with_media_buy(package_id)
+        return mb_repo.find_package_with_media_buy(package_id, principal_id=principal_id)
 
     def get_creative_by_id(self, creative_id: str) -> Creative | None:
         """Get a creative by tenant + creative_id (no principal filter)."""

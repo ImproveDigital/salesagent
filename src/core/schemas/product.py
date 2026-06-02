@@ -4,9 +4,6 @@ Extracted from src/core/schemas/__init__.py to reduce file size.
 All classes are re-exported from src.core.schemas for backward compatibility.
 """
 
-from typing import Any
-
-from adcp.types import Catalog as LibraryCatalog
 from adcp.types import GetProductsResponse as LibraryGetProductsResponse
 from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
 from adcp.types import Placement as LibraryPlacement
@@ -56,164 +53,28 @@ class Placement(LibraryPlacement):
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     description: str = Field(..., description="Detailed description of the placement")
-    format_ids: list[FormatId] = Field(  # type: ignore[assignment]
+    format_ids: list[FormatId] = Field(
         ...,
         description="Supported creative formats for this placement",
         min_length=1,
     )
 
 
-class Product(LibraryProduct):
-    """Product schema extending library Product with internal fields.
-
-    Inherits all AdCP-compliant fields from adcp library's Product,
-    ensuring we stay in sync with spec updates. Adds only internal-only
-    fields that we need for our implementation.
-
-    This pattern ensures:
-    - External serialization uses library Product (spec-compliant)
-    - Internal code has extra fields it needs (implementation_config)
-    - No conversion functions needed - inheritance handles it
-    - Automatic updates when library Product changes
-    """
-
-    # Internal-only fields (not in AdCP spec)
-    implementation_config: dict[str, Any] | None = Field(
-        default=None,
-        description="Internal: Ad server-specific configuration for implementing this product",
-        exclude=True,  # Exclude from serialization by default
-    )
-
-    # Filter-related fields (not in AdCP Product spec, but needed for filtering)
-    countries: list[str] | None = Field(
-        default=None,
-        description="Internal: Country codes (ISO 3166-1 alpha-2) where this product is available",
-        exclude=True,  # Exclude from serialization by default
-    )
-    # channels: inherited from library Product as list[MediaChannel] | None (public per AdCP spec)
-
-    # Device type targeting (from targeting_template.device_targets in DB)
-    device_types: list[str] | None = Field(
-        default=None,
-        description="Internal: Device types this product supports (mobile, desktop, tablet, ctv, etc.)",
-        exclude=True,  # Exclude from serialization by default
-    )
-
-    # Principal access control
-    allowed_principal_ids: list[str] | None = Field(
-        default=None,
-        description="Internal: Principal IDs that can see this product. NULL/empty means visible to all.",
-        exclude=True,  # Exclude from serialization by default
-    )
-
-    @model_validator(mode="after")
-    def validate_pricing_fields(self) -> "Product":
-        """Validate pricing_options per AdCP spec.
-
-        Per AdCP PR #88: All products must use pricing_options in the database.
-        However, pricing_options may be empty in API responses for anonymous/unauthenticated
-        users to hide pricing information.
-        """
-        # pricing_options defaults to empty list if not provided
-        # This allows filtering pricing info for anonymous users
-        return self
-
-    @model_validator(mode="after")
-    def validate_publisher_properties(self) -> "Product":
-        """Validate publisher_properties per AdCP spec.
-
-        Per AdCP spec, products must have at least one publisher property.
-        """
-        if not self.publisher_properties or len(self.publisher_properties) == 0:
-            raise ValueError(
-                "Product must have at least one publisher_property per AdCP spec. "
-                "Properties identify the inventory covered by this product."
-            )
-
-        return self
-
-    # Note: In AdCP V3, pricing is determined by field presence:
-    # - fixed_price present = fixed pricing
-    # - floor_price present = auction pricing with floor
-    # The consolidated CpmPricingOption/VcpmPricingOption types handle this automatically.
-
-    def model_dump(self, **kwargs):
-        """Return AdCP-compliant model dump with proper field names, excluding internal fields and null values."""
-        # Exclude internal/non-spec fields
-        kwargs["exclude"] = kwargs.get("exclude", set())
-        if isinstance(kwargs["exclude"], set):
-            kwargs["exclude"].update({"implementation_config", "expires_at"})
-
-        data = super().model_dump(**kwargs)
-
-        # Convert formats to format_ids per AdCP spec
-        if "formats" in data:
-            data["format_ids"] = data.pop("formats")
-
-        # Remove null fields per AdCP spec
-        # Only truly required fields should always be present
-        core_fields = {
-            "product_id",
-            "name",
-            "description",
-            "format_ids",
-            "delivery_type",
-            "delivery_measurement",
-            "is_custom",
-        }
-
-        adcp_data = {}
-        for key, value in data.items():
-            # Include core fields always, and non-null optional fields
-            # Note: pricing_options=[] is valid for anonymous users (no pricing shown)
-            # Per AdCP spec, pricing_options is required but can be empty array
-            if key in core_fields or value is not None:
-                adcp_data[key] = value
-            # Include empty pricing_options explicitly (required per AdCP schema)
-            elif key == "pricing_options" and value == []:
-                adcp_data[key] = []
-
-        return adcp_data
-
-    def model_dump_internal(self, **kwargs):
-        """Return internal model dump including all fields for database operations."""
-        return super().model_dump(**kwargs)
-
-    def model_dump_adcp_compliant(self, **kwargs):
-        """Return model dump for AdCP schema compliance."""
-        return self.model_dump(**kwargs)
-
-    def dict(self, **kwargs):
-        """Override dict to maintain backward compatibility."""
-        return self.model_dump(**kwargs)
+# Wire-shape Product is just the AdCP library type. Internal fields live on
+# ``src.core.resolved_product.ResolvedProduct``; the production wire path goes
+# through :func:`src.core.product_conversion.convert_product_model_to_resolved`,
+# which builds the wire shape from explicit ORM fields only.
+Product = LibraryProduct
 
 
 class ProductFilters(LibraryFilters):
     """Product filters extending library Filters from AdCP spec.
 
-    Inherits all AdCP-compliant filter fields from adcp library's Filters class,
-    ensuring we stay in sync with spec updates. All fields come from the library:
-    - delivery_type: Filter by delivery type (guaranteed, auction)
-    - format_ids: Filter by specific format IDs
-    - format_types: Filter by format types (video, display, audio)
-    - is_fixed_price: Filter for fixed price vs auction products
-    - min_exposures: Minimum exposures for measurement validity
-    - standard_formats_only: Only return IAB standard formats
-
-    Local extensions (not in AdCP product-filters.json):
-    - device_types: Filter by device form factors (mobile, desktop, tablet, ctv, etc.)
-
-    This pattern ensures:
-    - External requests use library Filters (spec-compliant)
-    - We automatically get spec updates when library updates
-    - No manual field duplication = no drift from spec
+    All filter fields come from the library — see adcp ProductFilters for the
+    full list (delivery_type, format_ids, format_types, is_fixed_price,
+    min_exposures, standard_formats_only, countries, regions, metros,
+    channels, etc.).
     """
-
-    # Local extension: device type filtering
-    device_types: list[str] | None = Field(
-        default=None,
-        description="Filter by device form factors (mobile, desktop, tablet, ctv, dooh, audio)",
-    )
 
     @model_validator(mode="before")
     @classmethod
@@ -222,30 +83,16 @@ class ProductFilters(LibraryFilters):
 
 
 class GetProductsRequest(LibraryGetProductsRequest):
-    """Extends library GetProductsWholesaleRequest (adcp 3.9: GetProductsRequest is a union alias).
+    """Extends library GetProductsRequest with live-spec cache precondition fields.
 
-    Base class: GetProductsWholesaleRequest (brief optional, buying_mode='wholesale').
-    We widen buying_mode to str|None so callers aren't forced into a single mode.
-
-    Library provides: account, brand, brief, buyer_campaign_ref, catalog,
-    context, ext, fields, filters, pagination, property_list, refine.
-
-    Internal-only: product_selectors (excluded from external serialization).
+    The installed adcp 5.7.0 library exposes the wholesale/pricing cache
+    preconditions; ``if_catalog_version`` remains a compatibility shim for
+    earlier v3.1 schema revisions.
     """
 
-    model_config = ConfigDict(extra=get_pydantic_extra_mode())
-
-    # Widen buying_mode from Literal['wholesale'] to str|None (we accept any mode or none)
-    buying_mode: str | None = Field(  # type: ignore[assignment]
+    if_catalog_version: str | None = Field(
         None,
-        description="Buyer intent: 'brief' (publisher curates) or 'wholesale' (buyer applies own audiences)",
-    )
-
-    # Internal-only fields (not in AdCP spec)
-    product_selectors: LibraryCatalog | None = Field(
-        None,
-        description="Selectors to filter the brand manifest product catalog for product discovery",
-        exclude=True,
+        description=("Deprecated catalog_version token accepted for compatibility with earlier v3.1 schema revisions."),
     )
 
 
@@ -257,13 +104,20 @@ class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse
     protocol layer (MCP, A2A, REST) via ProtocolEnvelope wrapper.
     """
 
+    model_config = ConfigDict(
+        extra=get_pydantic_extra_mode(),
+        use_enum_values=True,
+        validate_default=True,
+    )
+
     def __str__(self) -> str:
         """Return human-readable message for protocol layer.
 
         Used by both MCP (for display) and A2A (for task messages).
         Provides conversational text without adding non-spec fields to the schema.
         """
-        count = len(self.products)
+        products = self.products or []
+        count = len(products)
 
         # Base message
         if count == 0:
@@ -278,7 +132,7 @@ class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse
         from src.core.helpers.pricing_helpers import pricing_option_has_rate
 
         if count > 0 and all(
-            all(not pricing_option_has_rate(po) for po in p.pricing_options) for p in self.products if p.pricing_options
+            all(not pricing_option_has_rate(po) for po in p.pricing_options) for p in products if p.pricing_options
         ):
             return f"{base_msg} Please connect through an authorized buying agent for pricing data."
 

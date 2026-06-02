@@ -38,11 +38,17 @@ cmd_up() {
     export COMPOSE_PROJECT_NAME="adcp-test-$$"
     dc down -v 2>/dev/null || true
 
-    export POSTGRES_PORT ADCP_SALES_PORT=$MCP_PORT ADCP_TESTING=true CREATE_SAMPLE_DATA=true
+    export POSTGRES_PORT ADCP_SALES_PORT=$MCP_PORT ADCP_TESTING=true CREATE_SAMPLE_DATA=true MANAGED_INSTANCE=true
     export DATABASE_URL="postgresql://adcp_user:secure_password_change_me@localhost:${POSTGRES_PORT}/adcp_test"
     export DELIVERY_WEBHOOK_INTERVAL=5
+    export TENANT_MANAGEMENT_API_KEY="${TENANT_MANAGEMENT_API_KEY:-dev-tenant-management-key-change-me}"
     export GEMINI_API_KEY="${GEMINI_API_KEY:-test_key}"
     export ENCRYPTION_KEY="${ENCRYPTION_KEY:-PEg0SNGQyvzi4Nft-ForSzK8AGXyhRtql1MgoUsfUHk=}"  # TEST ONLY — never use in production
+
+    # LOCKFILE_HASH invalidates the Dockerfile uv-install layer when uv.lock
+    # changes — same mechanism as ``make compose-build``. Without it, the
+    # Dockerfile's build-arg guard fails and no image is produced.
+    export LOCKFILE_HASH="${LOCKFILE_HASH:-$(shasum -a 256 uv.lock | awk '{print $1}')}"
 
     dc build --progress=plain 2>&1 | grep -E "(Step|#|Building|exporting)" | tail -10
     dc up -d || { dc logs; exit 1; }
@@ -68,7 +74,9 @@ export ADCP_SALES_PORT=$MCP_PORT
 export DATABASE_URL="$DATABASE_URL"
 export ADCP_TESTING=true
 export CREATE_SAMPLE_DATA=true
+export MANAGED_INSTANCE=true
 export DELIVERY_WEBHOOK_INTERVAL=5
+export TENANT_MANAGEMENT_API_KEY="${TENANT_MANAGEMENT_API_KEY}"
 export GEMINI_API_KEY="${GEMINI_API_KEY}"
 export ENCRYPTION_KEY="${ENCRYPTION_KEY}"
 EOF

@@ -138,11 +138,12 @@ class TestTenantDashboard:
         # Should calculate metrics without errors
         assert response.status_code == 200
 
-        # Check for metrics display (live media buys, total revenue, etc.)
-        # Look for key dashboard elements rather than broad error checking
-        assert b"Total Revenue" in response.data
-        assert b"Live Media Buys" in response.data
-        assert b"Needs Attention" in response.data
+        # Ledger dashboard redesign (PR #24): the legacy labels
+        # "Total Revenue" / "Live Media Buys" / "Needs Attention" were
+        # replaced with the editorial pipeline columns + revenue ribbon.
+        assert b"Revenue \xc2\xb7 30 days" in response.data
+        assert b"Running" in response.data
+        assert b"Needs your attention" in response.data
 
         # Check for specific error messages that would indicate dashboard failures
         assert b"Error loading dashboard" not in response.data

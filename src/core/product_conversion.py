@@ -12,6 +12,8 @@ V3 Migration Notes:
 """
 
 import logging
+from typing import Any
+from unittest.mock import Mock
 
 from adcp import (
     CpcPricingOption,
@@ -23,36 +25,70 @@ from adcp import (
     VcpmPricingOption,
 )
 from adcp.types._generated import MediaChannel
-from packaging.version import InvalidVersion, Version
 
-# Import our extended Product (includes implementation_config)
-# Not the library Product - we need the internal fields
+from src.core.resolved_product import ResolvedProduct
 from src.core.schemas import Product
 
 logger = logging.getLogger(__name__)
 
-V3_VERSION = Version("3.0.0")
+
+def _split_price_guidance(price_guidance: Any) -> tuple[float | None, dict[str, Any] | None]:
+    """Return top-level floor_price plus public guidance without legacy floor."""
+    if not price_guidance:
+        return None, None
+    if isinstance(price_guidance, dict):
+        guidance_data = dict(price_guidance)
+    elif hasattr(price_guidance, "model_dump"):
+        guidance_data = price_guidance.model_dump(mode="json", exclude_none=True)
+    else:
+        guidance_data = {
+            field: getattr(price_guidance, field)
+            for field in ("floor", "p25", "p50", "p75", "p90")
+            if hasattr(price_guidance, field)
+        }
+
+    floor = guidance_data.pop("floor", None)
+    floor_price = float(floor) if floor is not None else None
+    return floor_price, guidance_data or None
 
 
-def needs_v2_compat(adcp_version: str | None) -> bool:
-    """Check if a client needs v2 backward-compat fields in responses.
+def _auction_pricing_fields(
+    *,
+    pricing_model: str,
+    pricing_option_id: str,
+    common_fields: dict[str, Any],
+    price_guidance: Any,
+) -> dict[str, Any]:
+    floor_price, public_guidance = _split_price_guidance(price_guidance)
+    if floor_price is None and not public_guidance:
+        raise ValueError(f"Auction {pricing_model.upper()} pricing option {pricing_option_id} requires price_guidance")
+    fields = dict(common_fields)
+    if floor_price is not None:
+        fields["floor_price"] = floor_price
+    if public_guidance:
+        fields["price_guidance"] = public_guidance
+    return fields
 
-    V2 compat fields (is_fixed, rate, price_guidance.floor) are only needed
-    for pre-3.0 clients. V3+ clients get clean responses per AdCP v3 spec.
 
-    Args:
-        adcp_version: Client-declared AdCP version string, or None if unknown.
+def _normalize_product_placements(placements: Any) -> Any:
+    """Project legacy stored placement dicts onto the current SDK shape."""
+    if not isinstance(placements, list):
+        return placements
 
-    Returns:
-        True if v2 compat fields should be added (version is None, < 3.0, or unparseable).
-    """
-    if adcp_version is None:
-        return True
-    try:
-        return Version(adcp_version) < V3_VERSION
-    except InvalidVersion:
-        logger.warning(f"Unparseable adcp_version '{adcp_version}', defaulting to v2 compat")
-        return True
+    normalized = []
+    for placement in placements:
+        if hasattr(placement, "model_dump"):
+            placement_data = placement.model_dump(mode="json", exclude_none=True)
+        elif isinstance(placement, dict):
+            placement_data = dict(placement)
+        else:
+            normalized.append(placement)
+            continue
+
+        placement_data.setdefault("kind", "seller_inline")
+        placement_data.setdefault("mode", "targetable")
+        normalized.append(placement_data)
+    return normalized
 
 
 def convert_pricing_option_to_adcp(
@@ -95,7 +131,9 @@ def convert_pricing_option_to_adcp(
     is_fixed = get_attr(pricing_option, "is_fixed")  # Internal flag, not sent to API
     currency = get_attr(pricing_option, "currency")
 
-    pricing_option_id = f"{pricing_model}_{currency.lower()}_{'fixed' if is_fixed else 'auction'}"
+    pricing_option_id = get_attr(pricing_option, "pricing_option_id") or (
+        f"{pricing_model}_{currency.lower()}_{'fixed' if is_fixed else 'auction'}"
+    )
 
     # Build common fields shared across all pricing options (V3 format)
     # Note: is_fixed and rate are added during serialization for v2.x compat
@@ -114,14 +152,6 @@ def convert_pricing_option_to_adcp(
     price_guidance = get_attr(pricing_option, "price_guidance")
     parameters = get_attr(pricing_option, "parameters")
 
-    # Extract floor from price_guidance if present (V3: moves to top-level floor_price)
-    floor_price = None
-    if price_guidance:
-        if isinstance(price_guidance, dict):
-            floor_price = price_guidance.get("floor")
-        elif hasattr(price_guidance, "floor"):
-            floor_price = price_guidance.floor
-
     # Discriminate by pricing_model to return typed instances
     if pricing_model == "cpm":
         if is_fixed:
@@ -132,20 +162,14 @@ def convert_pricing_option_to_adcp(
                 fixed_price=float(rate),
             )
         else:
-            if not price_guidance:
-                raise ValueError(f"Auction CPM pricing option {pricing_option_id} requires price_guidance")
-            # V3: floor moves to top-level, price_guidance only has percentiles
-            result = CpmPricingOption(
-                **common_fields,
-                price_guidance=price_guidance,
-            )
-            if floor_price is not None:
-                result = CpmPricingOption(
-                    **common_fields,
-                    floor_price=float(floor_price),
+            return CpmPricingOption(
+                **_auction_pricing_fields(
+                    pricing_model=pricing_model,
+                    pricing_option_id=pricing_option_id,
+                    common_fields=common_fields,
                     price_guidance=price_guidance,
                 )
-            return result
+            )
 
     elif pricing_model == "vcpm":
         if is_fixed:
@@ -156,19 +180,14 @@ def convert_pricing_option_to_adcp(
                 fixed_price=float(rate),
             )
         else:
-            if not price_guidance:
-                raise ValueError(f"Auction VCPM pricing option {pricing_option_id} requires price_guidance")
-            vcpm_result = VcpmPricingOption(
-                **common_fields,
-                price_guidance=price_guidance,
-            )
-            if floor_price is not None:
-                vcpm_result = VcpmPricingOption(
-                    **common_fields,
-                    floor_price=float(floor_price),
+            return VcpmPricingOption(
+                **_auction_pricing_fields(
+                    pricing_model=pricing_model,
+                    pricing_option_id=pricing_option_id,
+                    common_fields=common_fields,
                     price_guidance=price_guidance,
                 )
-            return vcpm_result
+            )
 
     elif pricing_model == "cpc":
         if is_fixed:
@@ -179,19 +198,14 @@ def convert_pricing_option_to_adcp(
                 fixed_price=float(rate),
             )
         else:
-            if not price_guidance:
-                raise ValueError(f"Auction CPC pricing option {pricing_option_id} requires price_guidance")
-            cpc_result = CpcPricingOption(
-                **common_fields,
-                price_guidance=price_guidance,
-            )
-            if floor_price is not None:
-                cpc_result = CpcPricingOption(
-                    **common_fields,
-                    floor_price=float(floor_price),
+            return CpcPricingOption(
+                **_auction_pricing_fields(
+                    pricing_model=pricing_model,
+                    pricing_option_id=pricing_option_id,
+                    common_fields=common_fields,
                     price_guidance=price_guidance,
                 )
-            return cpc_result
+            )
 
     elif pricing_model == "cpcv":
         # CPCV (Cost Per Completed View) - typically fixed rate
@@ -276,7 +290,10 @@ def convert_product_model_to_schema(product_model, adapter_type: str | None = No
     # Required fields per AdCP spec
     product_data["product_id"] = product_model.product_id
     product_data["name"] = product_model.name
-    product_data["description"] = product_model.description
+    # AdCP Product.description is a required non-null string. The ORM column
+    # is nullable for legacy rows, so coalesce to empty string to keep the
+    # wire shape valid (mirrors the reporting_capabilities default for #71).
+    product_data["description"] = product_model.description or ""
     product_data["delivery_type"] = product_model.delivery_type
 
     # format_ids: Use effective_format_ids which auto-resolves from profile if set
@@ -336,19 +353,47 @@ def convert_product_model_to_schema(product_model, adapter_type: str | None = No
             f"Create a PricingOption record for this product."
         )
 
-    # Optional fields
-    if product_model.measurement:
-        product_data["measurement"] = product_model.measurement
-    if product_model.creative_policy:
-        product_data["creative_policy"] = product_model.creative_policy
-    # Note: price_guidance is database metadata, not in AdCP Product schema - omit it
-    # Pricing information should be in pricing_options per AdCP spec
+    # AdCP 4.4 made reporting_capabilities required. The ORM column is NOT NULL
+    # with a server_default (migration c8404b483cf3), so this is always populated.
+    product_data["reporting_capabilities"] = product_model.reporting_capabilities
 
-    # Filter-related internal fields
-    if hasattr(product_model, "countries") and product_model.countries:
-        product_data["countries"] = product_model.countries
-    # channels: DB stores strings, schema uses MediaChannel enum
-    if hasattr(product_model, "channels") and product_model.channels:
+    # is_custom: column is Mapped[bool] non-null with default False on the ORM.
+    product_data["is_custom"] = product_model.is_custom
+
+    # Optional fields — emit only when set, so Pydantic field defaults apply
+    # for the rest. ``price_guidance`` is DB-only metadata; pricing lives on
+    # ``pricing_options`` per AdCP spec.
+    _OPTIONAL_PASSTHROUGH = (
+        "measurement",
+        "creative_policy",
+        "product_card",
+        "product_card_detailed",
+        "property_targeting_allowed",
+        "signal_targeting_allowed",
+        "catalog_match",
+        "catalog_types",
+        "conversion_tracking",
+        "data_provider_signals",
+        "included_signals",
+        "signal_targeting_rules",
+        "signal_targeting_options",
+        "forecast",
+        "allowed_actions",
+        "format_options",
+        "video_placement_types",
+        "vendor_metric_optimization",
+    )
+    for field_name in _OPTIONAL_PASSTHROUGH:
+        value = getattr(product_model, field_name, None)
+        if value is not None and not isinstance(value, Mock):
+            product_data[field_name] = value
+
+    placements = getattr(product_model, "placements", None)
+    if placements is not None and not isinstance(placements, Mock):
+        product_data["placements"] = _normalize_product_placements(placements)
+
+    # channels: DB stores strings, schema uses MediaChannel enum.
+    if product_model.channels:
         converted_channels = []
         for ch in product_model.channels:
             try:
@@ -358,127 +403,37 @@ def convert_product_model_to_schema(product_model, adapter_type: str | None = No
         if converted_channels:
             product_data["channels"] = converted_channels
 
-    if product_model.product_card:
-        product_data["product_card"] = product_model.product_card
-    if product_model.product_card_detailed:
-        product_data["product_card_detailed"] = product_model.product_card_detailed
-    if product_model.placements:
-        product_data["placements"] = product_model.placements
-    if product_model.reporting_capabilities:
-        product_data["reporting_capabilities"] = product_model.reporting_capabilities
-
-    # Default is_custom to False if not set
-    product_data["is_custom"] = product_model.is_custom if product_model.is_custom else False
-
-    # AdCP 3.6.0 fields — direct attribute access on typed Mapped[] columns
-    if product_model.property_targeting_allowed is not None:
-        product_data["property_targeting_allowed"] = product_model.property_targeting_allowed
-    if product_model.signal_targeting_allowed is not None:
-        product_data["signal_targeting_allowed"] = product_model.signal_targeting_allowed
-    if product_model.catalog_match is not None:
-        product_data["catalog_match"] = product_model.catalog_match
-    if product_model.catalog_types is not None:
-        product_data["catalog_types"] = product_model.catalog_types
-    if product_model.conversion_tracking is not None:
-        product_data["conversion_tracking"] = product_model.conversion_tracking
-    if product_model.data_provider_signals is not None:
-        product_data["data_provider_signals"] = product_model.data_provider_signals
-    if product_model.forecast is not None:
-        product_data["forecast"] = product_model.forecast
-
-    # Internal fields (not in AdCP spec, but in our extended Product schema)
-    # Use effective_implementation_config to auto-resolve from inventory profile if set
-    if hasattr(product_model, "effective_implementation_config"):
-        product_data["implementation_config"] = product_model.effective_implementation_config
-    elif hasattr(product_model, "implementation_config"):
-        product_data["implementation_config"] = product_model.implementation_config
-    else:
-        product_data["implementation_config"] = None
-
-    # Principal access control (internal field)
-    product_data["allowed_principal_ids"] = getattr(product_model, "allowed_principal_ids", None)
-
-    # Device type targeting (from targeting_template.device_targets)
-    targeting_template = getattr(product_model, "targeting_template", None)
-    if targeting_template and isinstance(targeting_template, dict):
-        device_targets = targeting_template.get("device_targets")
-        if isinstance(device_targets, list):
-            product_data["device_types"] = device_targets
-
     return Product(**product_data)
 
 
-def dump_pricing_option_v2_compat(po_model) -> dict:
-    """Serialize a pricing option model with v2.x backward-compat fields.
+def convert_product_model_to_resolved(product_model, adapter_type: str | None = None) -> ResolvedProduct:
+    """Convert ORM Product → :class:`ResolvedProduct`.
 
-    Takes a pricing option model object (CpmPricingOption, VcpmPricingOption, etc.)
-    and returns a serialized dict that includes v2.x fields:
-    - is_fixed: True if fixed_price is present, False otherwise
-    - rate: Copy of fixed_price when present (v2.x field name)
-    - price_guidance.floor: Copy of floor_price when present
-
-    Handles both RootModel-wrapped and unwrapped pricing option types.
-
-    Args:
-        po_model: A pricing option model (library type or RootModel wrapper).
-
-    Returns:
-        Serialized pricing option dict with v2.x backward-compat fields added.
+    Builds the wire-shape Product via :func:`convert_product_model_to_schema`
+    and pulls internal fields directly off the ORM model.
     """
-    # Unwrap RootModel if needed (adcp library wraps in PricingOption RootModel)
-    inner = getattr(po_model, "root", po_model)
+    wire = convert_product_model_to_schema(product_model, adapter_type=adapter_type)
 
-    # Serialize the model to dict
-    po_dict = inner.model_dump(mode="json", exclude_none=True)
+    countries = product_model.countries if product_model.countries else None
+    # Direct read — do NOT coerce ``[]`` to ``None``. ``allowed_principal_ids``
+    # is access-control data: an empty list means "no restrictions" while
+    # ``None`` means the same thing semantically, but the filter at
+    # ``products.py`` distinguishes them via ``getattr(..., None)`` and the
+    # caller may rely on the original shape.
+    allowed_principal_ids = product_model.allowed_principal_ids
+    implementation_config = product_model.effective_implementation_config
 
-    # Read fields from the model, not the dict, to derive v2 compat values
-    fixed_price = getattr(inner, "fixed_price", None)
-    floor_price = getattr(inner, "floor_price", None)
+    device_types: list[str] | None = None
+    targeting_template = product_model.targeting_template
+    if isinstance(targeting_template, dict):
+        device_targets = targeting_template.get("device_targets")
+        if isinstance(device_targets, list):
+            device_types = device_targets
 
-    # Add is_fixed discriminator (v2.x expected this field)
-    po_dict["is_fixed"] = fixed_price is not None
-
-    # Add rate field (v2.x name for fixed_price)
-    if fixed_price is not None:
-        po_dict["rate"] = fixed_price
-
-    # If floor_price is set, add floor to price_guidance for v2.x compat
-    if floor_price is not None:
-        if "price_guidance" not in po_dict:
-            po_dict["price_guidance"] = {}
-        po_dict["price_guidance"]["floor"] = floor_price
-
-    return po_dict
-
-
-def dump_product_v2_compat(product) -> dict:
-    """Serialize a Product model with v2.x backward-compat pricing options.
-
-    Takes a Product model and returns a serialized dict where pricing_options
-    include v2.x backward-compat fields (is_fixed, rate, price_guidance.floor).
-
-    Args:
-        product: A Product model (schema object with pricing_options).
-
-    Returns:
-        Serialized product dict with v2.x backward-compat pricing options.
-    """
-    product_dict = product.model_dump(mode="json")
-
-    # Replace pricing_options with v2-compat serialization from models
-    if hasattr(product, "pricing_options") and product.pricing_options:
-        product_dict["pricing_options"] = [dump_pricing_option_v2_compat(po) for po in product.pricing_options]
-
-    return product_dict
-
-
-def dump_products_v2_compat(products: list) -> list[dict]:
-    """Serialize a list of Product models with v2.x backward-compat pricing.
-
-    Args:
-        products: List of Product model objects.
-
-    Returns:
-        List of serialized product dicts with v2.x backward-compat fields.
-    """
-    return [dump_product_v2_compat(p) for p in products]
+    return ResolvedProduct(
+        wire=wire,
+        implementation_config=implementation_config,
+        countries=countries,
+        device_types=device_types,
+        allowed_principal_ids=allowed_principal_ids,
+    )

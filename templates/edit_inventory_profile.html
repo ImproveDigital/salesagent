@@ -1,245 +1,1166 @@
 {% extends "base.html" %}
 
-{% block title %}Edit Inventory Profile - Sales Agent Admin{% endblock %}
+{% block title %}{{ 'Create' if form_mode|default('edit') == 'create' else 'Edit' }} Inventory Bundle - Sales Agent Admin{% endblock %}
 
 {% block content %}
-<div class="card">
-    <div class="back-button-container">
-        <a href="{{ url_for('inventory_profiles.list_inventory_profiles', tenant_id=tenant_id) }}" class="btn btn-secondary btn-back">
-            ← Back to Inventory Profiles
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tenant_signals.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tenant_inventory_profiles.css') }}">
+
+{% set is_create = form_mode|default('edit') == 'create' %}
+{% set s = bundle_summary %}
+
+<div class="edit-page">
+    <div class="edit-container">
+
+        <a class="edit-back"
+           href="{{ url_for('inventory_profiles.list_inventory_profiles', tenant_id=tenant_id) }}">
+            ← Back to Inventory bundles
         </a>
+
+        <header class="edit-page-header">
+            <h1>{% if is_create %}Create inventory bundle{% else %}Edit {{ profile.name }}{% endif %}</h1>
+            <p class="lead">
+                {% if is_create %}
+                    Shape synced inventory, formats and properties into a buyer-visible bundle.
+                {% else %}
+                    Tweak the inventory shape, formats and properties that ship with this bundle.
+                {% endif %}
+                {# Adapter is shown as a chip on the Basics card — don't repeat here. #}
+            </p>
+        </header>
+
+        <form id="profile-form" method="POST">
+            <div class="edit-grid">
+
+                {# ===== Sidebar ===== #}
+                <aside class="edit-sidebar">
+
+                    {# Summary card — live validators (#529).
+                       Each row has a state dot (.vd) flipped by JS as the
+                       form changes. The Adapter + Used by rows are
+                       informational and stay neutral. #}
+                    <div class="card">
+                        <div class="card__header">
+                            <h2 class="card__title">Summary</h2>
+                        </div>
+                        <div class="summary-list" id="summary-validators">
+                            <div class="summary-list__row">
+                                <span class="k">Adapter</span>
+                                <span class="v">{{ s.adapter_label }}</span>
+                            </div>
+                            <div class="summary-list__row" data-validator="name">
+                                <span class="k">Name <span class="vd" aria-hidden="true"></span></span>
+                                <span class="v">
+                                    <span data-validator-text="name">{{ profile.name or 'missing' }}</span>
+                                </span>
+                            </div>
+                            <div class="summary-list__row" data-validator="description">
+                                <span class="k">Desc <span class="vd" aria-hidden="true"></span></span>
+                                <span class="v">
+                                    <span data-validator-text="description">{{ 'present' if profile.description else 'missing' }}</span>
+                                </span>
+                            </div>
+                            <div class="summary-list__row" data-validator="inventory">
+                                <span class="k">Inventory <span class="vd" aria-hidden="true"></span></span>
+                                <span class="v">
+                                    <span data-validator-text="inventory">
+                                        {% if s.ad_unit_count == 0 and s.placement_count == 0 %}
+                                            <span class="muted">none yet</span>
+                                        {% else %}
+                                            {% if s.placement_count %}
+                                                {{ s.placement_count }} {{ 'placement' if s.placement_count == 1 else 'placements' }}
+                                            {% endif %}
+                                            {% if s.placement_count and s.ad_unit_count %} · {% endif %}
+                                            {% if s.ad_unit_count %}
+                                                {{ s.ad_unit_count }} {{ 'ad unit' if s.ad_unit_count == 1 else 'ad units' }}
+                                            {% endif %}
+                                        {% endif %}
+                                    </span>
+                                </span>
+                            </div>
+                            <div class="summary-list__row" data-validator="formats">
+                                <span class="k">Formats <span class="vd" aria-hidden="true"></span></span>
+                                <span class="v">
+                                    <span data-validator-text="formats">
+                                        {% if s.format_count %}
+                                            {{ s.format_count }}
+                                        {% else %}
+                                            <span class="muted">none</span>
+                                        {% endif %}
+                                    </span>
+                                </span>
+                            </div>
+                            <div class="summary-list__row" data-validator="properties">
+                                <span class="k">Properties <span class="vd" aria-hidden="true"></span></span>
+                                <span class="v">
+                                    <span data-validator-text="properties">
+                                        {% if s.property_mode == 'tags' %}
+                                            {% if s.property_tag_count %}
+                                                {{ s.property_tag_count }} {{ 'tag' if s.property_tag_count == 1 else 'tags' }}
+                                            {% else %}
+                                                <span class="muted">none</span>
+                                            {% endif %}
+                                        {% else %}
+                                            {% if s.property_id_count %}
+                                                {{ s.property_id_count }} specific
+                                                {{ 'property' if s.property_id_count == 1 else 'properties' }}
+                                            {% else %}
+                                                <span class="muted">none</span>
+                                            {% endif %}
+                                        {% endif %}
+                                    </span>
+                                </span>
+                            </div>
+                            <div class="summary-list__row">
+                                <span class="k">Used by</span>
+                                <span class="v">
+                                    {% if products_using %}
+                                        {{ products_using | length }} {{ 'product' if products_using | length == 1 else 'products' }}
+                                    {% elif not is_create %}
+                                        <span class="muted">no products yet</span>
+                                    {% else %}
+                                        <span class="muted">new bundle</span>
+                                    {% endif %}
+                                </span>
+                            </div>
+                            {% if products_using %}
+                                <div class="summary-list__products">
+                                    {% for p in products_using[:5] %}
+                                        <a class="summary-list__product"
+                                           href="{{ url_for('products.edit_product', tenant_id=tenant_id, product_id=p.product_id) }}">
+                                            {{ p.name }}
+                                        </a>
+                                    {% endfor %}
+                                    {% if products_using | length > 5 %}
+                                        <span class="summary-list__more">
+                                            + {{ products_using | length - 5 }} more
+                                        </span>
+                                    {% endif %}
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    {% if not is_create %}
+                        {# Shared-with card — same data as the design's "Blast radius"
+                           but the word "blast" reads as incident-response; this is
+                           informational context. Reviewer (internal-tools) called it. #}
+                        <div class="card">
+                            <div class="card__header">
+                                <h2 class="card__title">Also in other bundles</h2>
+                            </div>
+                            {% if blast_radius %}
+                                <div class="usedby">
+                                    <p class="usedby__intro">
+                                        {{ blast_radius | length }}
+                                        {{ 'item' if blast_radius | length == 1 else 'items' }}
+                                        in this bundle
+                                        {{ 'is' if blast_radius | length == 1 else 'are' }}
+                                        also in other bundles. Edits to inventory <em>here</em> don't affect those —
+                                        bundles share placements, they don't share state.
+                                    </p>
+                                    {% for r in blast_radius[:5] %}
+                                        <div class="usedby__row">
+                                            <span class="name">
+                                                <code>{{ r.external_id }}</code>
+                                                <span class="meta">
+                                                    {{ 'placement' if r.kind == 'placement' else 'ad unit' }}
+                                                </span>
+                                            </span>
+                                            <span class="meta">
+                                                in {{ r.others }} other
+                                                {{ 'bundle' if r.others == 1 else 'bundles' }}
+                                            </span>
+                                        </div>
+                                    {% endfor %}
+                                    {% if blast_radius | length > 5 %}
+                                        <div class="usedby__row">
+                                            <span class="meta">+ {{ blast_radius | length - 5 }} more</span>
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            {% else %}
+                                <div class="usedby">
+                                    <div class="usedby__empty">
+                                        No inventory in this bundle appears in another bundle yet. That's fine —
+                                        bundles can share placements freely.
+                                    </div>
+                                </div>
+                            {% endif %}
+                        </div>
+                    {% endif %}
+
+                </aside>
+
+                {# ===== Main column ===== #}
+                <div class="edit-main">
+
+                    {# Basics card #}
+                    <div class="card">
+                        <div class="card__header">
+                            <h2 class="card__title">Basics</h2>
+                            <div class="card__controls">
+                                <span class="chip-adapter">{{ s.adapter_label }}</span>
+                            </div>
+                        </div>
+                        <div class="fieldgrid">
+                            <div class="field field--full">
+                                <label for="name">Bundle name *</label>
+                                <input type="text" id="name" name="name" required
+                                       placeholder="e.g., Homepage Premium Display"
+                                       value="{{ profile.name }}">
+                                <span class="hint">
+                                    Buyer-facing name. Use sentence case with no terminal punctuation
+                                </span>
+                            </div>
+                            {# Profile ID is the internal slug — carried as hidden so POST validates. #}
+                            <input type="hidden" id="profile_id" name="profile_id" value="{{ profile.profile_id }}">
+                            <div class="field field--full">
+                                <label for="description">How buyers see this</label>
+                                <textarea id="description" name="description" rows="3"
+                                    placeholder='Tell buyers what they get. Be factual, but explain why it&apos;s worth buying.&#10;e.g. "Our homepage — 100% viewable, sub-1s load, no creative rotation."'>{{ profile.description if profile.description else '' }}</textarea>
+                                <span class="hint">
+                                    Shown to buyers when they discover your inventory. Treat it as merchandising copy
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {# Inventory card #}
+                    <div class="card">
+                        <div class="card__header">
+                            <div>
+                                <h2 class="card__title">Inventory</h2>
+                                <p class="card__sub">
+                                    Pick placements or ad units from your synced {{ s.adapter_label }} inventory.
+                                    Placements wrap ad units — picking a placement covers all its children.
+                                </p>
+                            </div>
+                            <div class="card__controls">
+                                <div class="seg" id="inventory-picker-mode" aria-label="Inventory picker mode">
+                                    <button type="button" class="active" data-picker-mode="tree" aria-pressed="true">Tree</button>
+                                    <button type="button" data-picker-mode="flat" aria-pressed="false">Flat ad units</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card__body">
+                            <div id="inventory-selected-strip" class="chip-strip inventory-selected-strip"></div>
+
+                            <div class="picker__toolbar">
+                                <div class="picker__search">
+                                    <span class="picker__search-icon" aria-hidden="true">⌕</span>
+                                    <input type="search" id="inventory-picker-search"
+                                           placeholder="Filter placements, ad units, or IDs"
+                                           aria-label="Filter inventory picker"
+                                           autocomplete="off">
+                                </div>
+                                <span class="picker__count" id="inventory-picker-status" aria-live="polite"></span>
+                                <a class="picker__browse" href="{{ url_for('inventory.inventory_browser', tenant_id=tenant_id) }}">
+                                    Browse inventory
+                                </a>
+                                <div class="picker__spacer"></div>
+                                <label class="picker__toggle">
+                                    <input type="checkbox" name="include_descendants" checked>
+                                    Include child ad units
+                                </label>
+                            </div>
+
+                            <div class="tree-picker" id="inventory-picker-list"></div>
+                            <div class="reuse-strip" id="inventory-picker-help">
+                                <span class="reuse-strip__icon" aria-hidden="true">▦</span>
+                                <span>
+                                    <strong>Picking a placement</strong> includes its child ad units automatically.
+                                    Flip to <strong>Flat ad units</strong> to pick individual units only.
+                                </span>
+                            </div>
+
+                            <textarea id="targeted_ad_unit_ids" name="targeted_ad_unit_ids" style="display: none;"></textarea>
+                            <textarea id="targeted_placement_ids" name="targeted_placement_ids" style="display: none;"></textarea>
+                        </div>
+                    </div>
+
+                    {# Formats card #}
+                    <div class="card">
+                        <div class="card__header">
+                            <div>
+                                <h2 class="card__title">Creative formats</h2>
+                                <p class="card__sub">
+                                    Automatically derived from selected GAM inventory sizes and rendering settings.
+                                </p>
+                            </div>
+                        </div>
+                        <div class="card__body">
+                            <div id="format-derived-panel" style="padding: 12px 14px; background: var(--sig-bg-info); border: 1px solid var(--sig-bd-default); border-radius: 6px;">
+                                <div id="format-derived-status" style="color: var(--sig-fg-secondary); font-size: 13px;">
+                                    Pick inventory to detect creative formats.
+                                </div>
+                                <div id="format-derived-list" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;"></div>
+                            </div>
+
+                            <input type="hidden" id="formats-data" name="formats" value="[]">
+                        </div>
+                    </div>
+
+                    {# Properties card #}
+                    <div class="card">
+                        <div class="card__header">
+                            <div>
+                                <h2 class="card__title">Properties</h2>
+                                <p class="card__sub">
+                                    Add publisher domains, then use AAO lookup to select the property tags or IDs this
+                                    bundle covers.
+                                </p>
+                            </div>
+                        </div>
+                        <div class="card__body">
+                            <input type="hidden" name="property_mode" value="full">
+                            <textarea id="publisher_properties" name="publisher_properties" hidden>{{ profile.publisher_properties | tojson | safe }}</textarea>
+
+                            <div class="domain-lookup">
+                                <div class="domain-lookup__input">
+                                    <label for="publisher-domain-input">Publisher domain</label>
+                                    <input type="text" id="publisher-domain-input" placeholder="espn.com" autocomplete="off">
+                                </div>
+                                <button type="button" class="btn btn-secondary" id="publisher-domain-add">
+                                    Add domain
+                                </button>
+                                <span class="domain-lookup__status" id="publisher-domain-status" aria-live="polite"></span>
+                            </div>
+
+                            <div class="prop-rows" id="prop-rows"></div>
+                            <div class="reuse-strip">
+                                <span class="reuse-strip__icon" aria-hidden="true">▦</span>
+                                <span>
+                                    <strong>Domain-first AAO lookup</strong>
+                                    fetches cached adagents.json structure for the publisher you name. The saved
+                                    bundle stores explicit publisher domains plus property tags or IDs.
+                                </span>
+                            </div>
+
+                            <template id="prop-row-template">
+                                <div class="prop-row prop-row--domain" data-prop-row>
+                                    <input type="hidden" name="publisher_domain[]" value="">
+                                    <div class="prop-row__main">
+                                        <div class="prop-row__top">
+                                            <div>
+                                                <div class="prop-row__domain"></div>
+                                                <div class="prop-row__status"></div>
+                                            </div>
+                                            <div class="prop-row__actions">
+                                                <button type="button" class="btn btn-sm btn-secondary" data-lookup-domain>
+                                                    Lookup
+                                                </button>
+                                                <button type="button" class="prop-row__remove" data-remove-row>
+                                                    Remove
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div class="seg prop-row__mode" aria-label="Property selection mode">
+                                            <button type="button" data-row-mode="tags">Tags</button>
+                                            <button type="button" data-row-mode="ids">Property IDs</button>
+                                        </div>
+                                        <div class="prop-row__editor" data-row-editor></div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    {# Default targeting was a raw-JSON field that operators got wrong more often
+                       than right. Hidden from the edit UX; products handle targeting at compose
+                       time. Carried as a hidden no-op so POST validates. #}
+                    <input type="hidden" id="targeting_template" name="targeting_template" value="">
+
+                </div>
+            </div>
+        </form>
+
     </div>
 
-    <h2>Edit Inventory Profile: {{ profile.name }}</h2>
-    <p class="text-muted">Update inventory configuration</p>
-
-    <form id="profile-form" method="POST">
-        <!-- Section 1: Basic Information -->
-        <h3 style="margin-top: 0; border-bottom: 2px solid #007bff; padding-bottom: 0.5rem;">Profile Information</h3>
-        <p style="color: #666; margin-bottom: 1.5rem;">Basic details about this inventory profile</p>
-
-        <div class="form-group">
-            <label for="name">Profile Name *</label>
-            <input type="text" id="name" name="name" required placeholder="e.g., Homepage Premium Display" value="{{ profile.name }}">
-            <small style="color: #666;">A descriptive name for this inventory configuration</small>
-        </div>
-
-        <div class="form-group">
-            <label for="profile_id">Profile ID</label>
-            <input type="text" id="profile_id" name="profile_id" value="{{ profile.profile_id }}" readonly disabled>
-            <small style="color: #666;">Profile ID cannot be changed after creation.</small>
-        </div>
-
-        <div class="form-group">
-            <label for="description">Description</label>
-            <textarea id="description" name="description" rows="3" placeholder="Describe what inventory this profile covers">{{ profile.description if profile.description else '' }}</textarea>
-        </div>
-
-        <!-- Section 2: Inventory Selection -->
-        <h3 style="margin-top: 2rem; border-bottom: 2px solid #007bff; padding-bottom: 0.5rem;">Inventory (Ad Units & Placements)</h3>
-        <p style="color: #666; margin-bottom: 1.5rem;">Select ad units and placements from your ad server inventory</p>
-
-        <div class="form-group">
-            <label for="ad-unit-search">Ad Units</label>
-            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
-                <input type="text" id="ad-unit-search" placeholder="Search ad units..." style="flex: 1;">
-                <button type="button" onclick="openInventoryPicker('ad_unit')" class="btn btn-secondary">
-                    Browse Ad Units
-                </button>
-            </div>
-            <div id="selected-ad-units" style="min-height: 60px; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem; background: #f9f9f9;">
-                <span style="color: #999;">No ad units selected</span>
-            </div>
-            <textarea id="targeted_ad_unit_ids" name="targeted_ad_unit_ids" style="display: none;"></textarea>
-        </div>
-
-        <div class="form-group">
-            <label for="placement-search">Placements</label>
-            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
-                <input type="text" id="placement-search" placeholder="Search placements..." style="flex: 1;">
-                <button type="button" onclick="openInventoryPicker('placement')" class="btn btn-secondary">
-                    Browse Placements
-                </button>
-            </div>
-            <div id="selected-placements" style="min-height: 60px; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem; background: #f9f9f9;">
-                <span style="color: #999;">No placements selected</span>
-            </div>
-            <textarea id="targeted_placement_ids" name="targeted_placement_ids" style="display: none;"></textarea>
-        </div>
-
-        <div class="form-group">
-            <label>
-                <input type="checkbox" name="include_descendants" checked>
-                Include child ad units in targeting
-            </label>
-        </div>
-
-        <!-- Section 3: Creative Formats -->
-        <h3 style="margin-top: 2rem; border-bottom: 2px solid #007bff; padding-bottom: 0.5rem;">Creative Formats *</h3>
-        <p style="color: #666; margin-bottom: 1rem;">Select which creative formats are supported by this inventory</p>
-
-        <!-- Search box for formats -->
-        <div id="format-search-box" style="margin-bottom: 1rem;">
-            <input type="text" id="format-search-input" placeholder="Search formats by name, type, or size..."
-                   style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-
-        <!-- Selected formats (tags) -->
-        <div id="selected-formats" style="margin-bottom: 1rem; padding: 1rem; background: #f0f7ff; border: 1px solid #d0e7ff; border-radius: 4px; min-height: 50px; display: none;">
-            <div style="font-weight: 600; margin-bottom: 0.5rem; color: #0066cc;">Selected Formats:</div>
-            <div id="selected-formats-list" style="display: flex; flex-wrap: wrap; gap: 0.5rem;"></div>
-        </div>
-
-        <!-- Format list -->
-        <div id="format-list" style="margin-top: 1rem;">
-            <div id="format-loading" style="text-align: center; padding: 2rem; color: #666;">
-                Loading formats from creative agents...
-            </div>
-            <div id="format-results" style="display: none;"></div>
-        </div>
-
-        <!-- Hidden input to store selected format data -->
-        <input type="hidden" id="formats-data" name="formats" value="[]">
-
-        <!-- Section 4: Publisher Properties -->
-        <h3 style="margin-top: 2rem; border-bottom: 2px solid #007bff; padding-bottom: 0.5rem;">Publisher Properties *</h3>
-        <p style="color: #666; margin-bottom: 1rem;">Specify which publisher properties (websites, apps, etc.) this inventory represents</p>
-
-        <div class="alert" style="background: #e3f2fd; border-left: 4px solid #2196f3; padding: 1rem; margin-bottom: 1rem;">
-            <strong>Required:</strong> Inventory profiles must specify which properties they cover for AdCP compliance.
-        </div>
-
-        <!-- Property Selection Mode -->
-        <div class="form-group">
-            <label>Property Selection Method *</label>
-            <div class="form-group">
-                <label>
-                    <input type="radio" name="property_mode" value="tags" checked onchange="togglePropertyMode()">
-                    Use Property Tags (Recommended)
-                </label>
-                <small style="display: block; color: #666; margin-left: 1.5rem;">Assign tags that group related properties. Simple and flexible - buyers fetch property details via list_authorized_properties.</small>
-            </div>
-
-            <div class="form-group" style="margin-top: 0.5rem;">
-                <label>
-                    <input type="radio" name="property_mode" value="property_ids" onchange="togglePropertyMode()">
-                    Select Specific Properties (by ID)
-                </label>
-                <small style="display: block; color: #666; margin-left: 1.5rem;">Choose exact properties from your authorized inventory. Provides precise property-level control.</small>
-            </div>
-
-            <div class="form-group" style="margin-top: 0.5rem;">
-                <label>
-                    <input type="radio" name="property_mode" value="full" onchange="togglePropertyMode()">
-                    Specify Full Properties (Legacy)
-                </label>
-                <small style="display: block; color: #666; margin-left: 1.5rem;">Include complete property objects - for backward compatibility only.</small>
-            </div>
-        </div>
-
-        <!-- Property Tags Section (Default) -->
-        <div id="property-tags-section" style="margin-top: 1rem;">
-            <div class="form-group">
-                <label for="property_tags">Property Tags *</label>
-                <input type="text" id="property_tags" name="property_tags" placeholder="e.g., all_inventory, premium, sports">
-                <small style="color: #666;">Comma-separated list of tags. Example: all_inventory, premium, homepage</small>
-            </div>
-        </div>
-
-        <!-- Property IDs Section (NEW) -->
-        <div id="property-ids-section" style="margin-top: 1rem; display: none;">
-            <div class="form-group">
-                <label>Select Specific Properties *</label>
-                <small style="color: #666; display: block; margin-bottom: 0.5rem;">Select one or more properties from your authorized inventory.</small>
-                {% if authorized_properties and authorized_properties|length > 0 %}
-                <div style="max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem; background: #fafafa;">
-                    {% for prop in authorized_properties %}
-                    <label style="display: block; padding: 0.5rem; border-bottom: 1px solid #eee; cursor: pointer; transition: background 0.2s;"
-                           onmouseover="this.style.background='#f0f7ff'"
-                           onmouseout="this.style.background='transparent'">
-                        <input type="checkbox" name="selected_property_ids" value="{{ prop.property_id }}" style="margin-right: 0.5rem;">
-                        <strong>{{ prop.name or prop.property_id }}</strong>
-                        <span style="color: #666; font-size: 0.9em;">({{ prop.property_type }})</span>
-                        {% if prop.tags %}
-                        <div style="margin-left: 1.5rem; margin-top: 0.25rem;">
-                            {% for tag in prop.tags %}
-                            <span style="background: #e3f2fd; color: #1976d2; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.8em; margin-right: 0.25rem;">{{ tag }}</span>
-                            {% endfor %}
-                        </div>
-                        {% endif %}
-                    </label>
-                    {% endfor %}
-                </div>
+    {# Sticky form bar — Save / Cancel.
+       The status line is the live validation surface (#529): the JS toggles
+       its inner text + the bar's `data-form-state` attribute as the operator
+       edits the form. When the user mashes Save with missing required
+       fields, the formbar pulses + focus jumps to the first invalid field. #}
+    <div class="formbar" id="formbar" data-form-state="">
+        <div class="formbar__inner">
+            <div class="formbar__status" id="formbar-status" aria-live="polite">
+                {% if is_create %}
+                    New bundle will be available to products after creation.
                 {% else %}
-                <div class="alert" style="background: #fff3cd; border: 1px solid #ffc107; padding: 1rem; border-radius: 4px;">
-                    <strong>⚠️ No publisher properties found</strong><br>
-                    <small style="display: block; margin-top: 0.5rem;">
-                        You need to add publisher partnerships first.
-                        <a href="{{ url_for('inventory.inventory_browser', tenant_id=tenant_id) }}#publishers-tab" style="color: #856404; text-decoration: underline;">Go to Inventory → Publishers & Properties →</a>
-                    </small>
-                </div>
+                    Changes apply to the next media buy that uses this bundle.
                 {% endif %}
             </div>
+            <div class="formbar__spacer"></div>
+            {% if not is_create %}
+                <a class="btn btn-secondary"
+                   href="{{ url_for('inventory_profiles.preview_inventory_profile', tenant_id=tenant_id, profile_id=profile.id) }}">
+                    Preview
+                </a>
+                <form method="post"
+                      action="{{ url_for('inventory_profiles.duplicate_inventory_profile', tenant_id=tenant_id, profile_id=profile.id) }}"
+                      style="margin: 0; display: inline;">
+                    <button type="submit" class="btn btn-secondary">Duplicate</button>
+                </form>
+            {% endif %}
+            <a class="btn btn-secondary"
+               href="{{ url_for('inventory_profiles.list_inventory_profiles', tenant_id=tenant_id) }}">
+                Cancel
+            </a>
+            <button type="submit" form="profile-form" class="btn btn-primary"
+                    id="save-bundle-btn">
+                {{ 'Create bundle' if is_create else 'Save bundle' }}
+            </button>
         </div>
-
-        <!-- Full Properties Section (Legacy) -->
-        <div id="property-full-section" style="margin-top: 1rem; display: none;">
-            <div class="alert" style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 1rem; margin-bottom: 1rem;">
-                <strong>⚠️ Legacy Mode:</strong> This mode is for backward compatibility only. New profiles should use property tags or property IDs.
-            </div>
-            <div class="form-group">
-                <label for="publisher_properties">Publisher Properties (JSON) *</label>
-                <textarea id="publisher_properties" name="publisher_properties" rows="8"
-                          placeholder='[{"publisher_domain": "example.com", "property_tags": ["all_inventory"]}]'
-                          style="font-family: monospace; font-size: 0.9rem;"></textarea>
-                <small style="color: #666;">
-                    AdCP-compliant publisher properties structure. Each entry must include:
-                    <ul style="margin-top: 0.5rem; margin-bottom: 0;">
-                        <li><code>publisher_domain</code> (required): Domain where adagents.json is hosted</li>
-                        <li><code>property_ids</code> (array) OR <code>property_tags</code> (array): Specific properties or tags</li>
-                    </ul>
-                </small>
-
-                {% if tenant and tenant.primary_domain %}
-                <button type="button" class="btn btn-sm btn-secondary mt-2" onclick="setDefaultProperties()">
-                    Use Default ({{ tenant.primary_domain }})
-                </button>
-                {% endif %}
-            </div>
-        </div>
-
-        <!-- Section 5: Optional Targeting Template -->
-        <h3 style="margin-top: 2rem; border-bottom: 2px solid #007bff; padding-bottom: 0.5rem;">Default Targeting (Optional)</h3>
-        <p style="color: #666; margin-bottom: 1rem;">Optional default targeting rules that products can inherit</p>
-
-        <div class="form-group">
-            <label for="targeting_template">Targeting Template (JSON)</label>
-            <textarea id="targeting_template" name="targeting_template" rows="6"
-                      placeholder='{"geo_countries": ["US"], "device_type_any_of": ["desktop", "mobile"]}'
-                      style="font-family: monospace; font-size: 0.9rem;"></textarea>
-            <small style="color: #666;">Optional. Products using this profile can inherit or override these targeting rules.</small>
-        </div>
-
-        <!-- Submit Buttons -->
-        <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #ddd;">
-            <button type="submit" class="btn btn-primary">Update Inventory Profile</button>
-            <a href="{{ url_for('inventory_profiles.list_inventory_profiles', tenant_id=tenant_id) }}" class="btn btn-secondary">Cancel</a>
-        </div>
-    </form>
+    </div>
 </div>
 
 <script>
-// Format selection state
-let selectedFormats = new Set();
 let allFormats = [];
+let derivedFormats = [];
 
 // Pre-populate existing data
 const existingProfile = {
     inventory_config: {{ profile.inventory_config | tojson | safe }},
-    formats: {{ profile.formats | tojson | safe }},
+    formats: {{ profile.format_ids | tojson | safe }},
     publisher_properties: {{ profile.publisher_properties | tojson | safe }},
     targeting_template: {{ profile.targeting_template | tojson | safe if profile.targeting_template else 'null' }}
 };
+
+// Server-resolved external_id -> {name, id} maps. Missing IDs (e.g. entity
+// deleted in GAM after the bundle saved) won't have entries here — fall back
+// to bare ID so the operator still sees something. (#530)
+const INVENTORY_NAMES = {
+    ad_units: {{ inventory_names.ad_units | tojson | safe }},
+    placements: {{ inventory_names.placements | tojson | safe }}
+};
+
+const INVENTORY_PICKER = {{ inventory_picker | tojson | safe }};
+const INVENTORY_PICKER_LIMIT = {{ inventory_picker_limit | tojson }};
+const INVENTORY_CHIP_REUSE_ENABLED = {{ (not is_create) | tojson }};
+const BUNDLE_ADAPTER_ID = {{ (s.adapter_id or '') | tojson }};
+const KNOWN_PROPERTY_TAGS = new Set({{ known_property_tags | tojson | safe }});
+const SCRIPT_ROOT = '{{ request.script_root }}' || '';
+const DEFAULT_PUBLISHER_DOMAIN = {{ (tenant.primary_domain or '') | tojson }};
+const DEFAULT_CREATIVE_AGENT_URL = 'https://creative.adcontextprotocol.org';
+const GAM_CANONICAL_DISPLAY_FORMAT_IDS = ['display_image', 'display_html', 'display_js'];
+const GAM_CANONICAL_VIDEO_FORMAT_IDS = ['video_standard', 'video_vast'];
+
+// Base path for the Reuse page; picker rows and selected chips append
+// ``?item=<id>&kind=<kind>``. (#542)
+const REUSE_BASE_URL = '{{ url_for("inventory_profiles.reuse_inventory_bundles", tenant_id=tenant_id) }}';
+
+function _escAttr(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+}
+
+let inventoryPickerMode = 'tree';
+let inventoryOpenPlacements = new Set();
+let inventoryConfigPrepopulated = false;
+const inventorySelection = {
+    ad_units: new Set(),
+    placements: new Set(),
+};
+
+function isInventoryPickerOpen() {
+    return false;
+}
+
+function inventoryRows(key) {
+    return INVENTORY_PICKER[key] || [];
+}
+
+function inventoryRowById(key, id) {
+    return inventoryRows(key).find(row => row.id === id) || null;
+}
+
+function inventoryKindLabel(row) {
+    if (row.kind === 'placement') return row.subkind === 'tag' ? 'TAG' : 'SITE';
+    return 'AD UNIT';
+}
+
+function inventoryKindClass(row) {
+    if (row.kind === 'placement') return row.subkind === 'tag' ? 'kindchip--tag' : 'kindchip--site';
+    return 'kindchip--unit';
+}
+
+function inventoryReuseHref(row) {
+    const kind = row.kind === 'placement' ? 'placement' : 'ad_unit';
+    return `${REUSE_BASE_URL}?item=${encodeURIComponent(row.id)}&kind=${encodeURIComponent(kind)}`;
+}
+
+function inventoryBundleBadge(row, cascade = false) {
+    if (cascade) return 'via placement';
+    const count = Number(row.bundle_count || 0);
+    if (count > 0) return `in ${count} bundle${count === 1 ? '' : 's'}`;
+    return 'not yet bundled';
+}
+
+function inventoryRowSecondaryAction(row, cascade = false) {
+    if (!INVENTORY_CHIP_REUSE_ENABLED) return '';
+    return `<a class="tree__use ${row.bundle_count ? '' : 'solo'}" href="${_escAttr(inventoryReuseHref(row))}">`
+        + `${_escAttr(inventoryBundleBadge(row, cascade))}<span class="tree__reuse-arrow">Add elsewhere →</span></a>`;
+}
+
+function seedInventoryNameMaps() {
+    Object.entries(INVENTORY_PICKER || {}).forEach(([key, rows]) => {
+        if (!INVENTORY_NAMES[key]) INVENTORY_NAMES[key] = {};
+        (rows || []).forEach(row => {
+            INVENTORY_NAMES[key][row.id] = { name: row.name, id: row.id, subkind: row.subkind };
+        });
+    });
+}
+
+function writeInventoryHidden(key) {
+    const hiddenId = key === 'placements' ? 'targeted_placement_ids' : 'targeted_ad_unit_ids';
+    const hidden = document.getElementById(hiddenId);
+    if (!hidden) return;
+    hidden.value = JSON.stringify(Array.from(inventorySelection[key]));
+    hidden.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function syncInventorySelection() {
+    const focusSelector = inventoryFocusSelector(document.activeElement);
+    writeInventoryHidden('placements');
+    writeInventoryHidden('ad_units');
+    renderSelectedInventoryStrip();
+    renderInventoryPicker(focusSelector);
+    updateDerivedFormats();
+    if (typeof recomputeValidity === 'function') recomputeValidity();
+}
+
+function togglePlacement(id) {
+    if (inventorySelection.placements.has(id)) inventorySelection.placements.delete(id);
+    else {
+        inventorySelection.placements.add(id);
+        inventoryOpenPlacements.add(id);
+    }
+    syncInventorySelection();
+}
+
+function toggleAdUnit(id) {
+    if (inventorySelection.ad_units.has(id)) inventorySelection.ad_units.delete(id);
+    else inventorySelection.ad_units.add(id);
+    syncInventorySelection();
+}
+
+function removeSelectedInventory(kind, id) {
+    const key = kind === 'placement' ? 'placements' : 'ad_units';
+    inventorySelection[key].delete(id);
+    syncInventorySelection();
+}
+
+function renderSelectedInventoryStrip() {
+    const strip = document.getElementById('inventory-selected-strip');
+    if (!strip) return;
+
+    const items = [];
+    inventorySelection.placements.forEach(id => {
+        const row = inventoryRowById('placements', id) || { id, name: id, kind: 'placement', subkind: 'site' };
+        items.push(row);
+    });
+    inventorySelection.ad_units.forEach(id => {
+        const row = inventoryRowById('ad_units', id) || { id, name: id, kind: 'ad_unit', subkind: 'unit' };
+        items.push(row);
+    });
+
+    if (!items.length) {
+        strip.innerHTML = '<div class="inventory-selected-strip__empty">No inventory selected yet. Pick placements or ad units below.</div>';
+        return;
+    }
+
+    strip.innerHTML = items.map(row => {
+        const kind = row.kind === 'placement' ? 'placement' : 'ad_unit';
+        return `<span class="sel-chip">`
+            + `<span class="kindchip ${inventoryKindClass(row)}">${inventoryKindLabel(row)}</span>`
+            + `<span class="sel-chip__label">${_escAttr(row.name)}</span>`
+            + `<span class="sel-chip__id">#${_escAttr(row.id)}</span>`
+            + `<button type="button" class="sel-chip__x" data-remove-kind="${kind}" data-remove-id="${_escAttr(row.id)}" aria-label="Remove ${_escAttr(row.name)}">×</button>`
+            + `</span>`;
+    }).join('');
+}
+
+function inventoryQuery() {
+    return (document.getElementById('inventory-picker-search')?.value || '').toLowerCase().trim();
+}
+
+function inventoryRowMatches(row, query) {
+    if (!query) return true;
+    const haystack = [
+        row.name,
+        row.id,
+        row.meta,
+        row.subkind,
+        ...(row.path || []),
+        ...(row.sizes || []),
+    ].join(' ').toLowerCase();
+    return haystack.includes(query);
+}
+
+function childRowsForPlacement(placement) {
+    const childIds = new Set(placement.child_ids || []);
+    return inventoryRows('ad_units').filter(row => childIds.has(row.id));
+}
+
+function inventoryIncludesDescendants() {
+    return document.querySelector('input[name="include_descendants"]')?.checked !== false;
+}
+
+function inventoryPickerMayBeCapped() {
+    return inventoryRows('ad_units').length >= INVENTORY_PICKER_LIMIT ||
+        inventoryRows('placements').length >= INVENTORY_PICKER_LIMIT;
+}
+
+function cssEscapeValue(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function inventoryFocusSelector(el) {
+    if (!el) return null;
+    const placementId = el.dataset?.togglePlacement;
+    if (placementId) return `[data-toggle-placement="${cssEscapeValue(placementId)}"]`;
+    const adUnitId = el.dataset?.toggleAdUnit;
+    if (adUnitId) return `[data-toggle-ad-unit="${cssEscapeValue(adUnitId)}"]:not([disabled])`;
+    const openId = el.dataset?.toggleOpen;
+    if (openId) return `.chev[data-toggle-open="${cssEscapeValue(openId)}"]`;
+    return null;
+}
+
+function restoreInventoryFocus(selector) {
+    if (!selector) return;
+    const next = document.querySelector(`#inventory-picker-list ${selector}`);
+    if (next && typeof next.focus === 'function') next.focus();
+}
+
+function renderInventoryPickerStatus(visibleCount = 0) {
+    const status = document.getElementById('inventory-picker-status');
+    if (!status) return;
+    const placementCount = inventorySelection.placements.size;
+    const adUnitCount = inventorySelection.ad_units.size;
+    const capped = inventoryPickerMayBeCapped() ? ` of first ${INVENTORY_PICKER_LIMIT} synced rows` : '';
+    status.innerHTML = `<strong>${placementCount}</strong> placements, <strong>${adUnitCount}</strong> standalone ad units · ${visibleCount} shown${capped}`;
+}
+
+function treeSection(label, note) {
+    return `<div class="tree-picker__section">${_escAttr(label)}`
+        + `<span>${_escAttr(note)}</span></div>`;
+}
+
+function renderPlacementRow(row, query) {
+    const children = childRowsForPlacement(row);
+    const childVisible = children.filter(child => inventoryRowMatches(child, query));
+    const open = inventoryOpenPlacements.has(row.id) || (!!query && childVisible.length > 0);
+    const selected = inventorySelection.placements.has(row.id);
+    const childSelected = children.filter(child => inventorySelection.ad_units.has(child.id)).length;
+    const partial = !selected && childSelected > 0;
+    const cascadesChildren = selected && inventoryIncludesDescendants();
+    const expandable = row.subkind !== 'tag' && children.length > 0;
+    const checked = selected ? 'checked' : '';
+    const partialAttr = partial ? 'data-partial="true"' : '';
+    const nameToggleAttr = expandable
+        ? `data-toggle-open="${_escAttr(row.id)}"`
+        : `data-toggle-placement="${_escAttr(row.id)}"`;
+
+    let html = `<div class="tree__row ${selected ? 'selected' : ''} ${partial ? 'partial' : ''} ${open ? 'open' : ''}" data-kind="placement" data-depth="0" data-row-id="${_escAttr(row.id)}">`
+        + `<button type="button" class="chev ${expandable ? '' : 'placeholder'}" data-toggle-open="${_escAttr(row.id)}" aria-expanded="${open ? 'true' : 'false'}" aria-label="Toggle ${_escAttr(row.name)}">${expandable ? '›' : ''}</button>`
+        + `<span class="check"><input type="checkbox" data-toggle-placement="${_escAttr(row.id)}" aria-label="Select ${_escAttr(row.name)}" ${checked} ${partialAttr}></span>`
+        + `<button type="button" class="tree__name" ${nameToggleAttr} aria-label="${expandable ? 'Expand' : 'Select'} ${_escAttr(row.name)}">`
+        + `<span class="kindchip ${inventoryKindClass(row)}">${inventoryKindLabel(row)}</span>`
+        + `<span class="label">${_escAttr(row.name)}</span>`
+        + `<span class="id">#${_escAttr(row.id)}</span>`
+        + `</button>`
+        + `<span class="tree__meta"><span class="num">${row.child_count || children.length}</span><span>${(row.child_count || children.length) === 1 ? 'ad unit' : 'ad units'}</span></span>`
+        + inventoryRowSecondaryAction(row)
+        + `</div>`;
+
+    if (open && expandable) {
+        html += childVisible.map(child => renderAdUnitRow(child, 1, cascadesChildren)).join('');
+    }
+    return html;
+}
+
+function renderAdUnitRow(row, depth = 0, cascade = false) {
+    const selected = inventorySelection.ad_units.has(row.id);
+    const checked = selected || cascade ? 'checked' : '';
+    const disabled = cascade ? 'disabled' : '';
+    const sizes = (row.sizes || []).length ? row.sizes.join(', ') : row.meta;
+    return `<div class="tree__row ${selected || cascade ? 'selected' : ''}" data-kind="ad-unit" data-depth="${depth}" data-row-id="${_escAttr(row.id)}">`
+        + `<span class="chev placeholder"></span>`
+        + `<span class="check"><input type="checkbox" data-toggle-ad-unit="${_escAttr(row.id)}" aria-label="Select ${_escAttr(row.name)}" ${checked} ${disabled}></span>`
+        + `<button type="button" class="tree__name" data-toggle-ad-unit="${_escAttr(row.id)}" aria-label="Select ${_escAttr(row.name)}" ${disabled}>`
+        + `<span class="kindchip kindchip--unit">AD UNIT</span>`
+        + `<span class="label">${_escAttr(row.name)}</span>`
+        + `<span class="id">#${_escAttr(row.id)}</span>`
+        + `</button>`
+        + `<span class="tree__meta">${_escAttr(sizes || '—')}</span>`
+        + inventoryRowSecondaryAction(row, cascade)
+        + `</div>`;
+}
+
+function renderInventoryPicker(focusSelector = null) {
+    const list = document.getElementById('inventory-picker-list');
+    if (!list) return;
+    const query = inventoryQuery();
+    const help = document.getElementById('inventory-picker-help');
+    if (help) {
+        help.hidden = inventoryPickerMode !== 'tree';
+        const helpText = inventoryIncludesDescendants()
+            ? '<strong>Picking a placement</strong> includes its child ad units automatically.'
+            : '<strong>Picking a placement</strong> targets only that placement. Child ad units stay standalone.';
+        help.innerHTML = '<span class="reuse-strip__icon" aria-hidden="true">▦</span>'
+            + `<span>${helpText} Flip to <strong>Flat ad units</strong> to pick individual units only.</span>`;
+    }
+
+    if (inventoryPickerMode === 'flat') {
+        const rows = inventoryRows('ad_units').filter(row => inventoryRowMatches(row, query));
+        renderInventoryPickerStatus(rows.length);
+        list.innerHTML = rows.length
+            ? rows.map(row => renderAdUnitRow(row)).join('')
+            : '<div class="tree-picker__empty">No ad units match.</div>';
+        hydratePartialCheckboxes();
+        restoreInventoryFocus(focusSelector);
+        return;
+    }
+
+    const placements = inventoryRows('placements');
+    const sitePlacements = placements.filter(row => row.subkind !== 'tag');
+    const tagPlacements = placements.filter(row => row.subkind === 'tag');
+    const renderGroup = (rows, label, note) => {
+        const visible = rows.filter(row => inventoryRowMatches(row, query) ||
+            childRowsForPlacement(row).some(child => inventoryRowMatches(child, query)));
+        if (!visible.length) return { html: '', count: 0 };
+        return {
+            html: treeSection(label, note) + visible.map(row => renderPlacementRow(row, query)).join(''),
+            count: visible.length,
+        };
+    };
+    const site = renderGroup(sitePlacements, 'Site placements', 'wrap a set of ad units');
+    const tag = renderGroup(tagPlacements, 'Tag-level placements', 'cross-section groups');
+    renderInventoryPickerStatus(site.count + tag.count);
+    list.innerHTML = (site.html + tag.html) || '<div class="tree-picker__empty">No placements match.</div>';
+    hydratePartialCheckboxes();
+    restoreInventoryFocus(focusSelector);
+}
+
+function hydratePartialCheckboxes() {
+    document.querySelectorAll('#inventory-picker-list input[data-partial="true"]').forEach(input => {
+        input.indeterminate = true;
+    });
+}
+
+let publisherRows = [];
+let publisherRowSeq = 0;
+
+function nextPublisherRowId() {
+    publisherRowSeq += 1;
+    return `publisher-row-${publisherRowSeq}`;
+}
+
+function normalizePublisherDomain(raw) {
+    return (raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\//, '')
+        .replace(/\/+$/, '');
+}
+
+function splitCsv(value) {
+    return (value || '').split(',').map(item => item.trim()).filter(Boolean);
+}
+
+function makePublisherRow(prop) {
+    const propertyIds = prop.property_ids || [];
+    const propertyTags = prop.property_tags || [];
+    return {
+        id: nextPublisherRowId(),
+        domain: normalizePublisherDomain(prop.publisher_domain || DEFAULT_PUBLISHER_DOMAIN),
+        mode: propertyIds.length ? 'ids' : 'tags',
+        tags: propertyTags.slice(),
+        property_ids: propertyIds.slice(),
+        available_tags: propertyTags.slice(),
+        available_properties: [],
+        id_filter: '',
+        status: '',
+        statusMessage: '',
+        is_authorized: null,
+        loading: false,
+    };
+}
+
+function initialPublisherRows() {
+    const saved = existingProfile.publisher_properties || [];
+    if (saved.length) return saved.map(makePublisherRow);
+    return [];
+}
+
+function publisherRowById(id) {
+    return publisherRows.find(row => row.id === id) || null;
+}
+
+function publisherPropertiesPayload() {
+    return publisherRows.map(row => {
+        const base = { publisher_domain: row.domain };
+        if (row.mode === 'ids') {
+            return {
+                ...base,
+                property_ids: row.property_ids,
+                selection_type: 'by_id',
+            };
+        }
+        return {
+            ...base,
+            property_tags: row.tags.map(tag => tag.toLowerCase()),
+            selection_type: 'by_tag',
+        };
+    });
+}
+
+function syncPublisherPropertiesHidden() {
+    const hidden = document.getElementById('publisher_properties');
+    if (!hidden) return;
+    hidden.value = JSON.stringify(publisherPropertiesPayload());
+    hidden.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function publisherStatusText(row) {
+    if (row.loading) return 'Looking up adagents.json...';
+    if (row.status === 'authorized') {
+        return `${row.available_properties.length} authorized ${row.available_properties.length === 1 ? 'property' : 'properties'} found.`;
+    }
+    if (row.status === 'unbound') {
+        return `${row.available_properties.length} properties found from an unbound AAO entry.`;
+    }
+    if (row.status) {
+        return row.statusMessage || `AAO status: ${row.status}`;
+    }
+    return 'Lookup AAO to load property IDs and tags for this publisher.';
+}
+
+function renderTagEditor(row) {
+    const tagOptions = Array.from(new Set([...(row.available_tags || []), ...(row.tags || [])])).sort();
+    const chips = tagOptions.map(tag => {
+        const selected = row.tags.includes(tag);
+        return `<button type="button" class="tag-pick__chip ${selected ? 'selected' : ''}" data-tag-chip="${_escAttr(tag)}">${_escAttr(tag)}</button>`;
+    }).join('');
+    return `
+        <div class="prop-row__field">
+            <label>Property tags</label>
+            <input type="text" data-tags-input value="${_escAttr(row.tags.join(', '))}" placeholder="all_inventory, premium, sports">
+            <span class="hint">Comma-separated tags for this publisher domain.</span>
+        </div>
+        ${tagOptions.length ? `<div class="tag-pick">${chips}</div>` : ''}
+    `;
+}
+
+function renderIdEditor(row) {
+    const properties = row.available_properties || [];
+    if (!properties.length) {
+        return `
+            <div class="prop-row__field">
+                <label>Property IDs</label>
+                <input type="text" data-ids-input value="${_escAttr(row.property_ids.join(', '))}" placeholder="property_id_1, property_id_2">
+                <span class="hint">Lookup the domain to load named property ID choices from AAO.</span>
+            </div>
+        `;
+    }
+    const query = (row.id_filter || '').trim().toLowerCase();
+    const matched = query
+        ? properties.filter(prop => {
+            const haystack = [
+                prop.property_id || '',
+                prop.name || '',
+                (prop.tags || []).join(' '),
+                prop.publisher_domain || '',
+            ].join(' ').toLowerCase();
+            return haystack.includes(query);
+        })
+        : properties;
+    const visible = matched.slice(0, 200);
+    const hiddenCount = matched.length - visible.length;
+    const selected = new Set(row.property_ids);
+    const options = visible.map(prop => {
+        const propertyId = prop.property_id || '';
+        const label = prop.name || propertyId;
+        const tags = (prop.tags || []).length ? ` · ${(prop.tags || []).join(', ')}` : '';
+        return `
+            <label class="prop-id-option">
+                <input type="checkbox" data-property-id="${_escAttr(propertyId)}" ${selected.has(propertyId) ? 'checked' : ''}>
+                <span>
+                    <strong>${_escAttr(label)}</strong>
+                    <code>${_escAttr(propertyId)}</code>${_escAttr(tags)}
+                </span>
+            </label>
+        `;
+    }).join('');
+    return `
+        <div class="prop-row__field">
+            <label>Find property IDs</label>
+            <input type="search" data-id-filter value="${_escAttr(row.id_filter || '')}" placeholder="Search ${properties.length} properties by name, ID, or tag">
+            <span class="hint">
+                Showing ${visible.length} of ${matched.length} matching properties${hiddenCount > 0 ? '; keep typing to narrow the list' : ''}.
+            </span>
+        </div>
+        <div class="prop-id-list">${options || '<div class="tree-picker__empty">No matching properties.</div>'}</div>
+    `;
+}
+
+function applyLookupDefaultTags(row) {
+    const available = row.available_tags || [];
+    if (!available.length || row.mode !== 'tags') return;
+
+    const hasOnlyFallback = row.tags.length === 1 && row.tags[0] === 'all_inventory' && !available.includes('all_inventory');
+    if (row.tags.length && !hasOnlyFallback) return;
+
+    if (available.includes('all_inventory')) {
+        row.tags = ['all_inventory'];
+    } else if (available.length === 1) {
+        row.tags = [available[0]];
+    } else {
+        row.tags = [];
+    }
+}
+
+function renderPublisherRows() {
+    const rowsContainer = document.getElementById('prop-rows');
+    const template = document.getElementById('prop-row-template');
+    if (!rowsContainer || !template) return;
+
+    rowsContainer.innerHTML = '';
+    if (!publisherRows.length) {
+        rowsContainer.innerHTML = '<div class="tree-picker__empty">No publisher domains added yet.</div>';
+        syncPublisherPropertiesHidden();
+        return;
+    }
+
+    publisherRows.forEach(row => {
+        const node = template.content.firstElementChild.cloneNode(true);
+        node.dataset.rowId = row.id;
+        node.querySelector('input[name="publisher_domain[]"]').value = row.domain;
+        node.querySelector('.prop-row__domain').textContent = row.domain;
+        node.querySelector('.prop-row__status').textContent = publisherStatusText(row);
+        node.querySelectorAll('[data-row-mode]').forEach(button => {
+            const active = button.dataset.rowMode === row.mode;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+        node.querySelector('[data-row-editor]').innerHTML =
+            row.mode === 'ids' ? renderIdEditor(row) : renderTagEditor(row);
+        rowsContainer.appendChild(node);
+    });
+    syncPublisherPropertiesHidden();
+}
+
+async function lookupPublisherRow(row, forceRefresh = false) {
+    if (!row || !row.domain) return;
+    row.loading = true;
+    row.statusMessage = '';
+    renderPublisherRows();
+    try {
+        const response = await fetch(`${SCRIPT_ROOT}/tenant/{{ tenant_id }}/publisher-properties/lookup`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ publisher_domain: row.domain, force_refresh: forceRefresh }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Lookup failed');
+        row.status = data.aao_status || '';
+        row.statusMessage = data.error || '';
+        row.is_authorized = !!data.is_authorized;
+        row.available_tags = data.property_tags || [];
+        row.available_properties = data.properties || [];
+        applyLookupDefaultTags(row);
+    } catch (err) {
+        row.status = 'error';
+        row.statusMessage = err.message || String(err);
+        row.is_authorized = false;
+    } finally {
+        row.loading = false;
+        renderPublisherRows();
+        recomputeValidity();
+        updateDirtyState();
+    }
+}
+
+function addPublisherDomainFromInput() {
+    const input = document.getElementById('publisher-domain-input');
+    const status = document.getElementById('publisher-domain-status');
+    const domain = normalizePublisherDomain(input?.value || '');
+    if (!domain) {
+        if (status) status.textContent = 'Enter a publisher domain.';
+        return;
+    }
+    if (publisherRows.some(row => row.domain === domain)) {
+        if (status) status.textContent = `${domain} is already in this bundle.`;
+        return;
+    }
+    const row = makePublisherRow({
+        publisher_domain: domain,
+        property_tags: [],
+        selection_type: 'by_tag',
+    });
+    publisherRows.push(row);
+    if (input) input.value = '';
+    if (status) status.textContent = '';
+    renderPublisherRows();
+    recomputeValidity();
+    updateDirtyState();
+    lookupPublisherRow(row);
+}
+
+function initializePublisherRows() {
+    publisherRows = initialPublisherRows();
+    renderPublisherRows();
+
+    const addButton = document.getElementById('publisher-domain-add');
+    const input = document.getElementById('publisher-domain-input');
+    const rowsContainer = document.getElementById('prop-rows');
+
+    if (addButton) addButton.addEventListener('click', addPublisherDomainFromInput);
+    if (input) {
+        input.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            addPublisherDomainFromInput();
+        });
+    }
+    if (!rowsContainer) return;
+
+    rowsContainer.addEventListener('click', (e) => {
+        const rowNode = e.target.closest('[data-row-id]');
+        const row = rowNode ? publisherRowById(rowNode.dataset.rowId) : null;
+        if (!row) return;
+
+        const remove = e.target.closest('[data-remove-row]');
+        if (remove) {
+            publisherRows = publisherRows.filter(item => item.id !== row.id);
+            renderPublisherRows();
+            recomputeValidity();
+            updateDirtyState();
+            return;
+        }
+
+        const lookup = e.target.closest('[data-lookup-domain]');
+        if (lookup) {
+            lookupPublisherRow(row, true);
+            return;
+        }
+
+        const mode = e.target.closest('[data-row-mode]');
+        if (mode) {
+            row.mode = mode.dataset.rowMode === 'ids' ? 'ids' : 'tags';
+            renderPublisherRows();
+            recomputeValidity();
+            updateDirtyState();
+            return;
+        }
+
+        const tagChip = e.target.closest('[data-tag-chip]');
+        if (tagChip) {
+            const tag = tagChip.dataset.tagChip;
+            if (row.tags.includes(tag)) row.tags = row.tags.filter(item => item !== tag);
+            else row.tags.push(tag);
+            renderPublisherRows();
+            recomputeValidity();
+            updateDirtyState();
+        }
+    });
+
+    rowsContainer.addEventListener('input', (e) => {
+        const rowNode = e.target.closest('[data-row-id]');
+        const row = rowNode ? publisherRowById(rowNode.dataset.rowId) : null;
+        if (!row) return;
+        if (e.target.matches('[data-tags-input]')) {
+            row.tags = splitCsv(e.target.value).map(tag => _normalizeTag(tag)).filter(Boolean);
+        } else if (e.target.matches('[data-ids-input]')) {
+            row.property_ids = splitCsv(e.target.value);
+        } else if (e.target.matches('[data-id-filter]')) {
+            row.id_filter = e.target.value || '';
+            const editor = rowNode.querySelector('[data-row-editor]');
+            if (editor) {
+                editor.innerHTML = renderIdEditor(row);
+                const filter = editor.querySelector('[data-id-filter]');
+                if (filter) {
+                    filter.focus();
+                    filter.setSelectionRange(filter.value.length, filter.value.length);
+                }
+            }
+            return;
+        }
+        syncPublisherPropertiesHidden();
+        recomputeValidityDebounced();
+        updateDirtyState();
+    });
+
+    rowsContainer.addEventListener('change', (e) => {
+        const rowNode = e.target.closest('[data-row-id]');
+        const row = rowNode ? publisherRowById(rowNode.dataset.rowId) : null;
+        if (!row || !e.target.matches('[data-property-id]')) return;
+        const propertyId = e.target.dataset.propertyId;
+        if (e.target.checked && !row.property_ids.includes(propertyId)) row.property_ids.push(propertyId);
+        if (!e.target.checked) row.property_ids = row.property_ids.filter(item => item !== propertyId);
+        syncPublisherPropertiesHidden();
+        recomputeValidity();
+        updateDirtyState();
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    seedInventoryNameMaps();
+    prePopulateInventoryConfig();
+
+    const pickerList = document.getElementById('inventory-picker-list');
+    const pickerSearch = document.getElementById('inventory-picker-search');
+    const modeSwitch = document.getElementById('inventory-picker-mode');
+    const selectedStrip = document.getElementById('inventory-selected-strip');
+    const includeDesc = document.querySelector('input[name="include_descendants"]');
+
+    if (pickerList) {
+        pickerList.addEventListener('click', (e) => {
+            const reuse = e.target.closest('a.tree__use');
+            if (reuse) return;
+            const open = e.target.closest('[data-toggle-open]');
+            if (open && !e.target.closest('[data-toggle-placement]')) {
+                const id = open.dataset.toggleOpen;
+                if (inventoryOpenPlacements.has(id)) inventoryOpenPlacements.delete(id);
+                else inventoryOpenPlacements.add(id);
+                renderInventoryPicker();
+                return;
+            }
+            const placement = e.target.closest('[data-toggle-placement]');
+            if (placement) {
+                togglePlacement(placement.dataset.togglePlacement);
+                return;
+            }
+            const adUnit = e.target.closest('[data-toggle-ad-unit]');
+            if (adUnit && !adUnit.disabled) toggleAdUnit(adUnit.dataset.toggleAdUnit);
+        });
+    }
+    if (pickerSearch) pickerSearch.addEventListener('input', renderInventoryPicker);
+    if (modeSwitch) {
+        modeSwitch.addEventListener('click', (e) => {
+            const button = e.target.closest('[data-picker-mode]');
+            if (!button) return;
+            inventoryPickerMode = button.dataset.pickerMode === 'flat' ? 'flat' : 'tree';
+            modeSwitch.querySelectorAll('[data-picker-mode]').forEach(btn => {
+                btn.classList.toggle('active', btn === button);
+                btn.setAttribute('aria-pressed', btn === button ? 'true' : 'false');
+            });
+            renderInventoryPicker();
+        });
+    }
+    if (selectedStrip) {
+        selectedStrip.addEventListener('click', (e) => {
+            const button = e.target.closest('[data-remove-kind][data-remove-id]');
+            if (!button) return;
+            removeSelectedInventory(button.dataset.removeKind, button.dataset.removeId);
+        });
+    }
+    if (includeDesc) includeDesc.addEventListener('change', renderInventoryPicker);
+});
 
 // Load formats from API on page load
 document.addEventListener('DOMContentLoaded', function() {
@@ -247,67 +1168,70 @@ document.addEventListener('DOMContentLoaded', function() {
         // Pre-populate data after formats have loaded to avoid race condition
         prePopulateData();
     });
-    setupFormatSearch();
+
+    // When the page is opened from the duplicate flow, the most common next
+    // action is renaming the bundle. Autofocus + select the name so the
+    // operator can just start typing. (User-engagement reviewer flagged this
+    // as the highest-leverage friction fix on the page.)
+    if (new URLSearchParams(window.location.search).get('duplicated')) {
+        const nameInput = document.getElementById('name');
+        if (nameInput) {
+            nameInput.focus();
+            nameInput.select();
+        }
+    }
+
+    initializePublisherRows();
 });
 
-function prePopulateData() {
+function prePopulateInventoryConfig() {
     // Pre-populate inventory config
+    if (inventoryConfigPrepopulated) return;
     if (existingProfile.inventory_config) {
-        if (existingProfile.inventory_config.ad_units) {
-            document.getElementById('targeted_ad_unit_ids').value = JSON.stringify(existingProfile.inventory_config.ad_units);
-            // TODO: Display ad unit names
-        }
-        if (existingProfile.inventory_config.placements) {
-            document.getElementById('targeted_placement_ids').value = JSON.stringify(existingProfile.inventory_config.placements);
-            // TODO: Display placement names
-        }
+        const adUnitIds = existingProfile.inventory_config.ad_units || [];
+        const placementIds = existingProfile.inventory_config.placements || [];
         if (existingProfile.inventory_config.include_descendants !== undefined) {
             document.querySelector('input[name="include_descendants"]').checked = existingProfile.inventory_config.include_descendants;
         }
+
+        inventorySelection.ad_units = new Set(adUnitIds);
+        inventorySelection.placements = new Set(placementIds);
+        inventoryOpenPlacements = new Set([
+            ...placementIds,
+            ...(INVENTORY_PICKER.placements || []).slice(0, 1).map(row => row.id),
+        ]);
+        writeInventoryHidden('ad_units');
+        writeInventoryHidden('placements');
+        renderSelectedInventoryStrip();
+        renderInventoryPicker();
+    } else {
+        inventoryOpenPlacements = new Set((INVENTORY_PICKER.placements || []).slice(0, 1).map(row => row.id));
+        renderSelectedInventoryStrip();
+        renderInventoryPicker();
     }
+    inventoryConfigPrepopulated = true;
+}
 
-    // Pre-populate formats (will be selected after formats load)
-    if (existingProfile.formats && existingProfile.formats.length > 0) {
-        existingProfile.formats.forEach(fmt => {
-            selectedFormats.add(fmt.id);
-        });
-    }
+function prePopulateData() {
+    prePopulateInventoryConfig();
+    updateDerivedFormats();
 
-    // Pre-populate publisher properties - detect mode and populate appropriate field
-    if (existingProfile.publisher_properties && existingProfile.publisher_properties.length > 0) {
-        const firstProp = existingProfile.publisher_properties[0];
-
-        // Detect property selection mode based on fields present
-        if (firstProp.property_ids && Array.isArray(firstProp.property_ids)) {
-            // by_id mode: has property_ids array
-            document.querySelector('input[name="property_mode"][value="property_ids"]').checked = true;
-            togglePropertyMode();
-
-            // Check the appropriate checkboxes
-            firstProp.property_ids.forEach(propId => {
-                const checkbox = document.querySelector(`input[name="selected_property_ids"][value="${propId}"]`);
-                if (checkbox) checkbox.checked = true;
-            });
-        } else if (firstProp.property_tags && Array.isArray(firstProp.property_tags)) {
-            // by_tag mode: has property_tags array
-            document.querySelector('input[name="property_mode"][value="tags"]').checked = true;
-            togglePropertyMode();
-
-            // Populate tags input
-            document.getElementById('property_tags').value = firstProp.property_tags.join(', ');
-        } else {
-            // Legacy full mode: has other fields (like 'properties')
-            document.querySelector('input[name="property_mode"][value="full"]').checked = true;
-            togglePropertyMode();
-
-            // Populate JSON textarea
-            document.getElementById('publisher_properties').value = JSON.stringify(existingProfile.publisher_properties, null, 2);
-        }
-    }
+    // Publisher properties are rendered server-side as hidden all-property
+    // defaults. Placement-specific property mapping belongs in inventory setup.
 
     // Pre-populate targeting template
     if (existingProfile.targeting_template) {
         document.getElementById('targeting_template').value = JSON.stringify(existingProfile.targeting_template, null, 2);
+    }
+
+    // Sync recompute so initial paint reflects the populated state — without
+    // this, the operator sees a one-frame flash of all-grey dots while the
+    // deferred (setTimeout) recompute waits its turn. (#529, UX review)
+    if (typeof recomputeValidity === 'function') {
+        recomputeValidity();
+    }
+    if (typeof markFormClean === 'function') {
+        markFormClean();
     }
 }
 
@@ -320,11 +1244,7 @@ async function loadFormats() {
         // Check for errors
         if (data.error) {
             console.error('API returned error:', data);
-            document.getElementById('format-loading').innerHTML = `
-                <div style="color: #e74c3c; padding: 1rem; background: #fee; border: 1px solid #fcc; border-radius: 4px;">
-                    <strong>⚠️ Error loading formats:</strong> ${data.message || data.error}
-                </div>
-            `;
+            updateDerivedFormats();
             return;
         }
 
@@ -338,150 +1258,290 @@ async function loadFormats() {
 
         console.log(`✅ Loaded ${allFormats.length} formats from ${Object.keys(data.agents || {}).length} agent(s)`);
 
-        document.getElementById('format-loading').style.display = 'none';
-        displayFormats(allFormats);
+        updateDerivedFormats();
     } catch (error) {
         console.error('Error loading formats:', error);
-        document.getElementById('format-loading').innerHTML = `
-            <div style="color: #e74c3c; padding: 1rem; background: #fee; border: 1px solid #fcc; border-radius: 4px;">
-                <strong>⚠️ Network error loading formats:</strong> ${error.message}
-            </div>
-        `;
+        updateDerivedFormats();
     }
 }
 
-function setupFormatSearch() {
-    const searchBox = document.getElementById('format-search-input');
-    let searchTimeout;
+function formatIdValue(format) {
+    const fid = format && format.format_id;
+    if (fid && typeof fid === 'object') return fid.id || '';
+    return typeof fid === 'string' ? fid : '';
+}
 
-    searchBox.addEventListener('input', function(e) {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => {
-            const query = e.target.value.toLowerCase().trim();
-            if (query.length === 0) {
-                displayFormats(allFormats);
-            } else {
-                const filtered = allFormats.filter(fmt =>
-                    fmt.format_id.toLowerCase().includes(query) ||
-                    fmt.name.toLowerCase().includes(query) ||
-                    (fmt.description && fmt.description.toLowerCase().includes(query))
-                );
-                displayFormats(filtered);
-            }
-        }, 300);
+function formatAgentUrl(format) {
+    const fid = format && format.format_id;
+    return format?.agent_url || (fid && typeof fid === 'object' ? fid.agent_url : null) || DEFAULT_CREATIVE_AGENT_URL;
+}
+
+function canonicalFormatRef(id) {
+    const matching = allFormats.find(fmt => formatIdValue(fmt) === id);
+    return {
+        id,
+        agent_url: matching ? formatAgentUrl(matching) : DEFAULT_CREATIVE_AGENT_URL,
+    };
+}
+
+function sortSizeStrings(a, b) {
+    const [aw, ah] = a.split('x').map(Number);
+    const [bw, bh] = b.split('x').map(Number);
+    return (aw - bw) || (ah - bh);
+}
+
+function sizeFromValue(value) {
+    if (!value) return null;
+    if (typeof value === 'string' && value.includes('x')) {
+        const [w, h] = value.split('x').map(Number);
+        return Number.isFinite(w) && Number.isFinite(h) ? `${w}x${h}` : null;
+    }
+    if (typeof value === 'object' && value.width && value.height) {
+        const w = Number(value.width);
+        const h = Number(value.height);
+        return Number.isFinite(w) && Number.isFinite(h) ? `${w}x${h}` : null;
+    }
+    return null;
+}
+
+function addRowSizes(row, sizes) {
+    (row?.sizes || []).forEach(size => {
+        const parsed = sizeFromValue(size);
+        if (parsed && parsed !== '1x1') sizes.add(parsed);
     });
 }
 
-function displayFormats(formats) {
-    const container = document.getElementById('format-results');
+function rowCapabilities(row, fallbackCapabilities = null) {
+    const own = row?.capabilities || {};
+    if (own && Object.keys(own).length > 0) return own;
+    return fallbackCapabilities || {};
+}
 
-    if (formats.length === 0) {
-        container.innerHTML = '<div style="text-align: center; padding: 2rem; color: #666;">No formats found</div>';
-        container.style.display = 'block';
+function capabilitySlotKind(capabilities) {
+    return capabilities?.slot_kind || capabilities?.special_size?.kind || '';
+}
+
+function displayFormatIdsForCapabilities(capabilities) {
+    const modes = capabilities?.render_modes || null;
+    if (!modes || typeof modes !== 'object') return GAM_CANONICAL_DISPLAY_FORMAT_IDS;
+    const ids = [];
+    if (modes.image) ids.push('display_image');
+    if (modes.html) ids.push('display_html');
+    if (modes.js) ids.push('display_js');
+    return ids.length ? ids : GAM_CANONICAL_DISPLAY_FORMAT_IDS;
+}
+
+function fixedDisplayFormatIdsForCapabilities(capabilities) {
+    const slotKind = capabilitySlotKind(capabilities);
+    if (slotKind && !['fixed_display', 'responsive_display', 'rich_media'].includes(slotKind)) return [];
+    return displayFormatIdsForCapabilities(capabilities);
+}
+
+function addRowCanonicalFormats(row, formats, fallbackCapabilities = null) {
+    if (!row) return;
+    const capabilities = rowCapabilities(row, fallbackCapabilities);
+    const slotKind = capabilitySlotKind(capabilities);
+    if (slotKind === 'native') {
+        formats.push(canonicalFormatRef('native_standard'));
         return;
     }
-
-    // Group by category (format type removed in adcp 3.12)
-    const grouped = {};
-    formats.forEach(fmt => {
-        const cat = fmt.category || 'standard';
-        if (!grouped[cat]) {
-            grouped[cat] = [];
+    if (slotKind === 'olv') {
+        const sizes = (row.sizes || []).map(sizeFromValue).filter(size => size && size !== '1x1');
+        if (sizes.length === 0) {
+            GAM_CANONICAL_VIDEO_FORMAT_IDS.forEach(formatId => formats.push(canonicalFormatRef(formatId)));
+            return;
         }
-        grouped[cat].push(fmt);
-    });
-
-    let html = '';
-    for (const [type, typeFormats] of Object.entries(grouped)) {
-        html += `
-            <div style="margin-bottom: 2rem;">
-                <h4 style="margin-bottom: 1rem; text-transform: capitalize; color: #2c3e50; border-bottom: 1px solid #ddd; padding-bottom: 0.5rem;">${type}</h4>
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem;">
-        `;
-
-        typeFormats.forEach(format => {
-            const isSelected = selectedFormats.has(format.format_id);
-            const borderColor = isSelected ? '#0066cc' : '#e0e0e0';
-            const bgColor = isSelected ? '#f0f7ff' : '#f9f9f9';
-            const checkIcon = isSelected ? '✓ ' : '';
-
-            html += `
-                <div style="border: 2px solid ${borderColor}; border-radius: 4px; padding: 0.75rem; background: ${bgColor}; cursor: pointer; transition: all 0.2s;"
-                     onclick="toggleFormat('${format.format_id}', '${format.name}', '${format.agent_url || ''}')">
-                    <div style="font-weight: 600; color: #333;">${checkIcon}${format.name}</div>
-                    ${format.description ? `<div style="color: #777; font-size: 0.85rem; margin-top: 0.25rem;">${format.description}</div>` : ''}
-                </div>
-            `;
-        });
-
-        html += '</div></div>';
-    }
-
-    container.innerHTML = html;
-    container.style.display = 'block';
-}
-
-function toggleFormat(formatId, formatName, agentUrl) {
-    if (selectedFormats.has(formatId)) {
-        selectedFormats.delete(formatId);
-    } else {
-        selectedFormats.add(formatId);
-    }
-
-    updateSelectedFormatsDisplay();
-    updateHiddenInput();
-    displayFormats(allFormats); // Refresh display to show selection state
-}
-
-function updateSelectedFormatsDisplay() {
-    const container = document.getElementById('selected-formats');
-    const list = document.getElementById('selected-formats-list');
-
-    if (selectedFormats.size === 0) {
-        container.style.display = 'none';
-        return;
-    }
-
-    container.style.display = 'block';
-
-    let html = '';
-    selectedFormats.forEach(formatId => {
-        const format = allFormats.find(f => f.format_id === formatId);
-        if (format) {
-            html += `
-                <span style="background: #0066cc; color: white; padding: 0.5rem 0.75rem; border-radius: 4px; display: inline-flex; align-items: center; gap: 0.5rem;">
-                    ${format.name}
-                    <span style="cursor: pointer; font-weight: bold;" onclick="event.stopPropagation(); toggleFormat('${formatId}', '${format.name}', '${format.agent_url || ''}')">×</span>
-                </span>
-            `;
-        }
-    });
-
-    list.innerHTML = html;
-}
-
-function updateHiddenInput() {
-    // Store format references as JSON
-    const formatRefs = [];
-    selectedFormats.forEach(formatId => {
-        const format = allFormats.find(f => f.format_id === formatId);
-        if (format) {
-            formatRefs.push({
-                agent_url: format.agent_url || 'https://creative.adcontextprotocol.org',
-                format_id: formatId
+        sizes.forEach(size => {
+            const [width, height] = size.split('x').map(Number);
+            GAM_CANONICAL_VIDEO_FORMAT_IDS.forEach(formatId => {
+                const ref = canonicalFormatRef(formatId);
+                formats.push({
+                    agent_url: ref.agent_url,
+                    id: ref.id,
+                    width,
+                    height,
+                });
             });
+        });
+        return;
+    }
+    (row.sizes || []).forEach(size => {
+        const parsed = sizeFromValue(size);
+        if (!parsed) return;
+        if (parsed === '1x1') {
+            const dims = capabilities?.dimensions || {};
+            const hasDims = ['min_width', 'max_width', 'min_height', 'max_height'].some(key => dims[key] !== undefined && dims[key] !== null && dims[key] !== '');
+            if (!hasDims) return;
+            displayFormatIdsForCapabilities(capabilities).forEach(formatId => {
+                const ref = canonicalFormatRef(formatId);
+                const format = {
+                    agent_url: ref.agent_url,
+                    id: ref.id,
+                };
+                ['min_width', 'max_width', 'min_height', 'max_height'].forEach(key => {
+                    if (dims[key] !== undefined && dims[key] !== null && dims[key] !== '') format[key] = Number(dims[key]);
+                });
+                formats.push(format);
+            });
+            return;
         }
-    });
 
-    document.getElementById('formats-data').value = JSON.stringify(formatRefs);
+        const [width, height] = parsed.split('x').map(Number);
+        fixedDisplayFormatIdsForCapabilities(capabilities).forEach(formatId => {
+            const ref = canonicalFormatRef(formatId);
+            formats.push({
+                agent_url: ref.agent_url,
+                id: ref.id,
+                width,
+                height,
+            });
+        });
+    });
+}
+
+function addRowSpecialSizes(row, specialRows, fallbackCapabilities = null) {
+    if (!row) return;
+    const capabilities = rowCapabilities(row, fallbackCapabilities);
+    const hasSpecialSize = (row.sizes || []).some(size => sizeFromValue(size) === '1x1');
+    if (!hasSpecialSize || capabilitySlotKind(capabilities)) return;
+    specialRows.push({
+        id: row.id,
+        name: row.name,
+        kind: row.kind || 'ad_unit',
+    });
+}
+
+function selectedInventorySizes() {
+    const sizes = new Set();
+    inventorySelection.ad_units.forEach(id => addRowSizes(inventoryRowById('ad_units', id), sizes));
+    inventorySelection.placements.forEach(id => {
+        const placement = inventoryRowById('placements', id);
+        childRowsForPlacement(placement || {}).forEach(child => addRowSizes(child, sizes));
+    });
+    return Array.from(sizes).sort(sortSizeStrings);
+}
+
+function selectedInventorySpecialSizes() {
+    const specialRows = [];
+    const seen = new Set();
+    inventorySelection.ad_units.forEach(id => addRowSpecialSizes(inventoryRowById('ad_units', id), specialRows));
+    inventorySelection.placements.forEach(id => {
+        const placement = inventoryRowById('placements', id);
+        const placementCapabilities = rowCapabilities(placement);
+        childRowsForPlacement(placement || {}).forEach(child => addRowSpecialSizes(child, specialRows, placementCapabilities));
+    });
+    return specialRows.filter(row => {
+        if (seen.has(row.id)) return false;
+        seen.add(row.id);
+        return true;
+    });
+}
+
+function deriveCanonicalFormatsFromInventory() {
+    const formats = [];
+    inventorySelection.ad_units.forEach(id => addRowCanonicalFormats(inventoryRowById('ad_units', id), formats));
+    inventorySelection.placements.forEach(id => {
+        const placement = inventoryRowById('placements', id);
+        const placementCapabilities = rowCapabilities(placement);
+        childRowsForPlacement(placement || {}).forEach(child => addRowCanonicalFormats(child, formats, placementCapabilities));
+    });
+    const seen = new Set();
+    return formats.filter(format => {
+        const key = JSON.stringify([
+            format.id,
+            format.width || null,
+            format.height || null,
+            format.min_width || null,
+            format.max_width || null,
+            format.min_height || null,
+            format.max_height || null,
+            format.duration_ms || null,
+        ]);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).sort((a, b) => (a.width || a.min_width || 0) - (b.width || b.min_width || 0) ||
+        (a.height || a.min_height || 0) - (b.height || b.min_height || 0) ||
+        String(a.id).localeCompare(String(b.id)));
+}
+
+function formatTypeLabel(formatId) {
+    if (formatId === 'display_image') return 'image';
+    if (formatId === 'display_html') return 'HTML5';
+    if (formatId === 'display_js') return 'JS';
+    return String(formatId || '').replaceAll('_', ' ');
+}
+
+function derivedFormatChips() {
+    const groups = new Map();
+    derivedFormats.forEach(format => {
+        let key = '';
+        if (format.width && format.height) {
+            key = `${format.width}x${format.height}`;
+        } else if (format.min_width || format.max_width || format.min_height || format.max_height) {
+            key = `${format.min_width || '?'}-${format.max_width || '?'}w × ${format.min_height || '?'}-${format.max_height || '?'}h`;
+        }
+        if (!key) return;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(formatTypeLabel(format.id));
+    });
+    return Array.from(groups.entries()).map(([size, types]) => ({size, types}));
+}
+
+function updateDerivedFormats() {
+    derivedFormats = deriveCanonicalFormatsFromInventory();
+    document.getElementById('formats-data').value = JSON.stringify(derivedFormats);
+    renderDerivedFormats();
+}
+
+function renderDerivedFormats() {
+    const status = document.getElementById('format-derived-status');
+    const list = document.getElementById('format-derived-list');
+    if (!status || !list) return;
+
+    const sizes = selectedInventorySizes();
+    const specialRows = selectedInventorySpecialSizes();
+    if ((inventorySelection.ad_units.size + inventorySelection.placements.size) === 0) {
+        status.textContent = 'Pick placements or ad units to detect creative formats.';
+        list.innerHTML = '';
+        return;
+    }
+    if (sizes.length === 0 && specialRows.length === 0) {
+        status.textContent = 'No creative sizes were found on the selected inventory. Choose synced inventory with sizes.';
+        list.innerHTML = '';
+        return;
+    }
+
+    const fixedText = sizes.length
+        ? `${sizes.length} fixed ${sizes.length === 1 ? 'size' : 'sizes'} detected.`
+        : 'No fixed creative sizes detected.';
+    const specialText = specialRows.length
+        ? ` ${specialRows.length} GAM 1x1 ${specialRows.length === 1 ? 'slot needs' : 'slots need'} capability setup before saving.`
+        : ' Formats use display creative types supported by GAM.';
+    status.textContent = fixedText + specialText;
+
+    const formatChips = derivedFormatChips().map(group => `
+        <span style="background: var(--sig-bg-card); color: var(--sig-fg-primary); border: 1px solid var(--sig-bd-hairline); padding: 5px 8px; border-radius: 999px; font-size: 12px; display: inline-flex; gap: 6px; align-items: center;">
+            <strong>${_escAttr(group.size)}</strong>
+            <span style="color: var(--sig-fg-tertiary);">${_escAttr(group.types.join(' · '))}</span>
+        </span>
+    `);
+    const specialChips = specialRows.map(row => `
+        <span style="background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; padding: 5px 8px; border-radius: 999px; font-size: 12px; display: inline-flex; gap: 6px; align-items: center;">
+            <strong>1x1 from GAM</strong>
+            <span>${_escAttr(row.name)} needs setup</span>
+        </span>
+    `);
+    list.innerHTML = formatChips.concat(specialChips).join('');
 }
 
 // Property mode toggle
 function togglePropertyMode() {
-    const mode = document.querySelector('input[name="property_mode"]:checked').value;
+    const mode = _propertyModeChecked();
     const tagsSection = document.getElementById('property-tags-section');
     const idsSection = document.getElementById('property-ids-section');
     const fullSection = document.getElementById('property-full-section');
+    if (!tagsSection || !idsSection || !fullSection) return;
 
     // Hide all sections first
     tagsSection.style.display = 'none';
@@ -509,139 +1569,442 @@ function setDefaultProperties() {
     document.getElementById('publisher_properties').value = JSON.stringify(defaultProps, null, 2);
 }
 
-// Inventory picker functions (reuse from product form)
-function openInventoryPicker(type) {
-    // TODO: Implement inventory picker modal
-    // For now, show alert
-    alert(`Inventory picker for ${type} not yet implemented. Please enter IDs manually in the hidden field.`);
+
+// =====================================================================
+// Live validation (#529) + multi-domain row awareness (#532)
+//
+// Reads form state, updates Summary sidebar dots + formbar status + Save
+// button on every input/change event. The submit handler uses the same
+// computation: if any required validator fails, focus the first offending
+// field and surface a one-line reason in the formbar (no alert()).
+//
+// Validator names mirror the template's `data-validator` attributes. The
+// `tags` validator walks every row of the multi-domain editor.
+// =====================================================================
+
+// Match the AdCP `property_tag` spec exactly. The old regex enforced
+// `{2,50}` length bounds the spec doesn't carry — operators with
+// single-char channel codes or long network IDs would hit a wall our UI
+// invented. Spec: adcp.types.property_tag.PropertyTag.
+const TAG_PATTERN = /^[a-z0-9_]+$/;
+
+// Normalize "Premium Sports" → "premium_sports" so freetext tag entry doesn't
+// punish the operator for using natural spacing/case. Returns the normalized
+// string; an empty input returns ''.
+function _normalizeTag(raw) {
+    return (raw || '')
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9_]+/g, '_')
+        .replace(/^_+|_+$/g, '');
 }
 
-// Form validation
-document.getElementById('profile-form').addEventListener('submit', function(e) {
-    // Validate formats
-    if (selectedFormats.size === 0) {
-        e.preventDefault();
-        alert('Please select at least one creative format');
-        return false;
-    }
+// Walk every row in the multi-domain editor and return ``[[domain, tags[]], ...]``.
+// Rows with empty domain or empty tags are still surfaced so the validator
+// can flag them individually. (#532)
+function _tagRowsFromForm() {
+    const rows = document.querySelectorAll('#prop-rows .prop-row');
+    return Array.from(rows).map((row) => {
+        const domainEl = row.querySelector('select[name="publisher_domain[]"], input[name="publisher_domain[]"]');
+        const domain = (domainEl?.value || '').trim();
+        const raw = row.querySelector('input[name="property_tags[]"]')?.value || '';
+        const tags = raw.split(',').map((t) => t.trim()).filter(Boolean);
+        return { domain, tags };
+    });
+}
 
-    // Validate publisher properties based on property_mode
-    const mode = document.querySelector('input[name="property_mode"]:checked').value;
+function _selectedPropertyIds() {
+    return document.querySelectorAll('input[name="selected_property_ids"]:checked').length;
+}
 
+function _propertyModeChecked() {
+    const checked = document.querySelector('input[name="property_mode"]:checked');
+    const hidden = document.querySelector('input[name="property_mode"]');
+    return (checked || hidden)?.value || 'tags';
+}
+
+function _adUnitIds() {
+    try {
+        return JSON.parse(document.getElementById('targeted_ad_unit_ids').value || '[]');
+    } catch { return []; }
+}
+function _placementIds() {
+    try {
+        return JSON.parse(document.getElementById('targeted_placement_ids').value || '[]');
+    } catch { return []; }
+}
+
+// Compute validity for each required field. Returns {valid, errors, by}
+// where `by` maps validator name -> {ok, text, message, focusId}.
+function computeValidity() {
+    const name = (document.getElementById('name').value || '').trim();
+    const description = (document.getElementById('description').value || '').trim();
+
+    const adUnits = _adUnitIds();
+    const placements = _placementIds();
+    const invSize = adUnits.length + placements.length;
+    const invParts = [];
+    if (placements.length) invParts.push(placements.length + (placements.length === 1 ? ' placement' : ' placements'));
+    if (adUnits.length) invParts.push(adUnits.length + (adUnits.length === 1 ? ' ad unit' : ' ad units'));
+
+    const formatCount = derivedFormats.length;
+    const formatSizeCount = selectedInventorySizes().length;
+    const specialSizeCount = selectedInventorySpecialSizes().length;
+
+    const mode = _propertyModeChecked();
+    let propertyOk = false;
+    let propertyText = 'none';
+    let propertyMessage = '';
+    let propertyWarning = '';
     if (mode === 'tags') {
-        const tags = document.getElementById('property_tags').value.trim();
-        if (!tags) {
-            e.preventDefault();
-            alert('Please enter at least one property tag');
-            return false;
-        }
-        // Validate tag format
-        const tagArray = tags.split(',').map(t => t.trim()).filter(t => t);
-        const tagPattern = /^[a-z0-9_]{2,50}$/;
-        for (const tag of tagArray) {
-            if (!tagPattern.test(tag.toLowerCase())) {
-                e.preventDefault();
-                alert(`Invalid tag format: "${tag}". Use lowercase letters, numbers, underscores (2-50 chars)`);
-                return false;
+        // Walk every row in the multi-domain editor (#532). A row is valid
+        // when it has a domain AND at least one spec-shaped tag. Validation
+        // surfaces the first offender — operators fix one thing at a time.
+        const rows = _tagRowsFromForm();
+        if (rows.length === 0) {
+            propertyMessage = 'Add at least one publisher-domain row to save.';
+        } else {
+            let badIdx = -1;
+            let badReason = '';
+            for (let i = 0; i < rows.length; i++) {
+                const { domain, tags } = rows[i];
+                if (!domain) { badIdx = i; badReason = 'pick a publisher domain'; break; }
+                if (tags.length === 0) { badIdx = i; badReason = `(${domain}): add at least one tag`; break; }
+                const bad = tags.find(t => !TAG_PATTERN.test(t.toLowerCase()));
+                if (bad) {
+                    badIdx = i;
+                    badReason = `(${domain}): "${bad}" — use lowercase letters, numbers, and underscores only`;
+                    break;
+                }
+            }
+            if (badIdx >= 0) {
+                propertyMessage = `Row ${badIdx + 1} ${badReason}.`;
+            } else {
+                propertyOk = true;
+                const totalTags = rows.reduce((sum, r) => sum + r.tags.length, 0);
+                propertyText = rows.length === 1
+                    ? `${totalTags} ${totalTags === 1 ? 'tag' : 'tags'}`
+                    : `${rows.length} sites/apps · ${totalTags} ${totalTags === 1 ? 'tag' : 'tags'}`;
+                const unknownTag = rows
+                    .flatMap(r => r.tags.map(t => t.toLowerCase()))
+                    .find(t => !KNOWN_PROPERTY_TAGS.has(t));
+                if (unknownTag) {
+                    propertyWarning = `Bundle saves OK, but property tag "${unknownTag}" is not attached to any authorized property.`;
+                }
             }
         }
     } else if (mode === 'property_ids') {
-        const checked = document.querySelectorAll('input[name="selected_property_ids"]:checked');
-        if (checked.length === 0) {
-            e.preventDefault();
-            alert('Please select at least one property');
-            return false;
+        const checked = _selectedPropertyIds();
+        if (checked === 0) {
+            propertyMessage = 'Pick at least one specific property to save.';
+        } else {
+            propertyOk = true;
+            propertyText = checked + ' specific ' + (checked === 1 ? 'property' : 'properties');
         }
     } else if (mode === 'full') {
-        // Legacy full mode JSON validation
-        const propsJson = document.getElementById('publisher_properties').value.trim();
-        if (!propsJson) {
-            e.preventDefault();
-            alert('Please specify publisher properties');
-            return false;
-        }
-
-        try {
-            const props = JSON.parse(propsJson);
-            if (!Array.isArray(props) || props.length === 0) {
-                e.preventDefault();
-                alert('Publisher properties must be a non-empty array');
-                return false;
+        const propsRaw = (document.getElementById('publisher_properties').value || '').trim();
+        if (!propsRaw) {
+            propertyMessage = 'Add publisher properties JSON to save.';
+        } else {
+            try {
+                const parsed = JSON.parse(propsRaw);
+                if (!Array.isArray(parsed) || parsed.length === 0) {
+                    propertyMessage = 'Publisher properties must be a non-empty array.';
+                } else {
+                    let badIdx = -1;
+                    let badReason = '';
+                    for (let i = 0; i < parsed.length; i++) {
+                        const prop = parsed[i] || {};
+                        const domain = (prop.publisher_domain || '').trim();
+                        const tags = prop.property_tags || [];
+                        const ids = prop.property_ids || [];
+                        if (!domain) { badIdx = i; badReason = 'add a publisher domain'; break; }
+                        if (!tags.length && !ids.length) {
+                            badIdx = i;
+                            badReason = `(${domain}): choose at least one property tag or ID`;
+                            break;
+                        }
+                        const bad = tags.find(t => !TAG_PATTERN.test(String(t).toLowerCase()));
+                        if (bad) {
+                            badIdx = i;
+                            badReason = `(${domain}): "${bad}" — use lowercase letters, numbers, and underscores only`;
+                            break;
+                        }
+                    }
+                    if (badIdx >= 0) {
+                        propertyMessage = `Row ${badIdx + 1} ${badReason}.`;
+                    } else {
+                        propertyOk = true;
+                        const domains = new Set(parsed.map(prop => prop.publisher_domain).filter(Boolean));
+                        const tagCount = parsed.reduce((sum, prop) => sum + (prop.property_tags || []).length, 0);
+                        const idCount = parsed.reduce((sum, prop) => sum + (prop.property_ids || []).length, 0);
+                        const parts = [`${domains.size} ${domains.size === 1 ? 'domain' : 'domains'}`];
+                        if (tagCount) parts.push(`${tagCount} ${tagCount === 1 ? 'tag' : 'tags'}`);
+                        if (idCount) parts.push(`${idCount} ${idCount === 1 ? 'ID' : 'IDs'}`);
+                        propertyText = parts.join(' · ');
+                    }
+                }
+            } catch (err) {
+                propertyMessage = 'Publisher properties JSON is malformed.';
             }
-        } catch (error) {
-            e.preventDefault();
-            alert('Invalid JSON in publisher properties: ' + error.message);
-            return false;
         }
     }
 
-    return true;
+    // Messages are full sentences. The formbar reads them verbatim — no
+    // suffix appending (an earlier draft glued " to save." onto each, which
+    // mangled multi-sentence tag-error messages).
+    const item = ({ ok = true, warning = '', text, message = '', focusId = null }) => ({
+        ok,
+        warning,
+        text,
+        message,
+        focusId,
+        state: !ok ? 'invalid' : (warning ? 'warning' : 'valid'),
+    });
+
+    const by = {
+        name: item({
+            ok: name.length > 0,
+            text: name || 'missing',
+            message: 'Add a bundle name to save.',
+            focusId: 'name',
+        }),
+        description: item({
+            text: description ? 'present' : 'missing',
+            warning: description
+                ? ''
+                : 'Bundle saves OK, but agents may skip it because the description is empty.',
+            focusId: 'description',
+        }),
+        inventory: item({
+            ok: invSize > 0,
+            text: invParts.length ? invParts.join(' · ') : 'none yet',
+            message: 'Add at least one placement or ad unit to save.',
+            focusId: 'inventory-picker-search',
+        }),
+        formats: item({
+            ok: formatCount > 0 && specialSizeCount === 0,
+            text: formatSizeCount > 0 ? `${formatSizeCount} ${formatSizeCount === 1 ? 'size' : 'sizes'}` : 'none',
+            message: specialSizeCount > 0
+                ? 'Classify GAM 1x1 special inventory before saving.'
+                : 'Pick inventory with synced creative sizes to save.',
+            focusId: 'inventory-picker-search',
+        }),
+        properties: item({
+            ok: propertyOk,
+            warning: propertyWarning,
+            text: propertyText,
+            // propertyMessage is always set when !propertyOk; fall back is
+            // defensive only and uses the same sentence shape.
+            message: propertyWarning || propertyMessage || 'Configure publisher properties to save.',
+            // The tags mode uses a multi-row editor (#532) — focus the first
+            // tag input on submit failure. For property_ids, focus the
+            // section wrapper so the eye lands somewhere.
+            focusId: mode === 'tags'
+                ? null  // resolved at submit time by querying .prop-row inputs
+                : (mode === 'property_ids' ? 'property-ids-section' : 'publisher-domain-input'),
+        }),
+    };
+    const errors = Object.entries(by).filter(([, v]) => !v.ok);
+    const warnings = Object.entries(by).filter(([, v]) => v.ok && v.warning);
+    return { valid: errors.length === 0, errors, warnings, by };
+}
+
+function recomputeValidity() {
+    const state = computeValidity();
+
+    Object.entries(state.by).forEach(([name, info]) => {
+        const row = document.querySelector(`.summary-list__row[data-validator="${name}"]`);
+        if (!row) return;
+        row.classList.toggle('invalid', info.state === 'invalid');
+        row.classList.toggle('warning', info.state === 'warning');
+        row.classList.toggle('valid', info.state === 'valid');
+        row.title = info.warning || '';
+        const textEl = row.querySelector(`[data-validator-text="${name}"]`);
+        if (textEl) textEl.textContent = info.text;
+    });
+
+    const status = document.getElementById('formbar-status');
+    const formbar = document.getElementById('formbar');
+    const saveBtn = document.getElementById('save-bundle-btn');
+    if (state.valid && state.warnings.length === 0) {
+        // Once valid, the only new information is "Ready to save." The
+        // page-level caveat ("Changes apply to next media buy…") is already
+        // the default status text, so drop the redundant tail.
+        if (status) status.textContent = 'Ready to save.';
+        if (formbar) formbar.dataset.formState = 'ready';
+        if (saveBtn) saveBtn.disabled = false;
+    } else if (state.valid) {
+        const first = state.warnings[0][1];
+        if (status) status.textContent = first.warning;
+        if (formbar) formbar.dataset.formState = 'warning';
+        if (saveBtn) saveBtn.disabled = false;
+    } else {
+        const first = state.errors[0][1];
+        // Messages are already complete sentences — render verbatim.
+        if (status) status.textContent = first.message;
+        if (formbar) formbar.dataset.formState = 'invalid';
+        // Keep the button clickable so the click→focus-jump pattern works;
+        // server-side validation backstops any sneaky submission.
+        if (saveBtn) saveBtn.disabled = false;
+    }
+    return state;
+}
+
+// Wire form-wide listeners. Text inputs run through a debounce so the
+// Summary card doesn't stutter on every keystroke; non-text events
+// (checkboxes, radios, programmatic mutations) fire instantly.
+const TEXT_DEBOUNCE_MS = 180;
+let _validateTimer = null;
+let _initialFormSignature = null;
+let _isSubmitting = false;
+
+function recomputeValidityDebounced() {
+    clearTimeout(_validateTimer);
+    _validateTimer = setTimeout(recomputeValidity, TEXT_DEBOUNCE_MS);
+}
+
+function currentFormSignature() {
+    if (!profileForm) return '';
+    const entries = Array.from(new FormData(profileForm).entries())
+        .map(([key, value]) => [key, String(value)])
+        .sort((a, b) => (a[0] + a[1]).localeCompare(b[0] + b[1]));
+    return JSON.stringify(entries);
+}
+
+function markFormClean() {
+    _initialFormSignature = currentFormSignature();
+    if (profileForm) profileForm.dataset.dirty = 'false';
+}
+
+function isFormDirty() {
+    return _initialFormSignature !== null && currentFormSignature() !== _initialFormSignature;
+}
+
+function updateDirtyState() {
+    if (!profileForm) return;
+    profileForm.dataset.dirty = isFormDirty() ? 'true' : 'false';
+}
+
+window.addEventListener('beforeunload', (e) => {
+    if (_isSubmitting || !isFormDirty()) return;
+    e.preventDefault();
+    e.returnValue = '';
+});
+
+// Normalize the tag input on blur — operators who type "Premium Sports"
+// shouldn't be punished for natural spacing. (#529, UX review)
+const tagsInputForNormalize = document.getElementById('property_tags');
+if (tagsInputForNormalize) {
+    tagsInputForNormalize.addEventListener('blur', () => {
+        const raw = tagsInputForNormalize.value;
+        const normalized = raw
+            .split(',')
+            .map(_normalizeTag)
+            .filter(Boolean)
+            .join(', ');
+        if (normalized !== raw.trim()) {
+            tagsInputForNormalize.value = normalized;
+            // Bubble so the chip picker (#532) catches it too.
+            tagsInputForNormalize.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        recomputeValidity();
+    });
+}
+
+const profileForm = document.getElementById('profile-form');
+if (profileForm) {
+    profileForm.addEventListener('input', (e) => {
+        // Text inputs get the debounce treatment; checkboxes/radios/etc fire
+        // 'change' events that we handle below instantly.
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' && ['text', 'search'].includes(e.target.type)) {
+            recomputeValidityDebounced();
+        } else if (tag === 'TEXTAREA') {
+            recomputeValidityDebounced();
+        } else {
+            recomputeValidity();
+        }
+        updateDirtyState();
+    });
+    profileForm.addEventListener('change', () => {
+        recomputeValidity();
+        updateDirtyState();
+    });
+    profileForm.addEventListener('submit', (e) => {
+        const state = recomputeValidity();
+        if (!state.valid) {
+            e.preventDefault();
+            const first = state.errors[0][1];
+            // Multi-domain tags editor (#532): pick the first row whose tags
+            // input is empty or invalid.
+            const isTagsRowError = _propertyModeChecked() === 'tags';
+            let el = null;
+            if (isTagsRowError && first.focusId === null) {
+                const rows = _tagRowsFromForm();
+                const badIdx = rows.findIndex((r) => !r.domain || r.tags.length === 0 ||
+                    r.tags.some(t => !TAG_PATTERN.test(t.toLowerCase())));
+                const rowNodes = document.querySelectorAll('#prop-rows .prop-row');
+                el = rowNodes[Math.max(badIdx, 0)]?.querySelector('input[name="property_tags[]"]') || null;
+            } else if (first.focusId) {
+                el = document.getElementById(first.focusId);
+            }
+            if (el) {
+                // Some focusIds point at section wrappers (property_ids).
+                // Prefer to focus a sensible input inside if so.
+                const target =
+                    (el.matches('input, textarea, select') ? el : null) ||
+                    el.querySelector('input, textarea, select') ||
+                    el;
+                if (typeof target.focus === 'function') target.focus();
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // One-shot border flash on the focused input (without a
+                // page-wide shake — the UX review called the shake too
+                // noisy when the formbar status + scroll already convey
+                // intent).
+                if (target !== el || target.matches('input, textarea, select')) {
+                    target.classList.add('field--flash');
+                    target.addEventListener(
+                        'animationend',
+                        () => target.classList.remove('field--flash'),
+                        { once: true },
+                    );
+                }
+            }
+            return;
+        }
+
+        _isSubmitting = true;
+        const saveBtn = document.getElementById('save-bundle-btn');
+        const status = document.getElementById('formbar-status');
+        if (saveBtn) {
+            saveBtn.dataset.originalText = saveBtn.textContent.trim();
+            saveBtn.textContent = 'Saving...';
+            saveBtn.disabled = true;
+        }
+        if (status) status.textContent = 'Saving bundle...';
+    });
+}
+
+document.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 's') return;
+    e.preventDefault();
+    if (isInventoryPickerOpen()) return;
+    const saveBtn = document.getElementById('save-bundle-btn');
+    if (profileForm && !saveBtn?.disabled) {
+        profileForm.requestSubmit(saveBtn || undefined);
+    }
+});
+
+// Initial paint after the DOM is wired up.
+window.addEventListener('DOMContentLoaded', () => {
+    // Defer one tick — prePopulateData runs on DOMContentLoaded too and
+    // we want to read the populated state, not the empty initial state.
+    setTimeout(() => {
+        recomputeValidity();
+        if (_initialFormSignature === null) markFormClean();
+    }, 0);
 });
 </script>
 
-<style>
-.form-group {
-    margin-bottom: 1.5rem;
-}
-
-.form-group label {
-    display: block;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-    color: #333;
-}
-
-.form-group input[type="text"],
-.form-group textarea {
-    width: 100%;
-    padding: 0.5rem;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    font-size: 1rem;
-}
-
-.form-group small {
-    display: block;
-    margin-top: 0.25rem;
-    font-size: 0.875rem;
-}
-
-.btn {
-    padding: 0.5rem 1rem;
-    border-radius: 4px;
-    border: none;
-    cursor: pointer;
-    font-size: 1rem;
-}
-
-.btn-primary {
-    background: #007bff;
-    color: white;
-}
-
-.btn-primary:hover {
-    background: #0056b3;
-}
-
-.btn-secondary {
-    background: #6c757d;
-    color: white;
-}
-
-.btn-secondary:hover {
-    background: #545b62;
-}
-
-.btn-sm {
-    padding: 0.25rem 0.5rem;
-    font-size: 0.875rem;
-}
-
-code {
-    background: #f4f4f4;
-    padding: 0.2rem 0.4rem;
-    border-radius: 3px;
-    font-family: monospace;
-}
-</style>
 {% endblock %}

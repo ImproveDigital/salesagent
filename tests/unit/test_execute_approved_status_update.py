@@ -7,7 +7,7 @@ execution but never sets media_buy.status = 'active' in the database.
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from src.core.schemas import CreateMediaBuySuccess, Principal
 
@@ -28,6 +28,8 @@ def _make_mock_media_buy():
     mb.budget = Decimal("5000.00")
     mb.currency = "USD"
     mb.raw_request = {
+        "account": {"account_id": "test-acct"},
+        "idempotency_key": "idem-test-xxxxxxxxxxxxxxxx",
         "brand": {"domain": "testbrand.com"},
         "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
         "end_time": (datetime.now(UTC) + timedelta(days=8)).isoformat(),
@@ -37,14 +39,16 @@ def _make_mock_media_buy():
 
 
 def _make_mock_tenant():
-    """Build a mock Tenant ORM object."""
-    tenant = MagicMock()
-    tenant.tenant_id = "tenant_1"
-    tenant.name = "Test Tenant"
-    tenant.subdomain = "test"
-    tenant.ad_server = "mock"
-    tenant.virtual_host = None
-    return tenant
+    """Build a Tenant ORM object without attaching it to a session."""
+    from src.core.database.models import Tenant
+
+    return Tenant(
+        tenant_id="tenant_1",
+        name="Test Tenant",
+        subdomain="test",
+        ad_server="mock",
+        creative_pre_approval_gate_enabled=True,
+    )
 
 
 def _make_mock_package():
@@ -63,6 +67,7 @@ def _make_mock_product():
     product.name = "Test Product"
     product.delivery_type = "non_guaranteed"
     product.format_ids = [{"agent_url": "https://example.com/formats", "format_id": "fmt_1", "id": "fmt_1"}]
+    product.effective_format_ids = product.format_ids
 
     # Set up pricing option
     pricing_option = MagicMock()
@@ -149,18 +154,19 @@ class TestExecuteApprovedStatusUpdate:
 
         uow_iter = iter([mock_uow_1, mock_uow_2, mock_uow_3])
 
+        from src.core.utils.tenant_utils import serialize_tenant_to_dict
+
+        expected_tenant_context = serialize_tenant_to_dict(tenant)
+
         with (
             patch("src.core.database.repositories.MediaBuyUoW", side_effect=lambda _: next(uow_iter)),
-            patch("src.core.config_loader.set_current_tenant"),
-            patch(
-                "src.core.config_loader.get_tenant_by_id",
-                return_value={"tenant_id": "tenant_1", "adapter_type": "mock"},
-            ),
+            patch("src.core.config_loader.set_current_tenant") as set_current_tenant,
+            patch("src.core.config_loader.get_tenant_by_id", return_value=None),
             patch("src.core.auth.get_principal_object", return_value=principal),
             patch(
                 "src.core.tools.media_buy_create._execute_adapter_media_buy_creation",
                 return_value=adapter_response,
-            ),
+            ) as execute_adapter_media_buy_creation,
             patch("src.core.tools.media_buy_create._validate_creatives_before_adapter_call"),
             patch("src.core.helpers.adapter_helpers.get_adapter", return_value=mock_adapter),
         ):
@@ -171,6 +177,18 @@ class TestExecuteApprovedStatusUpdate:
         # -- Assert --
         assert success is True, f"Expected success but got error: {error}"
         assert error is None
+
+        set_current_tenant.assert_called_once_with(expected_tenant_context)
+        execute_adapter_media_buy_creation.assert_called_once_with(
+            ANY,
+            ANY,
+            media_buy.start_time,
+            media_buy.end_time,
+            ANY,
+            principal,
+            ANY,
+            tenant=expected_tenant_context,
+        )
 
         # THE KEY ASSERTION: update_status must be called with 'active'
         mock_repo_3.update_status.assert_called_once_with("mb_test_001", "active")

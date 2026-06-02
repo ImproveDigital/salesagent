@@ -24,7 +24,7 @@ from src.core.database.models import PricingOption
 from src.core.database.models import Product as ProductModel
 from src.core.product_conversion import convert_product_model_to_schema
 from src.core.schemas import Product as ProductSchema
-from tests.helpers.adcp_factories import create_test_db_product
+from tests.helpers.adcp_factories import create_test_db_product, create_test_reporting_capabilities
 
 ADCP_36_PRODUCT_FIELDS = {
     "catalog_match",
@@ -89,6 +89,7 @@ class TestProductAdcp36FieldsPersistence:
             delivery_measurement={"provider": "publisher", "notes": "test"},
             signal_targeting_allowed=True,
             property_targeting_allowed=True,
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         dumped = product.model_dump()
@@ -124,6 +125,7 @@ class TestProductAdcp36FieldsPersistence:
                 }
             ],
             delivery_measurement={"provider": "publisher"},
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
         assert product.property_targeting_allowed is False
 

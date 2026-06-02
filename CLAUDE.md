@@ -310,14 +310,17 @@ with get_db_session() as session:
 
 ## Project Overview
 
-Python-based Prebid Sales Agent with:
-- **MCP Server**: FastMCP tools for AI agents (via nginx at `/mcp/`)
-- **Admin UI**: Google OAuth secured interface (via nginx at `/admin/` or `/tenant/<name>`)
-- **A2A Server**: python-a2a agent-to-agent communication (via nginx at `/a2a`)
-- **Multi-Tenant**: Database-backed isolation with subdomain routing
+Python-based Prebid Sales Agent (this fork ships v2 — the `core/` rewrite) with:
+- **MCP Server**: AdCP buyer-protocol tools at `/mcp` (registered via `LazyPlatformRouter` + `adcp.server.serve()`)
+- **A2A Server**: AdCP A2A surface at `/` (host root per AdCP convention) with `/.well-known/agent-card.json` discovery
+- **Admin UI**: Google OAuth secured Flask app mounted via WSGI middleware at `/admin/`, `/tenant/<name>`, etc.
+- **Tenant Management API**: Embedded-mode integration surface at `/admin/api/v1/tenant-management`
+- **Multi-Tenant**: Bearer-token-driven tenant scoping (principal's tenant_id beats Host header) — embedded mode via X-Identity-* headers, traditional mode via subdomain
 - **PostgreSQL**: Production-ready with Docker deployment
 
-All services are accessed through the nginx proxy at **http://localhost:8000**.
+Production entry point: **`scripts/run_server.py` → `core.main.main()`**. Single Starlette binary serves all surfaces via `adcp.server.serve(transport="both")`. Set `RUN_STACK=src` to fall back to the legacy `src.app:app` FastAPI assembly (with broken A2A on a2a-sdk 1.0+) — kept reachable as an escape hatch.
+
+All services accessed through the nginx proxy at **http://localhost:8000**.
 
 ---
 
@@ -391,7 +394,9 @@ docker compose down       # Stop
 uvx adcp http://localhost:8000/mcp/ --auth test-token list_tools
 ```
 
-**Note:** `docker compose` builds from local source. For a clean rebuild: `docker compose build --no-cache`
+**Note:** `docker compose` builds from local source. For a clean rebuild: `docker compose build --no-cache`.
+
+**After a dependency bump (`uv.lock` changed), always use `make compose-up`** — bare `docker compose build` can reuse a stale install layer because of a BuildKit cache-mount edge case (the `RUN uv sync --frozen` step's COPY layer hash short-circuits even when the lockfile content changed). The make target threads `LOCKFILE_HASH=<sha256 of uv.lock>` as a build arg so the install layer's cache key changes whenever lockfile content does. Symptom if you skip it: bumped a dep but the running container still imports the old version.
 
 ### Testing
 

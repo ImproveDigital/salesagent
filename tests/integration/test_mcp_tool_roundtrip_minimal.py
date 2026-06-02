@@ -7,11 +7,59 @@ and caused errors.
 Focus: Test parameter-to-schema mapping, not business logic.
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastmcp.client import Client
 from fastmcp.client.transports import StreamableHttpTransport
+
+from tests.factories.spec_required_kwargs import required_request_kwargs
+
+# adcp 4.4 wire-required envelope on mutation tools — buyers must supply
+# both. Match the pattern used by tests/e2e/adcp_request_builder.py so test
+# inputs reflect real-buyer wire shape rather than the schema we'd prefer.
+# ``adcp_version`` stays omitted to exercise the legacy 3.0 default path.
+_WIRE_BRAND = {"domain": "testbrand.com"}
+_WIRE_ACCOUNT = {"brand": _WIRE_BRAND, "operator": "testbrand.com"}
+
+
+def _wire_envelope(prefix: str) -> dict:
+    """Return ``account`` + ``idempotency_key`` for inclusion in mutation requests."""
+    return {
+        "account": _WIRE_ACCOUNT,
+        "idempotency_key": f"{prefix}-{uuid.uuid4()}",
+    }
+
+
+@pytest.fixture
+def anonymous_wholesale_default_catalog(factory_session):
+    """Seed localhost's anonymous default-tenant catalog before the MCP server starts."""
+    from tests.factories import InventoryProfileFactory, PropertyTagFactory, TenantFactory
+
+    tenant = TenantFactory(
+        tenant_id="default",
+        subdomain="default",
+        brand_manifest_policy="public",
+        public_agent_url="https://default.example.com/agent",
+    )
+    PropertyTagFactory(tenant=tenant, tag_id="all_inventory", name="All Inventory")
+    bundle = InventoryProfileFactory(
+        tenant=tenant,
+        tenant_id=tenant.tenant_id,
+        profile_id="anonymous_wholesale_product",
+        name="Anonymous Wholesale Product",
+        pricing_availability={
+            "pricing_guidance_by_model": {
+                "cpm": {
+                    "p50": 5.0,
+                    "p75": 8.0,
+                }
+            }
+        },
+    )
+    factory_session.commit()
+    return bundle.profile_id
 
 
 @pytest.mark.integration
@@ -35,13 +83,33 @@ class TestMCPToolRoundtripMinimal:
             yield client
 
     async def test_get_products_minimal(self, mcp_client):
-        """Test get_products with only required parameter (promoted_offering)."""
-        result = await mcp_client.call_tool("get_products", {"brand": {"domain": "testbrand.com"}})
+        """Test get_products with a minimal explicit wholesale request."""
+        result = await mcp_client.call_tool(
+            "get_products", {"buying_mode": "wholesale", "brand": {"domain": "testbrand.com"}}
+        )
 
         assert result is not None
         # FastMCP call_tool returns structured_content
         content = result.structured_content if hasattr(result, "structured_content") else result
         assert "products" in content
+
+    async def test_get_products_anonymous_wholesale_retains_pricing_options(
+        self, anonymous_wholesale_default_catalog, mcp_server
+    ):
+        """Anonymous wholesale feed reads must stay AdCP-valid at the MCP boundary."""
+        headers = {"x-adcp-tenant": "default"}
+        transport = StreamableHttpTransport(url=f"http://localhost:{mcp_server.port}/mcp/", headers=headers)
+        client = Client(transport=transport)
+
+        async with client:
+            result = await client.call_tool("get_products", {"buying_mode": "wholesale", "filters": {}})
+
+        content = result.structured_content if hasattr(result, "structured_content") else result
+        assert content is not None
+        assert "products" in content
+        assert content["products"], "anonymous wholesale should return public catalog products"
+        assert {product["product_id"] for product in content["products"]} == {anonymous_wholesale_default_catalog}
+        assert all(product["pricing_options"] for product in content["products"])
 
     async def test_create_media_buy_minimal(self, mcp_client):
         """Test create_media_buy with minimal required parameters."""
@@ -70,6 +138,7 @@ class TestMCPToolRoundtripMinimal:
                     ],
                     "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
                     "end_time": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
+                    **_wire_envelope("roundtrip-create"),
                 },
             )
 
@@ -107,6 +176,7 @@ class TestMCPToolRoundtripMinimal:
                     ],
                     "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
                     "end_time": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
+                    **_wire_envelope("roundtrip-update-create"),
                 },
             )
 
@@ -120,6 +190,7 @@ class TestMCPToolRoundtripMinimal:
                     {
                         "media_buy_id": create_content["media_buy_id"],
                         "paused": True,  # adcp 2.12.0+: paused=True means pause, paused=False means resume
+                        **_wire_envelope("roundtrip-update"),
                     },
                 )
 
@@ -192,7 +263,8 @@ class TestMCPToolRoundtripMinimal:
                             "click_url": {"url": "https://example.com"},
                         },
                     }
-                ]
+                ],
+                **_wire_envelope("roundtrip-sync"),
             },
         )
 
@@ -223,61 +295,18 @@ class TestMCPToolRoundtripMinimal:
             error_msg = str(e).lower()
             assert "no_properties_configured" in error_msg or "properties" in error_msg
 
-    async def test_update_performance_index_minimal(self, mcp_client):
-        """Test update_performance_index with required parameters."""
-        # First, create a media buy to update
-        products_result = await mcp_client.call_tool(
-            "get_products", {"brand": {"domain": "testbrand.com"}, "brief": "test"}
-        )
-
-        products = (
-            products_result.structured_content if hasattr(products_result, "structured_content") else products_result
-        )
-        if products and len(products.get("products", [])) > 0:
-            product_id = products["products"][0]["product_id"]
-
-            # Create media buy
-            create_result = await mcp_client.call_tool(
-                "create_media_buy",
-                {
-                    "brand": {"domain": "testbrand.com"},
-                    "packages": [
-                        {
-                            "product_id": product_id,
-                            "pricing_option_id": "cpm_usd_fixed",  # Format: {model}_{currency}_{fixed|auction}
-                            "budget": 1000.0,
-                        }
-                    ],
-                    "start_time": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
-                    "end_time": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
-                },
-            )
-
-            create_content = (
-                create_result.structured_content if hasattr(create_result, "structured_content") else create_result
-            )
-            if "media_buy_id" in create_content:
-                media_buy_id = create_content["media_buy_id"]
-
-                # Now update performance index
-                result = await mcp_client.call_tool(
-                    "update_performance_index",
-                    {
-                        "media_buy_id": media_buy_id,
-                        "performance_data": [
-                            {
-                                "product_id": product_id,
-                                "performance_index": 1.2,  # 20% better than baseline
-                            }
-                        ],
-                    },
-                )
-
-                assert result is not None
-                content = result.structured_content if hasattr(result, "structured_content") else result
-                assert content is not None
-                # Should not crash - may return success or error status
-                assert "status" in content or "error" in content or "performance_data" in content
+    # update_performance_index used to exist as an MCP tool but the adcp
+    # library no longer exposes it on the wire (the tool was removed in
+    # an earlier spec revision). The impl still lives at
+    # src/core/tools/performance.py:_update_performance_index_impl and is
+    # covered by unit tests:
+    #   tests/unit/test_performance_index_behavioral.py    (behavioural)
+    #   tests/unit/test_auth_requirements.py               (auth boundary)
+    #   tests/unit/test_impl_resolved_identity.py          (identity param)
+    #   tests/unit/test_transport_agnostic_impl.py         (no console)
+    # Removing the MCP roundtrip test here — the wire path no longer
+    # exists, and unit-level coverage is sufficient until/unless the tool
+    # comes back to the spec.
 
 
 @pytest.mark.unit  # Changed from integration - these don't require server
@@ -289,7 +318,7 @@ class TestSchemaConstructionValidation:
         from src.core.schemas import UpdateMediaBuyRequest
 
         # Test with only media_buy_id (required via oneOf constraint)
-        req = UpdateMediaBuyRequest(media_buy_id="test_buy_123")
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="test_buy_123")
 
         assert req.media_buy_id == "test_buy_123"
         assert req.paused is None  # adcp 2.12.0+: replaced 'active' with 'paused'
@@ -303,10 +332,12 @@ class TestSchemaConstructionValidation:
         """Verify that all request schemas can be constructed without all fields."""
         from src.core import schemas
 
-        # Test schemas that should work with minimal params
+        # Test schemas that should work with minimal params. ``account`` and
+        # ``idempotency_key`` are spec-required on UpdateMediaBuyRequest (no
+        # spec mode permits omission); supplied via required_request_kwargs().
         test_cases = [
-            (schemas.GetProductsRequest, {"brand": {"domain": "testbrand.com"}}),
-            (schemas.UpdateMediaBuyRequest, {"media_buy_id": "test"}),
+            (schemas.GetProductsRequest, {"buying_mode": "wholesale", "brand": {"domain": "testbrand.com"}}),
+            (schemas.UpdateMediaBuyRequest, {**required_request_kwargs(), "media_buy_id": "test"}),
             (schemas.GetMediaBuyDeliveryRequest, {}),
             (schemas.ListCreativesRequest, {}),
             (schemas.ListAuthorizedPropertiesRequest, {}),
@@ -337,7 +368,7 @@ class TestParameterToSchemaMapping:
         }
 
         # Create request with valid fields only
-        req = UpdateMediaBuyRequest(**tool_params)
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), **tool_params)
 
         # Valid fields should be set
         assert req.media_buy_id == "test_buy_123"

@@ -12,7 +12,14 @@ Output:
     static/js/generated-types.d.ts
 """
 
+import sys
 from pathlib import Path
+
+# Make repo root importable so `from src.core.schemas import ...` works
+# regardless of cwd, without requiring callers to set PYTHONPATH.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 # Import our Pydantic schemas (which extend adcp library)
 from src.core.schemas import (

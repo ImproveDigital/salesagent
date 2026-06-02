@@ -18,6 +18,12 @@ from sqlalchemy import select
 
 from src.admin.utils import require_auth, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_capabilities import (
+    INTEGRATION_CAPABILITIES,
+    capability_owned_response,
+    publisher_owns,
+    publisher_owns_any,
+)
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant
 
@@ -149,8 +155,112 @@ def update_admin_settings():
 # GET requests for settings are handled by src/admin/blueprints/tenants.py::settings()
 
 
-@settings_bp.route("/general", methods=["POST"])
+@settings_bp.route("/integrations/", methods=["GET"])
 @require_tenant_access()
+def integrations_page(tenant_id):
+    """Render the standalone Integrations page (Sprint 7 Phase 2).
+
+    Promoted out of ``tenant_settings.html`` (the ``#integrations``
+    section). Four capability-gated subsections — Slack, AI Services,
+    Creative Agents, Signals Discovery Agents — carry their gates over
+    unchanged. The Slack and AI POST endpoints, plus the Creative /
+    Signals Agents management blueprints, are unchanged: only the GET
+    render moves.
+    """
+    from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+    with get_db_session() as session:
+        tenant = TenantConfigRepository(session, tenant_id).get_tenant()
+        if not tenant:
+            flash("Tenant not found", "error")
+            return redirect(url_for("core.index"))
+
+        if not publisher_owns_any(INTEGRATION_CAPABILITIES):
+            return render_template("_embedded_locked_page.html", tenant=tenant), 403
+
+        # AI config drives the Status banner + the legacy-key migration
+        # alert. Same shape ``tenant_settings`` loads — kept in sync so
+        # the template renders identically here.
+        ai_config = tenant.ai_config or {}
+        current_provider = ai_config.get("provider", "")
+        current_model = ai_config.get("model", "")
+        has_logfire = bool(ai_config.get("logfire_token"))
+        has_gemini_key = bool(tenant.gemini_api_key)
+
+        return render_template(
+            "integrations.html",
+            tenant=tenant,
+            tenant_id=tenant_id,
+            current_provider=current_provider,
+            current_model=current_model,
+            has_logfire=has_logfire,
+            has_gemini_key=has_gemini_key,
+        )
+
+
+@settings_bp.route("/policies/", methods=["GET"])
+@require_tenant_access()
+def policies_page(tenant_id):
+    """Render the standalone Policies & Workflows page (Sprint 7 Phase 2).
+
+    Promoted out of ``tenant_settings.html`` (the ~700-line
+    ``#business-rules`` section). Same form, same POST endpoint at
+    ``/settings/business-rules`` — only the GET render moves. Capability
+    gates (creative_approval, advertising_policy, product_ranking,
+    brand_manifest) carry over unchanged via ``publisher_owns()``.
+    """
+    from src.core.database.repositories import CurrencyLimitRepository
+    from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+    with get_db_session() as session:
+        repo = TenantConfigRepository(session, tenant_id)
+        tenant = repo.get_tenant()
+        if not tenant:
+            flash("Tenant not found", "error")
+            return redirect(url_for("core.index"))
+
+        # Adapter config drives the "GAM network currencies" banner in
+        # the Budget Controls subsection — load it as a dict so the
+        # template can read ``adapter_config.get(...)``.
+        adapter_obj = repo.get_adapter_config()
+        adapter_config: dict[str, Any] = {}
+        if adapter_obj:
+            adapter_config = {
+                "adapter_type": adapter_obj.adapter_type,
+                "network_currency": getattr(adapter_obj, "gam_network_currency", None),
+                "secondary_currencies": getattr(adapter_obj, "gam_secondary_currencies", None) or [],
+            }
+
+        # Currency limits — embedded tenants see read-only; open tenants
+        # get the full add/remove UI. Template reads ``currency_limits``.
+        currency_limits = CurrencyLimitRepository(session, tenant_id).list_all()
+
+        # AI services key gates the Creative Review + Product Ranking
+        # subsections' "API key required" warnings. Mirrors the loader
+        # in ``tenants.tenant_settings`` so the template renders
+        # identically here.
+        ai_config = tenant.ai_config or {}
+        has_gemini_key = bool(ai_config.get("api_key") or getattr(tenant, "gemini_api_key", None))
+
+        # Shared with the legacy tenant_settings view — both surfaces need
+        # the same Babel-derived currency catalog for the Add Currency
+        # modal's autocomplete. Reusing the existing helper rather than
+        # duplicating it.
+        from src.admin.blueprints.tenants import get_available_currencies
+
+        return render_template(
+            "policies_and_workflows.html",
+            tenant=tenant,
+            tenant_id=tenant_id,
+            adapter_config=adapter_config,
+            currency_limits=currency_limits,
+            has_gemini_key=has_gemini_key,
+            available_currencies=get_available_currencies(),
+        )
+
+
+@settings_bp.route("/general", methods=["POST"])
+@require_tenant_access(role=("admin",))
 @log_admin_action("update_general_settings")
 def update_general(tenant_id):
     """Update general tenant settings."""
@@ -269,18 +379,33 @@ def update_general(tenant_id):
                     )
                     db_session.add(limit)
 
-            if "enable_axe_signals" in request.form:
-                tenant.enable_axe_signals = request.form.get("enable_axe_signals") == "on"
-            else:
-                tenant.enable_axe_signals = False
+            # Headless gate (Sprint 7 Phase 4b): when the storefront owns
+            # the corresponding workflow, never touch these fields — not even
+            # to reset them to ``False``. The "checkbox-absent means unchecked"
+            # logic would otherwise silently clobber storefront-owned state
+            # on every save (e.g., a currency-only edit posts no
+            # ``enable_axe_signals`` checkbox → would set the field to False).
+            if publisher_owns("signals_agents"):
+                if "enable_axe_signals" in request.form:
+                    tenant.enable_axe_signals = request.form.get("enable_axe_signals") == "on"
+                else:
+                    tenant.enable_axe_signals = False
 
-            if "human_review_required" in request.form:
-                tenant.human_review_required = request.form.get("human_review_required") == "on"
-            else:
-                tenant.human_review_required = False
+            if publisher_owns("creative_approval"):
+                if "human_review_required" in request.form:
+                    tenant.human_review_required = request.form.get("human_review_required") == "on"
+                else:
+                    tenant.human_review_required = False
 
             tenant.updated_at = datetime.now(UTC)
             db_session.commit()
+
+            # Invalidate the cached virtual_host lookup so the next URL
+            # build (MCP/A2A URL, landing page, OAuth callback) sees the
+            # change without waiting for a process restart.
+            from src.core.domain_config import _resolve_single_tenant_virtual_host
+
+            _resolve_single_tenant_virtual_host.cache_clear()
 
             flash("General settings updated successfully", "success")
 
@@ -292,7 +417,7 @@ def update_general(tenant_id):
 
 
 @settings_bp.route("/adapter", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action(
     "update_adapter",
     extract_details=lambda r, **kw: {
@@ -480,9 +605,15 @@ def update_adapter(tenant_id):
 
 @settings_bp.route("/slack", methods=["POST"])
 @log_admin_action("update_slack")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def update_slack(tenant_id):
     """Update Slack integration settings."""
+    # Headless gate: the storefront may centralize Slack notifications
+    # on embedded instances. When that capability is owned by the
+    # storefront, the template hides the section and direct POSTs are
+    # rejected as defense-in-depth.
+    if not publisher_owns("slack"):
+        return capability_owned_response("slack")
     try:
         from src.core.webhook_validator import WebhookURLValidator
 
@@ -494,13 +625,13 @@ def update_slack(tenant_id):
             is_valid, error_msg = WebhookURLValidator.validate_webhook_url(webhook_url)
             if not is_valid:
                 flash(f"Invalid Slack webhook URL: {error_msg}", "error")
-                return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="integrations"))
+                return redirect(url_for("settings.integrations_page", tenant_id=tenant_id))
 
         if audit_webhook_url:
             is_valid, error_msg = WebhookURLValidator.validate_webhook_url(audit_webhook_url)
             if not is_valid:
                 flash(f"Invalid Slack audit webhook URL: {error_msg}", "error")
-                return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="integrations"))
+                return redirect(url_for("settings.integrations_page", tenant_id=tenant_id))
 
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -523,14 +654,16 @@ def update_slack(tenant_id):
         logger.error(f"Error updating Slack settings: {e}", exc_info=True)
         flash(f"Error updating Slack settings: {str(e)}", "error")
 
-    return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="integrations"))
+    return redirect(url_for("settings.integrations_page", tenant_id=tenant_id))
 
 
 @settings_bp.route("/ai", methods=["POST"])
 @log_admin_action("update_ai")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def update_ai(tenant_id):
     """Update AI services settings (multi-provider configuration)."""
+    if not publisher_owns("ai_services"):
+        return capability_owned_response("ai_services")
     try:
         provider = request.form.get("ai_provider", "gemini").strip()
         model = request.form.get("ai_model", "").strip()
@@ -590,13 +723,24 @@ def update_ai(tenant_id):
         logger.error(f"Error updating AI settings: {e}", exc_info=True)
         flash(f"Error updating AI settings: {str(e)}", "error")
 
-    return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="integrations"))
+    return redirect(url_for("settings.integrations_page", tenant_id=tenant_id))
 
 
 @settings_bp.route("/ai/test", methods=["POST"])
-@require_tenant_access(api_mode=True)
+@require_tenant_access(api_mode=True, role=("admin",), allow_embedded_writes=True)
 def test_ai_connection(tenant_id):
-    """Test AI connection with current configuration."""
+    """Test AI connection with current configuration.
+
+    Gated on the ``ai_services`` capability — if the storefront owns
+    AI, there's nothing on the publisher side to probe.
+
+    This endpoint is a read-only probe — it validates credentials against the
+    upstream provider and never writes to tenant state — so it opts into the
+    embedded-write gate. The verb-based gate would otherwise misclassify it.
+    """
+    if not publisher_owns("ai_services"):
+        return capability_owned_response("ai_services")
+
     import asyncio
     import concurrent.futures
 
@@ -686,9 +830,15 @@ def test_ai_connection(tenant_id):
 
 
 @settings_bp.route("/ai/test-logfire", methods=["POST"])
-@require_tenant_access(api_mode=True)
+@require_tenant_access(api_mode=True, role=("admin",), allow_embedded_writes=True)
 def test_logfire_connection(tenant_id):
-    """Test Logfire connection with provided token."""
+    """Test Logfire connection with provided token.
+
+    Read-only probe — see `test_ai_connection` above for rationale.
+    Gated on the ``ai_services`` capability.
+    """
+    if not publisher_owns("ai_services"):
+        return capability_owned_response("ai_services")
     try:
         data = request.get_json() or {}
         logfire_token = data.get("logfire_token", "").strip()
@@ -741,7 +891,11 @@ def get_ai_models(tenant_id):
     """Get available AI models from Pydantic AI.
 
     Returns models grouped by provider, extracted from pydantic_ai.models.KnownModelName.
+    Gated on the ``ai_services`` capability — no model picker if AI is storefront-owned.
     """
+    if not publisher_owns("ai_services"):
+        return capability_owned_response("ai_services")
+
     from pydantic_ai.models import KnownModelName
 
     # Extract all model strings from KnownModelName Literal type
@@ -816,7 +970,7 @@ def get_ai_models(tenant_id):
 # Domain and Email Management Routes
 @settings_bp.route("/domains/add", methods=["POST"])
 @log_admin_action("add_authorized_domain")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def add_authorized_domain(tenant_id):
     """Add domain to tenant's authorized domains list."""
     from src.admin.domain_access import add_authorized_domain as add_domain
@@ -847,7 +1001,7 @@ def add_authorized_domain(tenant_id):
 
 @settings_bp.route("/domains/remove", methods=["POST"])
 @log_admin_action("remove_authorized_domain")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def remove_authorized_domain(tenant_id):
     """Remove domain from tenant's authorized domains list."""
     from src.admin.domain_access import remove_authorized_domain as remove_domain
@@ -873,7 +1027,7 @@ def remove_authorized_domain(tenant_id):
 
 @settings_bp.route("/emails/add", methods=["POST"])
 @log_admin_action("add_authorized_email")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def add_authorized_email(tenant_id):
     """Add email to tenant's authorized emails list."""
     from src.admin.domain_access import add_authorized_email as add_email
@@ -904,7 +1058,7 @@ def add_authorized_email(tenant_id):
 
 @settings_bp.route("/emails/remove", methods=["POST"])
 @log_admin_action("remove_authorized_email")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def remove_authorized_email(tenant_id):
     """Remove email from tenant's authorized emails list."""
     from src.admin.domain_access import remove_authorized_email as remove_email
@@ -931,9 +1085,14 @@ def remove_authorized_email(tenant_id):
 # Test route for domain access functionality
 @settings_bp.route("/access/test", methods=["POST"])
 @log_admin_action("test_domain_access")
-@require_tenant_access()
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
 def test_domain_access(tenant_id):
-    """Test email access for this tenant."""
+    """Test email access for this tenant.
+
+    Read-only probe — looks up tenant access for a given email and flashes
+    the result, never writes to tenant state — so it opts into the
+    embedded-write gate.
+    """
     from src.admin.domain_access import get_user_tenant_access
 
     try:
@@ -1165,21 +1324,69 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
     return updates
 
 
+# Maps each business-rules form field to its capability. Fields not in
+# this map (currencies, measurement_providers, naming_templates) stay
+# publisher-owned permanently — they're ad-server-specific config.
+_BUSINESS_RULES_FIELD_CAPABILITIES: dict[str, str] = {
+    "approval_mode": "creative_approval",
+    "creative_review_criteria": "creative_approval",
+    "creative_auto_approve_threshold": "creative_approval",
+    "creative_auto_reject_threshold": "creative_approval",
+    "sensitive_categories": "creative_approval",
+    "learn_from_overrides": "creative_approval",
+    "human_review_required": "creative_approval",
+    "policy_check_enabled": "advertising_policy",
+    "default_prohibited_categories": "advertising_policy",
+    "default_prohibited_tactics": "advertising_policy",
+    "prohibited_categories": "advertising_policy",
+    "prohibited_tactics": "advertising_policy",
+    "prohibited_advertisers": "advertising_policy",
+    "product_ranking_prompt": "product_ranking",
+    "brand_manifest_policy": "brand_manifest",
+    "enable_axe_signals": "signals_agents",
+}
+
+
+def _rejected_storefront_capability(form_data) -> str | None:
+    """Return the capability name if any field in ``form_data`` belongs
+    to a workflow the storefront owns; otherwise ``None``.
+
+    The template gates hide these sections, so a populated field implies
+    a direct POST, a stale browser form, or a template bug. Either way,
+    reject.
+    """
+    for field, capability in _BUSINESS_RULES_FIELD_CAPABILITIES.items():
+        if field in form_data and not publisher_owns(capability):
+            return capability
+    return None
+
+
 @settings_bp.route("/business-rules", methods=["POST"])
 @log_admin_action("update_business_rules")
-@require_tenant_access()
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
 def update_business_rules(tenant_id):
     """Update business rules (budget, naming, approvals, features).
 
     This function uses PolicyService for validation and updates. The service layer
     provides clean, testable business logic with comprehensive validation.
+
+    Business rules are publisher-managed (Sprint 5 design); embedded tenants edit
+    them via the proxied admin UI. The model-layer guard's
+    ``PUBLISHER_WRITABLE_FIELDS[Tenant]`` allow-list enforces the per-column
+    boundary as defense-in-depth.
+
+    Headless gate (Sprint 7 Phase 4b): several form fields belong to workflows
+    the storefront may centralize on embedded instances. Reject if any of those
+    fields are present in the submitted form.
     """
     from src.services.policy_service import PolicyService, ValidationError
 
-    try:
-        # Get form data
-        data = request.get_json() if request.is_json else request.form
+    data = request.get_json() if request.is_json else request.form
+    rejected = _rejected_storefront_capability(data)
+    if rejected is not None:
+        return capability_owned_response(rejected)
 
+    try:
         # Parse form data into PolicyService format
         updates = parse_form_data_to_policy_updates(data)
 
@@ -1202,10 +1409,11 @@ def update_business_rules(tenant_id):
                             tenant.adapter_config.gam_manual_approval_required = manual_approval_value
                         elif adapter_type == "mock":
                             tenant.adapter_config.mock_manual_approval_required = manual_approval_value
-                        elif adapter_type == "kevel":
-                            tenant.adapter_config.kevel_manual_approval_required = manual_approval_value
-                elif not request.is_json:
-                    # Checkbox not present in form data means unchecked
+                elif not request.is_json and publisher_owns("creative_approval"):
+                    # Checkbox not present in form data means unchecked.
+                    # Skip when the storefront owns creative_approval — the
+                    # checkbox isn't rendered, so its absence doesn't mean
+                    # "publisher unchecked it."
                     tenant.human_review_required = False
                     if tenant.adapter_config:
                         adapter_type = tenant.adapter_config.adapter_type
@@ -1213,8 +1421,6 @@ def update_business_rules(tenant_id):
                             tenant.adapter_config.gam_manual_approval_required = False
                         elif adapter_type == "mock":
                             tenant.adapter_config.mock_manual_approval_required = False
-                        elif adapter_type == "kevel":
-                            tenant.adapter_config.kevel_manual_approval_required = False
 
                 db_session.commit()
 
@@ -1234,7 +1440,7 @@ def update_business_rules(tenant_id):
         # Flash each validation error
         for field, error in e.errors.items():
             flash(f"{field}: {error}", "error")
-        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="business-rules"))
+        return redirect(url_for("settings.policies_page", tenant_id=tenant_id))
 
     except Exception as e:
         logger.error(f"Error updating business rules: {e}", exc_info=True)
@@ -1243,11 +1449,11 @@ def update_business_rules(tenant_id):
             return jsonify({"success": False, "error": str(e)}), 500
 
         flash(f"Error updating business rules: {str(e)}", "error")
-        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="business-rules"))
+        return redirect(url_for("settings.policies_page", tenant_id=tenant_id))
 
 
 @settings_bp.route("/approximated-domain-status", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def check_approximated_domain_status(tenant_id):
     """Check if a domain is registered with Approximated."""
     try:
@@ -1300,7 +1506,7 @@ def check_approximated_domain_status(tenant_id):
 
 
 @settings_bp.route("/approximated-register-domain", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action("register_approximated_domain")
 def register_approximated_domain(tenant_id):
     """Register a domain with Approximated for TLS and routing."""
@@ -1360,7 +1566,7 @@ def register_approximated_domain(tenant_id):
 
 
 @settings_bp.route("/approximated-unregister-domain", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 @log_admin_action("unregister_approximated_domain")
 def unregister_approximated_domain(tenant_id):
     """Unregister a domain from Approximated."""
@@ -1405,7 +1611,7 @@ def unregister_approximated_domain(tenant_id):
 
 
 @settings_bp.route("/approximated-token", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def get_approximated_token(tenant_id):
     """Generate an Approximated DNS widget token and get DNS target."""
     try:

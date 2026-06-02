@@ -115,7 +115,6 @@ def test_creative_optional_fields_still_included():
         name="Test Creative",
         format={"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"},
         assets={"banner": {"asset_type": "image", "url": "https://example.com/banner.jpg"}},
-        tags=["sports", "premium"],  # Internal field in adcp 3.6.0
         # Internal fields
         principal_id="principal_123",
         status="approved",
@@ -124,9 +123,6 @@ def test_creative_optional_fields_still_included():
     response = GetCreativesResponse(creatives=[creative])
     result = response.model_dump()
     creative_data = result["creatives"][0]
-
-    # Listing Creative: tags is a public optional field; present when set
-    assert "tags" in creative_data, "Listing Creative: tags is a public field"
 
     # Internal fields still excluded
     assert "principal_id" not in creative_data, "Internal field principal_id should be excluded"
@@ -271,7 +267,7 @@ def test_sync_creatives_response_properties_success():
     # adcp 3.9: SyncCreativesResponse subclasses success variant only;
     # error variant is a separate type, no .errors attr on success
     assert not hasattr(response, "errors")
-    assert response.context is None
+    assert not hasattr(response, "context")
 
 
 # ── ListCreativeFormatsResponse __str__ ──────────────────────────────────

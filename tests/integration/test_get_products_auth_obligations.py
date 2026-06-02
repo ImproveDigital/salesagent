@@ -15,7 +15,13 @@ from src.core.exceptions import AdCPAuthenticationError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.tenant_context import LazyTenantContext
 from src.core.testing_hooks import AdCPTestContext
-from tests.factories import PricingOptionFactory, PrincipalFactory, ProductFactory, TenantFactory
+from tests.factories import (
+    InventoryProfileFactory,
+    PricingOptionFactory,
+    PrincipalFactory,
+    ProductFactory,
+    TenantFactory,
+)
 from tests.harness.product import ProductEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -135,6 +141,23 @@ class TestDiscoveryEndpointAuthentication:
             with pytest.raises(AdCPAuthenticationError):
                 await env.call_impl(brief="test")
 
+    @pytest.mark.asyncio
+    async def test_require_auth_policy_rejects_anonymous_wholesale(self, integration_db):
+        """Wholesale pricing feed access still honors the tenant auth policy."""
+        with ProductEnv(tenant_id="auth-reqd-wholesale", principal_id=None) as env:
+            tenant = TenantFactory(
+                tenant_id="auth-reqd-wholesale",
+                subdomain="auth-reqd-wholesale",
+                brand_manifest_policy="require_auth",
+            )
+            p = ProductFactory(tenant=tenant, product_id="wholesale-product", allowed_principal_ids=None)
+            PricingOptionFactory(product=p)
+
+            env._identity = _lazy_identity("auth-reqd-wholesale", principal_id=None)
+
+            with pytest.raises(AdCPAuthenticationError):
+                await env.call_impl(buying_mode="wholesale", brief=None, brand=None, filters={})
+
 
 class TestPrincipalScopedProductVisibility:
     """BR-RULE-003-01: Principal-scoped product visibility.
@@ -214,6 +237,36 @@ class TestPrincipalScopedProductVisibility:
         product_ids = {p.product_id for p in result.products}
         assert "open-item" in product_ids
         assert "closed-item" not in product_ids
+
+    @pytest.mark.asyncio
+    async def test_anonymous_wholesale_cannot_see_restricted_products(self, integration_db):
+        """Anonymous wholesale feed reads retain ACL filtering while exposing public pricing."""
+        with ProductEnv(tenant_id="scope-anon-wholesale", principal_id=None) as env:
+            tenant = TenantFactory(
+                tenant_id="scope-anon-wholesale",
+                subdomain="scope-anon-wholesale",
+                brand_manifest_policy="public",
+            )
+            InventoryProfileFactory(
+                tenant=tenant,
+                tenant_id=tenant.tenant_id,
+                profile_id="open-wholesale",
+                name="Open Wholesale Bundle",
+            )
+            InventoryProfileFactory(
+                tenant=tenant,
+                tenant_id=tenant.tenant_id,
+                profile_id="closed-wholesale",
+                name="Closed Wholesale Bundle",
+                constraints={"allowed_principal_ids": ["some-principal"]},
+            )
+
+            env._identity = _lazy_identity("scope-anon-wholesale", principal_id=None)
+            result = await env.call_impl(buying_mode="wholesale", brief=None, brand=None, filters={})
+
+        product_ids = {p.product_id for p in result.products}
+        assert product_ids == {"open-wholesale"}
+        assert len(result.products[0].pricing_options) == 1
 
     @pytest.mark.asyncio
     async def test_mixed_visibility_with_authenticated_principal(self, integration_db):

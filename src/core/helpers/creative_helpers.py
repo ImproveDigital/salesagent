@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from adcp import FormatId as LibraryFormatId
 from pydantic import BaseModel
 
+from src.core.canonical_formats import canonicalize_creative_agent_url
+from src.core.format_cache import canonical_format_satisfies
+
 if TYPE_CHECKING:
     from src.core.database.models import Product as DBProduct
     from src.core.resolved_identity import ResolvedIdentity
@@ -58,7 +61,7 @@ def _extract_format_info(format_value: Any) -> FormatInfo:
         format_id_val = format_value.get("id")
         if not agent_url_val or not format_id_val:
             raise ValueError(f"format_id must have both 'agent_url' and 'id' fields. Got: {format_value}")
-        agent_url = str(agent_url_val)
+        agent_url = canonicalize_creative_agent_url(agent_url_val)
         format_id = format_id_val
 
         # Extract optional parameters
@@ -73,7 +76,7 @@ def _extract_format_info(format_value: Any) -> FormatInfo:
             parameters = params
 
     elif isinstance(format_value, LibraryFormatId):
-        agent_url = str(format_value.agent_url)
+        agent_url = canonicalize_creative_agent_url(format_value.agent_url)
         format_id = format_value.id
 
         # Extract optional parameters from object
@@ -213,7 +216,8 @@ def _convert_creative_to_adapter_asset(creative: Creative, package_assignments: 
     # Base asset object with common fields
     # Note: creative.format_id returns string via FormatId.__str__() (returns just the id field)
     # creative.format is the actual FormatId object
-    format_str = str(creative.format_id)  # Convert FormatId to string ID
+    format_id_obj = creative.format_id
+    format_str = str(format_id_obj)  # Convert FormatId to string ID
 
     asset: dict[str, Any] = {
         "creative_id": creative.creative_id,
@@ -221,10 +225,19 @@ def _convert_creative_to_adapter_asset(creative: Creative, package_assignments: 
         "format": format_str,  # Adapter expects string format ID
         "package_assignments": package_assignments,
     }
+    if format_id_obj is not None:
+        asset["format_id"] = _format_ref_dict(
+            str(format_id_obj.agent_url),
+            format_id_obj.id,
+            {
+                "width": format_id_obj.width,
+                "height": format_id_obj.height,
+                "duration_ms": format_id_obj.duration_ms,
+            },
+        )
 
     # Extract dimensions from FormatId parameters (AdCP 2.5 format templates)
     # This is the primary source of truth for parameterized formats
-    format_id_obj = creative.format_id
     if format_id_obj is not None:
         if format_id_obj.width is not None:
             asset["width"] = format_id_obj.width
@@ -233,6 +246,7 @@ def _convert_creative_to_adapter_asset(creative: Creative, package_assignments: 
         if format_id_obj.duration_ms is not None:
             # Convert to seconds for adapter compatibility
             asset["duration"] = format_id_obj.duration_ms / 1000.0
+            asset["duration_seconds"] = format_id_obj.duration_ms / 1000.0
 
     # Extract data from assets dict (AdCP v1 spec)
     assets_dict = creative.assets if isinstance(creative.assets, dict) else {}
@@ -300,6 +314,7 @@ def _convert_creative_to_adapter_asset(creative: Creative, package_assignments: 
             # Extract VAST duration if present (duration_ms → seconds)
             if "duration_ms" in primary_asset:
                 asset["duration"] = primary_asset["duration_ms"] / 1000.0
+                asset["duration_seconds"] = primary_asset["duration_ms"] / 1000.0
 
         elif "content" in primary_asset and "url" not in primary_asset:
             # HTML or JavaScript asset (has content, no url)
@@ -324,6 +339,11 @@ def _convert_creative_to_adapter_asset(creative: Creative, package_assignments: 
             # Extract video duration (duration_ms → seconds)
             if "duration_ms" in primary_asset:
                 asset["duration"] = primary_asset["duration_ms"] / 1000.0
+                asset["duration_seconds"] = primary_asset["duration_ms"] / 1000.0
+
+    content_type = _infer_creative_content_type(format_str, getattr(creative, "assets", None), asset)
+    if content_type:
+        asset["content_type"] = content_type
 
     # Extract click URL from assets (URL asset with url_type="clickthrough")
     for _role, asset_data in assets_dict.items():
@@ -384,6 +404,133 @@ def _convert_creative_to_adapter_asset(creative: Creative, package_assignments: 
     return asset
 
 
+def _format_ref_dict(agent_url: str, format_id: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a JSON-safe FormatId dict with optional parameter fields."""
+    ref: dict[str, Any] = {"agent_url": agent_url, "id": format_id}
+    for key in ("width", "height", "duration_ms"):
+        if parameters and parameters.get(key) is not None:
+            ref[key] = parameters[key]
+    return ref
+
+
+def _media_asset_type_from_assets(assets: Any) -> str | None:
+    if not isinstance(assets, dict):
+        return None
+    for asset in assets.values():
+        if not isinstance(asset, dict):
+            continue
+        asset_type = str(asset.get("asset_type") or "").lower()
+        if asset_type in {"audio", "video", "image", "javascript", "html", "vast"}:
+            return asset_type
+        content_type = str(asset.get("content_type") or "").lower()
+        if content_type.startswith("audio/"):
+            return "audio"
+        if content_type.startswith("video/"):
+            return "video"
+    return None
+
+
+def _infer_creative_asset_type(format_id: str, assets: Any, creative_data: dict[str, Any]) -> str:
+    explicit = str(creative_data.get("asset_type") or "").lower()
+    if explicit:
+        return explicit
+    asset_type = _media_asset_type_from_assets(assets)
+    if asset_type:
+        return asset_type
+    if "vast" in format_id.lower():
+        return "vast"
+    if "audio" in format_id.lower():
+        return "audio"
+    if "video" in format_id.lower():
+        return "video"
+    if "js" in format_id.lower() or "javascript" in format_id.lower():
+        return "javascript"
+    if "html" in format_id.lower():
+        return "html"
+    return "image"
+
+
+def _infer_creative_content_type(format_id: str, assets: Any, creative_data: dict[str, Any]) -> str | None:
+    explicit = creative_data.get("content_type") or creative_data.get("mime_type")
+    if explicit:
+        return str(explicit)
+    if isinstance(assets, dict):
+        for asset in assets.values():
+            if isinstance(asset, dict):
+                content_type = asset.get("content_type") or asset.get("mime_type")
+                if content_type:
+                    return str(content_type)
+    if format_id == "video_vast" or "vast" in format_id.lower():
+        return "application/xml"
+    asset_type = _infer_creative_asset_type(format_id, assets, creative_data)
+    if asset_type == "audio":
+        return "audio/mpeg"
+    if asset_type == "video":
+        return "video/mp4"
+    return None
+
+
+def build_adapter_asset_from_stored_creative(
+    creative: Any,
+    *,
+    package_id: str,
+    format_spec: Any | None,
+) -> dict[str, Any]:
+    """Build an adapter upload payload from a stored creative row.
+
+    The payload preserves structured canonical format metadata so adapters
+    with non-display semantics (SpringServe audio, FreeWheel VAST) can choose
+    the correct upstream creative surface.
+    """
+    creative_data = creative.data or {}
+    format_parameters = creative.format_parameters if isinstance(creative.format_parameters, dict) else {}
+    format_id = str(creative.format)
+    format_ref = _format_ref_dict(str(creative.agent_url), format_id, format_parameters)
+    url, width, height = extract_media_url_and_dimensions(creative_data, format_spec)
+    click_url = extract_click_url(creative_data, format_spec)
+    impression_tracker_url = extract_impression_tracker_url(creative_data, format_spec)
+    duration_ms = format_parameters.get("duration_ms")
+    duration_seconds = float(duration_ms) / 1000.0 if duration_ms is not None else creative_data.get("duration_seconds")
+    assets = creative_data.get("assets")
+    asset_type = _infer_creative_asset_type(format_id, assets, creative_data)
+    content_type = _infer_creative_content_type(format_id, assets, creative_data)
+
+    asset: dict[str, Any] = {
+        "id": creative.creative_id,
+        "creative_id": creative.creative_id,
+        "package_assignments": [package_id],
+        "format": format_id,
+        "format_id": format_ref,
+        "format_parameters": format_parameters or None,
+        "width": width,
+        "height": height,
+        "url": url,
+        "click_url": click_url,
+        "asset_type": asset_type,
+        "name": creative.name or f"Creative {creative.creative_id}",
+    }
+    if content_type:
+        asset["content_type"] = content_type
+    if duration_seconds is not None:
+        asset["duration_seconds"] = duration_seconds
+        asset["duration"] = duration_seconds
+    if impression_tracker_url:
+        asset["delivery_settings"] = {"tracking_urls": {"impression": [impression_tracker_url]}}
+    return asset
+
+
+def adapter_asset_requires_dimensions(adapter_name: str, asset: dict[str, Any]) -> bool:
+    """Return whether a pre-synced creative upload must have width/height."""
+    if adapter_name in {"springserve", "freewheel"}:
+        return False
+    format_ref = asset.get("format_id")
+    format_id = str(format_ref.get("id") if isinstance(format_ref, dict) else asset.get("format") or "")
+    asset_type = str(asset.get("asset_type") or "").lower()
+    if asset_type == "audio" or "audio" in format_id.lower() or format_id == "video_vast":
+        return False
+    return True
+
+
 def _detect_snippet_type(snippet: str) -> str:
     """Auto-detect snippet type from content for legacy support."""
     if snippet.startswith("<?xml") or ".xml" in snippet:
@@ -413,7 +560,8 @@ def validate_creative_format_against_product(
 
     Note:
         Packages have exactly one product, so this is a binary check (matches or doesn't).
-        Format IDs should already be normalized before calling this function.
+        The comparison canonicalizes legacy fixed-size IDs and structured
+        parameterized IDs before matching.
 
     Example:
         >>> from src.core.schemas import FormatId, Product
@@ -445,25 +593,10 @@ def validate_creative_format_against_product(
             return ""
         return str(url_val).rstrip("/")
 
-    # Simple equality check: does creative's format_id match any product format_id?
+    # Canonical comparison keeps legacy fixed-size IDs compatible with AdCP
+    # parameterized IDs, e.g. display_300x250_image vs display_image+300x250.
     for product_format in product_format_ids:
-        # Handle both FormatId objects and dicts (database stores as dicts)
-        if isinstance(product_format, dict):
-            product_agent_url: str | None = product_format.get("agent_url")
-            product_fmt_id: str | None = product_format.get("id") or product_format.get("format_id")
-        elif isinstance(product_format, LibraryFormatId):
-            # Convert AnyUrl to string for consistent comparison
-            product_agent_url = str(product_format.agent_url) if product_format.agent_url else None
-            product_fmt_id = product_format.id
-        else:
-            # Skip invalid format entries
-            continue
-
-        if not product_agent_url or not product_fmt_id:
-            continue
-
-        # Format IDs match if both agent_url and id are equal (normalized to strip trailing slashes)
-        if normalize_url(creative_agent_url) == normalize_url(product_agent_url) and creative_id == product_fmt_id:
+        if canonical_format_satisfies(creative_format_id, product_format):
             return True, None
 
     # Build error message with supported formats
@@ -531,7 +664,7 @@ def process_and_upload_package_creatives(
     import logging
 
     # Lazy import to avoid circular dependency
-    from src.core.exceptions import AdCPAdapterError
+    from src.core.exceptions import AdCPAdapterError, AdCPError, AdCPValidationError
     from src.core.tools.creatives import _sync_creatives_impl
 
     logger = logging.getLogger(__name__)
@@ -560,7 +693,45 @@ def process_and_upload_package_creatives(
                 identity=context,  # ResolvedIdentity for principal_id extraction
             )
 
-            # Extract creative IDs from response
+            failed_results = [
+                result
+                for result in sync_response.creatives
+                if str(getattr(result.action, "value", result.action)).lower() == "failed" or result.errors
+            ]
+            if failed_results:
+                creative_errors = [
+                    {
+                        "creative_id": result.creative_id,
+                        "errors": [
+                            {
+                                "code": getattr(error, "code", None),
+                                "message": str(error.message if hasattr(error, "message") else error),
+                            }
+                            for error in result.errors or []
+                        ],
+                    }
+                    for result in failed_results
+                ]
+                transient_error_codes = {
+                    "creative_agent_unreachable",
+                    "preview_generation_failed",
+                    "processing_failed",
+                }
+                error_cls = (
+                    AdCPAdapterError
+                    if any(
+                        error.get("code") in transient_error_codes
+                        for creative_error in creative_errors
+                        for error in creative_error["errors"]
+                    )
+                    else AdCPValidationError
+                )
+                raise error_cls(
+                    f"Failed to upload creatives for package with product_id {product_id}",
+                    details={"error_code": "CREATIVES_UPLOAD_FAILED", "creative_errors": creative_errors},
+                )
+
+            # Extract creative IDs from successful response rows only.
             uploaded_ids = [result.creative_id for result in sync_response.creatives if result.creative_id]
 
             logger.info(
@@ -583,6 +754,8 @@ def process_and_upload_package_creatives(
             # Track uploads for return value
             uploaded_by_product[product_id] = uploaded_ids
 
+        except AdCPError:
+            raise
         except Exception as e:
             error_msg = f"Failed to upload creatives for package with product_id {product_id}: {str(e)}"
             logger.error(error_msg)
@@ -607,8 +780,8 @@ def process_and_upload_package_creatives(
 # - audio: audio_file
 # NOT included:
 # - url: Used for clickthrough URLs and trackers (url_type field distinguishes them)
-# - html/javascript/vast/text: These have 'content' field, not 'url' field
-MEDIA_ASSET_TYPES = {"image", "video", "audio"}
+# - html/javascript/text: These have 'content' field, not 'url' field
+MEDIA_ASSET_TYPES = {"image", "video", "audio", "vast"}
 
 # Known media asset IDs for fallback when format spec is not available
 # Based on AdCP creative agent format specs + common conventions
@@ -625,6 +798,9 @@ MEDIA_ASSET_FALLBACK_IDS = {
     "video_file",
     # audio assets
     "audio_file",
+    # VAST tag assets
+    "vast_tag",
+    "vast_tag_url",
     # common conventions
     "main",
     "image",
@@ -678,7 +854,6 @@ def extract_media_url_and_dimensions(
         - Uses adcp.utils.get_individual_assets() for backward compatibility with assets_required
     """
     # Lazy import to avoid circular dependencies
-    from adcp.types.generated_poc.core.format import Assets
     from adcp.utils import get_individual_assets, has_assets
 
     url = None
@@ -688,12 +863,11 @@ def extract_media_url_and_dimensions(
     # Priority 1: Use format spec to find media assets
     if creative_data.get("assets") and format_spec and has_assets(format_spec):
         for asset_spec in get_individual_assets(format_spec):
-            # Type guard: get_individual_assets only returns Assets, not Assets5 (repeatable groups)
-            if not isinstance(asset_spec, Assets):
-                continue
-            asset_type = str(asset_spec.asset_type).lower()
+            asset_type = str(getattr(asset_spec, "asset_type", "")).lower()
             if asset_type in MEDIA_ASSET_TYPES:
-                asset_id = asset_spec.asset_id
+                asset_id = getattr(asset_spec, "asset_id", None)
+                if not asset_id:
+                    continue
                 if asset_id in creative_data["assets"]:
                     asset_obj = creative_data["assets"][asset_id]
                     if isinstance(asset_obj, dict):
@@ -803,7 +977,6 @@ def extract_click_url(
         Click-through URL string (optionally with macros substituted), or None if not found.
     """
     # Lazy import to avoid circular dependencies
-    from adcp.types.generated_poc.core.format import Assets
     from adcp.utils import get_individual_assets, has_assets
 
     click_url = None
@@ -811,9 +984,7 @@ def extract_click_url(
     # Priority 1: Use format spec to find clickthrough URL (url_type == 'clickthrough')
     if creative_data.get("assets") and format_spec and has_assets(format_spec):
         for asset_spec in get_individual_assets(format_spec):
-            if not isinstance(asset_spec, Assets):
-                continue
-            asset_type = str(asset_spec.asset_type).lower()
+            asset_type = str(getattr(asset_spec, "asset_type", "")).lower()
             if asset_type == "url":
                 requirements = getattr(asset_spec, "requirements", None)
                 if requirements:
@@ -823,7 +994,9 @@ def extract_click_url(
                     elif hasattr(requirements, "url_type"):
                         req_url_type = requirements.url_type
                     if req_url_type == "clickthrough":
-                        asset_id = asset_spec.asset_id
+                        asset_id = getattr(asset_spec, "asset_id", None)
+                        if not asset_id:
+                            continue
                         if asset_id in creative_data["assets"]:
                             asset_obj = creative_data["assets"][asset_id]
                             if isinstance(asset_obj, dict) and asset_obj.get("url"):
@@ -870,7 +1043,6 @@ def extract_impression_tracker_url(creative_data: dict[str, Any], format_spec: A
         Impression tracker URL string or None if not found.
     """
     # Lazy import to avoid circular dependencies
-    from adcp.types.generated_poc.core.format import Assets
     from adcp.utils import get_individual_assets, has_assets
 
     tracker_url = None
@@ -879,9 +1051,7 @@ def extract_impression_tracker_url(creative_data: dict[str, Any], format_spec: A
     # Match url assets where requirements.url_type == 'tracker_pixel'
     if creative_data.get("assets") and format_spec and has_assets(format_spec):
         for asset_spec in get_individual_assets(format_spec):
-            if not isinstance(asset_spec, Assets):
-                continue
-            asset_type = str(asset_spec.asset_type).lower()
+            asset_type = str(getattr(asset_spec, "asset_type", "")).lower()
             if asset_type == "url":
                 # Check if this is a tracker_pixel by looking at requirements.url_type
                 requirements = getattr(asset_spec, "requirements", None)
@@ -893,7 +1063,9 @@ def extract_impression_tracker_url(creative_data: dict[str, Any], format_spec: A
                         req_url_type = requirements.url_type
                     # Only match tracker_pixel type
                     if req_url_type == "tracker_pixel":
-                        asset_id = asset_spec.asset_id
+                        asset_id = getattr(asset_spec, "asset_id", None)
+                        if not asset_id:
+                            continue
                         if asset_id in creative_data["assets"]:
                             asset_obj = creative_data["assets"][asset_id]
                             if isinstance(asset_obj, dict) and asset_obj.get("url"):

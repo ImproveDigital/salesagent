@@ -17,8 +17,6 @@ def test_no_import_collisions():
     files_to_check = [
         "main.py",
         "adapters/base.py",
-        "adapters/kevel.py",
-        "adapters/triton_digital.py",
     ]
 
     base_path = Path(__file__).parent.parent.parent
@@ -84,13 +82,18 @@ def test_no_import_collisions():
 
 
 def test_models_use_correct_imports():
-    """Verify that SQLAlchemy queries use Model* prefixed classes."""
+    """Verify that SQLAlchemy queries use Model* prefixed classes.
+
+    The legacy ``src/core/main.py`` was removed in the legacy-stack deletion;
+    scan ``src/core/tools/`` (where the _impl functions live) instead.
+    """
 
     base_path = Path(__file__).parent.parent.parent
-    main_file = base_path / "src" / "core" / "main.py"
+    tools_dir = base_path / "src" / "core" / "tools"
 
-    with open(main_file) as f:
-        content = f.read()
+    content = ""
+    for py_file in tools_dir.rglob("*.py"):
+        content += py_file.read_text()
 
     # Check for correct usage patterns (SQLAlchemy 2.0 style)
     incorrect_patterns = [
@@ -114,8 +117,6 @@ def test_wildcard_imports_documented():
     files_with_wildcards = [
         "main.py",
         "adapters/base.py",
-        "adapters/kevel.py",
-        "adapters/triton_digital.py",
     ]
 
     issues = []

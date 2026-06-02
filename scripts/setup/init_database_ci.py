@@ -56,6 +56,12 @@ def init_db_ci():
                     session.flush()
                     print("   ✓ Access control configured")
 
+                if not existing_tenant.default_gam_advertiser_id:
+                    print("Backfilling default advertiser for existing tenant...")
+                    existing_tenant.default_gam_advertiser_id = "test-advertiser"
+                    session.flush()
+                    print("   ✓ Default advertiser configured")
+
                 # Check if principal exists GLOBALLY by access_token (it's unique across all tenants)
                 stmt_principal = select(Principal).filter_by(access_token="ci-test-token")
                 existing_principal = session.scalars(stmt_principal).first()
@@ -132,10 +138,18 @@ def init_db_ci():
                     subdomain="ci-test",
                     billing_plan="test",
                     ad_server="mock",
+                    default_gam_advertiser_id="test-advertiser",
                     enable_axe_signals=True,
                     is_active=True,  # Explicitly set for auth lookup
                     authorized_emails=["ci-test@example.com"],  # Required by setup checklist
                     authorized_domains=None,  # Optional when emails are set
+                    # AAO setup-checklist prerequisite (post-#78: only
+                    # public_agent_url; house_domain was dropped). Without
+                    # this, ``validate_setup_complete`` raises in
+                    # ``_create_media_buy_impl`` and e2e tests creating
+                    # media buys against the mock platform (now DB-backed
+                    # via delegation) hit the gate.
+                    public_agent_url="https://ci-test.example.com/agent",
                     policy_settings=None,  # SQL NULL
                     signals_agent_config=None,  # SQL NULL
                     ai_policy=None,  # SQL NULL
@@ -193,7 +207,7 @@ def init_db_ci():
                         tenant_id = existing_tenant.tenant_id
                         print(f"   Using existing tenant (ID: {tenant_id})")
                     else:
-                        raise ValueError("Failed to create or find CI test tenant")
+                        raise ValueError("Failed to create or find CI test tenant") from e
 
                 # Now create principal + dependencies in separate transaction
                 # Query again for principal (may have been created by other container)
@@ -499,6 +513,10 @@ def init_db_ci():
             if existing_iso:
                 iso_tenant_id = existing_iso.tenant_id
                 print(f"Isolation tenant already exists (ID: {iso_tenant_id})")
+                if not existing_iso.default_gam_advertiser_id:
+                    existing_iso.default_gam_advertiser_id = "iso-test-advertiser"
+                    iso_session.commit()
+                    print("  ✓ Backfilled isolation tenant default advertiser")
             else:
                 iso_tenant_id = str(uuid.uuid4())
                 now_iso = datetime.now(UTC)
@@ -508,10 +526,13 @@ def init_db_ci():
                     subdomain="iso-test",
                     billing_plan="test",
                     ad_server="mock",
+                    default_gam_advertiser_id="iso-test-advertiser",
                     enable_axe_signals=False,
                     is_active=True,
                     authorized_emails=["iso-test@example.com"],
                     authorized_domains=None,
+                    # Setup-checklist prerequisite — see ci-test tenant block.
+                    public_agent_url="https://iso-test.example.com/agent",
                     policy_settings=None,
                     signals_agent_config=None,
                     ai_policy=None,
@@ -533,7 +554,7 @@ def init_db_ci():
                     if existing_iso:
                         iso_tenant_id = existing_iso.tenant_id
                     else:
-                        raise ValueError("Failed to create or find isolation tenant")
+                        raise ValueError("Failed to create or find isolation tenant") from e
 
             # Create principal for isolation tenant
             stmt_iso_principal = select(Principal).filter_by(access_token="iso-test-token")

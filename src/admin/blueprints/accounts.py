@@ -15,6 +15,7 @@ from src.admin.utils.audit_decorator import log_admin_action
 from src.admin.utils.helpers import require_tenant_access
 from src.core.database.models import Account
 from src.core.database.repositories.uow import AccountUoW
+from src.services.protocol_change_webhooks import notify_account_status_changed
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def list_accounts(tenant_id):
 
 
 @accounts_bp.route("/create", methods=["GET", "POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 @log_admin_action("create_account")
 def create_account(tenant_id):
     """Create a new account."""
@@ -120,7 +121,7 @@ def account_detail(tenant_id, account_id):
 
 
 @accounts_bp.route("/<account_id>/edit", methods=["GET", "POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 @log_admin_action("edit_account")
 def edit_account(tenant_id, account_id):
     """Edit an existing account."""
@@ -159,7 +160,7 @@ def edit_account(tenant_id, account_id):
 
 
 @accounts_bp.route("/<account_id>/status", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 @log_admin_action("change_account_status")
 def change_status(tenant_id, account_id):
     """Change account status (JSON API for AJAX calls)."""
@@ -169,21 +170,37 @@ def change_status(tenant_id, account_id):
     if not new_status:
         return jsonify({"success": False, "error": "Status is required."}), 400
 
+    principal_id = None
+    old_status = None
     with AccountUoW(tenant_id) as uow:
         account = uow.accounts.get_by_id(account_id)
         if account is None:
             return jsonify({"success": False, "error": "Account not found."}), 404
 
+        old_status = account.status
+        principal_id = account.principal_id
         allowed = _STATUS_TRANSITIONS.get(account.status, set())
         if new_status not in allowed:
-            return jsonify(
-                {
-                    "success": False,
-                    "error": f"Cannot transition from '{account.status}' to '{new_status}'. "
-                    f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}.",
-                }
-            ), 400
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": f"Cannot transition from '{account.status}' to '{new_status}'. "
+                        f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}.",
+                    }
+                ),
+                400,
+            )
 
         uow.accounts.update_status(account_id, new_status)
+
+    if old_status is not None:
+        notify_account_status_changed(
+            tenant_id=tenant_id,
+            account_id=account_id,
+            from_status=old_status,
+            to_status=new_status,
+            principal_id=principal_id,
+        )
 
     return jsonify({"success": True, "status": new_status})

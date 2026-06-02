@@ -140,3 +140,30 @@ def test_account_approval_mode_defaults_to_none_when_unset(integration_db):
         assert ctx.account_approval_mode is None
         # Creative approval_mode keeps its own default, unaffected
         assert ctx.approval_mode == "require-human"
+
+
+@pytest.mark.requires_db
+def test_creative_pre_approval_gate_round_trips_through_tenant_context(integration_db):
+    """The per-tenant creative gate must survive ORM -> dict -> TenantContext.
+
+    Approval paths pass serialized tenant context to adapter and feature-flag
+    helpers, so the serialized form must preserve this flag.
+    """
+    from src.core.tenant_context import TenantContext
+    from tests.factories import TenantFactory
+    from tests.harness._base import IntegrationEnv
+
+    with IntegrationEnv(tenant_id="test_creative_gate"):
+        tenant = TenantFactory(
+            tenant_id="test_creative_gate",
+            creative_pre_approval_gate_enabled=True,
+        )
+
+        d = serialize_tenant_to_dict(tenant)
+        assert d["creative_pre_approval_gate_enabled"] is True
+
+        ctx = TenantContext.from_orm_model(tenant)
+        assert ctx.creative_pre_approval_gate_enabled is True
+
+        ctx2 = TenantContext.from_dict(d)
+        assert ctx2.creative_pre_approval_gate_enabled is True

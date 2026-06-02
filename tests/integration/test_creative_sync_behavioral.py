@@ -9,12 +9,12 @@ Covers: salesagent-xwkj, salesagent-11th, salesagent-0m59, salesagent-mi8l
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from adcp.types import CreativeAction
+from adcp.types import FormatId as AdcpFormatId
 from adcp.types.generated_poc.core.creative_asset import CreativeAsset
-from adcp.types.generated_poc.core.format_id import FormatId as AdcpFormatId
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError, AdCPValidationError
 from tests.factories import MediaBuyFactory, MediaPackageFactory, PrincipalFactory, ProductFactory, TenantFactory
@@ -256,7 +256,7 @@ class TestCreativeValidation:
             assert result.action != CreativeAction.failed
 
     def test_adapter_format_skips_registry_validation(self, integration_db):
-        """Covers: UC-006-CREATIVE-FORMAT-VALIDATION-02 — adapter:// agent_url skips external format lookup."""
+        """Covers: UC-006-CREATIVE-FORMAT-VALIDATION-02 — non-HTTP agent_url skips external format lookup."""
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
             PrincipalFactory(tenant=tenant, principal_id="test_principal")
@@ -265,7 +265,7 @@ class TestCreativeValidation:
                 creatives=[
                     _make_creative_asset(
                         creative_id="c_adapter",
-                        format_id=AdcpFormatId(agent_url="broadstreet://default", id="broadstreet_billboard"),
+                        format_id=AdcpFormatId(agent_url="adapter-test://default", id="legacy_adapter_format"),
                     )
                 ]
             )
@@ -857,7 +857,7 @@ class TestSyncExtensions:
         assert len(response.creatives) == 1
         result = response.creatives[0]
         assert result.action == CreativeAction.failed
-        assert any("list_creative_formats" in e for e in (result.errors or []))
+        assert any("list_creative_formats" in e.message for e in (result.errors or []))
 
     def test_unreachable_agent_fails_with_retry(self, integration_db):
         """Covers: UC-006-EXT-G-01 — agent unreachable → failed with retry suggestion."""
@@ -878,7 +878,7 @@ class TestSyncExtensions:
         assert len(response.creatives) == 1
         result = response.creatives[0]
         assert result.action == CreativeAction.failed
-        assert any("unreachable" in e.lower() for e in (result.errors or []))
+        assert any("unreachable" in e.message.lower() for e in (result.errors or []))
 
     def test_package_not_found_lenient_logs_error(self, integration_db):
         """Covers: UC-006-EXT-J-02 — lenient: missing package → assignment_errors."""
@@ -976,7 +976,7 @@ class TestSyncExtensions:
         assert pkg_id in result.assignment_errors
 
     def test_adapter_format_skips_registry(self, integration_db):
-        """Covers: UC-006-EXT-H-02 — adapter:// agent_url bypasses external format lookup."""
+        """Covers: UC-006-EXT-H-02 — non-HTTP agent_url bypasses external format lookup."""
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
             PrincipalFactory(tenant=tenant, principal_id="test_principal")
@@ -985,7 +985,7 @@ class TestSyncExtensions:
                 creatives=[
                     _make_creative_asset(
                         creative_id="c_adapter",
-                        format_id=AdcpFormatId(agent_url="broadstreet://default", id="billboard"),
+                        format_id=AdcpFormatId(agent_url="adapter-test://default", id="legacy_adapter_format"),
                     )
                 ],
             )
@@ -1092,10 +1092,8 @@ class TestProvenanceEnforcement:
 class TestMediaBuyStatusOnSync:
     """Media buy status transitions on creative assignment with real DB."""
 
-    def test_draft_with_approved_at_transitions_to_pending_creatives(self, integration_db):
-        """Covers: UC-006-MEDIA-BUY-STATUS-01 — draft + approved_at → pending_creatives."""
-        from datetime import datetime
-
+    def test_draft_with_approved_at_transitions_to_pending_start(self, integration_db):
+        """Covers: UC-006-MEDIA-BUY-STATUS-01 — draft + approved_at + assignment → pending_start."""
         from sqlalchemy import select
 
         from src.core.database.database_session import get_db_session
@@ -1109,6 +1107,8 @@ class TestMediaBuyStatusOnSync:
                 principal=principal,
                 status="draft",
                 approved_at=datetime(2026, 1, 1, tzinfo=UTC),
+                start_time=datetime.now(UTC) + timedelta(days=1),
+                end_time=datetime.now(UTC) + timedelta(days=8),
             )
             pkg = MediaPackageFactory(media_buy=media_buy)
             mb_id = media_buy.media_buy_id
@@ -1123,7 +1123,7 @@ class TestMediaBuyStatusOnSync:
         with get_db_session() as session:
             mb = session.scalars(select(DBMediaBuy).filter_by(media_buy_id=mb_id, tenant_id="test_tenant")).first()
             assert mb is not None
-            assert mb.status == "pending_creatives"
+            assert mb.status == "pending_start"
 
     def test_draft_without_approved_at_stays_draft(self, integration_db):
         """Covers: UC-006-MEDIA-BUY-STATUS-02 — draft without approved_at stays draft."""
@@ -1156,10 +1156,8 @@ class TestMediaBuyStatusOnSync:
             assert mb is not None
             assert mb.status == "draft"
 
-    def test_non_draft_status_unchanged(self, integration_db):
+    def test_active_status_unchanged(self, integration_db):
         """Covers: UC-006-MEDIA-BUY-STATUS-03 — active status not affected by assignment."""
-        from datetime import datetime
-
         from sqlalchemy import select
 
         from src.core.database.database_session import get_db_session
@@ -1191,8 +1189,6 @@ class TestMediaBuyStatusOnSync:
 
     def test_upsert_assignment_still_transitions(self, integration_db):
         """Covers: UC-006-MEDIA-BUY-STATUS-04 — upserted assignment triggers status check."""
-        from datetime import datetime
-
         from sqlalchemy import select
 
         from src.core.database.database_session import get_db_session
@@ -1206,6 +1202,8 @@ class TestMediaBuyStatusOnSync:
                 principal=principal,
                 status="draft",
                 approved_at=datetime(2026, 1, 1, tzinfo=UTC),
+                start_time=datetime.now(UTC) + timedelta(days=1),
+                end_time=datetime.now(UTC) + timedelta(days=8),
             )
             pkg = MediaPackageFactory(media_buy=media_buy)
             mb_id = media_buy.media_buy_id
@@ -1227,7 +1225,7 @@ class TestMediaBuyStatusOnSync:
         with get_db_session() as session:
             mb = session.scalars(select(DBMediaBuy).filter_by(media_buy_id=mb_id, tenant_id="test_tenant")).first()
             assert mb is not None
-            assert mb.status == "pending_creatives"
+            assert mb.status == "pending_start"
 
 
 # ---------------------------------------------------------------------------
@@ -1418,3 +1416,61 @@ class TestSyncFlowVerification:
             # The guard logic is inside the (mocked) function — we verify it's called
             # but can't test the guard through the harness
             assert env.mock["send_notifications"].called
+
+
+# ---------------------------------------------------------------------------
+# Sync→List visibility — narrows #88 (e2e symptom only; impl is correct)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncedCreativeVisibleInList:
+    """A successfully-synced creative MUST appear in ``list_creatives`` for
+    the same principal/tenant.
+
+    The e2e ``test_creative_sync_with_assignment_in_single_call`` fails at
+    "Creative <id> should be in list" — sync claims action=created but
+    list doesn't return it. This class proves the impl + DB layer is
+    correct (narrows the bug to e2e/Docker-specific layers above the
+    impl). When someone roots the e2e symptom, this passing test is the
+    baseline reference for layer-by-layer narrowing.
+
+    Covers: #88 (impl boundary).
+    """
+
+    def test_synced_creative_appears_in_subsequent_list(self, integration_db):
+        """Sync a creative, then list — the creative must be in the list.
+
+        Both calls run inside a single ``CreativeSyncEnv`` so the DB
+        session and identity are shared (matching what the e2e flow gets
+        through one HTTP client). ``_list_creatives_impl`` is invoked
+        directly with the env's identity rather than spinning a separate
+        ``CreativeListEnv`` — that would split the session and exercise
+        a transaction-boundary path the e2e test doesn't.
+        """
+        from src.core.tools.creatives.listing import _list_creatives_impl
+
+        creative_id = "synced_001"
+        creative = _make_creative_asset(creative_id=creative_id, name="Sync→List Visibility")
+
+        with CreativeSyncEnv() as env:
+            env.setup_default_data()
+            sync_response = env.call_impl(creatives=[creative])
+
+            # Sanity: distinguish "sync didn't actually create" from
+            # "list filtered it out". If sync silently failed, the test
+            # below would mask the failure.
+            assert len(sync_response.creatives) == 1
+            result = sync_response.creatives[0]
+            assert result.action == CreativeAction.created, (
+                f"Sync did not create the creative — action={result.action}, errors={getattr(result, 'errors', None)}"
+            )
+            assert result.creative_id == creative_id
+
+            # Now list under the same identity. Same session, same
+            # principal/tenant scope. The new row must be visible.
+            list_response = _list_creatives_impl(identity=env.identity)
+            returned_ids = {c.creative_id for c in list_response.creatives}
+            assert creative_id in returned_ids, (
+                f"Synced creative {creative_id!r} not in list response. "
+                f"Got {returned_ids}. Impl-layer regression — see #88."
+            )

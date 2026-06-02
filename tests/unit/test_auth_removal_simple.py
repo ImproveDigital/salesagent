@@ -105,27 +105,15 @@ class TestAuthRemovalChanges:
         ), "Optional auth pattern not found in tool files"
         assert 'principal_id or "anonymous"' in combined_source, "Anonymous user pattern not found"
 
-    def test_pricing_filtering_for_anonymous_users(self):
-        """Test that pricing data is filtered for anonymous users."""
-        # Test the pricing filtering logic
-        from src.core.schemas import Product
-        from tests.helpers.adcp_factories import (
-            create_test_cpm_pricing_option,
-            create_test_publisher_properties_by_tag,
-        )
+    def _make_priced_product(self):
+        """Build a Product with a fixed CPM pricing option for filtering tests."""
+        from tests.helpers.adcp_factories import create_test_cpm_pricing_option, create_test_product
 
-        # Create a product with pricing data
-        product = Product(
+        return create_test_product(
             product_id="test_product",
             name="Test Product",
             description="Test description",
-            format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
             delivery_type="non_guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },
-            publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
             pricing_options=[
                 create_test_cpm_pricing_option(
                     pricing_option_id="cpm_usd_fixed",
@@ -136,37 +124,22 @@ class TestAuthRemovalChanges:
             ],
         )
 
-        # Simulate the anonymous user logic - check pricing type
-        principal_id = None
+    def test_pricing_filtering_for_anonymous_users(self):
+        """Test that pricing data is filtered for anonymous users."""
+        product = self._make_priced_product()
 
-        # Verify we have a fixed rate pricing option (for authenticated users)
         # adcp 2.14.0+ uses RootModel wrapper - rate is on .root
         pricing_option = product.pricing_options[0]
-        assert hasattr(pricing_option, "root")
-        assert hasattr(pricing_option.root, "rate")
         assert pricing_option.root.rate == 2.50
-
-        # For anonymous users, we would replace with auction pricing (no rate field)
-        # Here we just verify the concept by checking the structure
-        if principal_id is None:  # Anonymous user
-            # In real implementation, we'd replace pricing_options with auction variants
-            # For this test, we're verifying the pricing option structure
-            pass
-
-        # Verify other fields remain accessible (also via .root)
         assert pricing_option.root.currency == "USD"
-
-        # Other data should remain
         assert product.product_id == "test_product"
-        assert product.name == "Test Product"
 
     def test_pricing_message_for_anonymous_users(self):
         """Test that the pricing message is added for anonymous users."""
-        # Test the message logic
         principal_id = None
         pricing_message = None
 
-        if principal_id is None:  # Anonymous user
+        if principal_id is None:
             pricing_message = "Please connect through an authorized buying agent for pricing data"
 
         base_message = "Found 2 matching products"
@@ -177,51 +150,11 @@ class TestAuthRemovalChanges:
 
     def test_authenticated_users_keep_pricing_data(self):
         """Test that authenticated users still get full pricing data."""
-        from src.core.schemas import Product
-        from tests.helpers.adcp_factories import (
-            create_test_cpm_pricing_option,
-            create_test_publisher_properties_by_tag,
-        )
+        product = self._make_priced_product()
 
-        # Create a product with pricing data
-        product = Product(
-            product_id="test_product",
-            name="Test Product",
-            description="Test description",
-            format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
-            delivery_type="non_guaranteed",
-            delivery_measurement={
-                "provider": "test_provider",
-                "notes": "Test measurement",
-            },
-            publisher_properties=[create_test_publisher_properties_by_tag(publisher_domain="test.com")],
-            pricing_options=[
-                create_test_cpm_pricing_option(
-                    pricing_option_id="cpm_usd_fixed",
-                    currency="USD",
-                    rate=2.50,
-                    min_spend_per_package=1000.0,
-                )
-            ],
-        )
-
-        # Simulate authenticated user logic
-        principal_id = "authenticated_user"
-        if principal_id is None:  # This should NOT trigger for authenticated users
-            pass  # Would replace with auction pricing
-
-        # Verify pricing data is preserved (not removed for authenticated users)
-        # adcp 2.14.0+ uses RootModel wrapper - access via .root
         pricing_option = product.pricing_options[0]
         assert pricing_option.root.rate == 2.50
         assert pricing_option.root.min_spend_per_package == 1000.0
-
-        # No pricing message for authenticated users
-        pricing_message = None
-        if principal_id is None:
-            pricing_message = "Please connect through an authorized buying agent for pricing data"
-
-        assert pricing_message is None
 
 
 # That's it! The real testing should be:

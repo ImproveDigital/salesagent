@@ -18,18 +18,69 @@ Testing:
 - This avoids timeouts in CI when external creative agents are unreachable
 """
 
+import asyncio
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+# Cap on the total wall time of a multi-agent format fetch. Tenants can have N
+# creative agents, and a slow/dead one can block a sync request long enough for
+# the upstream LB to return 503. With per-agent default timeout=30s and a raw-MCP
+# fallback that retries, a single bad agent could burn >90s. This cap is the
+# real backstop — agents that don't return inside the window become
+# AGENT_UNREACHABLE errors instead of failing the whole request.
+_DEFAULT_FETCH_TIMEOUT_SECONDS = 20.0
+_MIN_FETCH_TIMEOUT_SECONDS = 0.1
+
+
+def _resolve_fetch_timeout() -> float:
+    """Read CREATIVE_FORMAT_FETCH_TIMEOUT with safe fallback + minimum clamp.
+
+    Bad operator input (non-numeric, NaN, ≤0) falls back to the default rather
+    than 500ing the route or causing asyncio.wait to behave pathologically.
+    """
+    import logging
+    import math
+
+    raw = os.environ.get("CREATIVE_FORMAT_FETCH_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_FETCH_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            f"Invalid CREATIVE_FORMAT_FETCH_TIMEOUT={raw!r}; using default {_DEFAULT_FETCH_TIMEOUT_SECONDS}s"
+        )
+        return _DEFAULT_FETCH_TIMEOUT_SECONDS
+    if math.isnan(value) or value < _MIN_FETCH_TIMEOUT_SECONDS:
+        logging.getLogger(__name__).warning(
+            f"CREATIVE_FORMAT_FETCH_TIMEOUT={raw!r} below minimum; clamping to {_MIN_FETCH_TIMEOUT_SECONDS}s"
+        )
+        return _MIN_FETCH_TIMEOUT_SECONDS
+    return value
+
+
+def _manifest_has_direct_url(creative_manifest: dict[str, Any]) -> bool:
+    """Return true when a manifest already points at creative content."""
+    for key in ("url", "media_url", "content_uri"):
+        if creative_manifest.get(key):
+            return True
+
+    assets = creative_manifest.get("assets")
+    if not isinstance(assets, dict):
+        return False
+
+    return any(isinstance(asset, dict) and bool(asset.get("url")) for asset in assets.values())
+
+
 from adcp import ADCPMultiAgentClient, ListCreativeFormatsRequest
 from adcp.exceptions import ADCPAuthenticationError, ADCPConnectionError, ADCPError, ADCPTimeoutError
 from adcp.types import AssetContentType as AssetType
-from adcp.types.generated_poc.core.error import Error as AdCPResponseError
-from adcp.types.generated_poc.core.format import Assets
+from adcp.types import Error as AdCPResponseError
 from yarl import URL
 
+from src.core.canonical_formats import DEFAULT_CREATIVE_AGENT_URL
 from src.core.exceptions import AdCPAdapterError
 from src.core.schemas import Format, FormatId, url
 
@@ -45,30 +96,43 @@ class FormatFetchResult:
     errors: list[AdCPResponseError]
 
 
+@dataclass
+class CachedFetchResult:
+    """Result of a single-agent cached fetch.
+
+    `stale=True` means the live fetch failed and we fell back to an expired cache
+    entry. Callers that want to surface the staleness to clients should emit a
+    STALE_RESPONSE warning; callers that just need formats can ignore the flag.
+    """
+
+    formats: list[Format]
+    stale: bool = False
+    cause: Exception | None = None
+    cache_age_seconds: int | None = None
+
+
 from src.core.utils.mcp_client import create_mcp_client  # Keep for custom tools (preview, build)
 
 
 def _create_mock_format(format_id_str: str, name: str, asset_type: str) -> Format:
     """Create a single mock format with proper typing for testing."""
-    from adcp.types.generated_poc.core.format import Assets5
+    from adcp.types import ImageFormatAsset, VideoFormatAsset
 
-    # adcp 3.6.0: Assets classes are type-discriminated with Literal asset_type fields.
-    # Assets = image, Assets5 = video. Pass asset_type as plain string (not enum).
     if asset_type == "video":
-        asset_item: Assets | Assets5 = Assets5(
+        asset_item: Any = VideoFormatAsset(
             item_type="individual",
             asset_id="primary",
             asset_type="video",
             required=True,
         )
     else:
-        asset_item = Assets(
+        asset_item = ImageFormatAsset(
             item_type="individual",
             asset_id="primary",
             asset_type="image",
             required=True,
         )
-    assets: list[Assets | Assets5] = [asset_item]
+    assets: list[Any] = [asset_item]
     # Use Format (our extended class) instead of AdcpFormat to include is_standard field
     # Explicitly pass None for optional internal fields to satisfy mypy
     return Format(
@@ -90,20 +154,14 @@ def _get_mock_formats() -> list[Format]:
     These formats match what the real creative agent returns, but without
     making external HTTP calls. Used in CI to avoid timeouts.
     """
-    # Create mock formats using our Format class (which includes is_standard field)
-    return [
-        _create_mock_format("display_300x250_image", "Medium Rectangle", "image"),
-        _create_mock_format("display_728x90_image", "Leaderboard", "image"),
-        _create_mock_format("display_300x600_image", "Half Page", "image"),
-        _create_mock_format("display_160x600_image", "Wide Skyscraper", "image"),
-        _create_mock_format("display_320x50_image", "Mobile Leaderboard", "image"),
-        _create_mock_format("video_standard", "Standard Video", "video"),
-        _create_mock_format("video_standard_30s", "Standard Video 30s", "video"),
-        _create_mock_format("video_vast", "VAST Video", "video"),
-        _create_mock_format("display_image", "Display Image", "image"),
-        _create_mock_format("display_html", "Display HTML", "image"),
-        _create_mock_format("display_js", "Display JavaScript", "image"),
-    ]
+    from src.core.standard_formats import get_standard_formats
+
+    return get_standard_formats()
+
+
+def _default_agent_url() -> str:
+    """Resolve the default creative agent URL, treating blank env values as unset."""
+    return os.environ.get("CREATIVE_AGENT_URL") or DEFAULT_CREATIVE_AGENT_URL
 
 
 @dataclass
@@ -156,7 +214,7 @@ class CreativeAgentRegistry:
     # The MCP server endpoint (/mcp) is appended by the MCP client when connecting
     # Reads CREATIVE_AGENT_URL env var so CI can point at a containerized agent.
     DEFAULT_AGENT = CreativeAgent(
-        agent_url=os.environ.get("CREATIVE_AGENT_URL", "https://creative.adcontextprotocol.org"),
+        agent_url=_default_agent_url(),
         name="AdCP Standard Creative Agent",
         enabled=True,
         priority=1,
@@ -324,15 +382,23 @@ class CreativeAgentRegistry:
                 # return TextContent with JSON. Also falls back when the SDK fails
                 # with generic errors (e.g., "no running event loop" → "No error
                 # details provided") that indicate an SDK-level transport issue.
-                sdk_transport_error = (
-                    "structuredContent" in str(error_msg)
-                    or "No error details provided" in str(error_msg)
-                    or "no running event loop" in str(error_msg)
-                    or "Failed to connect" in str(error_msg)
+                error_text = str(error_msg)
+                sdk_transport_error = any(
+                    marker in error_text
+                    for marker in (
+                        "structuredContent",
+                        "No error details provided",
+                        "no running event loop",
+                        "Failed to connect",
+                        "Failed to parse response",
+                        "doesn't match expected schema",
+                    )
                 )
                 if sdk_transport_error:
-                    logger.warning(f"adcp SDK transport issue, falling back to raw HTTP: {error_msg}")
-                    return await self._fetch_formats_raw_mcp(agent)
+                    suffix = "..." if len(error_text) > 1000 else ""
+                    logger.warning(f"adcp SDK transport issue, falling back to raw HTTP: {error_text[:1000]}{suffix}")
+                    request_args = request.model_dump(mode="json", exclude_none=True)
+                    return await self._fetch_formats_raw_mcp(agent, request_args=request_args)
 
                 logger.error(f"Creative agent {agent.name} returned FAILED status. Error: {error_msg}")
                 debug_info = getattr(result, "debug_info", None)
@@ -356,7 +422,11 @@ class CreativeAgentRegistry:
             logger.error(f"AdCP error with creative agent {agent.name}: {e.message}")
             raise RuntimeError(str(e.message)) from e
 
-    async def _fetch_formats_raw_mcp(self, agent: CreativeAgent) -> list[Format]:
+    async def _fetch_formats_raw_mcp(
+        self,
+        agent: CreativeAgent,
+        request_args: dict[str, Any] | None = None,
+    ) -> list[Format]:
         """Fallback: fetch formats via raw HTTP when adcp SDK rejects TextContent.
 
         The adcp SDK 3.6.0 requires structuredContent in MCP responses, but some
@@ -381,9 +451,11 @@ class CreativeAgentRegistry:
             if auth_token:
                 headers[auth_header] = auth_token
 
-        import asyncio
-
-        max_retries = 3
+        # The outer list_all_formats_with_errors caps total wall time with
+        # asyncio.wait, so this fallback can stay tight: one attempt for connection
+        # errors, one extra retry on 429 (which honours Retry-After) to handle
+        # creative agents that always return 429 on cold cache.
+        max_retries = 2
         last_exc: Exception | None = None
         for attempt in range(max_retries):
             try:
@@ -393,7 +465,7 @@ class CreativeAgentRegistry:
                         json={
                             "jsonrpc": "2.0",
                             "method": "tools/call",
-                            "params": {"name": "list_creative_formats", "arguments": {}},
+                            "params": {"name": "list_creative_formats", "arguments": request_args or {}},
                             "id": 1,
                         },
                         headers=headers,
@@ -468,51 +540,33 @@ class CreativeAgentRegistry:
     ) -> list[Format]:
         """Get formats from agent with caching.
 
-        Args:
-            agent: CreativeAgent to query
-            force_refresh: Skip cache and fetch fresh data
-            max_width: Maximum width in pixels (inclusive)
-            max_height: Maximum height in pixels (inclusive)
-            min_width: Minimum width in pixels (inclusive)
-            min_height: Minimum height in pixels (inclusive)
-            is_responsive: Filter for responsive formats
-            asset_types: Filter by asset types
-            name_search: Search by name
-            type_filter: Filter by format type (display, video, audio)
-
-        Returns:
-            List of Format objects
+        Returns cached formats when fresh, otherwise fetches live. On fetch failure
+        with a usable cache, returns the (possibly expired) cached formats; the
+        stale flag is discarded by this entry point — use `list_all_formats_with_errors`
+        when you need to surface staleness.
         """
-        # In testing mode (ADCP_TESTING=true), return mock formats to avoid external HTTP calls
         if os.environ.get("ADCP_TESTING", "").lower() == "true":
             return _get_mock_formats()
 
-        # Check cache - only use cache if no filtering parameters provided
         has_filters = any(
-            [
-                max_width is not None,
-                max_height is not None,
-                min_width is not None,
-                min_height is not None,
-                is_responsive is not None,
-                asset_types is not None,
-                name_search is not None,
-                type_filter is not None,
-            ]
+            v is not None
+            for v in (
+                max_width,
+                max_height,
+                min_width,
+                min_height,
+                is_responsive,
+                asset_types,
+                name_search,
+                type_filter,
+            )
         )
 
-        cache_key = self._cache_key(agent.agent_url)
-        cached = self._format_cache.get(cache_key)
-        if cached and not cached.is_expired() and not force_refresh and not has_filters:
-            return cached.formats
-
-        # Build client for this agent
-        client = self._build_adcp_client([agent])
-
-        # Fetch from agent
-        formats = await self._fetch_formats_from_agent(
-            client,
-            agent,
+        result = await self._fetch_for_agent_with_cache(
+            client=self._build_adcp_client([agent]),
+            agent=agent,
+            force_refresh=force_refresh,
+            has_filters=has_filters,
             max_width=max_width,
             max_height=max_height,
             min_width=min_width,
@@ -522,14 +576,7 @@ class CreativeAgentRegistry:
             name_search=name_search,
             type_filter=type_filter,
         )
-
-        # Update cache only if no filtering parameters (cache full result set)
-        if not has_filters:
-            self._format_cache[cache_key] = CachedFormats(
-                formats=formats, fetched_at=datetime.now(UTC), ttl_seconds=3600
-            )
-
-        return formats
+        return result.formats
 
     async def list_all_formats(
         self,
@@ -597,70 +644,183 @@ class CreativeAgentRegistry:
             return FormatFetchResult(formats=_get_mock_formats(), errors=[])
 
         agents = self._get_tenant_agents(tenant_id)
-        all_formats: list[Format] = []
-        errors: list[AdCPResponseError] = []
 
         logger.info(f"list_all_formats: Found {len(agents)} agents for tenant {tenant_id}")
 
-        # Build client for all agents
+        # asyncio.wait raises ValueError on an empty task list; a tenant with no
+        # enabled agents is a legitimate state, not an error.
+        if not agents:
+            return FormatFetchResult(formats=[], errors=[])
+
         client = self._build_adcp_client(agents)
 
-        for agent in agents:
-            logger.info(f"list_all_formats: Fetching from {agent.agent_url}")
-            try:
-                # Check cache first if no filters and not forcing refresh
-                has_filters = any(
-                    [
-                        max_width is not None,
-                        max_height is not None,
-                        min_width is not None,
-                        min_height is not None,
-                        is_responsive is not None,
-                        asset_types is not None,
-                        name_search is not None,
-                        type_filter is not None,
-                    ]
-                )
+        has_filters = any(
+            [
+                max_width is not None,
+                max_height is not None,
+                min_width is not None,
+                min_height is not None,
+                is_responsive is not None,
+                asset_types is not None,
+                name_search is not None,
+                type_filter is not None,
+            ]
+        )
 
-                cache_key = self._cache_key(agent.agent_url)
-                cached = self._format_cache.get(cache_key)
-                if cached and not cached.is_expired() and not force_refresh and not has_filters:
-                    formats = cached.formats
-                else:
-                    # Fetch from agent
-                    formats = await self._fetch_formats_from_agent(
-                        client,
-                        agent,
-                        max_width=max_width,
-                        max_height=max_height,
-                        min_width=min_width,
-                        min_height=min_height,
-                        is_responsive=is_responsive,
-                        asset_types=asset_types,
-                        name_search=name_search,
-                        type_filter=type_filter,
-                    )
+        # Fetch all agents in parallel via asyncio.wait so we keep partial
+        # results when the global timeout fires. (asyncio.gather + wait_for
+        # cancels everything on timeout — we'd lose the agents that already
+        # returned.) Any task still pending at the deadline is cancelled and
+        # surfaces as AGENT_UNREACHABLE for that agent.
+        tasks = [
+            asyncio.create_task(
+                self._fetch_for_agent_with_cache(
+                    client=client,
+                    agent=agent,
+                    force_refresh=force_refresh,
+                    has_filters=has_filters,
+                    max_width=max_width,
+                    max_height=max_height,
+                    min_width=min_width,
+                    min_height=min_height,
+                    is_responsive=is_responsive,
+                    asset_types=asset_types,
+                    name_search=name_search,
+                    type_filter=type_filter,
+                ),
+                name=f"creative_format_fetch:{agent.agent_url}",
+            )
+            for agent in agents
+        ]
 
-                    # Update cache only if no filtering parameters
-                    if not has_filters:
-                        self._format_cache[cache_key] = CachedFormats(
-                            formats=formats, fetched_at=datetime.now(UTC), ttl_seconds=3600
-                        )
+        timeout = _resolve_fetch_timeout()
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning(
+                f"list_all_formats: global timeout {timeout}s exceeded; "
+                f"{len(pending)}/{len(tasks)} agents still pending — cancelling"
+            )
+            for task in pending:
+                task.cancel()
+            # Let cancellations propagate so each pending task settles with CancelledError.
+            await asyncio.gather(*pending, return_exceptions=True)
 
-                logger.info(f"list_all_formats: Got {len(formats)} formats from {agent.agent_url}")
-                all_formats.extend(formats)
-            except Exception as e:
-                logger.error(f"Failed to fetch formats from {agent.agent_url}: {e}", exc_info=True)
+        all_formats: list[Format] = []
+        errors: list[AdCPResponseError] = []
+        for agent, task in zip(agents, tasks, strict=True):
+            if task.cancelled():
+                logger.error(f"Agent {agent.agent_url} timed out after {timeout}s")
                 errors.append(
                     AdCPResponseError(
                         code="AGENT_UNREACHABLE",
-                        message=f"Creative agent at {agent.agent_url} is unreachable: {e}",
+                        message=f"Creative agent at {agent.agent_url} did not respond within {timeout}s",
                     )
                 )
                 continue
+            exc = task.exception()
+            if exc is not None:
+                logger.error(f"Failed to fetch formats from {agent.agent_url}: {exc}")
+                errors.append(
+                    AdCPResponseError(
+                        code="AGENT_UNREACHABLE",
+                        message=f"Creative agent at {agent.agent_url} is unreachable: {exc}",
+                    )
+                )
+                continue
+            fetch = task.result()
+            all_formats.extend(fetch.formats)
+            if fetch.stale:
+                logger.warning(
+                    f"Serving stale cache for {agent.agent_url} (age={fetch.cache_age_seconds}s, cause={fetch.cause})"
+                )
+                errors.append(
+                    AdCPResponseError(
+                        code="STALE_RESPONSE",
+                        message=(
+                            f"Creative agent at {agent.agent_url} is unreachable; "
+                            f"serving cached formats ({fetch.cache_age_seconds}s old): {fetch.cause}"
+                        ),
+                        details={
+                            "served_from_cache": True,
+                            "cache_age_seconds": fetch.cache_age_seconds,
+                            "agent_url": str(agent.agent_url),
+                        },
+                        recovery="transient",
+                    )
+                )
+            else:
+                logger.info(f"list_all_formats: Got {len(fetch.formats)} formats from {agent.agent_url}")
 
         logger.info(f"list_all_formats: Returning {len(all_formats)} formats, {len(errors)} errors")
         return FormatFetchResult(formats=all_formats, errors=errors)
+
+    async def _fetch_for_agent_with_cache(
+        self,
+        client: ADCPMultiAgentClient,
+        agent: CreativeAgent,
+        force_refresh: bool,
+        has_filters: bool,
+        max_width: int | None,
+        max_height: int | None,
+        min_width: int | None,
+        min_height: int | None,
+        is_responsive: bool | None,
+        asset_types: list[str] | None,
+        name_search: str | None,
+        type_filter: str | None,
+    ) -> CachedFetchResult:
+        """Fetch formats for one agent with cache + stale-on-error fallback.
+
+        Cache rules:
+        - Fresh cache hit (not expired, no filters, no force_refresh) returns cached formats.
+        - Otherwise fetch live, refresh cache on success (when no filters).
+        - On fetch failure: if a cached entry exists and no filters are active, fall back
+          to the cached formats and mark `stale=True`. With no usable cache, re-raise so
+          the caller can surface AGENT_UNREACHABLE.
+
+        Filtered requests skip stale fallback — the cache holds the full unfiltered result,
+        and serving it for a filtered query could return the wrong subset.
+        """
+        from src.core.standard_formats import get_standard_formats, is_standard_agent
+
+        if is_standard_agent(agent.agent_url) and not force_refresh and not has_filters:
+            return CachedFetchResult(formats=get_standard_formats())
+
+        cache_key = self._cache_key(agent.agent_url)
+        cached = self._format_cache.get(cache_key)
+        if cached and not cached.is_expired() and not force_refresh and not has_filters:
+            return CachedFetchResult(formats=cached.formats)
+
+        if not has_filters:
+            from src.core.standard_formats import get_standard_formats, is_standard_agent
+
+            if is_standard_agent(agent.agent_url):
+                return CachedFetchResult(formats=get_standard_formats())
+
+        try:
+            formats = await self._fetch_formats_from_agent(
+                client,
+                agent,
+                max_width=max_width,
+                max_height=max_height,
+                min_width=min_width,
+                min_height=min_height,
+                is_responsive=is_responsive,
+                asset_types=asset_types,
+                name_search=name_search,
+                type_filter=type_filter,
+            )
+        except Exception as exc:
+            if cached is not None and not has_filters:
+                age = int((datetime.now(UTC) - cached.fetched_at).total_seconds())
+                return CachedFetchResult(formats=cached.formats, stale=True, cause=exc, cache_age_seconds=age)
+            raise
+
+        if not has_filters:
+            self._format_cache[cache_key] = CachedFormats(
+                formats=formats, fetched_at=datetime.now(UTC), ttl_seconds=3600
+            )
+        return CachedFetchResult(formats=formats)
 
     async def search_formats(
         self, query: str, tenant_id: str | None = None, type_filter: str | None = None
@@ -702,6 +862,21 @@ class CreativeAgentRegistry:
         Returns:
             Format object or None if not found
         """
+        # Standard-agent + IAB-standard format → hardcoded catalog. Skips the
+        # network round trip to the reference creative agent for the common
+        # case (display/video/audio/native standards GAM and most ad servers
+        # already support). Custom formats AND non-standard agents fall
+        # through to the live lookup. See src/core/standard_formats.py.
+        from src.core.standard_formats import (
+            get_standard_format,
+            is_standard_agent,
+        )
+
+        if is_standard_agent(agent_url):
+            cached = get_standard_format(format_id)
+            if cached is not None:
+                return cached
+
         # Find agent
         agent = CreativeAgent(agent_url=agent_url, name="Unknown", enabled=True)
         formats = await self.get_formats_for_agent(agent)
@@ -746,7 +921,13 @@ class CreativeAgentRegistry:
                 }]
             }
         """
-        # Use custom MCP client for non-standard tools (preview_creative not in AdCP spec)
+        from src.core.standard_formats import is_standard_agent
+
+        if is_standard_agent(agent_url) and _manifest_has_direct_url(creative_manifest):
+            return {}
+
+        # preview_creative is an AdCP creative-protocol tool; we use a thin custom MCP
+        # client here because the request shape is creative-agent-specific.
         async with create_mcp_client(agent_url=agent_url, timeout=30) as client:
             result = await client.call_tool(
                 "preview_creative", {"format_id": format_id, "creative_manifest": creative_manifest}
@@ -798,7 +979,8 @@ class CreativeAgentRegistry:
             - status: "draft" or "finalized"
             - creative_output: Generated creative manifest with output_format
         """
-        # Use custom MCP client for non-standard tools (build_creative not in AdCP spec)
+        # build_creative is an AdCP creative-protocol tool; we use a thin custom MCP
+        # client here because the request shape is creative-agent-specific.
         async with create_mcp_client(agent_url=agent_url, timeout=30) as client:
             params = {
                 "message": message,

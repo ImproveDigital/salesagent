@@ -23,6 +23,11 @@ from src.core.schemas import GetSignalsResponse, Signal, SignalDeployment
 def _make_signal(signal_agent_segment_id: str = "signal_123", **overrides) -> Signal:
     """Build a valid Signal with adcp 3.9 pricing_options."""
     defaults = {
+        "signal_id": {
+            "source": "agent",
+            "agent_url": "https://test.example/signals",
+            "id": signal_agent_segment_id,
+        },
         "signal_agent_segment_id": signal_agent_segment_id,
         "name": "Test Signal",
         "description": "Test signal description",
@@ -75,7 +80,7 @@ def test_get_signals_response_excludes_internal_fields():
     assert signal_data["signal_agent_segment_id"] == "signal_123"
     assert signal_data["name"] == "Test Signal"
     assert signal_data["description"] == "Test signal description"
-    assert signal_data["signal_type"] == "marketplace"
+    assert signal_data["signal_type"].value == "marketplace"
     assert signal_data["data_provider"] == "TestProvider"
     assert signal_data["coverage_percentage"] == 85.5
     assert "deployments" in signal_data

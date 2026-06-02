@@ -14,6 +14,7 @@ import pytest
 
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.testing_hooks import AdCPTestContext
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 
 class TestCreateMediaBuyDryRunResponseStructure:
@@ -57,7 +58,6 @@ class TestCreateMediaBuyDryRunResponseStructure:
             buyer_ref="test-buyer-ref",
             media_buy_id=simulated_media_buy_id,
             packages=cast(list[Any], simulated_packages),
-            context=None,
         )
 
         # Verify response structure
@@ -119,12 +119,14 @@ class TestUpdateMediaBuyDryRunNoPersistence:
             mock_session = MagicMock()
             mock_uow.session = mock_session
             mock_uow.media_buys = MagicMock()
+            mock_uow.media_buys.find_by_idempotency_key.return_value = None
             mock_uow.__enter__ = Mock(return_value=mock_uow)
             mock_uow.__exit__ = Mock(return_value=False)
             mock_uow_cls.return_value = mock_uow
 
             # Execute — impl now accepts identity instead of ctx
             req = UpdateMediaBuyRequest(
+                **required_request_kwargs(),
                 media_buy_id="mb_existing_123",
                 paused=True,
                 packages=[{"package_id": "pkg_1", "paused": True}],

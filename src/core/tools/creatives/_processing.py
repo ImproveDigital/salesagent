@@ -8,11 +8,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
+from adcp.types import Error
 from pydantic import BaseModel
 
 from src.core.helpers import _extract_format_info, _validate_creative_assets
-from src.core.schemas import CreativeStatusEnum, SyncCreativeResult
+from src.core.schemas import CreativeAsset, CreativeStatusEnum, SyncCreativeResult
 from src.core.validation_helpers import run_async_in_sync_context
 
 from ._assets import _build_creative_data, _extract_url_from_assets
@@ -409,7 +409,7 @@ def _update_existing_creative(
                             action="failed",
                             status=None,
                             platform_id=None,
-                            errors=[error_msg],
+                            errors=[Error(code="preview_generation_failed", message=error_msg)],
                             review_feedback=None,
                             assigned_to=None,
                             assignment_errors=None,
@@ -434,7 +434,7 @@ def _update_existing_creative(
                     action="failed",
                     status=None,
                     platform_id=None,
-                    errors=[error_msg],
+                    errors=[Error(code="creative_agent_unreachable", message=error_msg)],
                     review_feedback=None,
                     assigned_to=None,
                     assignment_errors=None,
@@ -728,7 +728,7 @@ def _create_new_creative(
                                 action="failed",
                                 status=None,
                                 platform_id=None,
-                                errors=[error_msg],
+                                errors=[Error(code="preview_generation_failed", message=error_msg)],
                                 review_feedback=None,
                                 assigned_to=None,
                                 assignment_errors=None,
@@ -753,7 +753,7 @@ def _create_new_creative(
                     action="failed",
                     status=None,
                     platform_id=None,
-                    errors=[error_msg],
+                    errors=[Error(code="creative_agent_unreachable", message=error_msg)],
                     review_feedback=None,
                     assigned_to=None,
                     assignment_errors=None,
@@ -783,8 +783,8 @@ def _create_new_creative(
     )
 
     # Update creative_id if it was generated (i6k: model attribute assignment)
-    if not creative.creative_id:
-        creative.creative_id = db_creative.creative_id
+    if not getattr(creative, "creative_id", None):
+        cast(Any, creative).creative_id = db_creative.creative_id
 
     # Now apply approval mode logic
     if approval_mode == "auto-approve":

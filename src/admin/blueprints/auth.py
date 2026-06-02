@@ -245,6 +245,15 @@ def login():
                         test_mode = True
                     logger.info(f"Detected tenant context from Host header: {tenant_subdomain} -> {tenant_context}")
 
+    # Embedded instances skip OIDC entirely — the blueprint isn't
+    # registered (see ``src/admin/app.py``), so any ``url_for("oidc.login", ...)``
+    # would BuildError → 500. Identity on embedded comes from
+    # X-Identity-* headers; per-tenant OIDC is for open instances.
+    # Sprint 7 Phase 4c.
+    from src.admin.utils.embedded_mode_auth import is_managed_instance
+
+    oidc_disabled_by_managed_instance = is_managed_instance()
+
     # Check for tenant-specific OIDC configuration (multi-tenant or single-tenant)
     if tenant_context:
         # For detected tenant, check if it has OIDC configured
@@ -252,7 +261,7 @@ def login():
 
         with get_db_session() as db_session:
             config = db_session.scalars(select(TenantAuthConfig).filter_by(tenant_id=tenant_context)).first()
-            if config and config.oidc_client_id:
+            if config and config.oidc_client_id and not oidc_disabled_by_managed_instance:
                 oidc_configured = True
                 oidc_enabled = config.oidc_enabled
 
@@ -271,7 +280,7 @@ def login():
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id="default")).first()
             config = db_session.scalars(select(TenantAuthConfig).filter_by(tenant_id="default")).first()
-            if config and config.oidc_client_id:
+            if config and config.oidc_client_id and not oidc_disabled_by_managed_instance:
                 oidc_configured = True
                 oidc_enabled = config.oidc_enabled
             # Only use auth_setup_mode in single-tenant mode if no global OAuth
@@ -831,12 +840,12 @@ def test_auth():
         os.environ.get("TEST_TENANT_ADMIN_EMAIL", "test_tenant_admin@example.com"): {
             "password": os.environ.get("TEST_TENANT_ADMIN_PASSWORD", "test123"),
             "name": "Test Tenant Admin",
-            "role": "tenant_admin",
+            "role": "admin",
         },
         os.environ.get("TEST_TENANT_USER_EMAIL", "test_tenant_user@example.com"): {
             "password": os.environ.get("TEST_TENANT_USER_PASSWORD", "test123"),
             "name": "Test Tenant User",
-            "role": "tenant_user",
+            "role": "member",
         },
     }
 
@@ -901,7 +910,7 @@ def gam_authorize(tenant_id):
     oauth = current_app.oauth if hasattr(current_app, "oauth") else None
     if not oauth:
         flash("OAuth not configured. Please contact your administrator.", "error")
-        return redirect(url_for("tenants.settings", tenant_id=tenant_id))
+        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))
 
     try:
         # Get GAM OAuth configuration
@@ -953,7 +962,7 @@ def gam_authorize(tenant_id):
     except Exception as e:
         logger.error(f"Error initiating GAM OAuth for tenant {tenant_id}: {e}")
         flash(f"Error starting OAuth flow: {str(e)}", "error")
-        return redirect(url_for("tenants.settings", tenant_id=tenant_id))
+        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))
 
 
 @auth_bp.route("/auth/gam/callback")
@@ -1045,7 +1054,7 @@ def gam_callback():
         if not refresh_token:
             logger.error("No refresh token in OAuth response")
             flash("No refresh token received. Please try again or contact support.", "error")
-            return redirect(url_for("tenants.settings", tenant_id=tenant_id))
+            return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))
 
         # Store refresh token in tenant's adapter config
         with get_db_session() as db_session:

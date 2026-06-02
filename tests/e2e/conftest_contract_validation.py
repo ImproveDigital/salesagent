@@ -18,7 +18,6 @@ ACTUAL_MCP_TOOLS = {
     "create_media_buy",
     "get_media_buy_delivery",
     "get_products",
-    "list_authorized_properties",
     "list_creative_formats",
     "list_creatives",
     "sync_creatives",

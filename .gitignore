@@ -1,4 +1,6 @@
 # Local configuration
+.context/
+signing_keys/
 /config.json
 __pycache__
 adcp.db
@@ -59,6 +61,7 @@ fix_*.py
 sync_*.py
 !scripts/sync_*.py
 !src/**/sync_*.py
+!tests/**/sync_*.py
 test_sync.py
 
 # One-off test scripts in root (proper tests belong in tests/)
@@ -110,6 +113,11 @@ server.pid
 conductor_ports.json
 conductor_ports.lock
 
+# GCP deployment secrets (never commit)
+flywg.conf
+*.flywg.conf
+.env.gcp
+
 # AdCP Schema Cache (downloaded on demand by E2E tests)
 /schemas/
 tests/e2e/schemas/
@@ -141,6 +149,8 @@ test-results/
 .claude/agents/review-*.md
 .claude/commands/code-review.md
 .claude/skills/code-review/
+.claude/skills/.agent-db.env
+.claude/scheduled_tasks.lock
 .claude/reports
 .perles/
 

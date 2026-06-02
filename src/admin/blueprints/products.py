@@ -11,8 +11,13 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 
+from src.admin.services.catalog_webhook_events import (
+    publish_product_catalog_change,
+    publish_product_record_update_catalog_change,
+)
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_capabilities import capability_owned_response, publisher_owns
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PricingOption, Product, ProductInventoryMapping, Tenant
 from src.core.database.product_pricing import get_product_pricing_options
@@ -25,6 +30,24 @@ logger = logging.getLogger(__name__)
 
 # Create Blueprint
 products_bp = Blueprint("products", __name__)
+
+
+def _require_compose_products():
+    if not publisher_owns("compose_products"):
+        return capability_owned_response("compose_products")
+    return None
+
+
+def _apply_inventory_profile_property_scope(product: Product) -> None:
+    """Let the linked inventory profile supply buyer-visible publisher properties."""
+    product.properties = None
+    product.property_ids = None
+    product.property_tags = []
+
+
+def _profile_backed_product_property_kwargs() -> dict[str, list[str]]:
+    """Product-column placeholder used when inventory profile owns property scope."""
+    return {"property_tags": []}
 
 
 def _format_to_dict(fmt: Format) -> dict:
@@ -88,6 +111,9 @@ def _parse_format_entries(formats_parsed: list[dict]) -> list[dict]:
             format_entry["width"] = int(fmt["width"])
         if fmt.get("height") is not None:
             format_entry["height"] = int(fmt["height"])
+        for key in ("min_width", "max_width", "min_height", "max_height"):
+            if fmt.get(key) is not None:
+                format_entry[key] = int(fmt[key])
         if fmt.get("duration_ms") is not None:
             format_entry["duration_ms"] = float(fmt["duration_ms"])
         entries.append(format_entry)
@@ -262,8 +288,8 @@ def parse_pricing_options_from_form(form_data: dict) -> list[dict]:
         if rate_str:
             try:
                 rate = float(rate_str)
-            except ValueError:
-                raise ValueError(f"Invalid rate value for pricing option {index}")
+            except ValueError as e:
+                raise ValueError(f"Invalid rate value for pricing option {index}") from e
 
         # Validate rate is required for fixed pricing
         if is_fixed and rate is None:
@@ -288,8 +314,8 @@ def parse_pricing_options_from_form(form_data: dict) -> list[dict]:
                             price_guidance[percentile] = float(value_str)
                         except ValueError:
                             pass
-            except ValueError:
-                raise ValueError(f"Invalid floor price value for pricing option {index}")
+            except ValueError as e:
+                raise ValueError(f"Invalid floor price value for pricing option {index}") from e
 
         # Parse min_spend_per_package
         min_spend = None
@@ -445,6 +471,9 @@ def list_products(tenant_id):
                 .unique()
                 .all()
             )
+
+            if not products and not publisher_owns("compose_products"):
+                return render_template("_embedded_locked_page.html", tenant=tenant), 403
 
             # Get inventory details for all products (breakdown by type)
             inventory_details = {}
@@ -696,9 +725,12 @@ def _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_d
 
 @products_bp.route("/add", methods=["GET", "POST"])
 @log_admin_action("add_product")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def add_product(tenant_id):
     """Add a new product - adapter-specific form."""
+    if not publisher_owns("compose_products"):
+        return capability_owned_response("compose_products")
+
     # Get tenant's adapter type and currencies
     with get_db_session() as db_session:
         tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -1024,7 +1056,9 @@ def add_product(tenant_id):
                 # Handle property authorization (AdCP requirement)
                 # Default to empty property_tags if not specified (satisfies DB constraint)
                 property_mode = form_data.get("property_mode", "tags")
-                if property_mode == "tags":
+                if product_kwargs.get("inventory_profile_id"):
+                    product_kwargs.update(_profile_backed_product_property_kwargs())
+                elif property_mode == "tags":
                     # Get selected property tags (format: "domain:tag")
                     selected_tags = request.form.getlist("selected_property_tags")
 
@@ -1309,6 +1343,14 @@ def add_product(tenant_id):
 
                 db_session.commit()
 
+                publish_product_catalog_change(
+                    tenant_id=tenant_id,
+                    action="created",
+                    product_id=product.product_id,
+                    data={"name": product.name},
+                    principal_ids=product.allowed_principal_ids or None,
+                )
+
                 flash(f"Product '{product.name}' created successfully!", "success")
                 # Redirect to products list
                 return redirect(url_for("products.list_products", tenant_id=tenant_id))
@@ -1324,10 +1366,13 @@ def add_product(tenant_id):
 
 @products_bp.route("/<product_id>/edit", methods=["GET", "POST"])
 @log_admin_action("edit_product")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def edit_product(tenant_id, product_id):
     """Edit an existing product."""
     from sqlalchemy import select
+
+    if response := _require_compose_products():
+        return response
 
     # Get tenant's adapter type and currencies
     with get_db_session() as db_session:
@@ -1491,6 +1536,9 @@ def edit_product(tenant_id, product_id):
                 # Empty list or no selection means visible to all (default)
                 from sqlalchemy.orm import attributes
 
+                previous_allowed_principal_ids = (
+                    list(product.allowed_principal_ids) if product.allowed_principal_ids is not None else None
+                )
                 allowed_principals = request.form.getlist("allowed_principal_ids")
                 if allowed_principals:
                     product.allowed_principal_ids = allowed_principals
@@ -1500,7 +1548,9 @@ def edit_product(tenant_id, product_id):
 
                 # Handle publisher properties (AdCP requirement)
                 property_mode = form_data.get("property_mode", "tags")
-                if property_mode == "tags":
+                if product.inventory_profile_id:
+                    _apply_inventory_profile_property_scope(product)
+                elif property_mode == "tags":
                     # Get selected property tags (format: "domain:tag")
                     selected_tags = request.form.getlist("selected_property_tags")
                     if selected_tags:
@@ -1886,6 +1936,13 @@ def edit_product(tenant_id, product_id):
                 db_session.refresh(product)
                 logger.info(f"[DEBUG] After commit - product.format_ids from DB: {product.format_ids}")
 
+                publish_product_record_update_catalog_change(
+                    tenant_id=tenant_id,
+                    product=product,
+                    previous_allowed_principal_ids=previous_allowed_principal_ids,
+                    pricing_changed=True,
+                )
+
                 flash(f"Product '{product.name}' updated successfully", "success")
                 return redirect(url_for("products.list_products", tenant_id=tenant_id))
 
@@ -2121,9 +2178,12 @@ def edit_product(tenant_id, product_id):
 
 
 @products_bp.route("/<product_id>/delete", methods=["DELETE"])
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def delete_product(tenant_id, product_id):
     """Delete a product."""
+    if response := _require_compose_products():
+        return response
+
     try:
         with get_db_session() as db_session:
             # Find the product
@@ -2134,6 +2194,7 @@ def delete_product(tenant_id, product_id):
 
             # Store product name for response
             product_name = product.name
+            allowed_principal_ids = product.allowed_principal_ids or None
 
             # Check if product is used in any active media buys
             mb_repo = MediaBuyRepository(db_session, tenant_id)
@@ -2172,6 +2233,14 @@ def delete_product(tenant_id, product_id):
 
             logger.info(f"Product {product_id} ({product_name}) deleted by tenant {tenant_id}")
 
+            publish_product_catalog_change(
+                tenant_id=tenant_id,
+                action="deleted",
+                product_id=product_id,
+                data={"name": product_name},
+                principal_ids=allowed_principal_ids,
+            )
+
             return jsonify({"success": True, "message": f"Product '{product_name}' deleted successfully"})
 
     except Exception as e:
@@ -2202,7 +2271,7 @@ def delete_product(tenant_id, product_id):
 
 @products_bp.route("/<product_id>/inventory", methods=["POST"])
 @log_admin_action("assign_inventory_to_product")
-@require_tenant_access(api_mode=True)
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def assign_inventory_to_product(tenant_id, product_id):
     """Assign inventory items to a product.
 
@@ -2213,6 +2282,9 @@ def assign_inventory_to_product(tenant_id, product_id):
         "is_primary": false  # optional, default false
     }
     """
+    if response := _require_compose_products():
+        return response
+
     try:
         from src.core.database.models import GAMInventory, ProductInventoryMapping
 
@@ -2381,9 +2453,12 @@ def get_product_inventory(tenant_id, product_id):
 
 @products_bp.route("/<product_id>/inventory/<int:mapping_id>", methods=["DELETE"])
 @log_admin_action("unassign_inventory_from_product")
-@require_tenant_access(api_mode=True)
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def unassign_inventory_from_product(tenant_id, product_id, mapping_id):
     """Remove an inventory assignment from a product (API endpoint)."""
+    if response := _require_compose_products():
+        return response
+
     try:
         from src.core.database.models import ProductInventoryMapping
 

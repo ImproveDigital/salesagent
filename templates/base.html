@@ -4,6 +4,75 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() if csrf_token else '' }}">
+    <script>
+        (function() {
+            const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+            function csrfToken() {
+                const meta = document.querySelector('meta[name="csrf-token"]');
+                return meta ? meta.getAttribute('content') || '' : '';
+            }
+
+            function sameOrigin(input) {
+                try {
+                    let rawUrl = '';
+                    if (typeof input === 'string') {
+                        rawUrl = input;
+                    } else if (input instanceof URL) {
+                        rawUrl = input.href;
+                    } else if (input && typeof input.url === 'string') {
+                        rawUrl = input.url;
+                    }
+                    if (!rawUrl) {
+                        return false;
+                    }
+                    const url = new URL(rawUrl, window.location.href);
+                    return url.origin === window.location.origin;
+                } catch (err) {
+                    return false;
+                }
+            }
+
+            const originalFetch = window.fetch;
+            if (originalFetch) {
+                window.fetch = function(input, init) {
+                    const requestInit = init ? Object.assign({}, init) : {};
+                    const requestMethod = requestInit.method || (input && input.method) || 'GET';
+                    const method = requestMethod.toUpperCase();
+                    const token = csrfToken();
+
+                    if (token && unsafeMethods.has(method) && sameOrigin(input)) {
+                        const headers = new Headers(
+                            requestInit.headers || (input instanceof Request ? input.headers : undefined)
+                        );
+                        if (!headers.has('X-CSRF-Token')) {
+                            headers.set('X-CSRF-Token', token);
+                        }
+                        requestInit.headers = headers;
+                    }
+
+                    return originalFetch.call(this, input, requestInit);
+                };
+            }
+
+            document.addEventListener('submit', function(event) {
+                const form = event.target;
+                if (!(form instanceof HTMLFormElement)) {
+                    return;
+                }
+                const method = (form.getAttribute('method') || 'GET').toUpperCase();
+                const token = csrfToken();
+                if (!token || !unsafeMethods.has(method) || form.querySelector('input[name="csrf_token"]')) {
+                    return;
+                }
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'csrf_token';
+                input.value = token;
+                form.appendChild(input);
+            }, true);
+        })();
+    </script>
     <title>{% block title %}Sales Agent Admin{% endblock %}</title>
     <!-- Favicon -->
     {% if tenant and tenant.favicon_url %}
@@ -15,176 +84,178 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <!-- Ledger design system fonts: Newsreader (serif), IBM Plex Sans (UI),
+         JetBrains Mono (IDs/codes). Preconnect for handshake speed. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ script_name }}/static/validation.css">
-    <style>
-        /* Custom styles that don't conflict with Bootstrap */
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5;
-            color: #333;
-            line-height: 1.6;
-        }
-        /* Use Bootstrap's container instead */
-        .header {
-            background: #2c3e50;
-            color: white;
-            padding: 1rem 0;
-            margin-bottom: 2rem;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .header h1 { margin: 0; }
-        .header nav { margin-top: 0.5rem; }
-        .header a { color: #ecf0f1; text-decoration: none; margin-right: 1rem; }
-        .header a:hover { color: #3498db; }
-        /* Use Bootstrap's card component instead */
-        .custom-card {
-            background: white;
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .custom-card h2 { margin-bottom: 1rem; color: #2c3e50; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #f8f9fa; font-weight: 600; }
-        tr:hover { background: #f8f9fa; }
-        /* Use Bootstrap's btn classes instead */
-        .custom-btn-small { padding: 0.25rem 0.5rem; font-size: 12px; }
-        .status {
-            display: inline-block;
-            padding: 0.25rem 0.5rem;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .status-active { background: #27ae60; color: white; }
-        .status-inactive { background: #e74c3c; color: white; }
-        .code {
-            font-family: 'Monaco', 'Courier New', monospace;
-            background: #f4f4f4;
-            padding: 0.2rem 0.4rem;
-            border-radius: 3px;
-            font-size: 0.9em;
-        }
-        .form-group { margin-bottom: 1rem; }
-        .form-group label { display: block; margin-bottom: 0.25rem; font-weight: 600; }
-        .form-group input, .form-group select, .form-group textarea {
-            width: 100%;
-            padding: 0.5rem;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        .form-group textarea { min-height: 200px; font-family: monospace; }
-        .alert {
-            padding: 1rem;
-            margin-bottom: 1rem;
-            border-radius: 4px;
-            position: relative;
-            animation: slideInDown 0.3s ease-out;
-        }
-        .alert-error { background: #fee; color: #c33; border: 1px solid #fcc; }
-        .alert-success {
-            background: #d4edda;
-            color: #155724;
-            border: 2px solid #28a745;
-            font-weight: 600;
-            font-size: 1.1rem;
-        }
-        .alert-info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-        .alert-warning { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
-
-        @keyframes slideInDown {
-            from {
-                transform: translateY(-100%);
-                opacity: 0;
-            }
-            to {
-                transform: translateY(0);
-                opacity: 1;
-            }
-        }
-        .tabs {
-            display: flex;
-            border-bottom: 2px solid #ddd;
-            margin-bottom: 1rem;
-        }
-        .tab {
-            padding: 0.5rem 1rem;
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            margin-bottom: -2px;
-        }
-        .tab.active {
-            border-bottom-color: #3498db;
-            color: #3498db;
-            font-weight: 600;
-        }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        pre {
-            background: #f4f4f4;
-            padding: 1rem;
-            border-radius: 4px;
-            overflow-x: auto;
-        }
-        /* Back button styles */
-        .back-button-container {
-            margin-bottom: 1.5rem;
-        }
-        .btn-back {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            text-decoration: none;
-        }
-    </style>
+    <link rel="stylesheet" href="{{ script_name }}/static/css/admin.css">
 </head>
-<body>
+<body{% if embedded %} class="sa-embedded"{% endif %}>
+    {# Embedded mode hides salesagent chrome — the upstream proxy (Scope3
+       Storefront, etc.) wraps the iframe with its own nav. Triggered by
+       either ?embedded=1 (explicit, per-load) or managed-mode auth bypass
+       (sprint 2 — managed tenants are always embedded). The tenant subnav
+       and per-page action buttons / titles still render. #}
+    {% if not embedded %}
     {% if g.test_mode %}
-    <div style="background: #ff9800; color: white; padding: 0.75rem 1rem; text-align: center; font-weight: bold; position: fixed; top: 0; left: 0; right: 0; z-index: 9999;">
-        ⚠️ TEST MODE ACTIVE - Authentication bypassed for testing. DO NOT USE IN PRODUCTION!
+    <div class="sa-test-mode-banner" role="status">
+        ⚠️ TEST MODE ACTIVE — Authentication bypassed for testing. DO NOT USE IN PRODUCTION!
     </div>
-    <div style="height: 50px;"></div>
+    <div class="sa-test-mode-spacer" aria-hidden="true"></div>
     {% endif %}
 
-    <div class="header">
+    {# Ledger top bar — thin (44px) paper strip for publishers, ink-inverted
+       for super-admin (operator-of-platform). Workspace + mode pill anchor
+       the page; the inline list at the right is global cross-tenant nav. #}
+    <div class="header{% if session.role == 'super_admin' %} header--admin{% endif %}">
         <div class="container">
-            <h1>
-                {% if tenant and tenant.name and session.role != 'super_admin' %}
-                    {{ tenant.name }} Sales Agent Dashboard
-                {% else %}
-                    Sales Agent Admin
-                {% endif %}
-            </h1>
+            <h1>{% if session.role == 'super_admin' %}Sales Agent{% else %}Sales Agent{% endif %}</h1>
             <nav>
                 {% if session.authenticated %}
-                    <span style="color: #ecf0f1; margin-right: 1rem;">
-                        {{ session.email or session.username }}
+                    {# Identity lockup. The "ADMIN" mode pill is super-admin-only
+                       (operator-of-platform); for tenant_admin we don't need a
+                       pill since the workspace name already conveys context. #}
+                    <span class="role-tag">
                         {% if session.role == 'super_admin' %}
-                            <span class="status" style="background: #9b59b6;">Super Admin</span>
-                        {% elif session.role == 'tenant_admin' %}
-                            <span class="status" style="background: #3498db;">{% if tenant %}{{ tenant.name }}{% endif %}</span>
-                        {% elif session.role == 'admin' %}
-                            <span class="status" style="background: #e74c3c;">{% if tenant %}{{ tenant.name }}{% endif %} Admin</span>
-                        {% elif session.role == 'manager' %}
-                            <span class="status" style="background: #f39c12;">{% if tenant %}{{ tenant.name }}{% endif %} Manager</span>
-                        {% elif session.role == 'viewer' %}
-                            <span class="status" style="background: #95a5a6;">{% if tenant %}{{ tenant.name }}{% endif %} Viewer</span>
+                            <span class="workspace-name">{{ session.email or session.username }}</span>
+                            <span class="status">Admin</span>
+                        {% elif tenant %}
+                            <span class="workspace-name">{{ tenant.name }}</span>
                         {% else %}
-                            <span class="status" style="background: #3498db;">{% if tenant %}{{ tenant.name }}{% endif %}</span>
+                            <span class="workspace-name">{{ session.email or session.username }}</span>
                         {% endif %}
                     </span>
                     {% if session.role == 'super_admin' %}
                         <a href="{{ script_name }}/">Accounts</a>
-                        <a href="{{ script_name }}/create_tenant">Create Account</a>
+                        <a href="{{ script_name }}/admin/scheduling">Scheduling</a>
+                        <a href="{{ script_name }}/create_tenant">New tenant</a>
                     {% endif %}
                     <a href="{{ script_name }}/logout">Logout</a>
+                    <span class="user-avatar" aria-hidden="true">{{ (session.email or session.username or '?')[0]|upper }}</span>
                 {% endif %}
             </nav>
         </div>
     </div>
+    {% endif %}
+    {# Persistent tenant subnav. Renders on every page where ``tenant`` is in
+       scope (auto-injected by the inject_context processor for tenant-scoped
+       routes). NOT gated on embedded — the subnav is what the operator
+       navigates by; the upstream proxy hides only ``.header``, not this.
+
+       Active state: each link is bolded when the request path is inside its
+       section. Dashboard is exact-match on ``/tenant/<id>``; other sections
+       use a startswith prefix. Configure highlights when on any of its
+       dropdown sub-pages.
+
+       Embedded host link: when ``embed_breadcrumb_root`` is set (header or
+       tenant column, see src/admin/utils/breadcrumbs.py), the leftmost item
+       is a link back to the host's storefront. The context key keeps its
+       legacy name — the upstream proxy contract is stable. #}
+    {% if tenant %}
+    <nav class="sa-tenant-nav" aria-label="Tenant navigation">
+        <div class="sa-tenant-nav__inner">
+            {% set _path = request.path or '' %}
+            {% set _tprefix = script_name + '/tenant/' + tenant.tenant_id %}
+            {% if embed_breadcrumb_root %}
+            {# target=_top breaks out of the iframe — the host link points
+               at the upstream storefront, which is meant to replace the
+               whole page chrome, not load inside the iframe. noreferrer
+               minimizes leaking the salesagent admin URL (which contains
+               tenant_id) to the host's storefront via the Referer header. #}
+            <a class="sa-nav-action sa-nav-action--host" href="{{ embed_breadcrumb_root.url }}" target="_top" rel="noopener noreferrer">{{ embed_breadcrumb_root.label }}</a>
+            {% endif %}
+            {# Products / Inventory / Signals are the three operator-authored
+               building blocks: Products = Inventory + Signals + price. Promoted
+               to top nav per #451 — these are the operator's ongoing work,
+               not one-time setup. #}
+            {% set _nav_product_count = nav_product_count|default(0)|int %}
+            {% set _show_products = publisher_owns('compose_products') or _nav_product_count > 0 %}
+            {% set _show_integrations = publisher_owns_any(integration_capabilities) %}
+            {% set _navlinks = [
+                ('Dashboard',  '',                     ''),
+                ('Media Buys', '/media-buys',          '/media-buy'),
+                ('Products',   '/products/',           '/products'),
+                ('Inventory',  '/inventory-profiles/', '/inventory-profiles'),
+                ('Signals',    '/signals/',            '/signals'),
+                ('Creatives',  '/creatives/review',    '/creatives'),
+                ('Workflows',  '/workflows',           '/workflows'),
+                ('Reports',    '/reporting',           '/reporting'),
+            ] %}
+            {% for label, href, active_prefix in _navlinks %}
+                {% if
+                    (label != 'Products' or _show_products)
+                    and (label != 'Creatives' or publisher_owns('creative_approval'))
+                    and (label != 'Workflows' or publisher_owns('campaign_approval'))
+                    and (label != 'Reports' or not embedded_view)
+                %}
+                {% set _href = _tprefix + href %}
+                {% set _is_active = (
+                    (active_prefix == '' and (_path == _tprefix or _path == _tprefix + '/'))
+                    or (active_prefix != '' and _path.startswith(_tprefix + active_prefix))
+                ) %}
+                <a class="sa-nav-action{% if _is_active %} is-active{% endif %}" href="{{ _href }}"{% if _is_active %} aria-current="page"{% endif %}>{{ label }}</a>
+                {% endif %}
+            {% endfor %}
+            {# Configure is active on every tenant-scoped page that isn't
+               one of the primary nav sections — so Settings sub-pages
+               (/users, /authorized-properties, /property-tags, /signing-keys,
+               /publisher-partners, /policy/*) all light it up without
+               having to allowlist each one. #}
+            {% set _is_primary_section = (
+                _path == _tprefix
+                or _path == _tprefix + '/'
+                or _path.startswith(_tprefix + '/media-buy')
+                or (_show_products and _path.startswith(_tprefix + '/products'))
+                or _path.startswith(_tprefix + '/inventory-profiles')
+                or _path.startswith(_tprefix + '/signals')
+                or (publisher_owns('creative_approval') and _path.startswith(_tprefix + '/creatives'))
+                or (publisher_owns('campaign_approval') and _path.startswith(_tprefix + '/workflows'))
+                or (not embedded_view and _path.startswith(_tprefix + '/reporting'))
+            ) %}
+            {% set _configure_active = _path.startswith(_tprefix + '/') and not _is_primary_section %}
+            <div class="sa-menu" data-sa-menu>
+                <button type="button" class="sa-menu__trigger{% if _configure_active %} is-active{% endif %}" data-sa-menu-trigger aria-haspopup="true" aria-expanded="false">
+                    Configure
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="sa-menu__panel" role="menu">
+                    {# Inventory Profiles + Signals moved to top nav (#451).
+                       What remains here is operational: browsing the raw
+                       ad-server inventory tree and the targeting-criteria
+                       directory the profiles draw from. #}
+                    <div class="sa-menu__group-label">Inventory</div>
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/publishers/">Publishers</a>
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/inventory/browse">Browse inventory</a>
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/targeting">Targeting criteria</a>
+                    {% if publisher_owns('inventory_sync') %}
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/inventory">Sync inventory</a>
+                    {% endif %}
+
+                    <div class="sa-menu__group-label">Buying</div>
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/buyer-routing">Buyer routing</a>
+
+                    <div class="sa-menu__group-label">Workspace</div>
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/settings/policies/">Policies &amp; Workflows</a>
+                    {% if _show_integrations %}
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/settings/integrations/">Integrations</a>
+                    {% endif %}
+                    {% if not embedded_view %}
+                    {# Signing keys: dead code on embedded — storefront signs under
+                       its own domain. Sprint 7 Phase 4c hard-hide. #}
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/signing-keys/">Signing keys</a>
+                    {# Tenant Settings: on embedded every remaining subsection is
+                       either promoted out, hard-hidden, or platform-managed (lock
+                       banner). Sprint 7 Phase 4d hides the entry and redirects
+                       the legacy route. #}
+                    <a class="sa-menu__item" role="menuitem" href="{{ _tprefix }}/settings">Tenant Settings</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </nav>
+    {% endif %}
     <div class="container">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -192,7 +263,8 @@
                     {% for category, message in messages %}
                         <div class="alert alert-{{ category }}">
                             {{ message }}
-                            <button onclick="this.parentElement.style.display='none'" style="float: right; background: none; border: none; font-size: 1.2em; cursor: pointer;">&times;</button>
+                            <button type="button" class="sa-alert-close" aria-label="Dismiss"
+                                onclick="this.parentElement.style.display='none'">&times;</button>
                         </div>
                     {% endfor %}
                 </div>
@@ -201,6 +273,41 @@
         {% block content %}{% endblock %}
     </div>
     <script>
+        // sa-menu — top-bar dropdown (Configure menu). Click trigger to
+        // toggle; Escape and outside-click close. No Bootstrap dependency
+        // so the visual doesn't fight the Ledger palette.
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('[data-sa-menu]').forEach(function(menu) {
+                const trigger = menu.querySelector('[data-sa-menu-trigger]');
+                if (!trigger) return;
+                trigger.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const open = menu.classList.toggle('is-open');
+                    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+                });
+            });
+            document.addEventListener('click', function(e) {
+                document.querySelectorAll('[data-sa-menu].is-open').forEach(function(menu) {
+                    if (!menu.contains(e.target)) {
+                        menu.classList.remove('is-open');
+                        const trigger = menu.querySelector('[data-sa-menu-trigger]');
+                        if (trigger) trigger.setAttribute('aria-expanded', 'false');
+                    }
+                });
+            });
+            document.addEventListener('keydown', function(e) {
+                if (e.key !== 'Escape') return;
+                document.querySelectorAll('[data-sa-menu].is-open').forEach(function(menu) {
+                    menu.classList.remove('is-open');
+                    const trigger = menu.querySelector('[data-sa-menu-trigger]');
+                    if (trigger) {
+                        trigger.setAttribute('aria-expanded', 'false');
+                        trigger.focus();
+                    }
+                });
+            });
+        });
+
         // Tab functionality
         document.addEventListener('DOMContentLoaded', function() {
             const tabs = document.querySelectorAll('.tab');
@@ -235,9 +342,57 @@
             }
         });
     </script>
+    {# Build stamp — small, fixed bottom-right. Surfaces the deployed
+       version + git SHA so bug reports can be tied to a specific image
+       build. Only renders for authenticated sessions (or embedded
+       requests, which are always authenticated via X-Identity-*) so
+       commit SHA + branch don't leak from the public login page.
+       In embedded mode we drop the branch name — publishers in the
+       Storefront iframe don't need to see the operator's internal
+       branch labels. #}
+    {% if build_info and (session.authenticated or embedded) %}
+    <div class="sa-build-stamp" title="Sales Agent build">
+        {{ build_info.display_short if embedded else build_info.display }}
+    </div>
+    {% endif %}
+    {# Toast container — sa-toast.js attaches to this on load. Lives
+       outside the main container so position: fixed children don't
+       clip on narrow viewports. Pointer events disabled on the root
+       so empty space doesn't block clicks underneath. #}
+    <div id="sa-toast-root" aria-live="polite" aria-atomic="true"></div>
+    <script src="{{ script_name }}/static/js/sa-toast.js"></script>
     <script src="{{ script_name }}/static/validation.js"></script>
     <!-- Bootstrap Bundle with Popper -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    {% if embedded %}
+    {# Embedded-mode navigation breadcrumbs for the upstream proxy.
+       Fires once on DOMContentLoaded so the parent frame can update its
+       outer URL (e.g. /{customer}/storefront/psa/{tenantId}/products) so
+       deep-links + browser back-button work. The parent listens for
+       ``message`` events with ``e.data.type === 'psa:navigate'``. We
+       targetOrigin '*' because the salesagent doesn't know the parent's
+       origin — the parent should validate the message ``source`` matches
+       its iframe element on receipt. #}
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.parent === window) {
+                return;  // not in an iframe; nothing to notify
+            }
+            try {
+                window.parent.postMessage({
+                    type: 'psa:navigate',
+                    pathname: window.location.pathname,
+                    search: window.location.search,
+                    title: document.title
+                }, '*');
+            } catch (err) {
+                // Cross-origin postMessage failure is non-fatal — the iframe
+                // still works, the parent just won't update its outer URL.
+                console.debug('psa:navigate postMessage failed:', err);
+            }
+        });
+    </script>
+    {% endif %}
     {% block scripts %}{% endblock %}
 </body>
 </html>

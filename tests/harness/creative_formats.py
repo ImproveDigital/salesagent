@@ -39,7 +39,6 @@ class CreativeFormatsEnv(IntegrationEnv):
         "registry": "src.core.creative_agent_registry.get_creative_agent_registry",
         "audit_logger": "src.core.tools.creative_formats.get_audit_logger",
     }
-    REST_ENDPOINT = "/api/v1/creative-formats"
 
     def _configure_mocks(self) -> None:
         """Set up happy-path defaults for external mocks.
@@ -86,23 +85,6 @@ class CreativeFormatsEnv(IntegrationEnv):
         kwargs.setdefault("req", None)
         return _list_creative_formats_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> ListCreativeFormatsResponse:
-        """Call list_creative_formats via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
-
     def call_mcp(self, **kwargs: Any) -> ListCreativeFormatsResponse:
         """Call list_creative_formats via Client(mcp) — full pipeline dispatch."""
         return self._run_mcp_client("list_creative_formats", ListCreativeFormatsResponse, **kwargs)
-
-    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert kwargs to ListCreativeFormatsBody shape for REST POST.
-
-        Returns empty dict intentionally: ListCreativeFormatsBody
-        (src/routes/api_v1.py) only defines ``adcp_version: str = "1.0.0"``
-        with no user-facing parameters. All kwargs are dropped.
-        """
-        return {}
-
-    def parse_rest_response(self, data: dict[str, Any]) -> ListCreativeFormatsResponse:
-        """Parse REST JSON into ListCreativeFormatsResponse."""
-        return ListCreativeFormatsResponse(**data)

@@ -25,6 +25,7 @@ from src.core.database.models import (
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.testing_hooks import AdCPTestContext
 from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+from tests.helpers.adcp_factories import create_test_reporting_capabilities
 
 
 def _create_test_tenant_and_principal(ad_server: str | None = None) -> tuple[str, str]:
@@ -89,6 +90,7 @@ def _create_basic_media_buy_with_webhook(
             format_ids=[],
             targeting_template={},
             delivery_type="",
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         pricing_option = PricingOption(
@@ -176,6 +178,7 @@ def get_mock_gam_reporting_delivery_data(base_date=None) -> ReportingData:
 
 @pytest.mark.requires_db
 @pytest.mark.asyncio
+@freeze_time("2026-06-15 12:00:00", tz_offset=0)
 async def test_delivery_webhook_sends_for_fresh_data(integration_db):
     """Scheduler should call get_media_buy_delivery for the correct period and send webhook when data is fresh."""
 
@@ -214,10 +217,18 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
         extracted_principal_id = metadata.get("principal_id")
         extracted_media_buy_id = metadata.get("media_buy_id")
 
-        # Extract from payload
+        # Extract from payload. salesagent builds the delivery-report payload via
+        # ``McpWebhookPayload.model_construct(result=delivery_response.model_dump())``
+        # so the ``result`` slot is a plain dict — see delivery_webhook_scheduler
+        # for the bypass rationale.
         task_id = payload.task_id
         status = payload.status
-        result = payload.result
+        if hasattr(payload.result, "model_dump"):
+            result = payload.result.model_dump()
+        elif isinstance(payload.result, dict):
+            result = payload.result
+        else:
+            result = {}
 
         # Webhook should have been sent exactly once
         assert mock_send_notification.await_count == 1
@@ -239,6 +250,80 @@ async def test_delivery_webhook_sends_for_fresh_data(integration_db):
         expected_end_date = (datetime.combine(yesterday, time.max)).isoformat()
 
         assert len(result.get("media_buy_deliveries")) == 1
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+@freeze_time("2026-06-15 12:00:00", tz_offset=0)
+async def test_delivery_webhook_handles_multiple_media_buys_without_detached_instance_error(integration_db, caplog):
+    """Regression for production trace 2026-05-08: when two or more media
+    buys with reporting_webhook are processed in one batch, the second
+    iteration raised DetachedInstanceError on ``media_buy.tenant``.
+
+    Root cause: ``_get_media_buy_delivery_impl`` opens its own
+    ``with get_db_session()`` context. If nested contexts share the same
+    scoped Session, the inner cleanup detaches every MediaBuy loaded by
+    the outer batch session, so the next iteration's ``media_buy.tenant``
+    relationship access blows up.
+    """
+    from tests.factories import MediaBuyFactory, PrincipalFactory, TenantFactory
+    from tests.helpers.managed_tenant_api import bind_factories_to_session
+
+    start = datetime.now(UTC).date() - timedelta(days=7)
+    end = datetime.now(UTC).date() + timedelta(days=7)
+    webhook_payload = {
+        "packages": [{"product_id": "prod_multi"}],
+        "reporting_webhook": {"url": "https://example.com/webhook", "frequency": "daily"},
+    }
+
+    # Two media buys, both with reporting_webhook configured. The bug only
+    # manifests on the second-and-later iterations of the batch loop.
+    with bind_factories_to_session():
+        tenant = TenantFactory(tenant_id="tenant_multi_detached", subdomain="multi-detached")
+        principal = PrincipalFactory(tenant=tenant)
+        for mb_id in ("mb_multi_a", "mb_multi_b"):
+            MediaBuyFactory(
+                tenant=tenant,
+                principal=principal,
+                media_buy_id=mb_id,
+                start_date=start,
+                end_date=end,
+                status="active",
+                raw_request=webhook_payload,
+            )
+
+    scheduler = DeliveryWebhookScheduler()
+
+    with patch.object(
+        scheduler.webhook_service,
+        "send_notification",
+        new_callable=AsyncMock,
+    ) as mock_send_notification:
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="src.services.delivery_webhook_scheduler"):
+            await scheduler._send_reports()
+
+        # Tie the test to the actual failure mode: the scheduler's broad
+        # ``except Exception`` swallows DetachedInstanceError and increments
+        # ``errors`` rather than letting it propagate. Assert directly that
+        # no detached-instance error was logged.
+        detached_errors = [r for r in caplog.records if "DetachedInstanceError" in (r.exc_text or "")]
+        assert not detached_errors, (
+            "Scheduler logged DetachedInstanceError — the inner get_db_session() context "
+            f"detached the outer batch's MediaBuy rows.\n"
+            f"First error: {detached_errors[0].message if detached_errors else ''}"
+        )
+
+        # Both media buys must round-trip — second-order check that the
+        # batch completed past the iteration where the bug manifested.
+        assert mock_send_notification.await_count == 2, (
+            f"Expected both media buys to send webhooks; got {mock_send_notification.await_count}"
+        )
+        sent_media_buy_ids = {
+            call.kwargs["metadata"]["media_buy_id"] for call in mock_send_notification.await_args_list
+        }
+        assert sent_media_buy_ids == {"mb_multi_a", "mb_multi_b"}
 
 
 @pytest.mark.requires_db
@@ -306,11 +391,23 @@ async def test_delivery_webhook_sends_gam_based_reporting_data_only_on_gam_avail
 
 @pytest.mark.requires_db
 @pytest.mark.asyncio
+@freeze_time("2026-06-15 12:00:00", tz_offset=0)
 async def test_dont_call_get_media_buy_delivery_tool_unless_media_buy_start_date_passed(integration_db):
-    """Test that we handle media buys with future start dates gracefully (empty delivery)."""
+    """Pre-start buys appear in delivery reports as heartbeats (post-#48).
+
+    Before #48 the scheduler skipped buys whose start_date was in the future,
+    so this test asserted ``len(media_buy_deliveries) == 0``. #48 changed
+    that contract: buyers who configure ``reporting_webhook`` get a
+    heartbeat report for warm-up (pre-start) and paused buys too, so they
+    can stop polling. Heartbeat deliveries carry ``status='ready'`` and the
+    response sets ``partial_data=True``.
+
+    This test now locks in the heartbeat contract: a buy starting tomorrow
+    yields one delivery with status='ready' and partial_data=True.
+    """
     tenant_id, principal_id = _create_test_tenant_and_principal()
 
-    # Start date is tomorrow
+    # Start date is tomorrow (relative to the frozen clock above).
     start_date = datetime.now(UTC).date() + timedelta(days=1)
     end_date = start_date + timedelta(days=7)
 
@@ -321,19 +418,35 @@ async def test_dont_call_get_media_buy_delivery_tool_unless_media_buy_start_date
     async def fake_send_notification(*args, **kwargs):
         return True
 
-    with patch.object(scheduler.webhook_service, "send_notification", new_callable=AsyncMock) as mock_send:
+    with patch.object(
+        scheduler.webhook_service,
+        "send_notification",
+        new_callable=AsyncMock,
+        side_effect=fake_send_notification,
+    ) as mock_send:
         await scheduler._send_reports()
 
-        # Should send a webhook (since status=active in DB) but with empty deliveries (since dynamic status=ready)
-        if mock_send.call_count > 0:
-            args, kwargs = mock_send.call_args
-            payload = kwargs.get("payload")
-            result = payload.result
-            assert len(result.get("media_buy_deliveries", [])) == 0
+        assert mock_send.call_count == 1, "Pre-start buy should still get a heartbeat webhook"
+        args, kwargs = mock_send.call_args
+        payload = kwargs.get("payload")
+        result = payload.result
+
+        deliveries = result.get("media_buy_deliveries", [])
+        assert len(deliveries) == 1, "Heartbeat report carries one delivery for the buy"
+        # AdCP wire vocab uses ``pending_start`` for the pre-start state;
+        # salesagent's internal vocab calls the same state ``ready``. The
+        # ``MediaBuyDeliveryData.status`` field_serializer translates at
+        # the wire boundary, so the test asserts the wire-shape value (the
+        # webhook payload is what real buyers see).
+        assert deliveries[0].get("status") == "pending_start", (
+            "Pre-start buy reports dynamic status='pending_start' (wire vocab)"
+        )
+        assert result.get("partial_data") is True, "Heartbeat reports flag partial_data=True"
 
 
 @pytest.mark.requires_db
 @pytest.mark.asyncio
+@freeze_time("2026-06-15 12:00:00", tz_offset=0)
 async def test_call_get_media_buy_delivery_for_ended_campaign(integration_db):
     """Test webhook behavior for ended campaigns."""
     tenant_id, principal_id = _create_test_tenant_and_principal()
@@ -365,6 +478,7 @@ async def test_call_get_media_buy_delivery_for_ended_campaign(integration_db):
 
 @pytest.mark.requires_db
 @pytest.mark.asyncio
+@freeze_time("2026-06-15 12:00:00", tz_offset=0)
 async def test_scheduler_status_filter_includes_completed_campaigns(integration_db):
     """Regression: scheduler delivery query must include ended (completed) campaigns.
 

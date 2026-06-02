@@ -114,9 +114,10 @@ def _create_property_selection(base_url: str, tenant_id: str) -> dict[str, str]:
         allow_redirects=False,
         timeout=20,
     )
-    assert property_response.status_code in {302, 303}, (
-        f"Authorized property setup failed: {property_response.status_code}"
-    )
+    assert property_response.status_code in {
+        302,
+        303,
+    }, f"Authorized property setup failed: {property_response.status_code}"
 
     return {
         "publisher_domain": publisher_domain,
@@ -350,7 +351,7 @@ def test_create_principal_browser_flow(docker_services_e2e, live_server):
         page.goto(f"/tenant/{TENANT_ID}/principals/create", wait_until="networkidle")
         page.locator("#principal_id").fill(principal_id)
         page.locator("#name").fill(principal_name)
-        page.get_by_role("button", name="Add Advertiser").click()
+        page.get_by_role("button", name="Add Buyer Agent").click()
         page.wait_for_url(f"**/tenant/{TENANT_ID}/settings*", wait_until="networkidle")
         page.wait_for_selector(f"text={principal_name}")
 

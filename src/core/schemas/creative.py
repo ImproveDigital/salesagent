@@ -9,10 +9,15 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal
 
-from adcp.types import AccountReference as LibraryAccountReference
 from adcp.types import (
+    AiTool,
+    CreativeAction,
     CreativeStatus,
+    Error,
+    SchemaVariant,
 )
+from adcp.types import CreativeApproval as LibraryCreativeApproval
+from adcp.types import CreativeAsset as LibraryCreativeAsset
 from adcp.types import FormatId as LibraryFormatId
 from adcp.types import (
     ListCreativeFormatsRequest as LibraryListCreativeFormatsRequest,
@@ -26,6 +31,7 @@ from adcp.types import (
 from adcp.types import (
     ListCreativesResponse as LibraryListCreativesResponse,
 )
+from adcp.types import PaginationResponse as LibraryResponsePagination
 from adcp.types import (
     QuerySummary as LibraryQuerySummary,
 )
@@ -35,15 +41,19 @@ from adcp.types import (
 from adcp.types import (
     SyncCreativesRequest as LibrarySyncCreativesRequest,
 )
-from adcp.types.generated_poc.core.pagination_response import PaginationResponse as LibraryResponsePagination
-from adcp.types.generated_poc.core.provenance import AiTool
+
+# Pin to the listing-side ``Creative`` (list_creatives_response). The
+# top-level ``adcp.types.Creative`` resolves to the delivery-side type
+# (get_creative_delivery_response) since adcp 4.4 — that variant has only
+# ``creative_id, media_buy_id, format_id, totals, variant_count, variants``
+# and rejects ``tags`` / ``status`` / ``assets`` etc. Our Creative is
+# explicitly a listing-side schema, so we extend the listing variant.
 from adcp.types.generated_poc.creative.list_creatives_response import (
     Creative as LibraryCreative,
 )
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
-from adcp.types.generated_poc.enums.creative_action import CreativeAction
 from pydantic import (
     ConfigDict,
     Field,
@@ -51,9 +61,9 @@ from pydantic import (
     model_validator,
 )
 
+from src.core._deprecations import LEGACY_FORMAT_ID_SUNSET, warn_deprecated
 from src.core.config import get_pydantic_extra_mode
 from src.core.schemas._base import (
-    ApprovalStatus,
     FormatId,
     NestedModelSerializerMixin,
     SalesAgentBaseModel,
@@ -122,12 +132,88 @@ class Provenance(SalesAgentBaseModel):
 
 
 class CreativeStatusEnum(Enum):
-    """Creative status enum (not in adcp library, local definition)."""
+    """Local creative status enum.
+
+    The library exposes ``adcp.types.CreativeStatus`` with the same values plus
+    ``archived``. Switch to the library enum when the archived state is wired
+    into the creative workflow.
+    """
 
     processing = "processing"
     approved = "approved"
     rejected = "rejected"
     pending_review = "pending_review"
+
+
+def _upgrade_format_id_in_values(values: Any) -> Any:
+    """Upgrade ``format_id`` (or legacy ``format`` alias) to the AdCP namespaced FormatId.
+
+    Used by both ``Creative`` (listing shape) and ``CreativeAsset`` (sync shape) so
+    string format_ids, the legacy ``format`` key, and library-typed ``FormatReferenceStructuredObject``
+    instances are all normalized to the local ``FormatId`` subclass.
+
+    Buyer-facing legacy shapes emit ``DeprecationWarning`` (sunset target
+    ``LEGACY_FORMAT_ID_SUNSET``):
+    - String ``format_id`` (warns inside ``upgrade_legacy_format_id``)
+    - Legacy ``format`` key in place of ``format_id`` (warned here)
+    Library-typed ``FormatReferenceStructuredObject`` conversion is silent because
+    it is internal plumbing, not buyer-facing.
+    """
+    from pydantic import BaseModel
+
+    from src.core.format_cache import upgrade_legacy_format_id
+
+    # ``model_validate(other_model_instance, from_attributes=True)`` passes the
+    # source BaseModel here — dump it so the rest of the validator can mutate.
+    if isinstance(values, BaseModel):
+        values = values.model_dump()
+
+    if not isinstance(values, dict):
+        return values
+
+    if "format" in values and "format_id" not in values:
+        warn_deprecated(
+            f"Legacy creative key 'format' is deprecated; use 'format_id'. "
+            f"Will be removed in {LEGACY_FORMAT_ID_SUNSET}."
+        )
+
+    format_val = values.get("format_id") or values.get("format")
+    if format_val is not None:
+        try:
+            values["format_id"] = upgrade_legacy_format_id(format_val)
+            values.pop("format", None)
+        except ValueError as e:
+            raise ValueError(f"Invalid format_id: {e}") from e
+
+    assets = values.get("assets")
+    if isinstance(assets, dict):
+        from src.core.schemas._asset_type_compat import infer_asset_types
+
+        values["assets"] = infer_asset_types(assets)
+    return values
+
+
+# --- Creative sync wire shape ---
+class CreativeAsset(LibraryCreativeAsset):
+    """Sync/create wire shape — extends library CreativeAsset.
+
+    AdCP's ``sync_creatives`` and ``create`` flows take ``CreativeAsset`` (provenance,
+    weight, placement_ids, industry_identifiers, inputs); the listing flow returns
+    the richer ``Creative`` (status, dates, account, assignments, etc.). Splitting
+    keeps each wire honest about which fields it actually carries.
+
+    Local extension: ``format_id`` accepts a plain string or legacy ``format`` alias
+    and upgrades to the structured FormatId for backward compatibility with pre-v2.4
+    callers.
+
+    Inherits ``extra="allow"`` from the library type — sync payloads commonly carry
+    forward-compat fields that should pass through silently.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_format_id(cls, values: Any) -> Any:
+        return _upgrade_format_id_in_values(values)
 
 
 # --- Creative Lifecycle ---
@@ -145,7 +231,6 @@ class Creative(LibraryCreative):
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     # === Overrides of listing Creative fields ===
-    name: str = Field(description="Creative name")
     status: CreativeStatus = Field(
         default=CreativeStatus.pending_review,
         description="Workflow approval status",
@@ -156,7 +241,21 @@ class Creative(LibraryCreative):
     assets: dict[str, Any] | None = Field(default=None, description="Creative assets")
 
     # === AI Provenance (EU AI Act Article 50) ===
-    provenance: Provenance | None = Field(default=None, description="AI provenance metadata per EU AI Act Article 50")
+    # Library 4.5.0 ships provenance on CreativeAsset (sync shape) but not on
+    # the listing Creative we extend. Salesagent surfaces it on listings too
+    # because sellers need to see disclosure metadata when reviewing — track
+    # spec inclusion in adcp RFC #4282.
+    provenance: Provenance | None = Field(
+        default=None,
+        description=(
+            "AI provenance metadata per EU AI Act Article 50. "
+            "On the listing wire (list_creatives) this is a salesagent extension "
+            "surfacing the sync-side provenance back to sellers for review; the "
+            "canonical write path is sync_creatives. Becomes spec-native once "
+            "AdCP RFC #4282 lands upstream — if the upstream shape is incompatible "
+            "with the local Provenance, this extension is removed (not migrated)."
+        ),
+    )
 
     # === Internal Fields (excluded from AdCP responses) ===
     principal_id: str | None = Field(
@@ -167,23 +266,13 @@ class Creative(LibraryCreative):
     @classmethod
     def validate_format_id(cls, values):
         """Validate and upgrade format_id to AdCP namespaced format."""
-        from src.core.format_cache import upgrade_legacy_format_id
-
-        # Handle both 'format' and 'format_id' keys
-        format_val = values.get("format_id") or values.get("format")
-        if format_val is not None:
-            try:
-                upgraded = upgrade_legacy_format_id(format_val)
-                values["format_id"] = upgraded
-                # Remove 'format' alias to avoid extra field rejection
-                values.pop("format", None)
-            except ValueError as e:
-                raise ValueError(f"Invalid format_id: {e}")
+        values = _upgrade_format_id_in_values(values)
 
         # Strip delivery-only fields that callers may still pass from old code.
         # These fields existed on the delivery Creative base but not on the listing base.
-        for field in ("variants", "variant_count", "totals", "media_buy_id"):
-            values.pop(field, None)
+        if isinstance(values, dict):
+            for field in ("variants", "variant_count", "totals", "media_buy_id"):
+                values.pop(field, None)
 
         return values
 
@@ -307,32 +396,23 @@ SubmitCreativesResponse = AddCreativeAssetsResponse
 
 
 class SyncCreativesRequest(LibrarySyncCreativesRequest):
-    """Extends library SyncCreativesRequest with local Creative type.
+    """Extends library SyncCreativesRequest.
 
     Library provides: account_id, assignments, context, creative_ids, creatives,
     delete_missing, dry_run, ext, push_notification_config, validation_mode — all
     inherited from AdCP spec.
 
     Local overrides:
-    - creatives: list[Creative] instead of list[CreativeAsset] (our Creative extends
-      LibraryCreative, which has a richer schema than CreativeAsset)
-    - push_notification_config: kept as dict[str, Any] | None because the library's
-      PushNotificationConfig requires 'authentication' and 'url' fields that aren't
-      enforced in our current implementation
+    - creatives: list[CreativeAsset] re-typed against the local CreativeAsset
+      subclass so the format_id upgrade validator runs on the wire.
+    - push_notification_config inherited from library; buyers send the typed
+      PushNotificationConfig shape (authentication + url required per spec).
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
-    # adcp 3.9 makes account required. Our impl resolves identity at the transport
-    # layer (ResolvedIdentity), not from the request payload, so account is optional here.
-    account: LibraryAccountReference | None = None  # type: ignore[assignment]
-
-    creatives: list[Creative] = Field(
+    creatives: SchemaVariant[list[CreativeAsset]] = Field(
         ..., min_length=1, max_length=100, description="Array of creative assets to sync (create or update)"
-    )  # type: ignore[assignment]
-    push_notification_config: dict[str, Any] | None = Field(  # type: ignore[assignment]
-        None,
-        description="Application-level webhook config (NOTE: Protocol-level push notifications via A2A/MCP transport take precedence)",
     )
 
 
@@ -355,26 +435,58 @@ class SyncCreativeResult(LibrarySyncCreativeResult):
     expires_at, preview_url.
 
     Local overrides:
-    - status, review_feedback: Internal fields excluded from responses
+    - internal_status, review_feedback: Internal fields excluded from responses.
+      ``internal_status`` is named distinctly from the library's ``status`` field
+      (which is the spec's review-lifecycle CreativeStatus) to avoid shadowing.
     - changes, errors, warnings: Override to default=[] (library defaults to None)
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
-    # Internal-only fields (not in AdCP spec)
-    status: str | None = Field(
+    # Internal-only fields — excluded from API responses. Named distinctly
+    # from the library ``status: CreativeStatus | None`` field (spec
+    # review-lifecycle indicator) to avoid spec collision.
+    internal_status: str | None = Field(
         None, exclude=True, description="Current approval status of the creative (INTERNAL - excluded from responses)"
+    )
+    status: Any | None = Field(
+        None,
+        exclude=True,
+        description="Legacy internal approval status accepted for compatibility with existing result construction.",
+    )
+    platform_id: str | None = Field(
+        None,
+        exclude=True,
+        description="Legacy internal platform creative ID accepted for compatibility with existing result construction.",
     )
     review_feedback: str | None = Field(
         None, exclude=True, description="Feedback from platform review process (INTERNAL - excluded from responses)"
     )
 
-    # Override library defaults: library uses None, we use [] for backward compatibility
+    # Override library defaults: library uses None, we use [] for backward compatibility.
+    # ``errors`` is ``list[Error]`` per AdCP spec (each entry needs a ``code`` for
+    # programmatic handling); the previous ``list[str]`` shape was off-spec and
+    # tripped FastMCP's response validator on the [mcp] transport.
     changes: list[str] = Field(
         default_factory=list, description="List of field names that were modified (for 'updated' action)"
     )
-    errors: list[str] = Field(default_factory=list, description="Validation or processing errors (for 'failed' action)")
+    errors: list[Error] = Field(
+        default_factory=list, description="Validation or processing errors (for 'failed' action)"
+    )
     warnings: list[str] = Field(default_factory=list, description="Non-fatal warnings about this creative")
+    assigned_to: list[Any] | None = Field(default=None, description="Packages this creative was assigned to")
+    assignment_errors: dict[str, str] | None = Field(default=None, description="Assignment errors for this creative")
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def normalize_known_action(cls, value: Any) -> Any:
+        """Store known AdCP creative actions as enums while accepting extension strings."""
+        if isinstance(value, str):
+            try:
+                return CreativeAction(value)
+            except ValueError:
+                return value
+        return value
 
     def model_dump(self, **kwargs):
         """Override to exclude non-AdCP fields for spec compliance.
@@ -454,13 +566,49 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
     Design decision (salesagent-g3c): error variant never constructed.
     """
 
+    dry_run: bool | None = None
+
+    @field_validator("creatives", mode="after")
+    @classmethod
+    def _coerce_creatives(cls, values: list[Any]) -> list[SyncCreativeResult]:
+        """Hydrate nested creatives into the local extension model.
+
+        adcp 5.7's generated response field points at the library row model.
+        The local row model extends that type with compatibility defaults and
+        enum coercion, so MCP round-trips need to rehydrate nested rows here.
+        """
+        coerced: list[SyncCreativeResult] = []
+        for value in values:
+            if isinstance(value, SyncCreativeResult):
+                coerced.append(value)
+                continue
+            if hasattr(value, "model_dump"):
+                coerced.append(SyncCreativeResult.model_validate(value.model_dump(mode="json", exclude_none=True)))
+            else:
+                coerced.append(SyncCreativeResult.model_validate(value))
+        return coerced
+
+    def model_dump(self, **kwargs):
+        """Pattern #4 nested serialization — re-serialize each ``SyncCreativeResult``
+        through its own ``model_dump()`` so the local ``status`` /
+        ``review_feedback`` fields with ``exclude=True`` are dropped.
+        """
+        result = super().model_dump(**kwargs)
+        if "creatives" in result and self.creatives:
+            result["creatives"] = [c.model_dump(**kwargs) for c in self.creatives]
+        return result
+
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""
         # Count actions from creatives list
-        created = sum(1 for c in self.creatives if c.action == CreativeAction.created)
-        updated = sum(1 for c in self.creatives if c.action == CreativeAction.updated)
-        deleted = sum(1 for c in self.creatives if c.action == CreativeAction.deleted)
-        failed = sum(1 for c in self.creatives if c.action == CreativeAction.failed)
+        actions = []
+        for creative in self.creatives:
+            action = creative.action
+            actions.append(action.value if hasattr(action, "value") else str(action))
+        created = actions.count(CreativeAction.created.value)
+        updated = actions.count(CreativeAction.updated.value)
+        deleted = actions.count(CreativeAction.deleted.value)
+        failed = actions.count(CreativeAction.failed.value)
 
         parts = []
         if created:
@@ -582,9 +730,9 @@ class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResp
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     # Override with local subtypes (each extends its library counterpart)
-    query_summary: QuerySummary = Field(..., description="Summary of the query that was executed")
+    query_summary: SchemaVariant[QuerySummary] = Field(..., description="Summary of the query that was executed")
     pagination: Pagination = Field(..., description="Pagination information for navigating results")
-    creatives: list[Creative] = Field(..., description="Array of creative assets")  # type: ignore[assignment]
+    creatives: list[Creative] = Field(..., description="Array of creative assets")
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""
@@ -697,9 +845,5 @@ class ApproveCreativeResponse(SalesAgentBaseModel):
     detail: str
 
 
-class CreativeApproval(SalesAgentBaseModel):
-    """Creative approval record for a package."""
-
-    creative_id: str = Field(..., description="Creative identifier")
-    approval_status: ApprovalStatus = Field(..., description="Current approval status")
-    rejection_reason: str | None = Field(default=None, description="Reason for rejection (when rejected)")
+class CreativeApproval(LibraryCreativeApproval):
+    """Creative approval record — extends library type per Pattern #1."""

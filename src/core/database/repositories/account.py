@@ -57,8 +57,19 @@ class AccountRepository:
         brand_domain: str,
         brand_id: str | None = None,
         sandbox: bool | None = None,
+        *,
+        billing: str | None = None,
+        principal_id: str | None = None,
     ) -> Account | None:
-        """Get an account by its natural key (operator + brand + sandbox).
+        """Get an account by its natural key.
+
+        Default key (operator + brand + sandbox) preserves today's
+        ``billing=operator`` upsert semantics for backward compatibility:
+        with ``billing=None`` the lookup ignores billing entirely.
+
+        For ``billing="agent"`` the caller MUST pass ``principal_id`` —
+        the buyer agent in the billing relationship is part of the natural
+        key.
 
         The brand field is JSONType containing {"domain": ..., "brand_id": ...}.
         """
@@ -73,6 +84,10 @@ class AccountRepository:
             stmt = stmt.where(Account.sandbox == sandbox)
         else:
             stmt = stmt.where(Account.sandbox.is_(None) | (Account.sandbox == False))  # noqa: E712
+        if billing is not None:
+            stmt = stmt.where(Account.billing == billing)
+        if principal_id is not None:
+            stmt = stmt.where(Account.principal_id == principal_id)
         return self._session.scalars(stmt).first()
 
     def list_by_natural_key(
@@ -234,6 +249,17 @@ class AccountRepository:
         self._session.flush()
         return access
 
+    def ensure_access(self, principal_id: str, account_id: str) -> bool:
+        """Grant access if missing.
+
+        Returns True when a new grant was created, False when the principal
+        already had access.
+        """
+        if self.has_access(principal_id, account_id):
+            return False
+        self.grant_access(principal_id, account_id)
+        return True
+
     def revoke_access(self, principal_id: str, account_id: str) -> bool:
         """Revoke an agent's access to an account. Returns True if deleted."""
         access = self._session.scalars(
@@ -268,6 +294,16 @@ class AccountRepository:
             select(AgentAccountAccess.account_id).where(
                 AgentAccountAccess.tenant_id == self._tenant_id,
                 AgentAccountAccess.principal_id == principal_id,
+            )
+        ).all()
+        return list(rows)
+
+    def list_principal_ids_for_account(self, account_id: str) -> list[str]:
+        """List principal IDs with access to an account."""
+        rows = self._session.scalars(
+            select(AgentAccountAccess.principal_id).where(
+                AgentAccountAccess.tenant_id == self._tenant_id,
+                AgentAccountAccess.account_id == account_id,
             )
         ).all()
         return list(rows)

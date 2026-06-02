@@ -78,15 +78,19 @@ Then the product is included in results
 ### BR-RULE-004: Anonymous Pricing Suppression
 **Obligation ID** BR-RULE-004-01
 **Layer** behavioral
-**Invariant:** Anonymous requests have `pricing_options` set to empty array on every product.
+**Invariant:** Anonymous curated-discovery requests have `pricing_options` set to empty array on every product. Anonymous `buying_mode='wholesale'` feed reads retain pricing because `Product.pricing_options` is required by the AdCP wire schema and buyers use wholesale feeds for catalog cache population.
 **Scenario:**
 ```gherkin
 Given a product with 3 pricing options
-When an anonymous user requests products
+When an anonymous user requests products in brief mode
 Then the product has pricing_options = []
 
 Given a product with 3 pricing options
 When an authenticated user requests products
+Then the product has all 3 pricing options
+
+Given a product with 3 pricing options
+When an anonymous user requests products in wholesale mode
 Then the product has all 3 pricing options
 ```
 **Priority:** P1
@@ -638,12 +642,12 @@ Then the existing assignment is updated (weight reset to 100)
 ### BR-RULE-039: Assignment Format Compatibility
 **Obligation ID** BR-RULE-039-01
 **Layer** schema
-**Invariant:** Format compatibility checks normalized agent_url and exact format_id against product's format_ids. Empty format_ids means all allowed.
+**Invariant:** Format compatibility checks normalized agent_url and canonical format identity against product's format_ids. Legacy fixed-size IDs such as `display_300x250` match their structured form (`display_image` with 300x250 parameters). Empty format_ids means all allowed.
 **Scenario:**
 ```gherkin
-Given product format_ids accepts agent "http://agent.com/mcp" id "banner_300x250"
-When a creative with agent_url "http://agent.com/mcp/" and id "banner_300x250" is assigned
-Then URL normalization strips trailing "/" and the format matches
+Given product format_ids accepts agent "http://agent.com/mcp" id "display_300x250"
+When a creative with agent_url "http://agent.com/mcp/" and id "display_image" plus width 300 and height 250 is assigned
+Then URL normalization strips trailing "/" and canonical format comparison matches
 
 Given a product with empty format_ids
 When any creative format is assigned
@@ -657,16 +661,20 @@ Then format compatibility passes (all formats allowed)
 ### BR-RULE-040: Media Buy Status Transition on Assignment
 **Obligation ID** BR-RULE-040-01
 **Layer** behavioral
-**Invariant:** Draft media buy with non-null approved_at transitions to pending_creatives on creative assignment. Other statuses unchanged.
+**Invariant:** pending_creatives means no creatives are assigned. When creatives are assigned to an approved draft or pending_creatives media buy, status falls back to flight-date gates. Unapproved drafts remain draft; active/terminal statuses are unchanged.
 **Scenario:**
 ```gherkin
 Given media buy status="draft" and approved_at is set
 When a creative assignment is made
-Then status transitions to "pending_creatives"
+Then status transitions to "pending_start" or "active" based on flight dates
 
 Given media buy status="draft" and approved_at is null
 When a creative assignment is made
 Then status remains "draft"
+
+Given media buy status="pending_creatives"
+When a creative assignment is made
+Then status transitions to "pending_start" or "active" based on flight dates
 ```
 **Priority:** P1
 **Affected by 3.6:** No

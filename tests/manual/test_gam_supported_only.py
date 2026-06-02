@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.core.schemas import CreateMediaBuyRequest, FormatId, MediaPackage, Principal, Targeting
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 # Default agent URL for creating FormatId objects
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
@@ -99,12 +100,12 @@ class SupportedTargetingTester:
             package_id="geo_test",
             name="Geographic Targeting Test",
             impressions=1000,
-            cpm=1.00,
             delivery_type="non_guaranteed",
             format_ids=[make_format_id("display_300x250")],
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="GEO_SUPPORTED",
             total_budget=1.00,
@@ -138,7 +139,6 @@ class SupportedTargetingTester:
             package_id="key_value_test",
             name="Key-Value Targeting Test",
             impressions=1000,
-            cpm=2.00,
             delivery_type="non_guaranteed",
             format_ids=[make_format_id("display_300x250")],
         )
@@ -168,6 +168,7 @@ class SupportedTargetingTester:
             raise ValueError("No custom targeting keys configured in test config")
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="AEE_AXE_SIGNALS",
             total_budget=2.00,
@@ -197,7 +198,6 @@ class SupportedTargetingTester:
             package_id="combined_test",
             name="Combined Supported Targeting",
             impressions=1000,
-            cpm=3.00,
             delivery_type="non_guaranteed",
             format_ids=[make_format_id("display_300x250")],
         )
@@ -221,6 +221,7 @@ class SupportedTargetingTester:
             key_value_pairs["axex"] = values[1] if len(values) > 1 else values[0]
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="GEO_AEE_COMBINED",
             total_budget=3.00,
@@ -254,12 +255,12 @@ class SupportedTargetingTester:
             package_id="device_fail",
             name="Device Fail Test",
             impressions=1000,
-            cpm=1.00,
             delivery_type="non_guaranteed",
             format_ids=[make_format_id("display_300x250")],
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="DEVICE_MUST_FAIL",
             total_budget=1.00,
@@ -292,12 +293,12 @@ class SupportedTargetingTester:
             package_id="os_fail",
             name="OS Fail Test",
             impressions=1000,
-            cpm=1.00,
             delivery_type="non_guaranteed",
             format_ids=[make_format_id("display_300x250")],
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="OS_MUST_FAIL",
             total_budget=1.00,
@@ -330,12 +331,12 @@ class SupportedTargetingTester:
             package_id="keyword_fail",
             name="Keyword Fail Test",
             impressions=1000,
-            cpm=1.00,
             delivery_type="non_guaranteed",
             format_ids=[make_format_id("display_300x250")],
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="KEYWORD_MUST_FAIL",
             total_budget=1.00,

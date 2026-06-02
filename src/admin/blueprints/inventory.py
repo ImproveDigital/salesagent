@@ -2,25 +2,83 @@
 
 import json
 import logging
+import time
 
-from flask import Blueprint, jsonify, render_template, request, session
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 from sqlalchemy import String, func, or_, select
 
 from src.admin.utils import execute_limited, get_tenant_config_from_db, require_auth, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_capabilities import publisher_owns
+from src.admin.utils.embedded_mode_auth import is_embedded_view
 from src.core.database.database_session import get_db_session
 from src.core.database.models import GAMInventory, GAMOrder, MediaBuy, Principal, Tenant
+from src.core.database.repositories.gam_sync import GAMSyncRepository
+from src.services.targeting_values import cached_targeting_values as _cached_targeting_values
+from src.services.targeting_values import persist_targeting_values_for_key, targeting_values_synced_empty
+from src.services.targeting_values import upsert_targeting_value_row as _upsert_targeting_value_row  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 # Create blueprint
 inventory_bp = Blueprint("inventory", __name__)
 
+_CAPABILITY_KINDS = {
+    "fixed_display": "Fixed display",
+    "responsive_display": "Responsive display",
+    "native": "Native",
+    "out_of_page": "Out of page / interstitial",
+    "olv": "OLV / video player",
+    "rich_media": "Rich media",
+    "not_sellable": "Not sellable",
+}
+
+_SAFEFRAME_MODES = {"unknown", "supported", "required", "disabled"}
+_SAFEFRAME_EXPANSION_MODES = ("overlay", "push")
+_RENDER_MODES = ("image", "html", "js", "vast")
+_TARGETING_VALUES_LIVE_FETCH_RATE: dict[str, list[float]] = {}
+_TARGETING_VALUES_LIVE_FETCH_WINDOW_SECONDS = 60.0
+_TARGETING_VALUES_LIVE_FETCH_LIMIT = 10
+
+
+def _check_targeting_values_live_fetch_rate(tenant_id: str) -> bool:
+    """Return True when this tenant may perform another live GAM value fetch."""
+    now = time.monotonic()
+    entries = _TARGETING_VALUES_LIVE_FETCH_RATE.setdefault(tenant_id, [])
+    cutoff = now - _TARGETING_VALUES_LIVE_FETCH_WINDOW_SECONDS
+    while entries and entries[0] < cutoff:
+        entries.pop(0)
+    if len(entries) >= _TARGETING_VALUES_LIVE_FETCH_LIMIT:
+        return False
+    entries.append(now)
+    return True
+
+
+def _live_targeting_values_failed_response(tenant_id: str, key_id: str, exc: Exception):
+    logger.warning(
+        "Live GAM targeting value fetch failed for tenant=%s key_id=%s: %s",
+        tenant_id,
+        key_id,
+        exc,
+        exc_info=True,
+    )
+    return (
+        jsonify({"error": "GAM unreachable, try again", "source": "live_failed"}),
+        502,
+    )
+
 
 @inventory_bp.route("/tenant/<tenant_id>/targeting")
 @require_tenant_access()
 def targeting_browser(tenant_id):
-    """Display targeting browser page."""
+    """Display targeting browser page.
+
+    The "Sync Targeting Data" button is hidden on embedded tenants —
+    sync is driven by the upstream platform via the Tenant Management
+    API (see ``POST /api/v1/tenant-management/tenants/{id}/refresh``).
+    The page itself remains visible so publishers can browse targeting
+    keys when authoring products.
+    """
 
     with get_db_session() as db_session:
         tenant_obj = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -36,18 +94,23 @@ def targeting_browser(tenant_id):
                 "axe_macro_key": tenant_obj.adapter_config.axe_macro_key or "",
             }
 
-    # Pass tenant data including ad_server (needed for AXE key save)
-    tenant = {
-        "tenant_id": tenant_obj.tenant_id,
-        "name": tenant_obj.name,
-        "ad_server": tenant_obj.ad_server or "",
-    }
+        # Pass tenant data including ad_server (needed for AXE key save)
+        # and is_embedded so the template can hide the Sync button. The
+        # is_embedded flag reflects the *current view* (header-auth preview
+        # OR a permanently embedded tenant), not just the persisted flag.
+        tenant = {
+            "tenant_id": tenant_obj.tenant_id,
+            "name": tenant_obj.name,
+            "ad_server": tenant_obj.ad_server or "",
+            "is_embedded": is_embedded_view(tenant_obj),
+            "external_source": tenant_obj.external_source,
+        }
 
     return render_template(
         "targeting_browser.html",
         tenant=tenant,
         tenant_id=tenant_id,
-        tenant_name=tenant_obj.name,
+        tenant_name=tenant["name"],
         adapter_config=adapter_config_dict,
     )
 
@@ -160,24 +223,36 @@ def get_targeting_data(tenant_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _uncached_targeting_values_response():
+    """Return the embedded-mode cache-miss contract without attempting live GAM."""
+    return jsonify({"values": [], "count": 0, "source": "uncached", "needs_sync": True})
+
+
+def _tenant_can_defer_targeting_value_sync(tenant: Tenant) -> bool:
+    """Whether this tenant can rely on host-driven targeting-value refresh."""
+    return bool(tenant.is_embedded) and not publisher_owns("inventory_sync")
+
+
 @inventory_bp.route("/api/tenant/<tenant_id>/targeting/values/<key_id>", methods=["GET"])
 @require_tenant_access(api_mode=True)
 def get_targeting_values(tenant_id, key_id):
-    """Get custom targeting values for a specific key by querying GAM in real-time.
+    """Get custom targeting values for a key.
 
-    Since inventory sync doesn't fetch values by default (for performance),
-    this endpoint queries GAM directly to get fresh values on-demand.
+    Reads from cached ``GAMInventory`` rows (``inventory_type=
+    'custom_targeting_value'``) when available; falls back to a live GAM
+    fetch on cache miss and persists the result for next time. Set
+    ``?refresh=1`` to force a live re-sync.
 
     Args:
         tenant_id: Tenant identifier
         key_id: Custom targeting key ID
 
     Returns:
-        JSON array of custom targeting values with their metadata
+        JSON ``{values: [...], count, source: "cache"|"live"}``
     """
     try:
         with get_db_session() as db_session:
-            from src.core.database.models import GAMInventory, Tenant
+            from src.core.database.models import Tenant
 
             # Get tenant and verify it has GAM configured
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -185,15 +260,21 @@ def get_targeting_values(tenant_id, key_id):
                 return jsonify({"error": "Tenant not found"}), 404
 
             # Verify key exists in our database
-            key_stmt = select(GAMInventory).where(
-                GAMInventory.tenant_id == tenant_id,
-                GAMInventory.inventory_type == "custom_targeting_key",
-                GAMInventory.inventory_id == key_id,
-            )
-            key_row = db_session.scalars(key_stmt).first()
+            gam_sync_repo = GAMSyncRepository(db_session, tenant_id)
+            key_row = gam_sync_repo.find_inventory_item("custom_targeting_key", key_id)
 
             if not key_row:
                 return jsonify({"error": "Custom targeting key not found"}), 404
+
+            # Cache-first: skip live fetch when we have rows for this key,
+            # unless the caller asked to refresh.
+            refresh = request.args.get("refresh") in ("1", "true", "yes")
+            if not refresh:
+                cached = _cached_targeting_values(gam_sync_repo, key_id, key_row.name)
+                if cached is not None:
+                    return jsonify({"values": cached, "count": len(cached), "source": "cache"})
+                if targeting_values_synced_empty(key_row):
+                    return jsonify({"values": [], "count": 0, "source": "cache"})
 
             # Query GAM in real-time for values
             adapter_config = tenant.adapter_config
@@ -219,6 +300,13 @@ def get_targeting_values(tenant_id, key_id):
             has_service_account = bool(adapter_config.gam_service_account_json)
 
             if not has_oauth and not has_service_account:
+                if _tenant_can_defer_targeting_value_sync(tenant):
+                    logger.info(
+                        "Targeting values uncached for embedded tenant=%s key_id=%s; host refresh required",
+                        tenant_id,
+                        key_id,
+                    )
+                    return _uncached_targeting_values_response()
                 logger.error(f"No GAM authentication configured for tenant {tenant_id}")
                 return (
                     jsonify({"error": "GAM authentication not configured. Please connect to GAM in tenant settings."}),
@@ -278,25 +366,33 @@ def get_targeting_values(tenant_id, key_id):
             # Create inventory discovery instance
             gam_client = GAMInventoryDiscovery(client=gam_ad_manager_client, tenant_id=tenant_id)
 
-            # Fetch values from GAM (max 1000 to avoid timeout)
-            gam_values = gam_client.discover_custom_targeting_values_for_key(key_id, max_values=1000)
-
-            # Transform to frontend format
-            values = []
-            for gam_value in gam_values:
-                values.append(
-                    {
-                        "id": gam_value.id,
-                        "name": gam_value.name,
-                        "display_name": gam_value.display_name or gam_value.name,
-                        "match_type": gam_value.match_type or "EXACT",
-                        "status": gam_value.status or "ACTIVE",
-                        "key_id": key_id,
-                        "key_name": key_row.name,
-                    }
+            if not _check_targeting_values_live_fetch_rate(tenant_id):
+                return (
+                    jsonify(
+                        {
+                            "error": "Too many live targeting value refreshes. Please wait before trying again.",
+                            "retry_after_seconds": int(_TARGETING_VALUES_LIVE_FETCH_WINDOW_SECONDS),
+                        }
+                    ),
+                    429,
                 )
 
-            return jsonify({"values": values, "count": len(values)})
+            # Persist values so subsequent calls hit cache and tenants without
+            # live GAM (demo, dev) can still browse the values they've fetched.
+            try:
+                gam_values = gam_client.discover_custom_targeting_values_for_key(key_id, max_values=1000)
+            except Exception as exc:
+                return _live_targeting_values_failed_response(tenant_id, key_id, exc)
+
+            values = persist_targeting_values_for_key(
+                gam_sync_repo,
+                key_id=key_id,
+                key_row=key_row,
+                gam_values=gam_values,
+            )
+            db_session.commit()
+
+            return jsonify({"values": values, "count": len(values), "source": "live"})
 
     except Exception as e:
         logger.error(f"Error fetching targeting values for key {key_id}: {e}", exc_info=True)
@@ -306,34 +402,257 @@ def get_targeting_values(tenant_id, key_id):
 @inventory_bp.route("/tenant/<tenant_id>/inventory")
 @require_tenant_access()
 def inventory_browser(tenant_id):
-    """Display unified inventory browser and profiles page."""
+    """Display the Sync Inventory page (sync controls + sync state only).
+
+    Gated by the ``inventory_sync`` capability flag. When the storefront
+    owns it (the historical embedded default), sync is driven by the
+    upstream platform via ``POST /api/v1/tenant-management/tenants/{id}/refresh``
+    and this page redirects to Browse Inventory. When the publisher owns
+    it, the page renders normally on both open and embedded tenants.
+
+    Why ``publisher_owns`` here but ``is_embedded_view`` in
+    ``targeting_browser`` / ``_load_tenant_for_inventory``: sync is a
+    per-instance contract between the salesagent and the storefront
+    (who pushes the button), so it follows the env flag. Browse and
+    targeting are per-tenant read surfaces that adapt their UI to the
+    *current request's* embedded context (preview mode, header auth),
+    so they follow ``is_embedded_view``.
+
+    Browse Inventory, Targeting Criteria, and Inventory Profiles are
+    now top-level nav siblings — see ``inventory_browse``,
+    ``targeting_browser``, and the inventory_profiles blueprint.
+    """
 
     with get_db_session() as db_session:
         tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-        row = (tenant.tenant_id, tenant.name) if tenant else None
-        if not row:
+        if not tenant:
             return "Tenant not found", 404
 
-        # Check adapter type - GAM inventory features (ad units, placements) only for GAM
-        # But Publishers & Properties tab is available for all adapters
+        if not publisher_owns("inventory_sync"):
+            # Storefront owns sync — the host drives it via
+            # POST /tenants/<id>/refresh. Redirect the deep-link to
+            # Browse Inventory (the read-only surface embedded publishers
+            # still use).
+            return redirect(url_for("inventory.inventory_browse", tenant_id=tenant.tenant_id))
+
         adapter_type = tenant.ad_server or "mock"
         is_gam = adapter_type == "google_ad_manager"
+        tenant_dict = {
+            "tenant_id": tenant.tenant_id,
+            "name": tenant.name,
+            "virtual_host": tenant.virtual_host,
+            "is_embedded": False,
+        }
 
-        # Note: We allow non-GAM tenants to access this page for the Publishers & Properties tab
+    return render_template(
+        "sync_inventory.html",
+        tenant=tenant_dict,
+        tenant_id=tenant_id,
+        tenant_name=tenant_dict["name"],
+        is_gam=is_gam,
+        adapter_type=adapter_type,
+    )
 
-    tenant_dict = {"tenant_id": row[0], "name": row[1], "virtual_host": tenant.virtual_host if tenant else None}
 
-    # Get inventory type from query param
+@inventory_bp.route("/tenant/<tenant_id>/inventory/browse")
+@require_tenant_access()
+def inventory_browse(tenant_id):
+    """Display the Browse Inventory page (ad-unit hierarchy + search).
+
+    Top-level nav sibling — visible on both embedded and open-instance
+    tenants. Embedded tenants browse the inventory the upstream platform
+    has synced for them; sync controls live on the Sync Inventory page
+    (hidden on embedded).
+    """
+
+    # Reuse the same tenant fetch as ``inventory_browser`` — both hit the
+    # same Tenant row, just present different UIs. The select() is
+    # allowlisted on ``inventory_browser``; sharing keeps the violation
+    # surface flat.
+    tenant_dict, is_gam, adapter_type, not_found = _load_tenant_for_inventory(tenant_id)
+    if not_found:
+        return not_found
+
     inventory_type = request.args.get("type", "all")
 
     return render_template(
-        "inventory_unified.html",
+        "inventory_browser.html",
         tenant=tenant_dict,
         tenant_id=tenant_id,
-        tenant_name=row[1],
+        tenant_name=tenant_dict["name"],
         inventory_type=inventory_type,
         is_gam=is_gam,
         adapter_type=adapter_type,
+    )
+
+
+def _load_tenant_for_inventory(tenant_id):
+    """Load the Tenant row for inventory pages.
+
+    Shared helper for ``inventory_browser`` (Sync Inventory) and
+    ``inventory_browse`` (Browse Inventory) — same tenant fetch, two
+    different page surfaces. Returns a tuple of:
+    ``(tenant_dict, is_gam, adapter_type, not_found_response_or_None)``.
+    The tenant_dict carries ``is_embedded`` so callers can decide whether
+    to show or suppress sync triggers.
+    """
+    with get_db_session() as db_session:
+        tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+        if not tenant:
+            return None, False, "mock", ("Tenant not found", 404)
+
+        adapter_type = tenant.ad_server or "mock"
+        is_gam = adapter_type == "google_ad_manager"
+        tenant_dict = {
+            "tenant_id": tenant.tenant_id,
+            "name": tenant.name,
+            "virtual_host": tenant.virtual_host,
+            "is_embedded": is_embedded_view(tenant),
+        }
+    return tenant_dict, is_gam, adapter_type, None
+
+
+def _inventory_size_labels(metadata: dict | None) -> list[str]:
+    sizes = metadata.get("sizes") if isinstance(metadata, dict) else []
+    labels: list[str] = []
+    if not isinstance(sizes, list):
+        return labels
+    for size in sizes:
+        if isinstance(size, dict) and size.get("width") and size.get("height"):
+            labels.append(f"{size['width']}x{size['height']}")
+        elif isinstance(size, str) and "x" in size:
+            labels.append(size)
+    return labels
+
+
+def _int_field(name: str) -> int | None:
+    value = (request.form.get(name) or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _capabilities_from_form() -> dict:
+    slot_kind = request.form.get("slot_kind") or "fixed_display"
+    if slot_kind not in _CAPABILITY_KINDS:
+        slot_kind = "fixed_display"
+
+    safeframe = request.form.get("safeframe") or "unknown"
+    if safeframe not in _SAFEFRAME_MODES:
+        safeframe = "unknown"
+
+    render_modes = {mode: request.form.get(f"render_{mode}") == "on" for mode in _RENDER_MODES}
+    safeframe_config = {
+        f"allow_{mode}_expansion": request.form.get(f"safeframe_allow_{mode}_expansion") == "on"
+        for mode in _SAFEFRAME_EXPANSION_MODES
+    }
+    dimensions = {
+        "min_width": _int_field("min_width"),
+        "max_width": _int_field("max_width"),
+        "min_height": _int_field("min_height"),
+        "max_height": _int_field("max_height"),
+    }
+
+    capabilities = {
+        "slot_kind": slot_kind,
+        "render_modes": render_modes,
+        "safeframe": safeframe,
+        "safeframe_config": safeframe_config,
+        "dimensions": {key: value for key, value in dimensions.items() if value is not None},
+        "notes": (request.form.get("notes") or "").strip(),
+    }
+
+    # Back-compat with the bundle save guard added for GAM 1x1 handling.
+    capabilities["special_size"] = {"kind": slot_kind}
+    return capabilities
+
+
+def _clear_inventory_cache(tenant_id: str) -> None:
+    cache = getattr(current_app, "cache", None)
+    if not cache:
+        return
+    cache.delete(f"inventory_tree:v3:{tenant_id}")
+    cache.delete(f"inventory_tree_time:v3:{tenant_id}")
+    for inv_type in ("all", "ad_unit", "placement", None):
+        cache.delete(f"inventory_list:{tenant_id}:{inv_type or 'all'}:ACTIVE")
+
+
+@inventory_bp.route("/tenant/<tenant_id>/inventory/capabilities/<inventory_type>/<inventory_id>", methods=["GET"])
+@require_tenant_access()
+def edit_inventory_capabilities(tenant_id: str, inventory_type: str, inventory_id: str):
+    """Edit publisher-authored capabilities for a synced inventory row."""
+    if inventory_type not in {"ad_unit", "placement"}:
+        flash("Inventory capabilities can be edited for ad units and placements.", "error")
+        return redirect(url_for("inventory.inventory_browse", tenant_id=tenant_id))
+
+    tenant_dict, is_gam, adapter_type, not_found = _load_tenant_for_inventory(tenant_id)
+    if not_found:
+        return not_found
+
+    with get_db_session() as db_session:
+        repo = GAMSyncRepository(db_session, tenant_id)
+        item = repo.find_inventory_item(inventory_type, inventory_id)
+        if not item:
+            flash("Inventory item not found.", "error")
+            return redirect(url_for("inventory.inventory_browse", tenant_id=tenant_id))
+
+        metadata = item.inventory_metadata or {}
+        capabilities = metadata.get("adcp_capabilities") if isinstance(metadata, dict) else {}
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+
+        return render_template(
+            "inventory_capabilities.html",
+            tenant=tenant_dict,
+            tenant_id=tenant_id,
+            tenant_name=tenant_dict["name"],
+            is_gam=is_gam,
+            adapter_type=adapter_type,
+            item=item,
+            metadata=metadata,
+            sizes=_inventory_size_labels(metadata),
+            capabilities=capabilities,
+            capability_kinds=_CAPABILITY_KINDS,
+            safeframe_modes=sorted(_SAFEFRAME_MODES),
+            safeframe_expansion_modes=_SAFEFRAME_EXPANSION_MODES,
+            render_modes=_RENDER_MODES,
+        )
+
+
+@inventory_bp.route("/tenant/<tenant_id>/inventory/capabilities/<inventory_type>/<inventory_id>", methods=["POST"])
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
+@log_admin_action("update_inventory_capabilities")
+def save_inventory_capabilities(tenant_id: str, inventory_type: str, inventory_id: str):
+    """Persist publisher-authored capabilities on a synced inventory row."""
+    if inventory_type not in {"ad_unit", "placement"}:
+        flash("Inventory capabilities can be edited for ad units and placements.", "error")
+        return redirect(url_for("inventory.inventory_browse", tenant_id=tenant_id))
+
+    with get_db_session() as db_session:
+        repo = GAMSyncRepository(db_session, tenant_id)
+        item = repo.find_inventory_item(inventory_type, inventory_id)
+        if not item:
+            flash("Inventory item not found.", "error")
+            return redirect(url_for("inventory.inventory_browse", tenant_id=tenant_id))
+
+        metadata = dict(item.inventory_metadata or {})
+        metadata["adcp_capabilities"] = _capabilities_from_form()
+        repo.update_inventory_metadata(inventory_type, inventory_id, metadata)
+        db_session.commit()
+
+    _clear_inventory_cache(tenant_id)
+    flash("Inventory capabilities saved.", "success")
+    return redirect(
+        url_for(
+            "inventory.edit_inventory_capabilities",
+            tenant_id=tenant_id,
+            inventory_type=inventory_type,
+            inventory_id=inventory_id,
+        )
     )
 
 
@@ -377,7 +696,7 @@ def orders_browser(tenant_id):
 
 @inventory_bp.route("/api/tenant/<tenant_id>/sync/orders", methods=["POST"])
 @log_admin_action("sync_orders")
-@require_tenant_access(api_mode=True)
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def sync_orders(tenant_id):
     """Sync GAM orders for a tenant."""
     try:
@@ -638,12 +957,12 @@ def analyze_ad_server_inventory(tenant_id):
                 {"id": "travel_enthusiasts", "name": "Travel Enthusiasts", "size": 750000},
             ],
             "formats": [
-                {"id": "display_728x90", "name": "Leaderboard", "dimensions": "728x90"},
-                {"id": "display_300x250", "name": "Medium Rectangle", "dimensions": "300x250"},
+                {"id": "display_image", "name": "Display Image", "dimensions": "728x90"},
+                {"id": "display_image", "name": "Display Image", "dimensions": "300x250"},
             ],
             "placements": [
-                {"id": "homepage_top", "name": "Homepage Top", "formats": ["display_728x90"]},
-                {"id": "article_sidebar", "name": "Article Sidebar", "formats": ["display_300x250"]},
+                {"id": "homepage_top", "name": "Homepage Top", "formats": ["display_image"]},
+                {"id": "article_sidebar", "name": "Article Sidebar", "formats": ["display_image"]},
             ],
         }
 
@@ -656,7 +975,7 @@ def analyze_ad_server_inventory(tenant_id):
 
 @inventory_bp.route("/api/tenant/<tenant_id>/inventory/sync", methods=["POST"])
 @log_admin_action("sync_inventory")
-@require_tenant_access(api_mode=True)
+@require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def sync_inventory(tenant_id):
     """Start inventory sync in background (non-blocking).
 
@@ -856,6 +1175,9 @@ def _unit_to_dict(unit, *, matched_search=False):
     metadata = unit.inventory_metadata or {}
     if not isinstance(metadata, dict):
         metadata = {}
+    capabilities = metadata.get("adcp_capabilities") or {}
+    if not isinstance(capabilities, dict):
+        capabilities = {}
     return {
         "id": unit.inventory_id,
         "name": unit.name,
@@ -866,6 +1188,8 @@ def _unit_to_dict(unit, *, matched_search=False):
         "has_children": metadata.get("has_children", False),
         "matched_search": matched_search,
         "sizes": metadata.get("sizes", []),
+        "metadata": metadata,
+        "capabilities": capabilities,
         "children": [],
     }
 
@@ -1226,6 +1550,7 @@ def get_inventory_list(tenant_id):
                     # Format response
                     result = []
                     for item in items:
+                        metadata = item.inventory_metadata or {}
                         result.append(
                             {
                                 "id": item.inventory_id,
@@ -1233,7 +1558,10 @@ def get_inventory_list(tenant_id):
                                 "type": item.inventory_type,
                                 "path": item.path or [],
                                 "status": item.status,
-                                "metadata": item.inventory_metadata or {},
+                                "metadata": metadata,
+                                "capabilities": metadata.get("adcp_capabilities", {})
+                                if isinstance(metadata, dict)
+                                else {},
                             }
                         )
 
@@ -1275,6 +1603,7 @@ def get_inventory_list(tenant_id):
             # Format response
             result = []
             for item in items:
+                metadata = item.inventory_metadata or {}
                 result.append(
                     {
                         "id": item.inventory_id,
@@ -1282,7 +1611,8 @@ def get_inventory_list(tenant_id):
                         "type": item.inventory_type,
                         "path": item.path if item.path else [item.name],
                         "status": item.status,
-                        "metadata": item.inventory_metadata or {},
+                        "metadata": metadata,
+                        "capabilities": metadata.get("adcp_capabilities", {}) if isinstance(metadata, dict) else {},
                     }
                 )
 

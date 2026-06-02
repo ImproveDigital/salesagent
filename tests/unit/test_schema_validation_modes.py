@@ -24,6 +24,7 @@ from src.core.schemas import (
     PackageRequest,
     Targeting,
 )
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 # Minimal valid data for constructing test models
 # adcp 3.6.0: brand replaced brand_manifest
@@ -42,7 +43,7 @@ class TestBuyerModelRejectsExtraInDev:
 
     def test_create_media_buy_request_rejects_extra(self):
         with pytest.raises(ValidationError, match="bogus"):
-            CreateMediaBuyRequest(**_VALID_CMR_DATA, bogus="injected")
+            CreateMediaBuyRequest(**required_request_kwargs(), **_VALID_CMR_DATA, bogus="injected")
 
     def test_package_request_rejects_extra(self):
         with pytest.raises(ValidationError, match="bogus"):
@@ -82,7 +83,7 @@ class TestNestedModelRejectsExtraInDev:
         """Bogus field on PackageRequest within CMR.packages is rejected."""
         data = {**_VALID_CMR_DATA, "packages": [{**_VALID_PACKAGE_DATA, "bogus_pkg_field": "injected"}]}
         with pytest.raises(ValidationError, match="bogus_pkg_field"):
-            CreateMediaBuyRequest(**data)
+            CreateMediaBuyRequest(**required_request_kwargs(), **data)
 
     def test_nested_targeting_rejects_extra(self):
         """Bogus field on targeting_overlay within a package is rejected."""
@@ -96,7 +97,7 @@ class TestNestedModelRejectsExtraInDev:
             ],
         }
         with pytest.raises(ValidationError, match="bogus_targeting"):
-            CreateMediaBuyRequest(**data)
+            CreateMediaBuyRequest(**required_request_kwargs(), **data)
 
 
 class TestExtFieldAccepted:
@@ -104,22 +105,30 @@ class TestExtFieldAccepted:
 
     def test_ext_field_accepted_on_cmr(self):
         cmr = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             **_VALID_CMR_DATA,
             ext={"vendor": {"custom": "value"}},
         )
         assert cmr.ext is not None
 
 
-class TestInternalModelsRejectExtra:
-    """Models inheriting from our AdCPBaseModel also reject extra fields in dev."""
+class TestInternalModelsAcceptForwardCompatExtras:
+    """GetProductsRequest is now an alias for the AdCP library type, which uses
+    ``extra='allow'`` for forward compatibility with future spec extensions.
 
-    def test_get_products_request_rejects_extra(self):
-        with pytest.raises(ValidationError, match="unknown_field"):
-            GetProductsRequest(
-                brief="test",
-                brand={"domain": "test.com"},
-                unknown_field="should_fail",
-            )
+    Phase 2 slice 7 dropped the local override that previously enforced
+    ``extra='forbid'`` in dev — the library's own forward-compat posture takes
+    precedence so spec growth doesn't break callers mid-version.
+    """
+
+    def test_get_products_request_keeps_extras_in_model_extra(self):
+        req = GetProductsRequest(
+            buying_mode="wholesale",
+            brief="test",
+            brand={"domain": "test.com"},
+            unknown_field="forward_compat",
+        )
+        assert req.model_extra == {"unknown_field": "forward_compat"}
 
 
 class TestConfigHelperFunctions:

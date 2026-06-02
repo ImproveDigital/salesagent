@@ -35,11 +35,15 @@ from sqlalchemy.orm import Session
 
 from src.core.database.database_session import get_db_session
 from src.core.database.repositories.account import AccountRepository
+from src.core.database.repositories.adapter_config import AdapterConfigRepository
 from src.core.database.repositories.creative import CreativeAssignmentRepository, CreativeRepository
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
+from src.core.database.repositories.inventory_profile import InventoryProfileRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.product import ProductRepository
+from src.core.database.repositories.push_notification import PushNotificationConfigRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
+from src.core.database.repositories.tenant_signal import TenantSignalRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 
 logger = logging.getLogger(__name__)
@@ -143,7 +147,8 @@ class MediaBuyUoW(BaseUoW):
 class ProductUoW(BaseUoW):
     """Unit of Work for Product operations.
 
-    Wraps a database session and provides a tenant-scoped ProductRepository.
+    Wraps a database session and provides tenant-scoped repositories for
+    product catalog rows and inventory bundle projections.
     Auto-commits on clean exit, rolls back on exception.
 
     Args:
@@ -151,13 +156,22 @@ class ProductUoW(BaseUoW):
     """
 
     products: ProductRepository | None
+    inventory_profiles: InventoryProfileRepository | None
+    currency_limits: CurrencyLimitRepository | None
+    adapter_configs: AdapterConfigRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
         self.products = ProductRepository(self._session, self._tenant_id)
+        self.inventory_profiles = InventoryProfileRepository(self._session, self._tenant_id)
+        self.currency_limits = CurrencyLimitRepository(self._session, self._tenant_id)
+        self.adapter_configs = AdapterConfigRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.products = None
+        self.inventory_profiles = None
+        self.currency_limits = None
+        self.adapter_configs = None
 
 
 class WorkflowUoW(BaseUoW):
@@ -200,6 +214,24 @@ class TenantConfigUoW(BaseUoW):
         self.tenant_config = None
 
 
+class TenantSignalUoW(BaseUoW):
+    """Unit of Work for TenantSignal reads + adapter-side resolution.
+
+    Used by ``_get_signals_impl`` to surface operator-declared signals on
+    the AdCP wire, and by adapter materializers that resolve buyer-side
+    signal_id references to adapter-shaped targeting.
+    """
+
+    tenant_signals: TenantSignalRepository | None
+
+    def _init_repos(self) -> None:
+        assert self._session is not None
+        self.tenant_signals = TenantSignalRepository(self._session, self._tenant_id)
+
+    def _clear_repos(self) -> None:
+        self.tenant_signals = None
+
+
 class AccountUoW(BaseUoW):
     """Unit of Work for Account operations.
 
@@ -213,13 +245,29 @@ class AccountUoW(BaseUoW):
     """
 
     accounts: AccountRepository | None
+    push_notifications: PushNotificationConfigRepository | None
 
     def _init_repos(self) -> None:
         assert self._session is not None
         self.accounts = AccountRepository(self._session, self._tenant_id)
+        self.push_notifications = PushNotificationConfigRepository(self._session, self._tenant_id)
 
     def _clear_repos(self) -> None:
         self.accounts = None
+        self.push_notifications = None
+
+
+class PushNotificationUoW(BaseUoW):
+    """Unit of Work for protocol push-notification registrations."""
+
+    push_notifications: PushNotificationConfigRepository | None
+
+    def _init_repos(self) -> None:
+        assert self._session is not None
+        self.push_notifications = PushNotificationConfigRepository(self._session, self._tenant_id)
+
+    def _clear_repos(self) -> None:
+        self.push_notifications = None
 
 
 class CreativeUoW(BaseUoW):

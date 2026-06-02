@@ -111,7 +111,6 @@ def test_list_creatives_response_with_optional_fields():
         name="Test Creative",
         format={"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"},
         assets={"banner": {"asset_type": "image", "url": "https://example.com/banner.jpg"}},
-        tags=["sports", "premium"],  # Internal field in adcp 3.6.0
         # Internal fields
         principal_id="principal_123",
         status="approved",
@@ -125,9 +124,6 @@ def test_list_creatives_response_with_optional_fields():
 
     result = response.model_dump()
     creative_data = result["creatives"][0]
-
-    # Listing Creative: tags is a public optional field; present when set
-    assert "tags" in creative_data, "Listing Creative: tags is a public field"
 
     # Internal fields always excluded from model_dump()
     assert "principal_id" not in creative_data

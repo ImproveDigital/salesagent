@@ -70,6 +70,8 @@ class AuditLogger:
         details: dict[str, Any] | None = None,
         error: str | None = None,
         tenant_id: str | None = None,
+        verified_agent_url: str | None = None,
+        verified_key_id: str | None = None,
     ):
         """Log an adapter operation with full audit context.
 
@@ -82,6 +84,10 @@ class AuditLogger:
             details: Additional operation details
             error: Error message if operation failed
             tenant_id: Override tenant ID (uses instance tenant_id if not provided)
+            verified_agent_url: When the inbound RFC 9421 signature is accepted,
+                the principal's agent_url that was used to fetch JWKS. NULL on
+                rows for unsigned (bearer-only) requests.
+            verified_key_id: kid from the verified Signature-Input.
         """
         # Use provided tenant_id or fall back to instance tenant_id
         tenant_id = tenant_id or self.tenant_id
@@ -89,15 +95,18 @@ class AuditLogger:
         # Build log message in security documentation format
         message = f"{self.adapter_name}.{operation} for principal '{principal_name}' ({self.adapter_name} advertiser ID: {adapter_id})"
 
+        # One log line per audit event — the per-key fan-out was readable in
+        # local tail but flooded production stdout. Full details are still
+        # persisted to AuditLog.details below for structured queries.
         if success:
-            audit_logger.info(message)
             if details:
-                for key, value in details.items():
-                    audit_logger.info(f"  {key}: {value}")
+                audit_logger.info("%s | %s", message, details)
+            else:
+                audit_logger.info(message)
+        elif error:
+            audit_logger.error("%s - FAILED | %s", message, error)
         else:
             audit_logger.error(f"{message} - FAILED")
-            if error:
-                audit_logger.error(f"  Error: {error}")
 
         # Write to database
         try:
@@ -113,6 +122,8 @@ class AuditLogger:
                     error_message=error if not success else None,
                     # Pass dict directly - JSONType column handles serialization
                     details=details or {},
+                    verified_agent_url=verified_agent_url,
+                    verified_key_id=verified_key_id,
                 )
                 db_session.add(audit_log)
                 db_session.commit()
@@ -268,7 +279,7 @@ class AuditLogger:
                     adapter_id=None,  # adapter_id not applicable
                     success=False,  # Security violations are failures
                     error_message=f"Attempted to access resource '{resource_id}' - {reason}",
-                    details=json.dumps({"resource_id": resource_id, "reason": reason}),
+                    details={"resource_id": resource_id, "reason": reason},
                 )
                 db_session.add(audit_log)
                 db_session.commit()

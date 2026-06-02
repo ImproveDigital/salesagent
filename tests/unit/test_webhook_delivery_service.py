@@ -105,6 +105,7 @@ def test_adcp_payload_structure(webhook_service, mock_db_session):
         mock_config.authentication_type = None
         mock_config.validation_token = None
         mock_config.webhook_secret = None  # No HMAC for this test
+        mock_config.signing_mode = "hmac"  # Default mode (RFC 9421 added in slice 3)
 
         # Update mock to return config for SQLAlchemy 2.0
         mock_db_session.scalars.return_value.all.return_value = [mock_config]
@@ -130,10 +131,15 @@ def test_adcp_payload_structure(webhook_service, mock_db_session):
 
         # Check new payload structure (PR #86 - no wrapper, direct payload)
         # Version should match what's reported by the adcp library
-        from adcp import get_adcp_version
+        import json as _json
 
-        payload = call_args.kwargs["json"]
-        assert payload["adcp_version"] == get_adcp_version()
+        from adcp import get_adcp_spec_version
+
+        # Slice 3 of signing-non-embedded: webhook_delivery_service now
+        # pre-serializes the body once and sends via ``content=`` so the
+        # signature base bytes are byte-identical to the wire body.
+        payload = _json.loads(call_args.kwargs["content"])
+        assert payload["adcp_version"] == get_adcp_spec_version()
         assert payload["notification_type"] == "scheduled"
         assert payload["is_adjusted"] is False  # NEW in PR #86
         assert payload["sequence_number"] == 1
@@ -152,6 +158,37 @@ def test_adcp_payload_structure(webhook_service, mock_db_session):
         assert delivery["totals"]["ctr"] == 0.01
 
 
+def test_delivery_service_refuses_public_http_url(webhook_service, mock_db_session, monkeypatch):
+    """Legacy stored HTTP webhook URLs should not be delivered."""
+    monkeypatch.delenv("ADCP_AUTH_TEST_MODE", raising=False)
+    monkeypatch.delenv("WEBHOOK_ALLOW_PRIVATE_IPS", raising=False)
+
+    start_time = datetime.now(UTC)
+    mock_config = MagicMock()
+    mock_config.url = "http://example.com/webhook"
+    mock_config.authentication_type = None
+    mock_config.authentication_token = None
+    mock_config.validation_token = None
+    mock_config.webhook_secret = None
+    mock_config.signing_mode = "hmac"
+    mock_config.auth_blocked_at = None
+    mock_db_session.scalars.return_value.all.return_value = [mock_config]
+
+    with patch("src.services.webhook_delivery_service.httpx.Client") as mock_client:
+        result = webhook_service.send_delivery_webhook(
+            media_buy_id="buy_http",
+            tenant_id="tenant1",
+            principal_id="principal1",
+            reporting_period_start=start_time,
+            reporting_period_end=start_time,
+            impressions=1000,
+            spend=100.0,
+        )
+
+    assert result is False
+    mock_client.return_value.__enter__.return_value.post.assert_not_called()
+
+
 def test_final_notification_type(webhook_service, mock_db_session):
     """Test that is_final sets notification_type to 'final' (PR #86)."""
     media_buy_id = "buy_final"
@@ -167,6 +204,7 @@ def test_final_notification_type(webhook_service, mock_db_session):
         mock_config.authentication_type = None
         mock_config.validation_token = None
         mock_config.webhook_secret = None
+        mock_config.signing_mode = "hmac"
         mock_db_session.scalars.return_value.all.return_value = [mock_config]
 
         # Send final webhook
@@ -182,8 +220,12 @@ def test_final_notification_type(webhook_service, mock_db_session):
             is_final=True,
         )
 
-        # Check notification_type (direct payload structure in PR #86)
-        payload = mock_client.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+        # Check notification_type (direct payload structure in PR #86).
+        # Body is sent via ``content=`` (slice 3) so we decode to dict here.
+        import json as _json
+
+        body_bytes = mock_client.return_value.__enter__.return_value.post.call_args.kwargs["content"]
+        payload = _json.loads(body_bytes)
         assert payload["notification_type"] == "final"
         assert payload["is_adjusted"] is False
         assert "next_expected_at" not in payload
@@ -242,6 +284,7 @@ def test_failure_tracking(mock_sleep, webhook_service, mock_db_session):
         mock_config.authentication_type = None
         mock_config.validation_token = None
         mock_config.webhook_secret = None
+        mock_config.signing_mode = "hmac"
         mock_db_session.scalars.return_value.all.return_value = [mock_config]
 
         # First webhook - success
@@ -297,6 +340,7 @@ def test_authentication_headers(webhook_service, mock_db_session):
         mock_config.authentication_token = "secret_token"
         mock_config.validation_token = "validation_token"
         mock_config.webhook_secret = None
+        mock_config.signing_mode = "hmac"
         mock_db_session.scalars.return_value.all.return_value = [mock_config]
 
         webhook_service.send_delivery_webhook(
@@ -334,3 +378,49 @@ def test_no_webhooks_configured(webhook_service, mock_db_session):
 
     # Should return False but not error
     assert result is False
+
+
+def test_signing_credential_loader_is_injectable(mock_db_session):
+    """Constructor accepts a custom credential loader so unit tests can
+    exercise the rfc9421 path without monkey-patching DB or filesystem.
+
+    Slice 3 (signing-non-embedded): default loader hits DB + parses PEM
+    on every send. Tests + KMS-backed alternative implementations need
+    the override hook.
+    """
+    from src.services.webhook_delivery_service import WebhookDeliveryService
+
+    captured_calls: list[dict] = []
+
+    def fake_loader(*, tenant_id: str, signing_mode: str):
+        captured_calls.append({"tenant_id": tenant_id, "signing_mode": signing_mode})
+        # Returning None forces the rfc9421 path to fail-closed in
+        # build_auth_headers — which is what we want to exercise here:
+        # the loader is consulted, period.
+
+    service = WebhookDeliveryService(signing_credential_loader=fake_loader)
+
+    with patch("src.services.webhook_delivery_service.httpx.Client"):
+        # Single config requesting rfc9421 forces the loader path.
+        config = MagicMock()
+        config.url = "https://buyer.example.com/webhook"
+        config.authentication_type = None
+        config.authentication_token = None
+        config.validation_token = None
+        config.webhook_secret = None
+        config.signing_mode = "rfc9421"
+        mock_db_session.scalars.return_value.all.return_value = [config]
+
+        service.send_delivery_webhook(
+            media_buy_id="buy_di",
+            tenant_id="tenant_di",
+            principal_id="principal_di",
+            reporting_period_start=datetime.now(UTC),
+            reporting_period_end=datetime.now(UTC),
+            impressions=1,
+            spend=0.01,
+        )
+
+    # The injected loader was consulted with the right args. Default
+    # production loader was NOT — this proves DI works.
+    assert captured_calls == [{"tenant_id": "tenant_di", "signing_mode": "rfc9421"}]

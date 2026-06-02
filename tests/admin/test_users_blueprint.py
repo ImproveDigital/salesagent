@@ -84,7 +84,7 @@ class TestAddUser:
 
         response = client.post(
             f"/tenant/{tenant.tenant_id}/users/add",
-            data={"email": "new@example.com", "name": "New User", "role": "manager"},
+            data={"email": "new@example.com", "name": "New User", "role": "member"},
         )
         # All terminal paths of the add_user handler return redirect(url_for(...)).
         assert response.status_code == 302
@@ -93,7 +93,7 @@ class TestAddUser:
             select(User).filter_by(tenant_id=tenant.tenant_id, email="new@example.com")
         ).first()
         assert user is not None
-        assert user.role == "manager"
+        assert user.role == "member"
         assert user.is_active is True
 
     def test_add_user_rejects_invalid_email(self, client, factory_session):
@@ -243,7 +243,7 @@ class TestEnableSetupMode:
 
     def test_enables_setup_mode(self, client, factory_session):
         tenant = TenantFactory(auth_setup_mode=False)
-        _auth_session(client, tenant.tenant_id)
+        _auth_session(client, tenant.tenant_id, auth_method="oidc")
 
         response = client.post(f"/tenant/{tenant.tenant_id}/users/enable-setup-mode")
         assert response.status_code == 200
@@ -256,7 +256,7 @@ class TestEnableSetupMode:
     def test_returns_404_for_unknown_tenant(self, client, factory_session):
         # Auth the session against a real tenant (super-admin bypasses tenant scoping).
         tenant = TenantFactory()
-        _auth_session(client, tenant.tenant_id)
+        _auth_session(client, tenant.tenant_id, auth_method="oidc")
 
         response = client.post("/tenant/nonexistent_tenant_id/users/enable-setup-mode")
         assert response.status_code == 404

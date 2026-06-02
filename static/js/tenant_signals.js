@@ -1,0 +1,660 @@
+/* Signals page — source-centric redesign.
+ *
+ * Server renders the full page (segments / keys / composites). This script
+ * adds the interactive layer: filters, selection state, inline rename,
+ * overflow menus, adaptive bulk-action bar.
+ */
+(function () {
+  'use strict';
+
+  const root = document.querySelector('.signals-page');
+  if (!root) return;
+
+  const scriptRoot = root.dataset.scriptRoot || '';
+  const tenantId = root.dataset.tenantId;
+  const urls = {
+    bulkCreate: `${scriptRoot}/tenant/${tenantId}/signals/bulk-create`,
+    bulkUpdate: `${scriptRoot}/tenant/${tenantId}/signals/bulk-update`,
+    bulkDelete: `${scriptRoot}/tenant/${tenantId}/signals/bulk-delete`,
+    signalDelete: (sid) => `${scriptRoot}/tenant/${tenantId}/signals/${encodeURIComponent(sid)}/delete`,
+    signalRename: (sid) => `${scriptRoot}/tenant/${tenantId}/signals/${encodeURIComponent(sid)}/rename`,
+    targetingValues: (keyId) => `${scriptRoot}/api/tenant/${tenantId}/targeting/values/${encodeURIComponent(keyId)}`,
+  };
+
+  // ---------- Show IDs toggle ----------
+  const idsToggle = document.getElementById('show-ids-toggle');
+  if (idsToggle) {
+    idsToggle.addEventListener('change', () => {
+      root.classList.toggle('show-ids', idsToggle.checked);
+    });
+    root.classList.toggle('show-ids', idsToggle.checked);
+  }
+  // Apply current show-ids state to all .id-only elements (rendered visible
+  // when root has .show-ids, hidden otherwise via CSS rule below).
+  injectShowIdsStyles();
+
+  function injectShowIdsStyles() {
+    // v2 emits the GAM id as `<span class="id">gam:...</span>` inside
+    // `.src-meta`, `.krow__name`, and inside the composite `.crow__title`
+    // siblings. Hide all by default; reveal when the page root has
+    // `.show-ids`.
+    const css = `
+      .signals-page .src-meta .id,
+      .signals-page .krow__name .id,
+      .signals-page .sig-meta .id { display: none; }
+      .signals-page.show-ids .src-meta .id,
+      .signals-page.show-ids .krow__name .id,
+      .signals-page.show-ids .sig-meta .id { display: inline; }
+    `;
+    const tag = document.createElement('style');
+    tag.textContent = css;
+    document.head.appendChild(tag);
+  }
+
+  // ---------- Status segmented control + search + tag filter ----------
+  const state = {
+    status: 'all',     // 'all' | 'mapped' | 'unmapped'
+    search: '',
+    tag: null,
+  };
+
+  document.querySelectorAll('.seg button[data-status]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.status = btn.dataset.status;
+      document.querySelectorAll('.seg button[data-status]').forEach((b) =>
+        b.classList.toggle('active', b === btn),
+      );
+      applyFilters();
+    });
+  });
+
+  const searchInput = document.getElementById('signals-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      state.search = searchInput.value.trim().toLowerCase();
+      applyFilters();
+    });
+  }
+
+  document.querySelectorAll('.tag-bar .pill').forEach((pill) => {
+    pill.addEventListener('click', () => {
+      state.tag = state.tag === pill.dataset.tag ? null : pill.dataset.tag;
+      document.querySelectorAll('.tag-bar .pill').forEach((p) =>
+        p.classList.toggle('active', p.dataset.tag === state.tag),
+      );
+      applyFilters();
+    });
+  });
+
+  function applyFilters() {
+    let qTag = state.tag;
+    let qText = state.search;
+    const m = qText.match(/^tag:([a-z0-9_-]+)/);
+    if (m) {
+      qTag = m[1];
+      qText = qText.slice(m[0].length).trim();
+    }
+    document.querySelectorAll('[data-row-kind]').forEach((row) => {
+      const mapped = row.dataset.mapped === '1';
+      const tags = (row.dataset.tags || '').split(',').filter(Boolean);
+      const text = row.textContent.toLowerCase();
+      let ok = true;
+      if (state.status === 'mapped' && !mapped && row.dataset.rowKind !== 'composite') ok = false;
+      if (state.status === 'unmapped' && (mapped || row.dataset.rowKind === 'composite')) ok = false;
+      if (qTag && !tags.includes(qTag)) ok = false;
+      if (qText && !text.includes(qText)) ok = false;
+      row.style.display = ok ? '' : 'none';
+    });
+    refreshBulkBar();
+  }
+
+  // ---------- Selection + adaptive bulk bar ----------
+  const bulkbar = document.getElementById('signals-bulkbar');
+
+  function visibleSelected() {
+    return [...document.querySelectorAll('.row-selectable input.sig-cb:checked')]
+      .filter((cb) => cb.closest('.row-selectable').style.display !== 'none');
+  }
+
+  function classifySelection() {
+    const sel = visibleSelected();
+    let mapped = 0, unmapped = 0;
+    const items = [];
+    sel.forEach((cb) => {
+      const row = cb.closest('.row-selectable');
+      const kind = row.dataset.rowKind;
+      const isMapped = row.dataset.mapped === '1';
+      if (isMapped || kind === 'composite') mapped++;
+      else unmapped++;
+      items.push({ row, kind, mapped: isMapped, dataset: row.dataset });
+    });
+    return { mapped, unmapped, items };
+  }
+
+  function refreshBulkBar() {
+    const { mapped, unmapped } = classifySelection();
+    const total = mapped + unmapped;
+    bulkbar.classList.toggle('show', total > 0);
+    bulkbar.querySelector('[data-bulk="count"]').textContent = total;
+    const summary = bulkbar.querySelector('[data-bulk="summary"]');
+    const parts = [];
+    if (unmapped) parts.push(`${unmapped} unmapped`);
+    if (mapped) parts.push(`${mapped} mapped`);
+    summary.textContent = parts.join(' · ');
+    bulkbar.querySelector('[data-bulk="map-group"]').hidden = !unmapped;
+    bulkbar.querySelector('[data-bulk="mapped-groups"]').hidden = !mapped;
+    bulkbar.querySelector('[data-bulk="delete"]').hidden = !mapped;
+    bulkbar.querySelector('[data-bulk="divider"]').hidden = !(mapped && unmapped);
+    bulkbar.querySelector('[data-bulk="map-count"]').textContent = unmapped;
+    bulkbar.querySelector('[data-bulk="delete-count"]').textContent = mapped;
+  }
+
+  // All checkbox / row-click handlers are DELEGATED on `document` so lazy-
+  // loaded value rows (injected after a key expand) pick up the wiring
+  // without re-binding. Per-element listeners would silently drop on new
+  // DOM nodes.
+
+  // Row-checkbox change → refresh bulk bar
+  document.addEventListener('change', (e) => {
+    const cb = e.target;
+    if (!(cb instanceof HTMLInputElement) || !cb.classList.contains('sig-cb')) return;
+    if (cb.dataset.selectAll) return;  // handled below
+    if (!cb.closest('.row-selectable')) return;
+    refreshBulkBar();
+  });
+
+  // Prevent checkbox click from bubbling to row-toggle handler
+  document.addEventListener('click', (e) => {
+    const cb = e.target;
+    if (cb instanceof HTMLInputElement && cb.classList.contains('sig-cb') && cb.closest('.row-selectable')) {
+      e.stopPropagation();
+    }
+  }, true);  // capture phase so we run before the row handler
+
+  // Select-all checkbox (per-card scope)
+  document.addEventListener('change', (e) => {
+    const cb = e.target;
+    if (!(cb instanceof HTMLInputElement) || !cb.dataset.selectAll) return;
+    const scope = cb.dataset.selectAll;
+    document.querySelectorAll(`.row-selectable[data-scope="${scope}"] input.sig-cb`).forEach((rowCb) => {
+      if (rowCb.closest('.row-selectable').style.display === 'none') return;
+      rowCb.checked = cb.checked;
+    });
+    refreshBulkBar();
+  });
+
+  // Row body click → toggle checkbox
+  document.addEventListener('click', (e) => {
+    const row = e.target.closest('.row-selectable');
+    if (!row) return;
+    if (e.target.closest('input, button, a, .menu, .menu-trigger, .sig-name')) return;
+    const cb = row.querySelector('input.sig-cb');
+    if (cb) {
+      cb.checked = !cb.checked;
+      refreshBulkBar();
+    }
+  });
+
+  // ---------- Key expand/collapse ----------
+  document.querySelectorAll('.krow').forEach((kr) => {
+    kr.addEventListener('click', (e) => {
+      if (e.target.closest('button, a, .menu-trigger')) return;
+      const target = document.querySelector(`.kvalues[data-key-id="${kr.dataset.keyId}"]`);
+      if (!target) return;
+      const open = !target.hidden;
+      target.hidden = open;
+      kr.classList.toggle('open', !open);
+      if (!open && kr.dataset.lazyLoad === '1') {
+        loadKeyValues(kr.dataset.keyId, target);
+      }
+    });
+  });
+
+  async function loadKeyValues(keyId, target) {
+    if (target.dataset.loaded === '1') return;
+    target.innerHTML = '<div class="freeform-callout-v2" style="background: var(--sig-bg-page);"><div>Loading values…</div></div>';
+    try {
+      const r = await fetch(urls.targetingValues(keyId), { credentials: 'same-origin' });
+      const data = await r.json();
+      if (data.error) {
+        target.innerHTML = `<div class="freeform-callout-v2"><div>${escapeHtml(data.error)}</div></div>`;
+        return;
+      }
+      const values = data.values || [];
+      if (!values.length) {
+        target.innerHTML = '<div class="freeform-callout-v2"><div>No values defined in GAM for this key.</div></div>';
+        return;
+      }
+      target.innerHTML = renderValueRows(keyId, values);
+      target.dataset.loaded = '1';
+    } catch (err) {
+      target.innerHTML = `<div class="freeform-callout-v2"><div>Failed to load values: ${escapeHtml(err.message)}</div></div>`;
+    }
+  }
+
+  function renderValueRows(keyId, values) {
+    return values.map((v) => {
+      const keyName = v.key_name || keyId;
+      return `<div class="srow row-selectable unmapped" data-row-kind="kv" data-mapped="0" data-tags="" data-scope="kv-${escapeAttr(keyId)}" data-key-id="${escapeAttr(keyId)}" data-value-id="${escapeAttr(v.id)}" data-key-name="${escapeAttr(keyName)}" data-value-name="${escapeAttr(v.display_name || v.name)}">
+        <div class="srow__check">
+          <input type="checkbox" class="sig-cb" data-key-id="${escapeAttr(keyId)}" data-value-id="${escapeAttr(v.id)}" data-key-name="${escapeAttr(keyName)}" data-value-name="${escapeAttr(v.display_name || v.name)}">
+        </div>
+        <div class="srow__source">
+          <div class="src-name"><code style="font-family: var(--sig-mono); font-size: 12.5px; color: var(--sig-fg-primary); background: var(--sig-bg-page); padding: 1px 7px; border-radius: 4px; border: 1px solid var(--sig-bd-hairline);">${escapeHtml(keyName)}=${escapeHtml(v.name)}</code></div>
+          <div class="src-meta"><span class="id">gam:${escapeHtml(v.id)}</span></div>
+        </div>
+        <div class="srow__arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg></div>
+        <div class="srow__signal">
+          <button type="button" class="sig-unmapped" data-action="map-one" data-kind="kv" data-key-id="${escapeAttr(keyId)}" data-value-id="${escapeAttr(v.id)}" data-key-name="${escapeAttr(keyName)}" data-value-name="${escapeAttr(v.display_name || v.name)}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            Map this value
+          </button>
+          <span class="sig-hint">creates a (key, value) signal on save</span>
+        </div>
+        <div class="srow__actions"></div>
+      </div>`;
+    }).join('');
+  }
+
+  // ---------- Overflow menus ----------
+  function menuForTrigger(trigger) {
+    const menu = trigger?.nextElementSibling;
+    return menu?.classList.contains('menu') ? menu : null;
+  }
+
+  function triggerForMenu(menu) {
+    const trigger = menu?.previousElementSibling;
+    return trigger?.classList.contains('menu-trigger') ? trigger : null;
+  }
+
+  function menuItems(menu) {
+    return [...menu.querySelectorAll('.menu__item')].filter((item) => !item.hidden);
+  }
+
+  function closeMenu(menu, { restoreFocus = false } = {}) {
+    if (!menu || menu.hidden) return;
+    menu.hidden = true;
+    const trigger = triggerForMenu(menu);
+    if (trigger) {
+      trigger.setAttribute('aria-expanded', 'false');
+      if (restoreFocus) trigger.focus();
+    }
+  }
+
+  function closeAllMenus({ except = null } = {}) {
+    document.querySelectorAll('.menu').forEach((menu) => {
+      if (menu !== except) closeMenu(menu);
+    });
+  }
+
+  function openMenu(trigger, { focus = 'first' } = {}) {
+    const menu = menuForTrigger(trigger);
+    if (!menu) return;
+    closeAllMenus({ except: menu });
+    menu.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    const items = menuItems(menu);
+    const target = focus === 'last' ? items.at(-1) : items[0];
+    target?.focus();
+  }
+
+  document.addEventListener('click', (e) => {
+    const trigger = e.target.closest('.menu-trigger');
+    if (trigger) {
+      e.stopPropagation();
+      const menu = menuForTrigger(trigger);
+      if (!menu) return;
+      if (menu.hidden) openMenu(trigger);
+      else closeMenu(menu, { restoreFocus: true });
+      return;
+    }
+    if (!e.target.closest('.menu')) {
+      closeAllMenus();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    const trigger = e.target.closest('.menu-trigger');
+    if (trigger && ['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
+      e.preventDefault();
+      openMenu(trigger, { focus: e.key === 'ArrowUp' ? 'last' : 'first' });
+      return;
+    }
+
+    const menu = e.target.closest('.menu');
+    if (!menu || menu.hidden) return;
+    const items = menuItems(menu);
+    const currentIndex = items.indexOf(document.activeElement);
+    const item = e.target.closest('.menu__item');
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMenu(menu, { restoreFocus: true });
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!items.length) return;
+      items[(currentIndex + 1) % items.length]?.focus();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!items.length) return;
+      items[(currentIndex - 1 + items.length) % items.length]?.focus();
+      return;
+    }
+    if (e.key === 'Home') {
+      e.preventDefault();
+      items[0]?.focus();
+      return;
+    }
+    if (e.key === 'End') {
+      e.preventDefault();
+      items.at(-1)?.focus();
+      return;
+    }
+    if (item && ['Enter', ' '].includes(e.key)) {
+      e.preventDefault();
+      item.click();
+      return;
+    }
+    if (e.key === 'Tab' && items.length) {
+      if (e.shiftKey && currentIndex <= 0) {
+        e.preventDefault();
+        items.at(-1)?.focus();
+      } else if (!e.shiftKey && currentIndex === items.length - 1) {
+        e.preventDefault();
+        items[0]?.focus();
+      }
+    }
+  });
+
+  // ---------- Inline rename (signal name in row-meta) ----------
+  document.querySelectorAll('.sig-name[data-signal-id]').forEach((span) => {
+    span.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (span.classList.contains('editing')) return;
+      startInlineEdit(span);
+    });
+  });
+
+  function startInlineEdit(span) {
+    const original = span.dataset.signalName;
+    const signalId = span.dataset.signalId;
+    span.classList.add('editing');
+    span.innerHTML = `<input type="text" value="${escapeAttr(original)}" aria-label="Rename signal ${escapeAttr(original)}" style="font: inherit; color: inherit; border: none; background: transparent; outline: none; width: ${Math.max(8, original.length)}ch">`;
+    const input = span.querySelector('input');
+    input.focus();
+    input.select();
+    // Guard: blur + Enter can both fire; the fetch is async; without a
+    // committed flag we mutate innerHTML twice and race the DOM. Lock
+    // after the first invocation.
+    let committed = false;
+    const commit = async () => {
+      if (committed) return;
+      committed = true;
+      input.removeEventListener('blur', commit);
+      const newName = input.value.trim();
+      span.classList.remove('editing');
+      if (!newName || newName === original) {
+        span.innerHTML = escapeHtml(original) + pencilSvg();
+        return;
+      }
+      span.innerHTML = `${escapeHtml(newName)}${pencilSvg()} <span style="color: var(--sig-fg-muted); font-size: 11px;">saving…</span>`;
+      try {
+        const r = await fetch(urls.signalRename(signalId), {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        span.dataset.signalName = newName;
+        span.innerHTML = escapeHtml(newName) + pencilSvg();
+      } catch (err) {
+        alert('Rename failed: ' + err.message);
+        span.dataset.signalName = original;
+        span.innerHTML = escapeHtml(original) + pencilSvg();
+      }
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      if (e.key === 'Escape') {
+        committed = true;  // suppress the blur that follows
+        input.removeEventListener('blur', commit);
+        span.classList.remove('editing');
+        span.innerHTML = escapeHtml(original) + pencilSvg();
+      }
+    });
+    input.addEventListener('click', (e) => e.stopPropagation());
+  }
+
+  function pencilSvg() {
+    return ' <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" style="vertical-align: middle; opacity: 0.55;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
+  }
+
+  // ---------- Overflow-menu rename trigger ----------
+  document.querySelectorAll('.menu__item[data-action="rename"]').forEach((item) => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const signalId = item.dataset.signalId;
+      const span = document.querySelector(`.sig-name[data-signal-id="${CSS.escape(signalId)}"]`);
+      if (span) {
+        closeAllMenus();
+        startInlineEdit(span);
+      }
+    });
+  });
+
+  // ---------- Bulk bar actions ----------
+  async function postJson(url, body) {
+    const r = await fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
+  }
+
+  // Bulk Create — turn ticked unmapped rows into signals
+  bulkbar.querySelector('[data-bulk-action="create"]').addEventListener('click', async () => {
+    const { items } = classifySelection();
+    const payload = items.filter((it) => !it.mapped && it.kind !== 'composite').map((it) => {
+      const d = it.dataset;
+      if (it.kind === 'segment') {
+        return {
+          kind: 'audience_segment',
+          segment_id: d.segmentId,
+          segment_name: d.segmentName,
+        };
+      }
+      if (it.kind === 'kv') {
+        return {
+          kind: 'custom_key_value',
+          key_id: d.keyId,
+          value_id: d.valueId,
+          key_name: d.keyName,
+          value_name: d.valueName,
+        };
+      }
+      if (it.kind === 'springserve_value_list') {
+        // SpringServe audience: the value_list (e.g. "Podcast MV35-54")
+        // becomes one TenantSignal carrying both its own id and the
+        // parent KV namespace so the materializer can write a demand-tag
+        // KV filter at create_media_buy time.
+        return {
+          kind: 'springserve_value_list',
+          value_list_id: d.valueListId,
+          key_id: d.keyId,
+          key_name: d.keyName,
+          name: d.segmentName,
+        };
+      }
+      return null;
+    }).filter(Boolean);
+    if (!payload.length) return;
+    try {
+      const data = await postJson(urls.bulkCreate, { items: payload });
+      alert(`Created ${data.created} signal(s)` + (data.skipped?.length ? `; ${data.skipped.length} already existed` : ''));
+      window.location.reload();
+    } catch (err) {
+      alert('Create failed: ' + err.message);
+    }
+  });
+
+  function mappedSignalIds() {
+    return classifySelection().items
+      .filter((it) => it.mapped || it.kind === 'composite')
+      .map((it) => it.dataset.signalId)
+      .filter(Boolean);
+  }
+
+  bulkbar.querySelector('[data-bulk-action="add-tag"]').addEventListener('click', () => bulkTagOp('add_tag'));
+  bulkbar.querySelector('[data-bulk-action="remove-tag"]').addEventListener('click', () => bulkTagOp('remove_tag'));
+  bulkbar.querySelector('[data-bulk-action="prefix"]').addEventListener('click', () => bulkRenameOp('rename_prefix'));
+  bulkbar.querySelector('[data-bulk-action="suffix"]').addEventListener('click', () => bulkRenameOp('rename_suffix'));
+
+  async function bulkTagOp(op) {
+    const value = bulkbar.querySelector('[data-bulk-input="tag"]').value.trim();
+    const ids = mappedSignalIds();
+    if (!value || !ids.length) return;
+    try {
+      const data = await postJson(urls.bulkUpdate, { signal_ids: ids, op, value });
+      alert(`Updated ${data.updated} signal(s)` + (data.skipped?.length ? `; ${data.skipped.length} skipped` : ''));
+      window.location.reload();
+    } catch (err) {
+      alert('Bulk update failed: ' + err.message);
+    }
+  }
+
+  async function bulkRenameOp(op) {
+    const value = bulkbar.querySelector('[data-bulk-input="rename"]').value;
+    const ids = mappedSignalIds();
+    if (!value || !ids.length) return;
+    try {
+      const data = await postJson(urls.bulkUpdate, { signal_ids: ids, op, value });
+      alert(`Updated ${data.updated} signal(s)` + (data.skipped?.length ? `; ${data.skipped.length} skipped` : ''));
+      window.location.reload();
+    } catch (err) {
+      alert('Bulk rename failed: ' + err.message);
+    }
+  }
+
+  bulkbar.querySelector('[data-bulk-action="delete"]').addEventListener('click', async () => {
+    const ids = mappedSignalIds();
+    if (!ids.length) return;
+    const referenced = classifySelection().items.filter(
+      (it) => (it.mapped || it.kind === 'composite') && parseInt(it.dataset.activeBuys || '0', 10) > 0,
+    );
+    let confirmTyped = '';
+    if (referenced.length) {
+      confirmTyped = prompt(
+        `${referenced.length} of ${ids.length} selected signal(s) are referenced by active media buys ` +
+          `and will break those buys. Type DELETE to confirm:`,
+      );
+      if (confirmTyped !== 'DELETE') return;
+    } else if (!confirm(`Delete ${ids.length} signal(s)?`)) {
+      return;
+    }
+    try {
+      const data = await postJson(urls.bulkDelete, { signal_ids: ids, confirm_typed: confirmTyped });
+      alert(`Deleted ${data.deleted} signal(s)` + (data.not_found?.length ? `; ${data.not_found.length} not found` : ''));
+      window.location.reload();
+    } catch (err) {
+      alert('Bulk delete failed: ' + err.message);
+    }
+  });
+
+  bulkbar.querySelector('[data-bulk-action="clear"]').addEventListener('click', () => {
+    document.querySelectorAll('.row-selectable input.sig-cb:checked').forEach((cb) => { cb.checked = false; });
+    refreshBulkBar();
+  });
+
+  // ---------- Single-row Map button (one-shot create) ----------
+  // Delegated so lazy-loaded value rows also pick it up.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-action="map-one"]');
+    if (!btn) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const d = btn.dataset;
+    let item;
+    if (d.kind === 'segment') {
+      item = { kind: 'audience_segment', segment_id: d.segmentId, segment_name: d.segmentName };
+    } else if (d.kind === 'kv') {
+      item = {
+        kind: 'custom_key_value',
+        key_id: d.keyId,
+        value_id: d.valueId,
+        key_name: d.keyName,
+        value_name: d.valueName,
+      };
+    } else if (d.kind === 'springserve_value_list') {
+      item = {
+        kind: 'springserve_value_list',
+        value_list_id: d.valueListId,
+        key_id: d.keyId,
+        key_name: d.keyName,
+        name: d.segmentName,
+      };
+    } else {
+      return;
+    }
+    try {
+      const data = await postJson(urls.bulkCreate, { items: [item] });
+      if (data.created) window.location.reload();
+      else alert('Already mapped.');
+    } catch (err) {
+      alert('Map failed: ' + err.message);
+    }
+  });
+
+  // ---------- Overflow-menu delete / unmap ----------
+  document.querySelectorAll('.menu__item[data-action="delete"], .menu__item[data-action="unmap"]').forEach((item) => {
+    item.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      closeAllMenus();
+      const signalId = item.dataset.signalId;
+      const activeBuys = parseInt(item.dataset.activeBuys || '0', 10);
+      const url = urls.signalDelete(signalId);
+      let confirmTyped = '';
+      if (activeBuys > 0) {
+        confirmTyped = prompt(
+          `${signalId} is referenced by ${activeBuys} active media buy(s). Type DELETE to confirm:`,
+        );
+        if (confirmTyped !== 'DELETE') return;
+      } else if (!confirm(`Delete signal "${signalId}"?`)) {
+        return;
+      }
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = url;
+      if (confirmTyped) {
+        const inp = document.createElement('input');
+        inp.type = 'hidden'; inp.name = 'confirm_typed'; inp.value = confirmTyped;
+        form.appendChild(inp);
+      }
+      document.body.appendChild(form);
+      form.submit();
+    });
+  });
+
+  // ---------- Helpers ----------
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
+    );
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+
+  // Initial bulk-bar refresh in case any rows came pre-selected.
+  refreshBulkBar();
+})();

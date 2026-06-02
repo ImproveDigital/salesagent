@@ -9,18 +9,30 @@ import os
 import time
 from typing import Any
 
+from flask import url_for
 from sqlalchemy import func, select
+from werkzeug.routing.exceptions import BuildError
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import (
+    AdapterConfig,
+    AdvertiserRoutingRule,
     AuthorizedProperty,
     CurrencyLimit,
     GAMInventory,
+    InventoryProfile,
     Principal,
     Product,
     PublisherPartner,
     Tenant,
     TenantAuthConfig,
+    TenantSignal,
+)
+from src.core.embedded_runtime import (
+    publisher_owns_ai_services,
+    publisher_owns_compose_products,
+    publisher_owns_creative_approval,
+    publisher_owns_runtime_capability,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +53,47 @@ def _is_multi_tenant_mode() -> bool:
 # Simple time-based cache for setup status (5 minute TTL)
 _setup_status_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
+# Adapter slugs that have inventory bundle-coverage data today (#485).
+# FreeWheel and SpringServe land when their sync surfaces participate.
+_INVENTORY_COVERAGE_TRACKED_ADAPTERS: frozenset[str] = frozenset({"google_ad_manager", "gam"})
+
+
+def _build_inventory_coverage(
+    bundle_ref_repo: Any,
+    gam_sync_repo: Any,
+    tenant_ad_server: str | None,
+) -> dict[str, Any] | None:
+    """Bundle-coverage payload for the Discovery card's bundles sub-item (#485).
+
+    Frames Job 1 as "do my bundles cover the inventory shapes buyers ask
+    for" — *not* as review-each-ad-unit. Returns counts for ad units and
+    placements with two values each: how many are synced (denominator) and
+    how many appear in ≥1 inventory bundle (numerator). No review or skip
+    state — multi-use is the norm and an un-bundled entity is informational,
+    not a TODO.
+
+    Returns ``None`` for tenants on adapters we don't track yet; the widget
+    falls back to a placeholder hint.
+    """
+    if tenant_ad_server not in _INVENTORY_COVERAGE_TRACKED_ADAPTERS:
+        return None
+    adapter_slug = "gam"
+    ad_units = {
+        "synced": gam_sync_repo.count_inventory("ad_unit"),
+        "bundled": bundle_ref_repo.count_bundled(adapter=adapter_slug, entity_type="ad_unit"),
+    }
+    placements = {
+        "synced": gam_sync_repo.count_inventory("placement"),
+        "bundled": bundle_ref_repo.count_bundled(adapter=adapter_slug, entity_type="placement"),
+    }
+    return {
+        "adapter": adapter_slug,
+        "ad_units": ad_units,
+        "placements": placements,
+        "has_synced_inventory": (ad_units["synced"] + placements["synced"]) > 0,
+    }
 
 
 class SetupTask:
@@ -80,12 +133,76 @@ class SetupChecklistService:
     def __init__(self, tenant_id: str):
         self.tenant_id = tenant_id
 
+    def _settings_url(self, section: str) -> str | None:
+        """Tenant settings URL, anchored to a section tab.
+
+        Section is a URL fragment (``#<section>``) consumed by the
+        client-side tab switcher in ``tenant_settings.html``, not the
+        ``/settings/<section>`` path parameter — the page renders all
+        tabs and the anchor selects the visible one.
+
+        Returns ``None`` outside a Flask request context. See
+        :meth:`_build_url` for the why.
+        """
+        return self._build_url("tenants.tenant_settings", _anchor=section)
+
+    def _route_url(self, endpoint: str) -> str | None:
+        """URL for a tenant-scoped route by Flask endpoint name.
+
+        Returns ``None`` outside a Flask request context. See
+        :meth:`_build_url`.
+        """
+        return self._build_url(endpoint)
+
+    def _build_url(self, endpoint: str, **kwargs: Any) -> str | None:
+        """Build a URL via Flask ``url_for``, tolerating callers whose
+        Flask context can't resolve admin-blueprint endpoints.
+
+        The service runs from three contexts:
+
+        * **Admin UI** (full Flask app) — admin pages need real URLs to
+          render.
+        * **Tenant Management API** (standalone Flask app, only the
+          ``tenant_management_api`` blueprint registered) — ``url_for``
+          raises ``werkzeug.routing.BuildError`` because the admin-UI
+          endpoints aren't registered in that app. The API never reads
+          ``action_url`` anyway (it surfaces ``configure_path`` from a
+          static map in ``tenant_status_service._CONFIGURE_PATHS``), so
+          ``None`` is correct.
+        * **MCP/A2A** (Starlette via :func:`adcp.server.serve`) —
+          ``validate_setup_complete`` runs inside
+          ``_create_media_buy_impl``. No Flask request stack exists, so
+          ``url_for`` raises ``RuntimeError``.
+          ``validate_setup_complete`` reads only ``task['name']``, so an
+          absent URL is harmless.
+
+        The completion gate (``is_complete`` evaluation) is unaffected
+        by this fallback — only the cosmetic "Configure" link
+        disappears on the non-admin-UI paths.
+        """
+        try:
+            return url_for(endpoint, tenant_id=self.tenant_id, **kwargs)
+        except (RuntimeError, BuildError):
+            return None
+
     @staticmethod
     def get_bulk_setup_status(tenant_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Get setup status for multiple tenants efficiently with bulk queries.
 
         Uses a simple time-based cache (5 minute TTL) to avoid expensive queries
         for dashboard views. Cache is cleared on tenant updates.
+
+        ``action_url`` fields bake in the calling request's SCRIPT_NAME via
+        ``url_for()``. The only cached-output consumer is
+        ``core.index → templates/index.html``, which reads
+        ``progress_percent`` / ``completed_count`` / ``total_count`` /
+        ``ready_for_orders`` / ``critical`` (length only) — never
+        ``action_url``. ``tenant_status_service`` calls the single-tenant
+        ``get_setup_status`` and bypasses the cache. So a cache hit
+        across embedded/non-embedded contexts cannot surface a wrong URL
+        today. If a future consumer starts reading ``action_url`` from
+        the bulk output, evict the cache on request boundary or scope
+        it per SCRIPT_NAME.
 
         Args:
             tenant_ids: List of tenant IDs to check
@@ -196,6 +313,16 @@ class SetupChecklistService:
                 tid: count for tid, count in session.execute(verified_publisher_stmt).all()
             }
 
+            # Buyer-advertiser routing rules per tenant.
+            routing_rule_stmt = (
+                select(AdvertiserRoutingRule.tenant_id, func.count())
+                .where(AdvertiserRoutingRule.tenant_id.in_(uncached_ids))
+                .group_by(AdvertiserRoutingRule.tenant_id)
+            )
+            routing_rule_counts: dict[str, int] = {  # noqa: C416
+                tid: count for tid, count in session.execute(routing_rule_stmt).all()
+            }
+
             # Build status for each uncached tenant using pre-fetched data
             for tenant_id in uncached_ids:
                 tenant = tenants.get(tenant_id)
@@ -213,6 +340,7 @@ class SetupChecklistService:
                     gam_inventory_count=gam_inventory_counts.get(tenant_id, 0),
                     product_count=product_counts.get(tenant_id, 0),
                     principal_count=principal_counts.get(tenant_id, 0),
+                    routing_rule_count=routing_rule_counts.get(tenant_id, 0),
                 )
 
                 # Cache the result
@@ -280,6 +408,7 @@ class SetupChecklistService:
         gam_inventory_count: int,
         product_count: int,
         principal_count: int,
+        routing_rule_count: int,
     ) -> dict[str, Any]:
         """Build setup status from pre-fetched data (used by bulk query).
 
@@ -292,6 +421,7 @@ class SetupChecklistService:
             gam_inventory_count: Number of GAM inventory items
             product_count: Number of products
             principal_count: Number of principals
+            routing_rule_count: Number of configured buyer-advertiser routing rules
 
         Returns:
             Dict with same format as get_setup_status()
@@ -305,6 +435,7 @@ class SetupChecklistService:
             gam_inventory_count,
             product_count,
             principal_count,
+            routing_rule_count,
         )
         recommended_tasks = self._build_recommended_tasks(tenant, budget_limit_count, currency_count)
         optional_tasks = self._build_optional_tasks(tenant, currency_count)
@@ -328,49 +459,174 @@ class SetupChecklistService:
             "optional": [task.to_dict() for task in optional_tasks],
         }
 
+    def _build_aao_tasks(self, tenant: Tenant) -> list[SetupTask]:
+        """AAO checklist item (Public Agent URL).
+
+        Sprint 1.8 §6: embedded tenants with ``public_agent_url`` set don't
+        see this item — the platform (Scope3) owns it. Embedded tenants
+        with NULL still see it so the gap surfaces to the host product
+        via the §7 setup_tasks scope=platform annotation, but with no
+        action_url (the publisher can't fix it — only the host product
+        can).
+
+        For open-instance tenants, completion uses the same resolution
+        chain that powers display/discovery via
+        :func:`src.services.agent_url_resolver.resolve_agent_url`:
+        explicit ``public_agent_url`` → ``virtual_host`` → platform-
+        prefixed subdomain default. Gating only on the explicit column
+        would mark working tenants (subdomain + ``SALES_AGENT_DOMAIN``
+        set) as incomplete and block them from creating media buys
+        despite their URL being fully reachable — the inconsistency that
+        broke the live storyboard run.
+
+        Single source of truth for both the live-session path
+        (:meth:`_check_critical_tasks`) and the bulk path
+        (:meth:`_build_critical_tasks`).
+        """
+        from src.services.agent_url_resolver import resolve_agent_url
+
+        resolved_url = resolve_agent_url(tenant)
+
+        # Embedded + URL set by platform → checklist item is hidden (managed
+        # off-publisher). resolve_agent_url returns None for embedded
+        # tenants without an explicit column, which keeps this branch tight.
+        if tenant.is_embedded and tenant.public_agent_url:
+            return []
+
+        if resolved_url:
+            # Open-instance with any derivable URL. Show the row as complete
+            # and surface what we resolved so the operator can spot-check.
+            details = f"Configured: {resolved_url}"
+        elif tenant.is_embedded:
+            details = (
+                "Platform configuration in progress — your host product will set this. "
+                "Contact your host's support team if it stays empty."
+            )
+        else:
+            details = (
+                "Set a Custom Domain on the Account screen — your agent URL is derived "
+                "from it and is what publishers list in their adagents.json."
+            )
+
+        # Embedded tenants with NULL can't fix this themselves — drop the
+        # action_url so the UI doesn't surface a clickable button leading to
+        # a screen where the field is readonly.
+        if tenant.is_embedded and not tenant.public_agent_url:
+            action_url: str | None = None
+        else:
+            # Self-hosted: send users to the Account screen where Custom
+            # Domain (the source of the derived URL) lives.
+            action_url = self._settings_url("account")
+
+        return [
+            SetupTask(
+                key="public_agent_url",
+                name="Public Agent URL",
+                description=(
+                    "The agent URL publishers list in their adagents.json to "
+                    "authorize this tenant. Derived from your Custom Domain "
+                    "(open-instance) or the platform's shared host (embedded)."
+                ),
+                is_complete=bool(resolved_url),
+                action_url=action_url,
+                details=details,
+            ),
+        ]
+
+    @staticmethod
+    def _evaluate_ad_server(tenant: Tenant) -> tuple[bool, str]:
+        """Compute ``(is_configured, config_details)`` for the tenant's ad server.
+
+        Shared by ``_check_critical_tasks``, ``_build_critical_tasks``, and
+        ``get_capability_ladder``. Mock adapter only counts as configured when
+        ``ADCP_TESTING=true`` — otherwise it's treated as not production-ready.
+        """
+        if not (tenant.ad_server and tenant.ad_server != ""):
+            return False, "No ad server configured"
+
+        if tenant.is_gam_tenant:
+            return True, "GAM configured - Test connection to verify"
+
+        if tenant.ad_server == "mock":
+            if os.environ.get("ADCP_TESTING") == "true":
+                return True, "Mock adapter configured (test mode)"
+            return False, "Mock adapter - Configure a real ad server for production"
+
+        if tenant.ad_server in {"triton", "triton_digital", "freewheel"}:
+            return True, f"{tenant.ad_server} adapter configured"
+
+        # Unknown adapter type - show warning but don't block
+        return True, f"{tenant.ad_server} adapter - verify configuration"
+
+    def _gam_routing_task(self, tenant: Tenant, routing_rule_count: int) -> list[SetupTask]:
+        """Critical GAM buyer-routing task.
+
+        Active GAM tenants need a tenant default advertiser before live
+        order creation can safely attach unmatched buyers to a GAM company.
+        Buyer-specific routes are overrides for known buyers; they do not
+        provide a tenant-wide fallback.
+        """
+        if not tenant.is_active or not tenant.is_gam_tenant:
+            return []
+
+        has_default = bool(tenant.default_gam_advertiser_id)
+        if has_default:
+            details = f"Default GAM advertiser configured: {tenant.default_gam_advertiser_id}"
+        elif routing_rule_count:
+            details = (
+                f"{routing_rule_count} buyer-specific GAM advertiser route(s) configured, "
+                "but no tenant default advertiser is set"
+            )
+        else:
+            details = "No default GAM advertiser is configured"
+
+        return [
+            SetupTask(
+                key="gam_default_advertiser",
+                name="GAM Default Advertiser",
+                description="Configure a tenant default GAM advertiser for unmatched buyer traffic",
+                is_complete=has_default,
+                action_url=self._route_url("buyer_routing.buyer_routing_page"),
+                details=details,
+            )
+        ]
+
+    def _gam_advertiser_create_permission_task(self, tenant: Tenant) -> list[SetupTask]:
+        """Recommended GAM adapter task for advertiser create-permission proof."""
+        if not tenant.is_active or not tenant.is_gam_tenant:
+            return []
+
+        adapter_config: AdapterConfig | None = tenant.adapter_config
+        proven_at = adapter_config.gam_advertiser_create_permission_proven_at if adapter_config is not None else None
+        details = (
+            f"Advertiser create permission proven at {proven_at.isoformat()}"
+            if proven_at is not None
+            else "Run advertiser ensure with a missing Interchange-* advertiser to prove create permission"
+        )
+
+        return [
+            SetupTask(
+                key="gam_advertiser_create_permission",
+                name="GAM Advertiser Create Permission",
+                description="Prove the configured GAM credential can create advertiser companies",
+                is_complete=proven_at is not None,
+                action_url=self._route_url("buyer_routing.buyer_routing_page"),
+                details=details,
+            )
+        ]
+
     def _check_critical_tasks(self, session, tenant: Tenant) -> list[SetupTask]:
         """Check critical tasks required before first order."""
         tasks = []
 
+        # 0. AAO model: public_agent_url. First item in the checklist —
+        # the salesagent can't verify any publisher's adagents.json without
+        # knowing what URL it serves on.
+        tasks.extend(self._build_aao_tasks(tenant))
+
         # 1. Ad Server FULLY CONFIGURED - CRITICAL BLOCKER
         # This is the most important task - nothing else can be done until ad server works
-        ad_server_selected = tenant.ad_server is not None and tenant.ad_server != ""
-
-        # For GAM, check that it's fully configured with OAuth credentials
-        ad_server_fully_configured = False
-        config_details = "No ad server configured"
-
-        if ad_server_selected:
-            if tenant.is_gam_tenant:
-                # Check if GAM has OAuth tokens (indicates successful authentication)
-                # GAM config is stored in the adapter_config table, not directly on tenant
-                # For now, just check if adapter is selected
-                has_credentials = True  # Assume configured if GAM is selected
-                ad_server_fully_configured = has_credentials
-
-                if has_credentials:
-                    config_details = "GAM configured - Test connection to verify"
-                else:
-                    config_details = "GAM selected but not authenticated - Complete OAuth flow and test connection"
-            elif tenant.ad_server == "mock":
-                # Mock adapter is for testing only - not production ready
-                # But allow it in testing environments (ADCP_TESTING=true)
-                import os
-
-                if os.environ.get("ADCP_TESTING") == "true":
-                    ad_server_fully_configured = True
-                    config_details = "Mock adapter configured (test mode)"
-                else:
-                    ad_server_fully_configured = False
-                    config_details = "Mock adapter - Configure a real ad server for production"
-            elif tenant.ad_server in ["kevel", "triton"]:
-                # Other adapters (Kevel, Triton) - assume configured once selected
-                ad_server_fully_configured = True
-                config_details = f"{tenant.ad_server} adapter configured"
-            else:
-                # Unknown adapter type - show warning but don't block
-                ad_server_fully_configured = True
-                config_details = f"{tenant.ad_server} adapter - verify configuration"
+        ad_server_fully_configured, config_details = self._evaluate_ad_server(tenant)
 
         tasks.append(
             SetupTask(
@@ -378,7 +634,7 @@ class SetupChecklistService:
                 name="⚠️ Ad Server Configuration",
                 description="BLOCKER: Configure and test ad server connection before proceeding with other setup",
                 is_complete=ad_server_fully_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#adserver",
+                action_url=self._settings_url("adserver"),
                 details=config_details,
             )
         )
@@ -403,7 +659,7 @@ class SetupChecklistService:
                     name="⚠️ Single Sign-On (SSO)",
                     description="CRITICAL: Configure SSO and disable setup mode for production security",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=self._route_url("users.list_users"),
                     details=sso_details,
                 )
             )
@@ -419,43 +675,61 @@ class SetupChecklistService:
                     name="Currency Configuration",
                     description="At least one currency must be configured for media buys",
                     is_complete=currency_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                    action_url=self._route_url("settings.policies_page"),
                     details=(
                         f"{currency_count} currencies configured" if currency_count > 0 else "No currencies configured"
                     ),
                 )
             )
 
-        # 4. Authorized Properties
-        # Single source of truth: AuthorizedProperty table
-        # (Populated automatically when syncing verified PublisherPartners)
-        stmt = (
-            select(func.count()).select_from(AuthorizedProperty).where(AuthorizedProperty.tenant_id == self.tenant_id)
-        )
-        property_count = session.scalar(stmt) or 0
+        # GAM routing is required before any live GAM order can be written.
+        if ad_server_fully_configured and tenant.is_gam_tenant:
+            stmt = (
+                select(func.count())
+                .select_from(AdvertiserRoutingRule)
+                .where(AdvertiserRoutingRule.tenant_id == self.tenant_id)
+            )
+            routing_rule_count = session.scalar(stmt) or 0
+            tasks.extend(self._gam_routing_task(tenant, routing_rule_count))
 
-        # Also check verified publisher count for better messaging
+        # 4. Authorized Properties → green when EITHER:
+        #    - ≥1 verified PublisherPartner (new AAO model — each
+        #      partner's brand.json + adagents.json is the source of truth)
+        #    - ≥1 AuthorizedProperty row (legacy model — pre-AAO tenants
+        #      and existing fixtures still seed this table directly)
+        # The OR keeps existing tenants out of the regression even before
+        # they migrate to the AAO model.
         stmt_publishers = (
             select(func.count())
             .select_from(PublisherPartner)
-            .where(PublisherPartner.tenant_id == self.tenant_id, PublisherPartner.is_verified == True)  # noqa: E712
+            .where(
+                PublisherPartner.tenant_id == self.tenant_id,
+                PublisherPartner.is_verified == True,  # noqa: E712
+            )
         )
         verified_publisher_count = session.scalar(stmt_publishers) or 0
-
-        is_complete = property_count > 0
-        details = (
-            f"{property_count} properties from {verified_publisher_count} verified publishers"
-            if property_count > 0
-            else "Add publishers and sync to discover properties"
+        stmt_props = (
+            select(func.count()).select_from(AuthorizedProperty).where(AuthorizedProperty.tenant_id == self.tenant_id)
         )
+        legacy_property_count = session.scalar(stmt_props) or 0
+        is_complete = verified_publisher_count > 0 or legacy_property_count > 0
+        if verified_publisher_count > 0:
+            details = f"{verified_publisher_count} verified publisher partners"
+        elif legacy_property_count > 0:
+            details = (
+                f"{legacy_property_count} authorized properties (legacy mode — "
+                "add a publisher partner to migrate to the AAO model)"
+            )
+        else:
+            details = "Add a publisher partner — their adagents.json must authorize this tenant's agent URL."
 
         tasks.append(
             SetupTask(
                 key="authorized_properties",
                 name="Authorized Properties",
-                description="Configure properties with adagents.json for verification",
+                description="At least one publisher partner whose adagents.json authorizes your agent URL.",
                 is_complete=is_complete,
-                action_url=f"/tenant/{self.tenant_id}/inventory#publishers-pane",
+                action_url=self._route_url("publisher_partners.publishers_page"),
                 details=details,
             )
         )
@@ -479,12 +753,12 @@ class SetupChecklistService:
                         name="Inventory Sync",
                         description="Sync ad units and placements from ad server",
                         is_complete=inventory_synced,
-                        action_url=f"/tenant/{self.tenant_id}/settings#inventory",
+                        action_url=self._route_url("inventory.inventory_browser"),
                         details=inventory_details,
                     )
                 )
-            elif tenant.ad_server in ["kevel", "triton"]:
-                # Kevel and Triton adapters - mark as complete (inventory configured per product)
+            elif tenant.ad_server in {"triton", "triton_digital", "freewheel"}:
+                # Schema-driven adapters configure inventory per-product (not via sync).
                 tasks.append(
                     SetupTask(
                         key="inventory_synced",
@@ -512,32 +786,44 @@ class SetupChecklistService:
         if ad_server_fully_configured:
             stmt = select(func.count()).select_from(Product).where(Product.tenant_id == self.tenant_id)
             product_count = session.scalar(stmt) or 0
+        else:
+            product_count = 0
+
+        if ad_server_fully_configured:
             tasks.append(
                 SetupTask(
                     key="products_created",
                     name="Products",
                     description="Create at least one advertising product",
                     is_complete=product_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/products",
+                    action_url=self._route_url("products.list_products"),
                     details=f"{product_count} products created" if product_count > 0 else "No products created",
                 )
             )
 
-        # 6. Principals Created
-        stmt = select(func.count()).select_from(Principal).where(Principal.tenant_id == self.tenant_id)
-        principal_count = session.scalar(stmt) or 0
-        tasks.append(
-            SetupTask(
-                key="principals_created",
-                name="Advertisers (Principals)",
-                description="Create principals for advertisers who will buy inventory",
-                is_complete=principal_count > 0,
-                action_url=f"/tenant/{self.tenant_id}/settings#advertisers",
-                details=(
-                    f"{principal_count} advertisers configured" if principal_count > 0 else "No advertisers configured"
-                ),
+        # 6. Principals Created — Sprint 7 IA cleanup: skip on embedded.
+        # Principal provisioning on embedded tenants is platform-managed
+        # (Tenant Management API creates them on /provision and via the
+        # embedded auth header bypass), so there's nothing for the publisher
+        # operator to do here. The Buyer Agents settings tab is also hidden
+        # on embedded; surfacing this task would link to a missing section.
+        if not tenant.is_embedded:
+            stmt = select(func.count()).select_from(Principal).where(Principal.tenant_id == self.tenant_id)
+            principal_count = session.scalar(stmt) or 0
+            tasks.append(
+                SetupTask(
+                    key="principals_created",
+                    name="Advertisers (Principals)",
+                    description="Create principals for advertisers who will buy inventory",
+                    is_complete=principal_count > 0,
+                    action_url=self._settings_url("advertisers"),
+                    details=(
+                        f"{principal_count} advertisers configured"
+                        if principal_count > 0
+                        else "No advertisers configured"
+                    ),
+                )
             )
-        )
 
         return tasks
 
@@ -555,29 +841,30 @@ class SetupChecklistService:
                 name="Account Name",
                 description="Set a display name for your sales agent",
                 is_complete=has_custom_name,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=self._settings_url("account"),
                 details=f"Using '{tenant.name}'" if has_custom_name else "Using default name",
             )
         )
 
-        # 2. Creative Approval Guidelines
-        # Only count as configured if user has set auto-approve formats (explicit configuration)
-        # Default human_review_required=True doesn't count as "configured"
-        has_approval_config = bool(tenant.auto_approve_format_ids)
-        tasks.append(
-            SetupTask(
-                key="creative_approval_guidelines",
-                name="Creative Approval Guidelines",
-                description="Configure auto-approval rules and manual review settings",
-                is_complete=has_approval_config,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
-                details=(
-                    "Auto-approval formats configured"
-                    if has_approval_config
-                    else "Using default (manual review required)"
-                ),
+        if publisher_owns_creative_approval():
+            # 2. Creative Approval Guidelines
+            # Only count as configured if user has set auto-approve formats (explicit configuration)
+            # Default human_review_required=True doesn't count as "configured"
+            has_approval_config = bool(tenant.auto_approve_format_ids)
+            tasks.append(
+                SetupTask(
+                    key="creative_approval_guidelines",
+                    name="Creative Approval Guidelines",
+                    description="Configure auto-approval rules and manual review settings",
+                    is_complete=has_approval_config,
+                    action_url=self._route_url("settings.policies_page"),
+                    details=(
+                        "Auto-approval formats configured"
+                        if has_approval_config
+                        else "Using default (manual review required)"
+                    ),
+                )
             )
-        )
 
         # 3. Naming Conventions
         # Only count line_item_name_template as custom (order_name_template has server_default)
@@ -588,7 +875,7 @@ class SetupChecklistService:
                 name="Naming Conventions",
                 description="Customize order and line item naming templates",
                 is_complete=has_custom_naming,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=self._route_url("settings.policies_page"),
                 details="Custom templates configured" if has_custom_naming else "Using default naming templates",
             )
         )
@@ -616,10 +903,12 @@ class SetupChecklistService:
                 name="Budget Controls",
                 description="Set maximum daily budget limits for safety",
                 is_complete=has_budget_limits,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=self._route_url("settings.policies_page"),
                 details=details,
             )
         )
+
+        tasks.extend(self._gam_advertiser_create_permission_task(tenant))
 
         # 4. AXE Segment Keys Configuration (RECOMMENDED - part of AdCP spec)
         # AXE (Audience Exchange) targeting is part of the AdCP protocol specification
@@ -645,7 +934,7 @@ class SetupChecklistService:
                 name="AXE Segment Keys",
                 description="Configure custom targeting keys for AXE audience segments (recommended for AdCP compliance)",
                 is_complete=axe_keys_configured,
-                action_url=f"/tenant/{self.tenant_id}/targeting",
+                action_url=self._route_url("inventory.targeting_browser"),
                 details=(
                     ", ".join(axe_details)
                     if axe_keys_configured
@@ -654,19 +943,20 @@ class SetupChecklistService:
             )
         )
 
-        # 5. Slack Integration
-        slack_webhook = tenant.slack_webhook_url
-        slack_configured = bool(slack_webhook)
-        tasks.append(
-            SetupTask(
-                key="slack_integration",
-                name="Slack Integration",
-                description="Configure Slack webhooks for order notifications",
-                is_complete=slack_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
-                details="Slack notifications enabled" if slack_configured else "No Slack integration",
+        if publisher_owns_runtime_capability("slack"):
+            # 5. Slack Integration
+            slack_webhook = tenant.slack_webhook_url
+            slack_configured = bool(slack_webhook)
+            tasks.append(
+                SetupTask(
+                    key="slack_integration",
+                    name="Slack Integration",
+                    description="Configure Slack webhooks for order notifications",
+                    is_complete=slack_configured,
+                    action_url=self._route_url("settings.integrations_page"),
+                    details="Slack notifications enabled" if slack_configured else "No Slack integration",
+                )
             )
-        )
 
         # 6. Tenant CNAME (Virtual Host)
         virtual_host = tenant.virtual_host
@@ -677,7 +967,7 @@ class SetupChecklistService:
                 name="Custom Domain (CNAME)",
                 description="Configure custom domain for your sales agent",
                 is_complete=has_custom_domain,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=self._settings_url("account"),
                 details=f"Using {virtual_host}" if has_custom_domain else "Using default subdomain",
             )
         )
@@ -708,38 +998,42 @@ class SetupChecklistService:
                     name="Single Sign-On (SSO)",
                     description="Configure tenant-specific SSO authentication",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=self._route_url("users.list_users"),
                     details=sso_details,
                 )
             )
 
-        # 1. Signals Discovery Agent
-        signals_enabled = tenant.enable_axe_signals or False
-        tasks.append(
-            SetupTask(
-                key="signals_agent",
-                name="Signals Discovery Agent",
-                description="Enable AXE signals for advanced targeting",
-                is_complete=signals_enabled,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
-                details="AXE signals enabled" if signals_enabled else "AXE signals not configured",
+        if publisher_owns_runtime_capability("signals_agents"):
+            # 1. Signals Discovery Agent
+            signals_enabled = tenant.enable_axe_signals or False
+            tasks.append(
+                SetupTask(
+                    key="signals_agent",
+                    name="Signals Discovery Agent",
+                    description="Enable AXE signals for advanced targeting",
+                    is_complete=signals_enabled,
+                    action_url=self._route_url("settings.integrations_page"),
+                    details="AXE signals enabled" if signals_enabled else "AXE signals not configured",
+                )
             )
-        )
 
-        # 2. Gemini AI Features (Optional - Tenant-Specific)
-        gemini_configured = bool(tenant.gemini_api_key)
-        tasks.append(
-            SetupTask(
-                key="gemini_api_key",
-                name="Gemini AI Features",
-                description="Enable AI-assisted product recommendations and creative policy checks",
-                is_complete=gemini_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
-                details=(
-                    "AI features enabled" if gemini_configured else "Optional: Configure Gemini API key for AI features"
-                ),
+        if publisher_owns_ai_services():
+            # 2. Gemini AI Features (Optional - Tenant-Specific)
+            gemini_configured = bool(tenant.gemini_api_key)
+            tasks.append(
+                SetupTask(
+                    key="gemini_api_key",
+                    name="Gemini AI Features",
+                    description="Enable AI-assisted product recommendations and creative policy checks",
+                    is_complete=gemini_configured,
+                    action_url=self._route_url("settings.integrations_page"),
+                    details=(
+                        "AI features enabled"
+                        if gemini_configured
+                        else "Optional: Configure Gemini API key for AI features"
+                    ),
+                )
             )
-        )
 
         # 3. Multiple Currencies
         stmt = select(func.count()).select_from(CurrencyLimit).where(CurrencyLimit.tenant_id == self.tenant_id)
@@ -751,7 +1045,7 @@ class SetupChecklistService:
                 name="Multiple Currencies",
                 description="Support international advertisers with EUR, GBP, etc.",
                 is_complete=multiple_currencies,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=self._route_url("settings.policies_page"),
                 details=(
                     f"{currency_count} currencies supported" if multiple_currencies else "Only 1 currency configured"
                 ),
@@ -769,36 +1063,18 @@ class SetupChecklistService:
         gam_inventory_count: int,
         product_count: int,
         principal_count: int,
+        routing_rule_count: int,
     ) -> list[SetupTask]:
-        """Build critical tasks from pre-fetched data (no session queries)."""
-        tasks = []
+        """Build critical tasks from pre-fetched data (no session queries).
+
+        Mirrors :meth:`_check_critical_tasks` for the bulk path; the two
+        must stay in sync so single-tenant and bulk callers agree on
+        ``progress_percent`` and ``ready_for_orders``.
+        """
+        tasks = list(self._build_aao_tasks(tenant))
 
         # 1. Ad Server Configuration
-        ad_server_selected = tenant.ad_server is not None and tenant.ad_server != ""
-        ad_server_fully_configured = False
-        config_details = "No ad server configured"
-
-        if ad_server_selected:
-            if tenant.is_gam_tenant:
-                ad_server_fully_configured = True
-                config_details = "GAM configured - Test connection to verify"
-            elif tenant.ad_server == "mock":
-                # Mock adapter is for testing only - not production ready
-                # But allow it in testing environments (ADCP_TESTING=true)
-                import os
-
-                if os.environ.get("ADCP_TESTING") == "true":
-                    ad_server_fully_configured = True
-                    config_details = "Mock adapter configured (test mode)"
-                else:
-                    ad_server_fully_configured = False
-                    config_details = "Mock adapter - Configure a real ad server for production"
-            elif tenant.ad_server in ["kevel", "triton"]:
-                ad_server_fully_configured = True
-                config_details = f"{tenant.ad_server} adapter configured"
-            else:
-                ad_server_fully_configured = True
-                config_details = f"{tenant.ad_server} adapter - verify configuration"
+        ad_server_fully_configured, config_details = self._evaluate_ad_server(tenant)
 
         tasks.append(
             SetupTask(
@@ -806,7 +1082,7 @@ class SetupChecklistService:
                 name="⚠️ Ad Server Configuration",
                 description="BLOCKER: Configure and test ad server connection before proceeding with other setup",
                 is_complete=ad_server_fully_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#adserver",
+                action_url=self._settings_url("adserver"),
                 details=config_details,
             )
         )
@@ -829,25 +1105,28 @@ class SetupChecklistService:
                     name="⚠️ Single Sign-On (SSO)",
                     description="CRITICAL: Configure SSO and disable setup mode for production security",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=self._route_url("users.list_users"),
                     details=sso_details,
                 )
             )
 
         # 3. Currency Limits - Only show after ad server is configured
-        if ad_server_fully_configured:
+        if ad_server_fully_configured and (publisher_owns_compose_products() or product_count > 0):
             tasks.append(
                 SetupTask(
                     key="currency_limits",
                     name="Currency Configuration",
                     description="At least one currency must be configured for media buys",
                     is_complete=currency_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                    action_url=self._route_url("settings.policies_page"),
                     details=(
                         f"{currency_count} currencies configured" if currency_count > 0 else "No currencies configured"
                     ),
                 )
             )
+
+        if ad_server_fully_configured:
+            tasks.extend(self._gam_routing_task(tenant, routing_rule_count))
 
         # 4. Authorized Properties
         # Single source of truth: AuthorizedProperty table
@@ -866,7 +1145,7 @@ class SetupChecklistService:
                 name="Authorized Properties",
                 description="Configure properties with adagents.json for verification",
                 is_complete=properties_is_complete,
-                action_url=f"/tenant/{self.tenant_id}/inventory#publishers-pane",
+                action_url=self._route_url("publisher_partners.publishers_page"),
                 details=properties_details,
             )
         )
@@ -881,7 +1160,7 @@ class SetupChecklistService:
                         name="Inventory Sync",
                         description="Sync ad units and placements from ad server",
                         is_complete=inventory_synced,
-                        action_url=f"/tenant/{self.tenant_id}/settings#inventory",
+                        action_url=self._route_url("inventory.inventory_browser"),
                         details=(
                             f"{gam_inventory_count:,} inventory items synced"
                             if inventory_synced
@@ -889,7 +1168,7 @@ class SetupChecklistService:
                         ),
                     )
                 )
-            elif tenant.ad_server in ["kevel", "triton"]:
+            elif tenant.ad_server in {"triton", "triton_digital", "freewheel"}:
                 tasks.append(
                     SetupTask(
                         key="inventory_synced",
@@ -913,31 +1192,37 @@ class SetupChecklistService:
                 )
 
         # 5. Products Created - Only show after ad server is configured
-        if ad_server_fully_configured:
+        if ad_server_fully_configured and (publisher_owns_compose_products() or product_count > 0):
             tasks.append(
                 SetupTask(
                     key="products_created",
                     name="Products",
                     description="Create at least one advertising product",
                     is_complete=product_count > 0,
-                    action_url=f"/tenant/{self.tenant_id}/products",
+                    action_url=self._route_url("products.list_products"),
                     details=f"{product_count} products created" if product_count > 0 else "No products created",
                 )
             )
 
-        # 6. Principals Created
-        tasks.append(
-            SetupTask(
-                key="principals_created",
-                name="Advertisers (Principals)",
-                description="Create principals for advertisers who will buy inventory",
-                is_complete=principal_count > 0,
-                action_url=f"/tenant/{self.tenant_id}/settings#advertisers",
-                details=(
-                    f"{principal_count} advertisers configured" if principal_count > 0 else "No advertisers configured"
-                ),
+        # 6. Principals Created — Sprint 7 IA cleanup: skip on embedded.
+        # See :meth:`_check_critical_tasks` for the full rationale. Mirroring
+        # the per-tenant path so single-tenant and bulk callers agree on
+        # ``progress_percent`` and ``ready_for_orders``.
+        if not tenant.is_embedded:
+            tasks.append(
+                SetupTask(
+                    key="principals_created",
+                    name="Advertisers (Principals)",
+                    description="Create principals for advertisers who will buy inventory",
+                    is_complete=principal_count > 0,
+                    action_url=self._settings_url("advertisers"),
+                    details=(
+                        f"{principal_count} advertisers configured"
+                        if principal_count > 0
+                        else "No advertisers configured"
+                    ),
+                )
             )
-        )
 
         return tasks
 
@@ -955,29 +1240,30 @@ class SetupChecklistService:
                 name="Account Name",
                 description="Set a display name for your sales agent",
                 is_complete=has_custom_name,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=self._settings_url("account"),
                 details=f"Using '{tenant.name}'" if has_custom_name else "Using default name",
             )
         )
 
-        # 2. Creative Approval Guidelines
-        # Only count as configured if user has set auto-approve formats (explicit configuration)
-        # Default human_review_required=True doesn't count as "configured"
-        has_approval_config = bool(tenant.auto_approve_format_ids)
-        tasks.append(
-            SetupTask(
-                key="creative_approval_guidelines",
-                name="Creative Approval Guidelines",
-                description="Configure auto-approval rules and manual review settings",
-                is_complete=has_approval_config,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
-                details=(
-                    "Auto-approval formats configured"
-                    if has_approval_config
-                    else "Using default (manual review required)"
-                ),
+        if publisher_owns_creative_approval():
+            # 2. Creative Approval Guidelines
+            # Only count as configured if user has set auto-approve formats (explicit configuration)
+            # Default human_review_required=True doesn't count as "configured"
+            has_approval_config = bool(tenant.auto_approve_format_ids)
+            tasks.append(
+                SetupTask(
+                    key="creative_approval_guidelines",
+                    name="Creative Approval Guidelines",
+                    description="Configure auto-approval rules and manual review settings",
+                    is_complete=has_approval_config,
+                    action_url=self._route_url("settings.policies_page"),
+                    details=(
+                        "Auto-approval formats configured"
+                        if has_approval_config
+                        else "Using default (manual review required)"
+                    ),
+                )
             )
-        )
 
         # 3. Naming Conventions
         # Only count line_item_name_template as custom (order_name_template has server_default)
@@ -988,7 +1274,7 @@ class SetupChecklistService:
                 name="Naming Conventions",
                 description="Customize order and line item naming templates",
                 is_complete=has_custom_naming,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=self._route_url("settings.policies_page"),
                 details="Custom templates configured" if has_custom_naming else "Using default naming templates",
             )
         )
@@ -1001,7 +1287,7 @@ class SetupChecklistService:
                 name="Budget Controls",
                 description="Set maximum daily budget limits for safety",
                 is_complete=has_budget_limits,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=self._route_url("settings.policies_page"),
                 details=(
                     f"{budget_limit_count} currency limit(s) with daily budget controls"
                     if has_budget_limits
@@ -1009,6 +1295,8 @@ class SetupChecklistService:
                 ),
             )
         )
+
+        tasks.extend(self._gam_advertiser_create_permission_task(tenant))
 
         # 4. AXE Segment Keys Configuration (RECOMMENDED - part of AdCP spec)
         # AXE (Audience Exchange) targeting is part of the AdCP protocol specification
@@ -1034,7 +1322,7 @@ class SetupChecklistService:
                 name="AXE Segment Keys",
                 description="Configure custom targeting keys for AXE audience segments (recommended for AdCP compliance)",
                 is_complete=axe_keys_configured,
-                action_url=f"/tenant/{self.tenant_id}/targeting",
+                action_url=self._route_url("inventory.targeting_browser"),
                 details=(
                     ", ".join(axe_details)
                     if axe_keys_configured
@@ -1043,18 +1331,19 @@ class SetupChecklistService:
             )
         )
 
-        # 5. Slack Integration
-        slack_configured = bool(tenant.slack_webhook_url)
-        tasks.append(
-            SetupTask(
-                key="slack_integration",
-                name="Slack Integration",
-                description="Configure Slack webhooks for order notifications",
-                is_complete=slack_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
-                details="Slack notifications enabled" if slack_configured else "No Slack integration",
+        if publisher_owns_runtime_capability("slack"):
+            # 5. Slack Integration
+            slack_configured = bool(tenant.slack_webhook_url)
+            tasks.append(
+                SetupTask(
+                    key="slack_integration",
+                    name="Slack Integration",
+                    description="Configure Slack webhooks for order notifications",
+                    is_complete=slack_configured,
+                    action_url=self._route_url("settings.integrations_page"),
+                    details="Slack notifications enabled" if slack_configured else "No Slack integration",
+                )
             )
-        )
 
         # 6. Custom Domain
         has_custom_domain = bool(tenant.virtual_host)
@@ -1064,7 +1353,7 @@ class SetupChecklistService:
                 name="Custom Domain (CNAME)",
                 description="Configure custom domain for your sales agent",
                 is_complete=has_custom_domain,
-                action_url=f"/tenant/{self.tenant_id}/settings#account",
+                action_url=self._settings_url("account"),
                 details=f"Using {tenant.virtual_host}" if has_custom_domain else "Using default subdomain",
             )
         )
@@ -1094,38 +1383,42 @@ class SetupChecklistService:
                     name="Single Sign-On (SSO)",
                     description="Configure tenant-specific SSO authentication",
                     is_complete=sso_enabled and setup_mode_disabled,
-                    action_url=f"/tenant/{self.tenant_id}/users",
+                    action_url=self._route_url("users.list_users"),
                     details=sso_details,
                 )
             )
 
-        # 1. Signals Discovery Agent
-        signals_enabled = tenant.enable_axe_signals or False
-        tasks.append(
-            SetupTask(
-                key="signals_agent",
-                name="Signals Discovery Agent",
-                description="Enable AXE signals for advanced targeting",
-                is_complete=signals_enabled,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
-                details="AXE signals enabled" if signals_enabled else "AXE signals not configured",
+        if publisher_owns_runtime_capability("signals_agents"):
+            # 1. Signals Discovery Agent
+            signals_enabled = tenant.enable_axe_signals or False
+            tasks.append(
+                SetupTask(
+                    key="signals_agent",
+                    name="Signals Discovery Agent",
+                    description="Enable AXE signals for advanced targeting",
+                    is_complete=signals_enabled,
+                    action_url=self._route_url("settings.integrations_page"),
+                    details="AXE signals enabled" if signals_enabled else "AXE signals not configured",
+                )
             )
-        )
 
-        # 2. Gemini AI Features
-        gemini_configured = bool(tenant.gemini_api_key)
-        tasks.append(
-            SetupTask(
-                key="gemini_api_key",
-                name="Gemini AI Features",
-                description="Enable AI-assisted product recommendations and creative policy checks",
-                is_complete=gemini_configured,
-                action_url=f"/tenant/{self.tenant_id}/settings#integrations",
-                details=(
-                    "AI features enabled" if gemini_configured else "Optional: Configure Gemini API key for AI features"
-                ),
+        if publisher_owns_ai_services():
+            # 2. Gemini AI Features
+            gemini_configured = bool(tenant.gemini_api_key)
+            tasks.append(
+                SetupTask(
+                    key="gemini_api_key",
+                    name="Gemini AI Features",
+                    description="Enable AI-assisted product recommendations and creative policy checks",
+                    is_complete=gemini_configured,
+                    action_url=self._route_url("settings.integrations_page"),
+                    details=(
+                        "AI features enabled"
+                        if gemini_configured
+                        else "Optional: Configure Gemini API key for AI features"
+                    ),
+                )
             )
-        )
 
         # 3. Multiple Currencies
         multiple_currencies = currency_count > 1
@@ -1135,7 +1428,7 @@ class SetupChecklistService:
                 name="Multiple Currencies",
                 description="Support international advertisers with EUR, GBP, etc.",
                 is_complete=multiple_currencies,
-                action_url=f"/tenant/{self.tenant_id}/settings#business-rules",
+                action_url=self._route_url("settings.policies_page"),
                 details=(
                     f"{currency_count} currencies supported" if multiple_currencies else "Only 1 currency configured"
                 ),
@@ -1143,6 +1436,151 @@ class SetupChecklistService:
         )
 
         return tasks
+
+    def get_dashboard_jobs(self) -> dict[str, Any]:
+        """Compute the three ongoing seller jobs for the dashboard (#471).
+
+        The operator's dashboard isn't a setup wizard with an "ready" state —
+        it's a workbench for three persistent jobs:
+
+        * **Discovery & Matching** — *the* primary job; the reason the
+          operator opens the dashboard. "Have I exposed the right
+          inventory and signals so buyers can find them?" Today the widget
+          surfaces bundle + signal counts; the richer coverage analytics
+          (what fraction of ad units / placements / KVs / audiences are
+          exposed vs. reviewed-and-explicitly-skipped) land in follow-up
+          issues. Adapter-agnostic in principle (GAM today; FreeWheel,
+          SpringServe, etc. as their syncs land).
+
+        * **Composition** — combine catalog into buyer-facing products.
+          Static product CRUD today; dynamic composition (price ×
+          optimization × targeting × demand) is the direction. Hidden for
+          embedded tenants: composition runs upstream in the storefront.
+
+        * **Delivery** — fulfill the orders you've sold. Approvals,
+          pacing, exceptions. Light here — the existing Pipeline strip
+          below this widget shows the live state. This card is the
+          jumping-off point.
+
+        These are **ongoing jobs**, not a sequence to complete; the widget
+        is always shown. Distinct from the hygiene gate
+        (:meth:`validate_setup_complete`) — that gates whether the agent
+        can take orders at all; these are the operator's day-to-day work.
+        """
+        from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+        with get_db_session() as session:
+            tenant = TenantConfigRepository(session, self.tenant_id).get_tenant()
+            if not tenant:
+                raise ValueError(f"Tenant {self.tenant_id} not found")
+
+            inventory_bundle_count = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(InventoryProfile)
+                    .where(InventoryProfile.tenant_id == self.tenant_id)
+                )
+                or 0
+            )
+            signal_profile_count = (
+                session.scalar(
+                    select(func.count()).select_from(TenantSignal).where(TenantSignal.tenant_id == self.tenant_id)
+                )
+                or 0
+            )
+            product_count = (
+                session.scalar(select(func.count()).select_from(Product).where(Product.tenant_id == self.tenant_id))
+                or 0
+            )
+
+            # Inventory bundle-coverage (#485). "Of N synced ad units, how
+            # many appear in at least one bundle?" Only for tenants on an
+            # adapter we track (GAM today). Multi-use is the norm — the same
+            # placement can be in many bundles — so the bundled count is
+            # distinct entities, not bundle references.
+            from src.core.database.repositories.gam_sync import GAMSyncRepository
+            from src.core.database.repositories.inventory_bundle_reference import (
+                InventoryBundleReferenceRepository,
+            )
+
+            inventory_coverage = _build_inventory_coverage(
+                bundle_ref_repo=InventoryBundleReferenceRepository(session, self.tenant_id),
+                gam_sync_repo=GAMSyncRepository(session, self.tenant_id),
+                tenant_ad_server=tenant.ad_server,
+            )
+
+            discovery_job: dict[str, Any] = {
+                "key": "discovery",
+                "name": "Product discovery & matching",
+                "tagline": "Make sure buyers can find the right inventory and signals from you.",
+                "sub_items": [
+                    {
+                        "key": "bundles",
+                        "name": "Inventory bundles",
+                        "count": inventory_bundle_count,
+                        "started": inventory_bundle_count > 0,
+                        "action_url": self._route_url("inventory_profiles.list_inventory_profiles"),
+                        "action_label": "Review bundles" if inventory_bundle_count > 0 else "Author bundles",
+                        # Real inventory coverage analytics (#485). ``None`` for adapters we
+                        # don't track yet — the widget falls back to a placeholder hint.
+                        "coverage": inventory_coverage,
+                    },
+                    {
+                        "key": "signals",
+                        "name": "Signal profiles",
+                        "count": signal_profile_count,
+                        # Signals are optional — a publisher with zero signals is valid, but only
+                        # if they've reviewed their signal universe and made the call. Signal
+                        # coverage analytics land in #486 (parallel work).
+                        "started": signal_profile_count > 0,
+                        "action_url": self._route_url("tenant_signals.list_signals"),
+                        "action_label": "Review signals" if signal_profile_count > 0 else "Author signals",
+                        "coverage": None,
+                    },
+                ],
+            }
+
+            # Composition job — hidden when the storefront owns composition;
+            # otherwise embedded publishers may still manage legacy/open
+            # product catalogs.
+            composition_job: dict[str, Any] | None = None
+            if publisher_owns_compose_products():
+                composition_job = {
+                    "key": "composition",
+                    "name": "Composition",
+                    "tagline": "Combine your catalog into buyer-facing products.",
+                    "count": product_count,
+                    "count_label": "product" if product_count == 1 else "products",
+                    "action_url": self._route_url("products.list_products"),
+                    "action_label": "Manage products" if product_count > 0 else "Compose a product",
+                    # Static CRUD is the present-tense path; dynamic composition is the direction.
+                    "note": "Static products today. Dynamic composition (pricing × targeting × demand) is the direction.",
+                }
+
+            # Delivery job — light surface. The detailed pipeline (incoming /
+            # running / pending) is the existing strip below this widget.
+            delivery_job: dict[str, Any] = {
+                "key": "delivery",
+                "name": "Delivery",
+                "tagline": "Fulfill the orders you've sold.",
+                "action_url": None if tenant.is_embedded else self._route_url("operations.reporting"),
+                "action_label": "Reporting",
+                "note": (
+                    "Delivery status is surfaced by the storefront."
+                    if tenant.is_embedded
+                    else "Approvals, pacing, and exceptions live in the pipeline below."
+                ),
+            }
+
+            jobs: list[dict[str, Any]] = [discovery_job]
+            if composition_job is not None:
+                jobs.append(composition_job)
+            jobs.append(delivery_job)
+
+            return {
+                "is_embedded": tenant.is_embedded,
+                "jobs": jobs,
+            }
 
     def get_next_steps(self) -> list[dict[str, str]]:
         """Get prioritized next steps for incomplete tasks.
@@ -1207,12 +1645,19 @@ def get_incomplete_critical_tasks(tenant_id: str) -> list[dict[str, Any]]:
 def validate_setup_complete(tenant_id: str) -> None:
     """Validate that tenant has completed all critical setup tasks.
 
-    Args:
-        tenant_id: Tenant ID to validate
-
-    Raises:
-        SetupIncompleteError: If critical setup tasks are incomplete
+    Embedded-mode tenants skip this gate: platform-config tasks (ad server,
+    SSO, etc.) are owned by the host product (Storefront, Manticore, ...),
+    not the publisher, and surfacing them as buyer-protocol blockers would
+    be wrong.
     """
+    from src.core.database.database_session import get_db_session
+    from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+    with get_db_session() as session:
+        tenant = TenantConfigRepository(session, tenant_id).get_tenant()
+        if tenant and tenant.is_embedded:
+            return
+
     incomplete = get_incomplete_critical_tasks(tenant_id)
     if incomplete:
         task_names = ", ".join(task["name"] for task in incomplete)

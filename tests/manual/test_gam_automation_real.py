@@ -36,6 +36,7 @@ from src.adapters.google_ad_manager import GoogleAdManager
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Product
 from src.core.schemas import CreateMediaBuyRequest, MediaPackage, Principal, Targeting
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 
 class GAMAutomationTester:
@@ -276,11 +277,11 @@ class GAMAutomationTester:
             package_id="gam_test_auto",
             name="Auto Activation Test Package",
             impressions=1000,  # Small test amount
-            cpm=1.00,
             format="display",
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="AUTO001",
             total_budget=10.00,
@@ -335,10 +336,11 @@ class GAMAutomationTester:
         )
 
         package = MediaPackage(
-            package_id="gam_test_confirm", name="Confirmation Test Package", impressions=500, cpm=0.50, format="display"
+            package_id="gam_test_confirm", name="Confirmation Test Package", impressions=500, format="display"
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="CONF001",
             total_budget=5.00,
@@ -394,10 +396,11 @@ class GAMAutomationTester:
         )
 
         package = MediaPackage(
-            package_id="gam_test_manual", name="Manual Test Package", impressions=750, cpm=0.75, format="display"
+            package_id="gam_test_manual", name="Manual Test Package", impressions=750, format="display"
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="MAN001",
             total_budget=7.50,
@@ -455,11 +458,11 @@ class GAMAutomationTester:
             package_id="gam_test_guaranteed",
             name="Guaranteed Test Package",
             impressions=10000,
-            cpm=5.00,
             format="display",
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="GUAR001",
             total_budget=500.00,
@@ -518,11 +521,11 @@ class GAMAutomationTester:
             package_id="gam_test_lifecycle_network",
             name="Lifecycle Activate Test Package",
             impressions=500,
-            cpm=1.50,
             format="display",
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="LIFECYCLE001",
             total_budget=7.50,
@@ -587,11 +590,11 @@ class GAMAutomationTester:
             package_id="gam_test_lifecycle_standard",
             name="Lifecycle Approval Test Package",
             impressions=1000,
-            cpm=2.00,
             format="display",
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="LIFECYCLE002",
             total_budget=20.00,
@@ -654,11 +657,11 @@ class GAMAutomationTester:
             package_id="gam_test_lifecycle_standard_block",
             name="Lifecycle Blocking Test Package",
             impressions=500,
-            cpm=3.00,
             format="display",
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="LIFECYCLE003",
             total_budget=15.00,
@@ -725,11 +728,11 @@ class GAMAutomationTester:
             package_id="gam_test_lifecycle_archive",
             name="Lifecycle Archive Test Package",
             impressions=100,
-            cpm=1.00,
             format="display",
         )
 
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="LIFECYCLE004",
             total_budget=1.00,

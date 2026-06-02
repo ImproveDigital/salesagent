@@ -25,6 +25,7 @@ def pending_media_buy_with_package(integration_db):
 
     from tests.factories import (
         ALL_FACTORIES,
+        InventoryProfileFactory,
         MediaBuyFactory,
         MediaPackageFactory,
         PricingOptionFactory,
@@ -47,11 +48,17 @@ def pending_media_buy_with_package(integration_db):
             principal_id="test_principal",
             platform_mappings={"mock": {"id": "test_advertiser"}},
         )
+        profile = InventoryProfileFactory(
+            tenant=tenant,
+            format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
+        )
         product = ProductFactory(
             tenant=tenant,
             product_id="guaranteed_display",
             name="Guaranteed Display Ads",
             delivery_type="guaranteed",
+            inventory_profile_id=profile.id,
+            format_ids=[],
         )
         PricingOptionFactory(
             product=product,
@@ -78,6 +85,8 @@ def pending_media_buy_with_package(integration_db):
             end_time=end,
             status="pending_approval",
             raw_request={
+                "account": {"account_id": "test-acct"},
+                "idempotency_key": "idem-test-xxxxxxxxxxxxxxxx",
                 "brand": {"domain": "testbrand.com"},
                 "start_time": start.isoformat(),
                 "end_time": end.isoformat(),
@@ -167,6 +176,8 @@ def pending_media_buy_with_two_packages(integration_db):
             end_time=end,
             status="pending_approval",
             raw_request={
+                "account": {"account_id": "test-acct"},
+                "idempotency_key": "idem-test-xxxxxxxxxxxxxxxx",
                 "brand": {"domain": "testbrand.com"},
                 "start_time": start.isoformat(),
                 "end_time": end.isoformat(),

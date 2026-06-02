@@ -16,10 +16,10 @@ import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from src.core.database.models import MediaBuy, MediaPackage
+from src.core.database.models import GamAdvertiser, MediaBuy, MediaPackage
 
 
 class MediaBuyRepository:
@@ -60,6 +60,17 @@ class MediaBuyRepository:
             )
         ).first()
 
+    def get_by_id_for_update(self, media_buy_id: str) -> MediaBuy | None:
+        """Get a media buy by ID and lock it for the current transaction."""
+        return self._session.scalars(
+            select(MediaBuy)
+            .where(
+                MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.media_buy_id == media_buy_id,
+            )
+            .with_for_update()
+        ).first()
+
     def find_by_idempotency_key(self, idempotency_key: str, principal_id: str) -> MediaBuy | None:
         """Find an existing media buy by idempotency_key within (tenant, principal).
 
@@ -81,6 +92,46 @@ class MediaBuyRepository:
             result = self.find_by_idempotency_key(identifier, principal_id)
         return result
 
+    def get_by_external_id(self, external_id: str) -> MediaBuy | None:
+        """Get a media buy by adapter-side ID (e.g. GAM order ID)."""
+        return self._session.scalars(
+            select(MediaBuy).where(
+                MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.external_id == external_id,
+            )
+        ).first()
+
+    def list_external_ids_for_source(self, source: str, external_ids: list[str]) -> set[str]:
+        """Return the subset of ``external_ids`` that already have a row
+        with the given ``source`` within this tenant.
+
+        Used by the GAM projection to skip orders that have already been
+        materialized so a buyer doesn't see duplicates.
+        """
+        if not external_ids:
+            return set()
+        rows = self._session.scalars(
+            select(MediaBuy.external_id).where(
+                MediaBuy.tenant_id == self._tenant_id,
+                MediaBuy.source == source,
+                MediaBuy.external_id.in_(external_ids),
+            )
+        ).all()
+        return {r for r in rows if r is not None}
+
+    def get_by_id_or_external_id(self, identifier: str) -> MediaBuy | None:
+        """Resolve a media buy by canonical ``media_buy_id`` or by ``external_id``.
+
+        Lookup convergence — buyers can pass either form. Native AdCP buys
+        carry an ``mb_<uuid>`` PK plus an ``external_id`` populated after the
+        adapter assigns one; imported buys use ``gam_<order_id>`` for both
+        the PK (with the prefix) and the ``external_id`` (without).
+        """
+        result = self.get_by_id(identifier)
+        if result is None:
+            result = self.get_by_external_id(identifier)
+        return result
+
     # ------------------------------------------------------------------
     # List queries
     # ------------------------------------------------------------------
@@ -96,15 +147,80 @@ class MediaBuyRepository:
 
         Filters are combined with AND. Pass None to skip a filter.
         """
-        stmt = select(MediaBuy).where(
-            MediaBuy.tenant_id == self._tenant_id,
-            MediaBuy.principal_id == principal_id,
-        )
+        assigned_advertiser_ids = self._assigned_gam_advertiser_ids(principal_id)
+        visible_to_principal = self._visible_media_buy_clause(principal_id, assigned_advertiser_ids)
+        stmt = select(MediaBuy).where(MediaBuy.tenant_id == self._tenant_id, visible_to_principal)
         if media_buy_ids is not None:
             stmt = stmt.where(MediaBuy.media_buy_id.in_(media_buy_ids))
         if statuses is not None:
             stmt = stmt.where(MediaBuy.status.in_(statuses))
         return list(self._session.scalars(stmt).all())
+
+    def _assigned_gam_advertiser_ids(self, principal_id: str) -> set[str]:
+        return set(
+            self._session.scalars(
+                select(GamAdvertiser.advertiser_id).where(
+                    GamAdvertiser.tenant_id == self._tenant_id,
+                    GamAdvertiser.principal_id == principal_id,
+                )
+            ).all()
+        )
+
+    def _visible_media_buy_clause(self, principal_id: str, assigned_advertiser_ids: set[str]) -> Any:
+        native_or_owned = and_(
+            or_(MediaBuy.source.is_(None), MediaBuy.source != "gam_import"),
+            MediaBuy.principal_id == principal_id,
+        )
+        if not assigned_advertiser_ids:
+            return native_or_owned
+        return or_(
+            native_or_owned,
+            and_(
+                MediaBuy.source == "gam_import",
+                MediaBuy.raw_request["gam_advertiser_id"].as_string().in_(assigned_advertiser_ids),
+            ),
+        )
+
+    def gam_import_is_assigned_to_principal(self, media_buy: MediaBuy, principal_id: str) -> bool:
+        """Return whether a materialized GAM import still belongs to principal_id.
+
+        GAM-imported rows are materialized snapshots of ``gam_orders``. Access
+        remains governed by the live ``gam_advertisers.principal_id`` assignment
+        so clearing or changing an advertiser assignment revokes stale rows that
+        were previously stamped with ``MediaBuy.principal_id``.
+        """
+        if media_buy.source != "gam_import":
+            return True
+
+        advertiser_id = (media_buy.raw_request or {}).get("gam_advertiser_id")
+        if not advertiser_id:
+            return False
+
+        return (
+            self._session.scalar(
+                select(GamAdvertiser.advertiser_id).where(
+                    GamAdvertiser.tenant_id == self._tenant_id,
+                    GamAdvertiser.advertiser_id == str(advertiser_id),
+                    GamAdvertiser.principal_id == principal_id,
+                )
+            )
+            is not None
+        )
+
+    def _filter_live_gam_import_assignments(self, media_buys: list[MediaBuy], principal_id: str) -> list[MediaBuy]:
+        """Hide materialized GAM imports whose advertiser assignment changed."""
+        imported = [buy for buy in media_buys if buy.source == "gam_import"]
+        if not imported:
+            return media_buys
+
+        assigned_advertiser_ids = self._assigned_gam_advertiser_ids(principal_id)
+
+        return [
+            buy
+            for buy in media_buys
+            if buy.source != "gam_import"
+            or str((buy.raw_request or {}).get("gam_advertiser_id")) in assigned_advertiser_ids
+        ]
 
     def get_active(self) -> list[MediaBuy]:
         """Get all active media buys for the tenant."""
@@ -173,7 +289,12 @@ class MediaBuyRepository:
             result.setdefault(pkg.media_buy_id, []).append(pkg)
         return result
 
-    def find_package_with_media_buy(self, package_id: str) -> tuple[MediaPackage, MediaBuy] | None:
+    def find_package_with_media_buy(
+        self,
+        package_id: str,
+        *,
+        principal_id: str | None = None,
+    ) -> tuple[MediaPackage, MediaBuy] | None:
         """Find a package and its parent media buy by package_id within the tenant.
 
         Useful when you only have a package_id and need to resolve the parent
@@ -191,7 +312,14 @@ class MediaBuyRepository:
         ).first()
         if result is None:
             return None
-        return result[0], result[1]
+        db_package, db_media_buy = result[0], result[1]
+        if principal_id is not None:
+            if db_media_buy.source == "gam_import":
+                if not self.gam_import_is_assigned_to_principal(db_media_buy, principal_id):
+                    return None
+            elif db_media_buy.principal_id != principal_id:
+                return None
+        return db_package, db_media_buy
 
     # ------------------------------------------------------------------
     # Tenant-wide list queries (for admin/dashboard)
@@ -258,6 +386,51 @@ class MediaBuyRepository:
             ).all()
         )
 
+    def list_filtered_with_cursor(
+        self,
+        *,
+        status: str | None = None,
+        principal_id: str | None = None,
+        from_date: datetime.date | None = None,
+        to_date: datetime.date | None = None,
+        cursor_created_at: datetime.datetime | None = None,
+        cursor_id: str | None = None,
+        limit: int = 50,
+    ) -> list[MediaBuy]:
+        """List media buys for ``GET /media-buys`` drill-down.
+
+        Sort: ``created_at desc, media_buy_id desc``. Cursor pagination uses
+        the same ``(created_at, id)`` tuple pattern as audit log + sync
+        history so concurrent inserts can't skip or duplicate rows.
+
+        ``from_date``/``to_date`` filter on ``start_date`` (the flight start),
+        not ``created_at`` — buyers ask "what was running in this window".
+        """
+        stmt = select(MediaBuy).where(MediaBuy.tenant_id == self._tenant_id)
+
+        if status:
+            stmt = stmt.where(MediaBuy.status == status)
+        if principal_id:
+            stmt = stmt.where(MediaBuy.principal_id == principal_id)
+        if from_date:
+            stmt = stmt.where(MediaBuy.start_date >= from_date)
+        if to_date:
+            stmt = stmt.where(MediaBuy.start_date <= to_date)
+
+        if cursor_created_at is not None and cursor_id is not None:
+            stmt = stmt.where(
+                or_(
+                    MediaBuy.created_at < cursor_created_at,
+                    and_(
+                        MediaBuy.created_at == cursor_created_at,
+                        MediaBuy.media_buy_id < cursor_id,
+                    ),
+                )
+            )
+
+        stmt = stmt.order_by(MediaBuy.created_at.desc(), MediaBuy.media_buy_id.desc()).limit(limit)
+        return list(self._session.scalars(stmt).all())
+
     # ------------------------------------------------------------------
     # MediaBuy writes
     # ------------------------------------------------------------------
@@ -280,6 +453,9 @@ class MediaBuyRepository:
         package_id_map: dict[int, str] | None = None,
         by_alias: bool = False,
         created_at: datetime.datetime | None = None,
+        approved_at: datetime.datetime | None = None,
+        confirmed_at: datetime.datetime | None = None,
+        approved_by: str | None = None,
         account_id: str | None = None,
     ) -> MediaBuy:
         """Create a MediaBuy from a request model, serializing raw_request at the DB boundary.
@@ -337,10 +513,60 @@ class MediaBuyRepository:
             kwargs["kpi_goal"] = kpi_goal
         if created_at is not None:
             kwargs["created_at"] = created_at
+        if approved_at is not None:
+            kwargs["approved_at"] = approved_at
+        if confirmed_at is not None:
+            kwargs["confirmed_at"] = confirmed_at
+        if approved_by is not None:
+            kwargs["approved_by"] = approved_by
         if account_id is not None:
             kwargs["account_id"] = account_id
 
         media_buy = MediaBuy(**kwargs)
+        self._session.add(media_buy)
+        self._session.flush()
+        return media_buy
+
+    def create_from_gam_import(
+        self,
+        *,
+        media_buy_id: str,
+        principal_id: str,
+        order_name: str,
+        advertiser_name: str,
+        budget: Decimal | None,
+        currency: str,
+        start_date: datetime.date,
+        end_date: datetime.date,
+        start_time: datetime.datetime | None,
+        end_time: datetime.datetime | None,
+        status: str,
+        external_id: str,
+        raw_request: dict,
+    ) -> MediaBuy:
+        """Create a media buy materialized from an imported GAM order.
+
+        Marks the row with ``source='gam_import'`` and stamps
+        ``external_id`` with the GAM order id so the buyer can update it
+        later via either id form. Does NOT commit — UoW handles that.
+        """
+        media_buy = MediaBuy(
+            media_buy_id=media_buy_id,
+            tenant_id=self._tenant_id,
+            principal_id=principal_id,
+            order_name=order_name,
+            advertiser_name=advertiser_name,
+            budget=budget,
+            currency=currency,
+            start_date=start_date,
+            end_date=end_date,
+            start_time=start_time,
+            end_time=end_time,
+            status=status,
+            raw_request=raw_request,
+            source="gam_import",
+            external_id=external_id,
+        )
         self._session.add(media_buy)
         self._session.flush()
         return media_buy
@@ -380,8 +606,19 @@ class MediaBuyRepository:
         media_buy.status = status
         if approved_at is not None:
             media_buy.approved_at = approved_at
+            if media_buy.confirmed_at is None:
+                media_buy.confirmed_at = approved_at
         if approved_by is not None:
             media_buy.approved_by = approved_by
+        self._session.flush()
+        return media_buy
+
+    def increment_revision(self, media_buy_id: str) -> MediaBuy | None:
+        """Increment a media buy's optimistic-concurrency revision."""
+        media_buy = self.get_by_id(media_buy_id)
+        if media_buy is None:
+            return None
+        media_buy.revision = (media_buy.revision or 1) + 1
         self._session.flush()
         return media_buy
 
@@ -518,10 +755,18 @@ class MediaBuyRepository:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def get_all_by_statuses(session: Session, statuses: list[str]) -> list[MediaBuy]:
+    def get_all_by_statuses(
+        session: Session, statuses: list[str], *, eager_load_tenant: bool = False
+    ) -> list[MediaBuy]:
         """Get media buys across ALL tenants filtered by status.
 
         This is a system-level query for schedulers that need to process
         media buys regardless of tenant. Not tenant-scoped.
+
+        ``eager_load_tenant`` joins MediaBuy.tenant so scheduler batches that
+        inspect tenant-level flags do not emit one lazy-load query per buy.
         """
-        return list(session.scalars(select(MediaBuy).where(MediaBuy.status.in_(statuses))).all())
+        stmt = select(MediaBuy).where(MediaBuy.status.in_(statuses))
+        if eager_load_tenant:
+            stmt = stmt.options(joinedload(MediaBuy.tenant))
+        return list(session.scalars(stmt).all())

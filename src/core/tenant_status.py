@@ -20,9 +20,9 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
 
     A tenant is considered configured if:
     - For GAM: OAuth token OR service account credentials exist
-    - For Kevel: API key exists
+    - For Triton: publisher username/password exist in config_json
+    - For FreeWheel: either (username + password) or api_token exists in config_json
     - For Mock: Always configured
-    - For Triton: API key exists
     - For others: Adapter config exists
 
     Args:
@@ -67,24 +67,29 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
                     )
                 return has_auth
 
-            elif adapter_type == "kevel":
-                # Kevel requires API key and network ID
-                has_credentials = bool(adapter_config.kevel_api_key and adapter_config.kevel_network_id)
-                if not has_credentials:
-                    logger.info(f"Tenant {tenant_id} Kevel adapter missing credentials")
-                return has_credentials
-
             elif adapter_type == "mock":
                 # Mock adapter is NOT considered configured for production use
-                # Users should configure a real ad server (GAM, Kevel, etc.)
+                # Users should configure a real ad server (GAM, etc.)
                 return False
 
-            elif adapter_type == "triton":
-                # Triton requires API key
-                has_key = bool(adapter_config.triton_api_key)
-                if not has_key:
-                    logger.info(f"Tenant {tenant_id} Triton adapter missing API key")
-                return has_key
+            elif adapter_type in {"triton", "triton_digital"}:
+                config = adapter_config.config_json or {}
+                has_creds = bool(config.get("username") and config.get("password"))
+                if not has_creds:
+                    logger.info(f"Tenant {tenant_id} Triton adapter missing publisher credentials")
+                return has_creds
+
+            elif adapter_type == "freewheel":
+                config = adapter_config.config_json or {}
+                has_password_grant = bool(config.get("username") and config.get("password"))
+                has_token = bool(config.get("api_token"))
+                has_creds = has_password_grant or has_token
+                if not has_creds:
+                    logger.info(
+                        f"Tenant {tenant_id} FreeWheel adapter missing credentials "
+                        "(need username+password or api_token)"
+                    )
+                return has_creds
 
             else:
                 # Unknown adapter type - consider it configured if it has a type
@@ -158,15 +163,19 @@ def get_tenant_status(tenant_id: str) -> dict:
                 if not adapter_config.gam_network_code:
                     missing_config.append("GAM network code not set")
 
-            elif adapter_type == "kevel":
-                if not adapter_config.kevel_api_key:
-                    missing_config.append("Kevel API key not set")
-                if not adapter_config.kevel_network_id:
-                    missing_config.append("Kevel network ID not set")
+            elif adapter_type in {"triton", "triton_digital"}:
+                config = adapter_config.config_json or {}
+                if not config.get("username"):
+                    missing_config.append("Triton publisher email not set")
+                if not config.get("password"):
+                    missing_config.append("Triton publisher password not set")
 
-            elif adapter_type == "triton":
-                if not adapter_config.triton_api_key:
-                    missing_config.append("Triton API key not set")
+            elif adapter_type == "freewheel":
+                config = adapter_config.config_json or {}
+                has_password_grant = bool(config.get("username") and config.get("password"))
+                has_token = bool(config.get("api_token"))
+                if not has_password_grant and not has_token:
+                    missing_config.append("FreeWheel credentials not set (username+password or api_token)")
 
             # Mock adapter doesn't need additional config
             status["is_configured"] = len(missing_config) == 0

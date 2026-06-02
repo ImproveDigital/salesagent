@@ -9,7 +9,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import validates
 
 # Pydantic models for JSON field validation
@@ -31,15 +31,21 @@ class CommentModel(BaseModel):
 
 
 class PlatformMappingModel(BaseModel):
-    """Model for principal.platform_mappings."""
+    """Model for principal.platform_mappings.
+
+    Uses ``extra="forbid"`` so removed adapter keys (e.g. ``kevel`` after
+    its removal) fail loudly on write instead of being silently scrubbed
+    by the validator's ``model_dump(exclude_none=True)`` round-trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     google_ad_manager: dict[str, Any] | None = None
-    kevel: dict[str, Any] | None = None
     mock: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def at_least_one_platform(self):
-        if not any([self.google_ad_manager, self.kevel, self.mock]):
+        if not any([self.google_ad_manager, self.mock]):
             raise ValueError("At least one platform mapping is required")
         return self
 
@@ -96,8 +102,8 @@ class JSONValidatorMixin:
                 return None  # Convert string 'null' to actual None
             try:
                 value = json.loads(value)
-            except json.JSONDecodeError:
-                raise ValueError(f"{key} must be valid JSON")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{key} must be valid JSON") from e
         if not isinstance(value, dict):
             # If it's not a dict and not None, make it an empty dict
             return {}
@@ -112,8 +118,8 @@ class JSONValidatorMixin:
         if isinstance(value, str):
             try:
                 value = json.loads(value)
-            except json.JSONDecodeError:
-                raise ValueError(f"{key} must be valid JSON")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{key} must be valid JSON") from e
 
         if not isinstance(value, list):
             raise ValueError(f"{key} must be a list")
@@ -138,8 +144,8 @@ class JSONValidatorMixin:
         if isinstance(value, str):
             try:
                 value = json.loads(value)
-            except json.JSONDecodeError:
-                raise ValueError(f"{key} must be valid JSON")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{key} must be valid JSON") from e
 
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a dictionary")
@@ -157,8 +163,8 @@ class JSONValidatorMixin:
         if isinstance(value, str):
             try:
                 value = json.loads(value)
-            except json.JSONDecodeError:
-                raise ValueError(f"{key} must be valid JSON")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{key} must be valid JSON") from e
 
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a dictionary")
@@ -176,8 +182,8 @@ class JSONValidatorMixin:
         if isinstance(value, str):
             try:
                 value = json.loads(value)
-            except json.JSONDecodeError:
-                raise ValueError(f"{key} must be valid JSON")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{key} must be valid JSON") from e
 
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a dictionary")
@@ -195,8 +201,8 @@ class JSONValidatorMixin:
         if isinstance(value, str):
             try:
                 value = json.loads(value)
-            except json.JSONDecodeError:
-                raise ValueError(f"{key} must be valid JSON")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{key} must be valid JSON") from e
 
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a dictionary")
@@ -226,8 +232,8 @@ def ensure_json_array(value: str | list | None, default: list | None = None) -> 
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON string")
+        except json.JSONDecodeError as e:
+            raise ValueError("Invalid JSON string") from e
 
     if not isinstance(value, list):
         raise ValueError("Value must be a list")
@@ -252,8 +258,8 @@ def ensure_json_object(value: str | dict | None, default: dict | None = None) ->
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON string")
+        except json.JSONDecodeError as e:
+            raise ValueError("Invalid JSON string") from e
 
     if not isinstance(value, dict):
         raise ValueError("Value must be a dictionary")
@@ -275,8 +281,8 @@ def validate_json_schema(value: Any, schema: type[BaseModel]) -> dict:
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON string")
+        except json.JSONDecodeError as e:
+            raise ValueError("Invalid JSON string") from e
 
     validated = schema(**value)
     return validated.model_dump(mode="json")

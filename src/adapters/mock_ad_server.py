@@ -24,7 +24,7 @@ from src.core.schemas import (
     CheckMediaBuyStatusResponse,
     CreateMediaBuyRequest,
     CreateMediaBuyResponse,
-    CreateMediaBuySuccess,
+    CreateMediaBuySubmitted,
     DeliveryTotals,
     MediaPackage,
     PackagePerformance,
@@ -475,13 +475,22 @@ class MockAdServer(AdServerAdapter):
 
             # Handle question asking (return pending with question)
             if scenario.should_ask_question:
-                # For question-asking scenario, return success with pending media_buy_id
-                # The media buy hasn't been created yet - we need input first
-                # The workflow_step_id will track this pending operation
-                return CreateMediaBuySuccess(
-                    media_buy_id="pending",  # Placeholder for pending manual approval
-                    creative_deadline=None,
-                    packages=[],  # No packages yet - operation not complete
+                step = self._create_workflow_step(
+                    step_type="mock_create_media_buy_question",
+                    status="input_required",
+                    request_data={
+                        "request": request,
+                        "packages": packages,
+                        "start_time": start_time.isoformat(),
+                        "end_time": end_time.isoformat(),
+                        "operation": "create_media_buy",
+                        "question": scenario.question_text,
+                    },
+                )
+                return CreateMediaBuySubmitted(
+                    task_id=step["step_id"],
+                    workflow_step_id=step["step_id"],
+                    message=scenario.question_text or "Additional input is required before creating this media buy.",
                 )
 
             # Handle async mode
@@ -595,14 +604,14 @@ class MockAdServer(AdServerAdapter):
         else:
             self.log("   Manual completion required - use complete_task tool")
 
-        # For async mode, return response without media_buy_id or packages
+        # For async mode, return the submitted task shape without media_buy_id or packages
         # The media buy hasn't been created yet - it's being processed asynchronously
         # The workflow_step_id (from step['step_id']) will track this pending operation
         # Client can poll the step or wait for webhook notification when complete
-        return CreateMediaBuySuccess(
-            media_buy_id="pending",  # Placeholder for async processing in progress
-            creative_deadline=None,
-            packages=[],  # No packages yet - operation not complete
+        return CreateMediaBuySubmitted(
+            task_id=step["step_id"],
+            workflow_step_id=step["step_id"],
+            message="Media buy creation submitted for asynchronous processing.",
         )
 
     def _create_media_buy_sync_with_delay(
@@ -675,6 +684,7 @@ class MockAdServer(AdServerAdapter):
 
         order_name_template = "{campaign_name|brand_name} - {media_buy_id} - {date_range}"  # Default
         tenant_gemini_key = None
+        auto_naming_enabled = True
         try:
             with get_db_session() as db_session:
                 if tenant_id and tenant_id != "unknown":
@@ -683,13 +693,22 @@ class MockAdServer(AdServerAdapter):
                         if tenant_obj.order_name_template:
                             order_name_template = tenant_obj.order_name_template
                         tenant_gemini_key = tenant_obj.gemini_api_key
+                        auto_naming_enabled = tenant_obj.auto_naming_enabled
         except Exception:
             # Database not available (e.g., in unit tests) - use default template
             logger.debug("Could not load tenant config from DB, using defaults", exc_info=True)
 
         # Build context and apply template
         context = build_order_name_context(
-            request, packages, start_time, end_time, tenant_gemini_key=tenant_gemini_key, media_buy_id=media_buy_id
+            request,
+            packages,
+            start_time,
+            end_time,
+            tenant_gemini_key=tenant_gemini_key,
+            media_buy_id=media_buy_id,
+            template=order_name_template,
+            auto_naming_enabled=auto_naming_enabled,
+            tenant_id=tenant_id,
         )
         print(
             f"[NAMING DEBUG] template={repr(order_name_template)}, has_promoted_offering={('promoted_offering' in context)}"
@@ -741,15 +760,17 @@ class MockAdServer(AdServerAdapter):
                 budget_amount, _ = extract_budget_amount(p.budget)
                 total_budget += budget_amount
             elif p.delivery_type == "guaranteed":
-                # Fallback: calculate from CPM * impressions (legacy)
-                # Use pricing_info if available (pricing_option_id flow), else fallback to package.cpm
-                pricing_info = package_pricing_info.get(p.package_id) if package_pricing_info else None
-                if pricing_info:
-                    # Use rate from pricing option (fixed) or bid_price (auction)
-                    rate = pricing_info["rate"] if pricing_info["is_fixed"] else pricing_info.get("bid_price", p.cpm)
-                else:
-                    # Fallback to legacy package.cpm
-                    rate = p.cpm
+                # Fallback: calculate from rate * impressions when package.budget is absent.
+                # package_pricing_info is guaranteed populated by media_buy_create.
+                pricing_info = (package_pricing_info or {}).get(p.package_id)
+                if not pricing_info:
+                    raise ValueError(
+                        f"Missing pricing info for package {p.package_id!r}; "
+                        "media_buy_create must populate package_pricing_info."
+                    )
+                rate = pricing_info["rate"] if pricing_info["is_fixed"] else pricing_info.get("bid_price")
+                if rate is None:
+                    raise ValueError(f"Package {p.package_id!r} uses auction pricing but has no bid_price.")
                 total_budget += rate * p.impressions / 1000
 
         # Apply strategy-based bid adjustment
@@ -1235,7 +1256,7 @@ class MockAdServer(AdServerAdapter):
             media_buy_id=media_buy_id,
             reporting_period=date_range,
             totals=DeliveryTotals(
-                impressions=impressions, spend=spend, clicks=100, ctr=0.0, video_completions=5000, completion_rate=0.0
+                impressions=impressions, spend=spend, clicks=100, ctr=0.0, completed_views=5000, completion_rate=0.0
             ),
             by_package=by_package,
             currency="USD",

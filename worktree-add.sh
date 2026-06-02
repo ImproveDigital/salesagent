@@ -11,9 +11,8 @@
 #
 # What it does:
 #   1. Creates the worktree (new branch from base-ref, or checks out existing)
-#   2. Symlinks .beads/ for shared task tracking
-#   3. Symlinks untracked .claude/ dirs (research, settings, agent-memory)
-#   4. Runs uv sync if uv is available
+#   2. Symlinks untracked .claude/ dirs (research, settings, agent-memory)
+#   3. Runs uv sync if uv is available
 
 set -euo pipefail
 
@@ -43,13 +42,6 @@ fi
 
 # Resolve to absolute path
 TARGET="$(cd "$TARGET" && pwd)"
-
-# Symlink .beads/ for shared task tracking
-if [ -d "$MAIN_REPO/.beads" ]; then
-    rm -rf "$TARGET/.beads"
-    ln -sf "$MAIN_REPO/.beads" "$TARGET/.beads"
-    echo "Linked .beads/"
-fi
 
 # Symlink untracked .claude/ local state
 # (tracked .claude/ files like rules/workflows come from git automatically)

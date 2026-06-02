@@ -1,4 +1,3 @@
-# from .xandr import XandrAdapter  # Temporarily disabled - needs schema updates
 from dataclasses import dataclass
 
 from .base import AdapterCapabilities as AdapterCapabilities
@@ -8,23 +7,26 @@ from .base import BaseProductConfig as BaseProductConfig
 from .base import TargetingCapabilities as TargetingCapabilities
 from .broadstreet import BroadstreetAdapter
 from .creative_engine import CreativeEngineAdapter
+from .freewheel import FreeWheelAdapter
 from .google_ad_manager import GoogleAdManager as GAMAdapter
-from .kevel import Kevel as KevelAdapter
 from .mock_ad_server import MockAdServer as MockAdapter
-from .triton_digital import TritonDigital as TritonAdapter
+from .springserve import SpringServeAdapter
+
+# Triton is parked — module is preserved (see src/adapters/triton/) and tests
+# still run, but the adapter is intentionally NOT registered: Triton told us
+# their APIs aren't production-ready (2026-05). Restoring is a registry-only
+# revert when their APIs come back. No tenants can select "triton" as their
+# ad_server while it's deregistered.
 
 # Map of adapter type strings to adapter classes
 ADAPTER_REGISTRY = {
     "gam": GAMAdapter,
     "google_ad_manager": GAMAdapter,
     "broadstreet": BroadstreetAdapter,
-    "kevel": KevelAdapter,
+    "freewheel": FreeWheelAdapter,
+    "springserve": SpringServeAdapter,
     "mock": MockAdapter,
-    "triton": TritonAdapter,
-    "triton_digital": TritonAdapter,
     "creative_engine": CreativeEngineAdapter,
-    # 'xandr': XandrAdapter,
-    # 'microsoft_monetize': XandrAdapter
 }
 
 
@@ -80,7 +82,7 @@ def get_adapter_default_channels(adapter_type: str) -> list[str]:
     Default channels are defined on each adapter class's default_channels attribute.
 
     Args:
-        adapter_type: Adapter type name (e.g., "google_ad_manager", "mock", "kevel", "triton")
+        adapter_type: Adapter type name (e.g., "google_ad_manager", "mock", "triton")
 
     Returns:
         List of default channel names for the adapter

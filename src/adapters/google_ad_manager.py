@@ -14,7 +14,7 @@ __all__ = [
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import sqlalchemy.exc
@@ -45,6 +45,7 @@ from src.adapters.gam.managers.orders import (
 from src.adapters.gam.pricing_compatibility import PricingCompatibility
 from src.adapters.gam_data_freshness import validate_and_log_freshness
 from src.core.audit_logger import AuditLogger
+from src.core.sandbox import is_sandbox_trafficking_request
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
     AffectedPackage,
@@ -65,12 +66,37 @@ from src.core.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _clamp_target_date_to_now(end_dt: datetime) -> datetime:
+    """Clamp a reporting-window ``end`` to "now" for freshness validation.
+
+    Ad-hoc ``get_media_buy_delivery`` queries may legitimately extend past
+    "now" (e.g. a buyer polling ``[today, tomorrow]``). GAM cannot have
+    produced data for a future boundary, so the freshness validator would
+    reject every such window as stale. Clamping to "now" lets the validator
+    apply its real check ("does the report cover up to now?") instead of an
+    impossible one ("does the report cover up to tomorrow?").
+
+    Naive datetimes are clamped against a naive ``now`` so the comparison
+    doesn't raise; aware datetimes against ``datetime.now(UTC)``.
+    """
+    now = datetime.now(UTC)
+    if end_dt.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    return min(end_dt, now)
+
+
 class GoogleAdManager(AdServerAdapter):
     """Google Ad Manager adapter using modular architecture."""
 
     adapter_name = "google_ad_manager"
 
     capabilities = AdapterCapabilities(
+        supports_inventory_sync=True,  # Via background_sync_service (existing async sync)
+        # supports_reporting_sync stays False — GAM doesn't have a separate
+        # reporting sync; line-item stats are written by gam_orders_service
+        # as part of the inventory sync.
+        reporting_bundled_with_inventory=True,  # Surfaces label on /admin/scheduling
+        supports_custom_targeting=True,
         supports_realtime_reporting=True,  # Snapshots via cached GAM line item stats
     )
 
@@ -134,11 +160,11 @@ class GoogleAdManager(AdServerAdapter):
             # Check if it's numeric (as string or int)
             try:
                 int(advertiser_id)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as e:
                 raise ValueError(
                     f"GAM advertiser_id must be numeric (got: '{advertiser_id}'). "
                     f"Check principal platform_mappings configuration."
-                )
+                ) from e
 
         # advertiser_id is only required for order/campaign operations, not inventory sync
 
@@ -161,17 +187,29 @@ class GoogleAdManager(AdServerAdapter):
             # Legacy client property for backward compatibility
             self.client = self.client_manager.get_client()
 
-            # Auto-detect trafficker_id if not provided
+            # Auto-detect trafficker_id if not provided.
+            #
+            # The googleads SOAP client returns a zeep complex object — it
+            # supports __getitem__ (``current_user["id"]``) and attribute
+            # access (``current_user.name``), but NOT ``.get()`` like a dict.
+            # The previous code called ``.get('name', 'Unknown')`` for the
+            # log message, which raised ``AttributeError: User instance has
+            # no attribute 'get'`` AFTER ``self.trafficker_id`` was already
+            # assigned — the warning logged on every request even though
+            # the ID was detected fine. Use ``getattr`` for optional fields.
             if not self.trafficker_id:
                 try:
                     user_service = self.client.GetService("UserService")
                     current_user = user_service.getCurrentUser()
                     self.trafficker_id = str(current_user["id"])
+                    user_name = getattr(current_user, "name", None) or "Unknown"
                     logger.info(
-                        f"Auto-detected trafficker_id: {self.trafficker_id} ({current_user.get('name', 'Unknown')})"
+                        "Auto-detected trafficker_id: %s (%s)",
+                        self.trafficker_id,
+                        user_name,
                     )
                 except Exception as e:
-                    logger.warning(f"Could not auto-detect trafficker_id: {e}")
+                    logger.warning("Could not auto-detect trafficker_id: %s", e)
 
             # Initialize manager components with pre-loaded config
             self.targeting_manager = GAMTargetingManager(
@@ -309,6 +347,21 @@ class GoogleAdManager(AdServerAdapter):
             raise ValueError("GAM adapter not configured for order operations")
         return self.orders_manager.check_order_has_guaranteed_items(order_id)
 
+    def latest_inventory_sync_at(self) -> datetime | None:
+        """Most-recent successful inventory SyncJob for this tenant.
+
+        Powers the freshness column on the shared ``/admin/scheduling``
+        page. Reads from the existing ``sync_jobs`` table where the
+        async ``background_sync_service`` persists run history.
+        """
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.sync_job import SyncJobRepository
+
+        with get_db_session() as session:
+            return SyncJobRepository(session, self.tenant_id).latest_completed_at(
+                adapter_type="google_ad_manager", sync_type="inventory"
+            )
+
     def get_supported_pricing_models(self) -> set[str]:
         """Return set of pricing models GAM adapter supports.
 
@@ -340,6 +393,18 @@ class GoogleAdManager(AdServerAdapter):
             nielsen_dma=True,  # GAM supports US DMAs
             us_zip=True,  # GAM supports US ZIP targeting
         )
+
+    def get_creative_formats(self) -> list[dict[str, Any]]:
+        """Return the canonical creative formats this GAM adapter can traffic.
+
+        GAM creative/template details like native fluid sizing, custom
+        templates, and VAST routing are represented in platform_config and
+        implementation_config; they are not separate public AdCP format IDs.
+        SafeFrame behavior belongs to inventory/tag rendering capabilities.
+        """
+        from src.adapters.gam.formats import gam_supported_format_models
+
+        return [fmt.model_dump(mode="json") for fmt in gam_supported_format_models()]
 
     # Legacy properties for backward compatibility
     @property
@@ -419,6 +484,11 @@ class GoogleAdManager(AdServerAdapter):
             if not self.trafficker_id:
                 missing.append("trafficker_id")
             error_msg += ", ".join(missing)
+            if not self.advertiser_id:
+                error_msg += (
+                    ". Configure a tenant default GAM advertiser or a buyer-specific advertiser mapping "
+                    "before creating GAM media buys."
+                )
 
             self.log(f"[red]Error: {error_msg}[/red]")
             return CreateMediaBuyError(
@@ -429,6 +499,7 @@ class GoogleAdManager(AdServerAdapter):
 
         from src.core.database.database_session import get_db_session
         from src.core.database.models import GAMInventory, Product, ProductInventoryMapping
+        from src.core.inventory_profile_projection import project_visible_inventory_profile_product
 
         products_map = {}
         with get_db_session() as db_session:
@@ -440,16 +511,22 @@ class GoogleAdManager(AdServerAdapter):
                 # package.product_id is like "prod_610fbb8b"
                 product_id = package.product_id
                 logger.info(f"Looking up product for package {package.package_id}: product_id={product_id}")
+                if not product_id:
+                    logger.error(f"Package {package.package_id} is missing product_id")
+                    continue
 
                 stmt = select(Product).filter_by(
                     tenant_id=self.tenant_id,
                     product_id=product_id,
                 )
                 product = db_session.scalars(stmt).first()
+                if not product:
+                    product = project_visible_inventory_profile_product(db_session, self.tenant_id, product_id)
                 if product:
                     logger.info(f"Found product: {product.product_id} (name={product.name})")
-                    # Start with product's implementation_config
-                    impl_config = product.implementation_config.copy() if product.implementation_config else {}
+                    # Start with the effective config so profile-backed products
+                    # inherit current inventory targeting from their bundle.
+                    impl_config = product.effective_implementation_config.copy()
                     logger.info(f"Product implementation_config: {impl_config}")
 
                     # Load inventory mappings from ProductInventoryMapping table
@@ -519,7 +596,7 @@ class GoogleAdManager(AdServerAdapter):
             if not product_config:
                 error_msg = (
                     f"Product configuration missing for package '{package.package_id}'. "
-                    f"Product must exist in database with valid configuration before media buy creation."
+                    f"Product must exist as a catalog row or buyer-visible inventory bundle before media buy creation."
                 )
                 self.log(f"[red]Error: {error_msg}[/red]")
                 return CreateMediaBuyError(
@@ -538,9 +615,9 @@ class GoogleAdManager(AdServerAdapter):
                     f"GAM requires all products to have either ad units or placements configured. "
                     f"\n\n⚠️  SETUP REQUIRED: Please configure this product's inventory before accepting media buy requests."
                     f"\n\nTo fix:"
-                    f"\n  1. Go to Admin UI → Products → '{pkg_product_id}'"
+                    f"\n  1. Go to Admin UI → Inventory Bundles or Products → '{pkg_product_id}'"
                     f"\n  2. Click 'Sync Inventory' to load ad units from GAM"
-                    f"\n  3. Assign ad units or placements to this product"
+                    f"\n  3. Assign ad units or placements to this product or bundle"
                     f"\n  4. Save changes"
                     f"\n\nAlternatively, for testing you can use Mock adapter instead of GAM (set ad_server='mock' on tenant)."
                 )
@@ -549,20 +626,11 @@ class GoogleAdManager(AdServerAdapter):
                     errors=[Error(code="product_not_configured", message=error_msg, details=None)],
                 )
 
-        # Validate targeting from MediaPackage objects (targeting_overlay is populated from request)
-        unsupported_features = []
-        for package in packages:
-            if package.targeting_overlay:
-                features = self._validate_targeting(package.targeting_overlay)
-                if features:
-                    unsupported_features.extend(features)
-
-        if unsupported_features:
-            error_msg = f"Unsupported targeting features: {', '.join(unsupported_features)}"
-            self.log(f"[red]Error: {error_msg}[/red]")
-            return CreateMediaBuyError(
-                errors=[Error(code="unsupported_targeting", message=error_msg, details=None)],
-            )
+        # Pre-flight targeting validation — uses the AdServerAdapter base helper
+        # so the audit + error shape stay consistent with Triton/FreeWheel.
+        targeting_error = self._validate_targeting_or_error(packages, self._validate_targeting, adapter_name="GAM")
+        if targeting_error is not None:
+            return targeting_error
 
         # Check if manual approval is required for media buy creation
         # Skip approval workflow if this media buy was already manually approved
@@ -615,7 +683,8 @@ class GoogleAdManager(AdServerAdapter):
                 order_currency = pricing.get("currency", "USD")
                 break  # All packages have same currency
 
-        # Get tenant's Gemini key for auto_name generation
+        # Get tenant's Gemini key + auto-naming toggle for auto_name generation
+        auto_naming_enabled = True
         try:
             from src.core.database.database_session import get_db_session
             from src.core.database.models import Tenant
@@ -627,13 +696,22 @@ class GoogleAdManager(AdServerAdapter):
                 tenant_obj = db_session.scalars(tenant_stmt).first()
                 if tenant_obj:
                     tenant_gemini_key = tenant_obj.gemini_api_key
+                    auto_naming_enabled = tenant_obj.auto_naming_enabled
         except sqlalchemy.exc.SQLAlchemyError as e:
             logger.warning(f"Could not load tenant Gemini key: {e}")
 
         # Generate a pre-order media_buy_id for naming (GAM order_id replaces this in the response)
         pre_order_id = f"gam_{uuid.uuid4().hex[:8]}"
         context = build_order_name_context(
-            request, packages, start_time, end_time, tenant_gemini_key=tenant_gemini_key, media_buy_id=pre_order_id
+            request,
+            packages,
+            start_time,
+            end_time,
+            tenant_gemini_key=tenant_gemini_key,
+            media_buy_id=pre_order_id,
+            template=order_name_template,
+            auto_naming_enabled=auto_naming_enabled,
+            tenant_id=self.tenant_id,
         )
         base_order_name = apply_naming_template(order_name_template, context)
 
@@ -645,7 +723,10 @@ class GoogleAdManager(AdServerAdapter):
         order_name = truncate_name_with_suffix(full_order_name, GAM_NAME_LIMITS["max_order_name_length"])
 
         # Calculate total budget from package budgets (AdCP v2.2.0)
-        total_budget_amount = request.get_total_budget()
+        sandbox_trafficking = is_sandbox_trafficking_request(request)
+        total_budget_amount = 0.0 if sandbox_trafficking else request.get_total_budget()
+        if sandbox_trafficking:
+            self.log("[SANDBOX] Creating GAM order against sandbox advertiser with totalBudget=0")
 
         order_id = self.orders_manager.create_order(
             order_name=order_name,
@@ -1023,7 +1104,7 @@ class GoogleAdManager(AdServerAdapter):
                 reporting_period=date_range,
                 by_package=[],
                 totals=DeliveryTotals(
-                    impressions=0, spend=0, clicks=None, ctr=None, video_completions=None, completion_rate=None
+                    impressions=0, spend=0, clicks=None, ctr=None, completed_views=None, completion_rate=None
                 ),
                 currency="USD",
             )
@@ -1036,7 +1117,7 @@ class GoogleAdManager(AdServerAdapter):
                 reporting_period=date_range,
                 by_package=[],
                 totals=DeliveryTotals(
-                    impressions=0, spend=0, clicks=None, ctr=None, video_completions=None, completion_rate=None
+                    impressions=0, spend=0, clicks=None, ctr=None, completed_views=None, completion_rate=None
                 ),
                 currency="USD",
             )
@@ -1060,7 +1141,7 @@ class GoogleAdManager(AdServerAdapter):
                         spend=0,
                         clicks=0,
                         ctr=0.0,
-                        video_completions=None,
+                        completed_views=None,
                         completion_rate=None,
                     ),
                     currency="USD",
@@ -1086,7 +1167,7 @@ class GoogleAdManager(AdServerAdapter):
                     spend=total_budget * progress,
                     clicks=int(total_budget * 1000 * progress * 0.01),  # 1% CTR
                     ctr=1.0,
-                    video_completions=None,
+                    completed_views=None,
                     completion_rate=None,
                 ),
                 currency=str(media_buy.currency or "USD"),
@@ -1115,11 +1196,12 @@ class GoogleAdManager(AdServerAdapter):
             requested_timezone="America/New_York",
         )
 
-        # Validate data freshness
-        # The adapter decides whether to return data or raise error if data is stale
-        # Target date is the end of the reporting period
-        target_date = date_range.end
-
+        # Validate data freshness. See `_clamp_target_date_to_now`: ad-hoc
+        # buyer queries can extend past "now", and GAM cannot have produced
+        # data for a future boundary. The webhook delivery path is unaffected
+        # because it calls `is_data_fresh_for_webhook` directly with its own
+        # yesterday-anchored target.
+        target_date = _clamp_target_date_to_now(date_range.end)
         is_fresh = validate_and_log_freshness(reporting_data, media_buy_id, target_date=target_date)
 
         if not is_fresh:
@@ -1130,6 +1212,11 @@ class GoogleAdManager(AdServerAdapter):
         total_clicks = reporting_data.metrics.get("total_clicks", 0)
         total_spend = reporting_data.metrics.get("total_spend", 0.0)
         avg_ctr = reporting_data.metrics.get("average_ctr", 0.0)
+        # In-stream VAST completions only — outstream players don't fire
+        # VAST events so this returns zero for those line items. The full
+        # classifier-plus-viewership-merge that handles outstream is
+        # tracked in #225 Phase 2.
+        total_video_completions = reporting_data.metrics.get("total_video_completions", 0) or 0
 
         # Build daily breakdown from reporting data
         daily_breakdown = []
@@ -1172,7 +1259,7 @@ class GoogleAdManager(AdServerAdapter):
         by_package = []
         if packages_data:
             # Group reporting data by line item
-            line_item_metrics = {}
+            line_item_metrics: dict[str, dict[str, float]] = {}
             for row in reporting_data.data:
                 line_item_id = row.get("line_item_id", "")
                 if line_item_id:
@@ -1181,10 +1268,12 @@ class GoogleAdManager(AdServerAdapter):
                             "impressions": 0,
                             "clicks": 0,
                             "spend": 0.0,
+                            "video_completions": 0,
                         }
                     line_item_metrics[line_item_id]["impressions"] += row.get("impressions", 0)
                     line_item_metrics[line_item_id]["clicks"] += row.get("clicks", 0)
                     line_item_metrics[line_item_id]["spend"] += row.get("spend", 0.0)
+                    line_item_metrics[line_item_id]["video_completions"] += row.get("video_completions", 0)
 
             # Match packages to line items and build delivery data
             for i, pkg_data in enumerate(packages_data):
@@ -1194,11 +1283,17 @@ class GoogleAdManager(AdServerAdapter):
 
                 if platform_line_item_id and platform_line_item_id in line_item_metrics:
                     metrics = line_item_metrics[platform_line_item_id]
+                    pkg_video = int(metrics["video_completions"])
                     by_package.append(
                         AdapterPackageDelivery(
                             package_id=package_id,
                             impressions=int(metrics["impressions"]),
                             spend=metrics["spend"],
+                            # None for non-video packages so the wire field
+                            # is dropped via exclude_none. Zero would falsely
+                            # claim "we measured zero VAST events" on a
+                            # display-only package.
+                            completed_views=pkg_video if pkg_video > 0 else None,
                         )
                     )
 
@@ -1211,8 +1306,16 @@ class GoogleAdManager(AdServerAdapter):
                 spend=total_spend,
                 clicks=total_clicks if total_clicks > 0 else None,
                 ctr=avg_ctr if avg_ctr > 0 else None,
-                video_completions=None,
-                completion_rate=None,
+                # None when we observed zero VAST events so the wire
+                # response doesn't claim "measured zero" on a display-only
+                # buy. Real values are surfaced when in-stream inventory
+                # delivered them.
+                completed_views=total_video_completions if total_video_completions > 0 else None,
+                completion_rate=(
+                    round(total_video_completions / total_impressions, 4)
+                    if total_video_completions > 0 and total_impressions > 0
+                    else None
+                ),
             ),
             currency=str(media_buy.currency or "USD"),
             daily_breakdown=daily_breakdown if daily_breakdown else None,

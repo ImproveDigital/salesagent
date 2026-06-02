@@ -192,17 +192,11 @@ class TestBaseClassContract:
         impl_id = env.identity_for(Transport.IMPL)
         assert impl_id.protocol == "mcp"
 
-        a2a_id = env.identity_for(Transport.A2A)
-        assert a2a_id.protocol == "a2a"
-
-        rest_id = env.identity_for(Transport.REST)
-        assert rest_id.protocol == "rest"
-
         mcp_id = env.identity_for(Transport.MCP)
         assert mcp_id.protocol == "mcp"
 
         # All share same principal/tenant
-        for ident in [impl_id, a2a_id, rest_id, mcp_id]:
+        for ident in [impl_id, mcp_id]:
             assert ident.principal_id == "p1"
             assert ident.tenant_id == "t1"
 
@@ -212,8 +206,8 @@ class TestBaseClassContract:
         from tests.harness.transport import Transport
 
         env = BaseTestEnv()
-        id1 = env.identity_for(Transport.REST)
-        id2 = env.identity_for(Transport.REST)
+        id1 = env.identity_for(Transport.MCP)
+        id2 = env.identity_for(Transport.MCP)
         assert id1 is id2
 
     def test_identity_backward_compat(self):
@@ -223,17 +217,6 @@ class TestBaseClassContract:
         env = BaseTestEnv(principal_id="p1")
         assert env.identity.principal_id == "p1"
         assert env.identity.protocol == "mcp"
-
-    def test_call_via_raises_for_unimplemented_transport(self):
-        """call_via with Transport.A2A raises NotImplementedError if call_a2a not overridden."""
-
-        from tests.harness._base import BaseTestEnv
-        from tests.harness.transport import Transport
-
-        env = BaseTestEnv()
-        result = env.call_via(Transport.A2A)
-        assert result.is_error
-        assert isinstance(result.error, NotImplementedError)
 
     def test_call_via_mcp_raises_for_unimplemented(self):
         """call_via with Transport.MCP raises NotImplementedError if call_mcp not overridden."""
@@ -266,6 +249,27 @@ class TestBaseClassContract:
         assert result.payload.ok is True
         assert result.envelope.get("transport") == "mcp"
 
+    def test_call_via_a2a_routes_through_call_a2a(self):
+        """call_via(Transport.A2A) dispatches through A2aDispatcher → call_a2a."""
+
+        from pydantic import BaseModel
+
+        from tests.harness._base import BaseTestEnv
+        from tests.harness.transport import Transport
+
+        class _Resp(BaseModel):
+            ok: bool = True
+
+        class _TestEnv(BaseTestEnv):
+            def call_a2a(self, **kwargs):
+                return _Resp()
+
+        env = _TestEnv()
+        result = env.call_via(Transport.A2A)
+        assert result.is_success
+        assert result.payload.ok is True
+        assert result.envelope.get("transport") == "a2a"
+
     def test_call_via_impl_uses_call_impl(self):
         """call_via(Transport.IMPL) routes through call_impl."""
         from tests.harness._base import BaseTestEnv
@@ -285,23 +289,32 @@ class TestBaseClassContract:
         assert result.is_success
         assert result.payload.ok is True
 
-    def test_nested_integration_env_raises(self):
-        """Nesting two IntegrationEnvs must raise to prevent session corruption."""
-        import pytest
+    def test_nested_integration_env_rebinds_session(self):
+        """Nested IntegrationEnvs unbind+rebind the factory session.
 
+        Earlier versions raised AssertionError("already bound") when factories
+        were already bound, but that turned a single mid-context crash in test N
+        into a cascade that failed every test after it. The current contract is:
+        ``__enter__`` defensively unbinds any leftover session before binding
+        its own, so an aborted ``__exit__`` cannot corrupt the next test.
+        """
         from tests.harness._base import IntegrationEnv
 
         class _TestEnv(IntegrationEnv):
             EXTERNAL_PATCHES = {"dep": "os.getcwd"}
 
+        factory_mock = MagicMock(_meta=MagicMock(sqlalchemy_session=None))
         with patch("src.core.database.database_session.get_engine") as mock_engine:
             mock_engine.return_value = MagicMock()
-            # First env binds factories
-            with patch("tests.factories.ALL_FACTORIES", [MagicMock(_meta=MagicMock(sqlalchemy_session=None))]):
+            with patch("tests.factories.ALL_FACTORIES", [factory_mock]):
                 with _TestEnv():
-                    # Second env should fail because factories are already bound
-                    with pytest.raises(AssertionError, match="already bound"):
-                        _TestEnv().__enter__()
+                    first_session = factory_mock._meta.sqlalchemy_session
+                    assert first_session is not None
+                    # Second env should unbind and re-bind cleanly, not raise.
+                    with _TestEnv():
+                        second_session = factory_mock._meta.sqlalchemy_session
+                        assert second_session is not None
+                        assert second_session is not first_session
 
 
 class TestEnvMethodNamingConsistency:

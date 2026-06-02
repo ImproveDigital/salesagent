@@ -6,26 +6,68 @@ from collections.abc import Sequence
 from typing import Any
 
 from adcp import PushNotificationConfig
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
-from adcp.types.generated_poc.enums.creative_action import CreativeAction
+from adcp.types import ContextObject, CreativeAction, Error
 from pydantic import BaseModel
 
 from src.core.database.repositories.uow import CreativeUoW
+from src.core.embedded_runtime import publisher_owns_creative_approval
 from src.core.exceptions import AdCPAuthenticationError
 from src.core.helpers import log_tool_activity
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schemas import SyncCreativeResult, SyncCreativesResponse
+from src.core.schemas import CreativeAsset, SyncCreativeResult, SyncCreativesResponse
+from src.core.tracing import traced
 from src.core.validation_helpers import format_validation_error, run_async_in_sync_context
 
 from ._assignments import _process_assignments
 from ._processing import _create_new_creative, _update_existing_creative
-from ._validation import _get_field, _validate_creative_input, check_provenance_required
-from ._workflow import _audit_log_sync, _create_sync_workflow_steps, _send_creative_notifications
+from ._validation import (
+    _get_field,
+    _validate_creative_input,
+    check_provenance_required,
+    get_registered_creative_agent_urls,
+)
+from ._workflow import (
+    _audit_log_sync,
+    _create_sync_workflow_steps,
+    _send_creative_notifications,
+)
 
 logger = logging.getLogger(__name__)
 
 
+# Re-export for backward compat — single inference rule lives in
+# ``src.core.schemas._asset_type_compat`` so the production sync path and
+# the ``CreativeAsset.__init__`` patch agree.
+from src.core.schemas._asset_type_compat import infer_asset_types as _infer_asset_types  # noqa: E402
+
+
+def _effective_approval_mode(approval_mode: str, publisher_owns_approval: bool | None = None) -> str:
+    """Return seller-side creative approval mode.
+
+    Storefront-owned creative approval means salesagent has no approval work to
+    perform, so creatives should proceed as approved within this system.
+    """
+    owns_approval = publisher_owns_creative_approval() if publisher_owns_approval is None else publisher_owns_approval
+    if owns_approval:
+        return approval_mode
+    return "auto-approve"
+
+
+def _apply_provenance_warning(
+    result: SyncCreativeResult,
+    provenance_warning: str | None,
+    *,
+    publisher_owns_approval: bool,
+) -> bool:
+    """Append provenance warning and return whether seller review is needed."""
+    if not provenance_warning or result.action == CreativeAction.failed:
+        return False
+
+    result.warnings.append(provenance_warning)
+    return publisher_owns_approval
+
+
+@traced
 def _sync_creatives_impl(
     creatives: Sequence[CreativeAsset | BaseModel | dict[str, Any]],
     assignments: dict | None = None,
@@ -123,7 +165,11 @@ def _sync_creatives_impl(
     # approval_mode: "auto-approve", "require-human", "ai-powered"
     logger.info(f"[sync_creatives] Tenant dict keys: {list(tenant.keys())}")
     logger.info(f"[sync_creatives] Tenant approval_mode field: {tenant.get('approval_mode', 'NOT FOUND')}")
-    approval_mode = tenant.get("approval_mode", "require-human")
+    publisher_owns_approval = publisher_owns_creative_approval()
+    approval_mode = _effective_approval_mode(
+        tenant.get("approval_mode", "require-human"),
+        publisher_owns_approval=publisher_owns_approval,
+    )
     logger.info(f"[sync_creatives] Final approval mode: {approval_mode} (from tenant: {tenant.get('tenant_id')})")
 
     # Fetch creative formats ONCE before processing loop (outside any transaction)
@@ -132,6 +178,7 @@ def _sync_creatives_impl(
 
     registry = get_creative_agent_registry()
     all_formats = run_async_in_sync_context(registry.list_all_formats(tenant_id=tenant["tenant_id"]))
+    registered_agent_urls = get_registered_creative_agent_urls(registry, tenant["tenant_id"])
 
     with CreativeUoW(tenant["tenant_id"]) as uow:
         assert uow.creatives is not None
@@ -156,13 +203,19 @@ def _sync_creatives_impl(
                     # Default required fields for raw dicts missing them
                     creative_data = raw_creative.copy()
                     creative_data.setdefault("assets", {})
+                    creative_data["assets"] = _infer_asset_types(creative_data["assets"])
                     creative = CreativeAsset(**creative_data)
                 else:
                     creative = CreativeAsset.model_validate(raw_creative, from_attributes=True)
 
                 # Validate the creative against schema and business rules
                 try:
-                    validated_creative = _validate_creative_input(creative, registry, principal_id)
+                    validated_creative = _validate_creative_input(
+                        creative,
+                        registry,
+                        principal_id,
+                        registered_agent_urls=registered_agent_urls,
+                    )
                     format_value = validated_creative.format
 
                 except (ValidationError, ValueError) as validation_error:
@@ -181,7 +234,7 @@ def _sync_creatives_impl(
                             action="failed",
                             status=None,
                             platform_id=None,
-                            errors=[error_msg],
+                            errors=[Error(code="validation_failed", message=error_msg)],
                             review_feedback=None,
                             assigned_to=None,
                             assignment_errors=None,
@@ -260,7 +313,9 @@ def _sync_creatives_impl(
                             failed_creatives.append(
                                 {
                                     "creative_id": existing_creative.creative_id,
-                                    "error": update_result.errors[0] if update_result.errors else "Unknown error",
+                                    "error": update_result.errors[0].message
+                                    if update_result.errors
+                                    else "Unknown error",
                                     "format": creative.format_id,
                                 }
                             )
@@ -291,11 +346,13 @@ def _sync_creatives_impl(
                                 creative_info["ai_review_reason"] = existing_creative.data["ai_review"].get("reason")
                             creatives_needing_approval.append(creative_info)
 
-                        # Add provenance warning if applicable
-                        if provenance_warning and update_result.action != CreativeAction.failed:
-                            update_result.warnings.append(provenance_warning)
-                            # Flag for review when provenance is missing
+                        if _apply_provenance_warning(
+                            update_result,
+                            provenance_warning,
+                            publisher_owns_approval=publisher_owns_approval,
+                        ):
                             existing_creative.status = "pending_review"
+                            update_result.status = existing_creative.status
                             needs_approval = True
 
                         results.append(update_result)
@@ -321,7 +378,9 @@ def _sync_creatives_impl(
                             failed_creatives.append(
                                 {
                                     "creative_id": creative_id,
-                                    "error": create_result.errors[0] if create_result.errors else "Unknown error",
+                                    "error": create_result.errors[0].message
+                                    if create_result.errors
+                                    else "Unknown error",
                                     "format": creative.format_id,
                                 }
                             )
@@ -338,15 +397,17 @@ def _sync_creatives_impl(
                                 "creative_id": create_result.creative_id,
                                 "format": creative.format_id,
                                 "name": creative.name,
-                                "status": create_result.status,
+                                "status": create_result.internal_status,
                             }
                             # AI review reason will be added asynchronously when review completes
                             # No ai_result available yet in async mode
                             creatives_needing_approval.append(creative_info)
 
-                        # Add provenance warning if applicable
-                        if provenance_warning and create_result.action != CreativeAction.failed:
-                            create_result.warnings.append(provenance_warning)
+                        if _apply_provenance_warning(
+                            create_result,
+                            provenance_warning,
+                            publisher_owns_approval=publisher_owns_approval,
+                        ):
                             needs_approval = True
 
                         results.append(create_result)
@@ -368,7 +429,7 @@ def _sync_creatives_impl(
                         action="failed",
                         status=None,
                         platform_id=None,
-                        errors=[error_msg],
+                        errors=[Error(code="processing_failed", message=error_msg)],
                         review_feedback=None,
                         assigned_to=None,
                         assignment_errors=None,

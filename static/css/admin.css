@@ -1,0 +1,1375 @@
+/* ==========================================================================
+   Sales Agent Admin — Ledger design system
+   ==========================================================================
+   Editorial, dense, data-forward. Newsreader (serif) for numbers/headlines,
+   IBM Plex Sans for UI, JetBrains Mono for IDs/codes. Warm paper background,
+   near-black ink. Color is reserved for blocking states — amber for action
+   needed, red for hard errors. Everything else is monochrome.
+
+   This file is a thin layer on top of Bootstrap 5. Per-page templates should
+   reference the --sa-* tokens instead of hardcoding colors, spacing, shadows.
+
+   Order of inclusion (see base.html):
+     1. Bootstrap 5
+     2. Font Awesome
+     3. validation.css
+     4. THIS FILE  (overrides above where needed)
+     5. Per-template <style> blocks
+   ========================================================================== */
+
+/* ---------- Tokens --------------------------------------------------------- */
+
+:root {
+    /* Typography — Ledger triad */
+    --sa-font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont,
+        "Segoe UI", system-ui, sans-serif;
+    --sa-font-serif: 'Newsreader', 'Iowan Old Style', Georgia, serif;
+    --sa-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, "SF Mono",
+        Menlo, Monaco, Consolas, monospace;
+
+    --sa-text-xs: 0.75rem;     /* 12px — meta, badges, dense tables */
+    --sa-text-sm: 0.875rem;    /* 14px — body, form inputs, table cells */
+    --sa-text-base: 1rem;      /* 16px — paragraphs */
+    --sa-text-lg: 1.125rem;    /* 18px — section headings */
+    --sa-text-xl: 1.5rem;      /* 24px — page section titles */
+    --sa-text-2xl: 1.875rem;   /* 30px — page titles */
+
+    --sa-leading-tight: 1.25;
+    --sa-leading-snug: 1.4;
+    --sa-leading-normal: 1.6;
+
+    /* Ink scale — derived from the Ledger ink #1a1815 with alpha */
+    --sa-ink:      #1a1815;
+    --sa-ink-70:   rgba(26, 24, 21, 0.6);
+    --sa-ink-50:   rgba(26, 24, 21, 0.5);
+    --sa-ink-30:   rgba(26, 24, 21, 0.3);
+    --sa-rule:     rgba(26, 24, 21, 0.13);
+    --sa-rule-soft: rgba(26, 24, 21, 0.08);
+
+    /* Neutral aliases — back-compat for templates that reference --sa-gray-* */
+    --sa-gray-50:  #f4f1ea;     /* paper */
+    --sa-gray-100: #ebe7dc;     /* paper-deep */
+    --sa-gray-200: rgba(26, 24, 21, 0.13);
+    --sa-gray-300: rgba(26, 24, 21, 0.22);
+    --sa-gray-400: rgba(26, 24, 21, 0.3);
+    --sa-gray-500: rgba(26, 24, 21, 0.5);
+    --sa-gray-600: rgba(26, 24, 21, 0.6);
+    --sa-gray-700: rgba(26, 24, 21, 0.75);
+    --sa-gray-800: #1a1815;
+    --sa-gray-900: #1a1815;
+
+    /* Surface + chrome */
+    --sa-bg-page:    #f4f1ea;     /* paper */
+    --sa-bg-surface: #fbf9f4;     /* card */
+    --sa-bg-muted:   #ebe7dc;     /* paper-deep */
+    --sa-bg-code:    #ebe7dc;
+
+    --sa-border:        var(--sa-rule);
+    --sa-border-strong: rgba(26, 24, 21, 0.22);
+    --sa-border-focus:  var(--sa-ink);
+
+    --sa-text-strong:  var(--sa-ink);
+    --sa-text-default: var(--sa-ink-70);
+    --sa-text-muted:   var(--sa-ink-50);
+    --sa-text-faint:   var(--sa-ink-30);
+
+    /* Brand + intent — primary is ink, color is reserved for blockers only */
+    --sa-primary:        #1a1815;
+    --sa-primary-hover:  #000000;
+    --sa-primary-tint:   #ebe7dc;
+    --sa-primary-strong: #1a1815;
+
+    /* "Done" states are not green — they are simply neutral checks */
+    --sa-success:        #1a1815;
+    --sa-success-tint:   #ebe7dc;
+    --sa-success-text:   var(--sa-ink-70);
+    --sa-success-border: var(--sa-rule);
+
+    /* Amber is the one signal color — reserved for action-required */
+    --sa-warning:        #b25e09;
+    --sa-warning-tint:   #f3e3c5;
+    --sa-warning-text:   #7a3f04;
+    --sa-warning-border: #d9a866;
+
+    /* Red — hard blocking errors only */
+    --sa-danger:        #9b2c1f;
+    --sa-danger-tint:   #f1d8d2;
+    --sa-danger-text:   #7a1d12;
+    --sa-danger-border: #d9988c;
+
+    --sa-info:          var(--sa-ink-70);
+    --sa-info-tint:     #ebe7dc;
+    --sa-info-text:     var(--sa-ink);
+    --sa-info-border:   var(--sa-rule);
+
+    /* Header chrome — paper for publisher (storefront), ink for super-admin */
+    --sa-header-bg:     #f4f1ea;
+    --sa-header-fg:     #1a1815;
+    --sa-header-fg-dim: rgba(26, 24, 21, 0.5);
+    --sa-header-accent: #1a1815;
+    --sa-header-rule:   rgba(26, 24, 21, 0.13);
+
+    /* Editorial canvas — caps content + chrome inner widths so dashboards
+       and the tenant subnav share the same horizontal extent across pages. */
+    --sa-container-max: 1280px;
+
+    /* Spacing scale (8pt grid with 4px finer step) */
+    --sa-space-1: 0.25rem;   /* 4 */
+    --sa-space-2: 0.5rem;    /* 8 */
+    --sa-space-3: 0.75rem;   /* 12 */
+    --sa-space-4: 1rem;      /* 16 */
+    --sa-space-5: 1.5rem;    /* 24 */
+    --sa-space-6: 2rem;      /* 32 */
+    --sa-space-7: 3rem;      /* 48 */
+
+    /* Radii — Ledger uses tight 2px corners, not soft pillows */
+    --sa-radius-sm: 2px;
+    --sa-radius-md: 2px;
+    --sa-radius-lg: 2px;
+    --sa-radius-xl: 2px;
+    --sa-radius-pill: 999px;
+
+    /* Shadows — almost none. Editorial paper does not float. */
+    --sa-shadow-xs: none;
+    --sa-shadow-sm: none;
+    --sa-shadow-md: 0 1px 2px rgba(26, 24, 21, 0.04);
+    --sa-shadow-lg: 0 2px 8px rgba(26, 24, 21, 0.06);
+    --sa-ring-focus: 0 0 0 2px rgba(26, 24, 21, 0.4);
+
+    /* Motion */
+    --sa-duration-fast: 120ms;
+    --sa-duration-base: 180ms;
+    --sa-easing: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Respect user motion preference. */
+@media (prefers-reduced-motion: reduce) {
+    :root {
+        --sa-duration-fast: 0ms;
+        --sa-duration-base: 0ms;
+    }
+    *, *::before, *::after {
+        animation-duration: 0ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0ms !important;
+    }
+}
+
+/* ---------- Page chrome ---------------------------------------------------- */
+
+body {
+    font-family: var(--sa-font-sans);
+    background: var(--sa-bg-page);
+    color: var(--sa-text-default);
+    line-height: var(--sa-leading-normal);
+    font-size: var(--sa-text-base);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'ss01', 'ss02';
+}
+
+/* Editorial type voice — Newsreader serif for page titles & headlines.
+   Numbers everywhere are tabular-aligned. */
+h1, h2, h3, h4, h5, h6 {
+    color: var(--sa-text-strong);
+    line-height: var(--sa-leading-tight);
+    font-family: var(--sa-font-serif);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+}
+h1 { letter-spacing: -0.02em; }
+
+.sa-page-header__title,
+.custom-card h2,
+.sa-card h2 {
+    font-family: var(--sa-font-serif);
+    font-weight: 500;
+    letter-spacing: -0.015em;
+}
+
+/* Numbers default to tabular figures so columns align */
+table td, table th, .metric-value, .sa-num {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Newsreader serif for any element marked as a "ledger number" */
+.sa-num {
+    font-family: var(--sa-font-serif);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+
+a {
+    color: var(--sa-primary);
+    text-decoration: none;
+    transition: color var(--sa-duration-fast) var(--sa-easing);
+}
+a:hover {
+    color: var(--sa-primary-hover);
+    text-decoration: underline;
+}
+
+code, pre, .code {
+    font-family: var(--sa-font-mono);
+}
+.code {
+    background: var(--sa-bg-code);
+    padding: 0.1rem 0.35rem;
+    border-radius: var(--sa-radius-sm);
+    font-size: 0.85em;
+    color: var(--sa-text-strong);
+}
+pre {
+    background: var(--sa-bg-code);
+    padding: var(--sa-space-4);
+    border-radius: var(--sa-radius-md);
+    overflow-x: auto;
+    font-size: var(--sa-text-sm);
+    color: var(--sa-text-strong);
+    border: 1px solid var(--sa-border);
+}
+
+/* Top header — Ledger thin paper bar (44px). Quiet chrome: publisher
+   workspace + STOREFRONT pill + nav + avatar. The :has() selector
+   inverts the bar (ink background) for super-admin operator views. */
+.header {
+    background: var(--sa-header-bg);
+    color: var(--sa-header-fg);
+    padding: 0;
+    margin-bottom: var(--sa-space-5);
+    border-bottom: 1px solid var(--sa-header-rule);
+    font-family: var(--sa-font-sans);
+}
+.header > .container {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+.header h1 {
+    margin: 0;
+    color: var(--sa-header-fg);
+    font-family: var(--sa-font-serif);
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    flex-shrink: 0;
+}
+.header h1::after {
+    content: 'v2.0';
+    font-family: var(--sa-font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    margin-left: 8px;
+    color: var(--sa-header-fg-dim);
+}
+.header nav {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 18px;
+    flex: 1;
+    justify-content: flex-end;
+    font-size: 12.5px;
+}
+.header a {
+    color: var(--sa-header-fg);
+    opacity: 0.75;
+    text-decoration: none;
+    font-size: 12.5px;
+    padding: 0;
+    border-radius: 0;
+    transition: opacity var(--sa-duration-fast) var(--sa-easing);
+}
+.header a:hover {
+    color: var(--sa-header-fg);
+    opacity: 1;
+    background: transparent;
+    text-decoration: none;
+}
+.header .role-tag {
+    color: var(--sa-header-fg);
+    margin: 0;
+    font-size: 12.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    padding-left: 16px;
+    border-left: 1px solid var(--sa-header-rule);
+    height: 20px;
+    line-height: 20px;
+}
+.header .role-tag .workspace-name {
+    opacity: 0.85;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.header .role-tag .workspace-name::after {
+    content: '\025BE';   /* small triangle ▾ — workspace switcher affordance */
+    color: var(--sa-header-fg-dim);
+    font-size: 9px;
+    margin-left: 2px;
+}
+/* The role badge becomes the Ledger STOREFRONT / ADMIN pill — mono lockup,
+   inverted from the bar background. */
+.header .role-tag .status {
+    font-family: var(--sa-font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 0;
+    background: var(--sa-ink);
+    color: var(--sa-bg-page);
+    line-height: 1;
+    border: none;
+}
+.header nav > .user-avatar {
+    /* The avatar lives at the end of the nav; use a sibling pseudo for
+       the rule rather than border-left on a circle. */
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--sa-ink);
+    color: var(--sa-bg-page);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--sa-font-serif);
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 12px;
+    position: relative;
+}
+.header nav > .user-avatar::before {
+    content: '';
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1px;
+    height: 16px;
+    background: var(--sa-header-rule);
+}
+
+/* sa-tenant-nav — persistent tenant subnav strip rendered by base.html
+   on every page where ``tenant`` is in scope. Sits directly under the
+   header (44px, hidden in embedded mode). Background matches the page so
+   it reads as quiet chrome, not as a separate band — visual hierarchy is
+   carried by the bottom rule and the active-tab underline.
+   Holds operational links (Media Buys/Products/Creatives/Workflows/Reports)
+   on the left and the Configure dropdown on the right. */
+.sa-tenant-nav {
+    height: 36px;
+    background: var(--sa-bg-page);
+    border-bottom: 1px solid var(--sa-rule);
+    font-family: var(--sa-font-sans);
+    font-size: 12px;
+}
+.sa-tenant-nav__inner {
+    max-width: var(--sa-container-max);
+    margin: 0 auto;
+    padding: 0 var(--sa-space-5);
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+}
+/* Configure dropdown floats to the right edge of the strip. */
+.sa-tenant-nav__inner > .sa-menu { margin-left: auto; }
+
+/* Narrow viewports: the strip switches to horizontal scroll instead of
+   wrapping (which would push content down and break the 36px assumption
+   used by below-the-fold pages). Configure trails the local nav at the
+   end of the scroll content. */
+@media (max-width: 960px) {
+    .sa-tenant-nav__inner {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        scrollbar-width: thin;
+        gap: 14px;
+    }
+    .sa-tenant-nav__inner > .sa-menu { margin-left: 0; }
+    .sa-nav-action { flex-shrink: 0; }
+}
+
+.sa-nav-action {
+    color: var(--sa-ink-70);
+    font-family: var(--sa-font-sans);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 20px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+    letter-spacing: 0.01em;
+    border-bottom: 2px solid transparent;
+    transition: color var(--sa-duration-fast) var(--sa-easing),
+                border-color var(--sa-duration-fast) var(--sa-easing);
+}
+.sa-nav-action:hover,
+.sa-nav-action:focus {
+    color: var(--sa-ink);
+    text-decoration: none;
+}
+/* Active state uses color shift + underline rail (not font-weight) — a
+   500→600 weight change reflows sibling labels because letters get wider,
+   so labels shift horizontally as the user navigates. The underline + ink
+   color shift is enough cue without the metric change. */
+.sa-nav-action.is-active {
+    color: var(--sa-ink);
+    border-bottom-color: var(--sa-ink);
+}
+/* Configure trigger gets the same color shift when the user is on any of
+   its sub-pages. No underline — the trigger is a button, not a tab. */
+.sa-menu__trigger.is-active {
+    color: var(--sa-ink);
+}
+/* Host-storefront link in embedded mode — separated from the local nav
+   by a thin divider so the host vs. salesagent boundary is visible.
+   Padding equals the parent flex ``gap`` (18px) so spacing on either side
+   of the divider reads symmetric. */
+.sa-nav-action--host {
+    padding-right: 18px;
+    border-right: 1px solid var(--sa-rule);
+    border-bottom: none;
+}
+.sa-nav-action--host.is-active { border-bottom: none; }
+
+/* sa-menu — Configure dropdown. Anchored to the right edge of the tenant
+   subnav strip so it renders in both embedded mode (where .header is
+   hidden) and standalone. Quiet trigger; click toggles, outside-click +
+   Escape close. */
+.sa-menu {
+    position: relative;
+    display: inline-flex;
+}
+.sa-menu__trigger {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: var(--sa-ink);
+    font-family: var(--sa-font-sans);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: color var(--sa-duration-fast) var(--sa-easing);
+    line-height: 20px;
+    height: 20px;
+    letter-spacing: 0.01em;
+}
+.sa-menu__trigger:hover,
+.sa-menu.is-open > .sa-menu__trigger { color: var(--sa-ink); }
+.sa-menu__trigger svg {
+    transition: transform var(--sa-duration-fast) var(--sa-easing);
+    color: var(--sa-ink-50);
+}
+.sa-menu.is-open .sa-menu__trigger svg { transform: rotate(180deg); color: var(--sa-ink); }
+
+.sa-menu__panel {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 220px;
+    background: var(--sa-bg-surface);
+    border: 1px solid var(--sa-rule);
+    box-shadow: 0 6px 20px rgba(26, 24, 21, 0.10), 0 1px 3px rgba(26, 24, 21, 0.05);
+    padding: 4px 0;
+    z-index: 1000;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-4px);
+    transition: opacity var(--sa-duration-fast) var(--sa-easing),
+                transform var(--sa-duration-fast) var(--sa-easing);
+}
+.sa-menu.is-open .sa-menu__panel {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.sa-menu__group-label {
+    font-family: var(--sa-font-sans);
+    font-size: 9.5px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--sa-ink-50);
+    padding: 8px 14px 2px;
+}
+.sa-menu__group-label:not(:first-child) {
+    border-top: 1px solid var(--sa-rule-soft);
+    margin-top: 4px;
+    padding-top: 10px;
+}
+.sa-menu__item {
+    display: block;
+    padding: 5px 14px;
+    font-size: 12.5px;
+    line-height: 1.4;
+    color: var(--sa-ink) !important;
+    text-decoration: none;
+    transition: background var(--sa-duration-fast) var(--sa-easing);
+    opacity: 1 !important;
+}
+.sa-menu__item:hover,
+.sa-menu__item:focus {
+    background: var(--sa-bg-muted);
+    color: var(--sa-ink) !important;
+    text-decoration: none;
+}
+
+/* Admin (super-admin) variant — inverted bar communicates
+   "operator-of-platform" vs publisher-using-platform. */
+.header--admin {
+    --sa-header-bg: var(--sa-ink);
+    --sa-header-fg: var(--sa-bg-page);
+    --sa-header-fg-dim: rgba(244, 241, 234, 0.5);
+    --sa-header-rule: rgba(255, 255, 255, 0.18);
+}
+.header--admin .role-tag .status {
+    background: var(--sa-bg-page);
+    color: var(--sa-ink);
+}
+.header--admin .user-avatar {
+    background: var(--sa-bg-page);
+    color: var(--sa-ink);
+}
+
+/* ---------- Cards ---------------------------------------------------------- */
+
+.custom-card,
+.sa-card {
+    background: var(--sa-bg-surface);
+    border: 1px solid var(--sa-border);
+    border-radius: var(--sa-radius-md);
+    padding: var(--sa-space-5);
+    margin-bottom: var(--sa-space-5);
+    box-shadow: none;
+}
+.custom-card h2,
+.sa-card h2 {
+    margin: 0 0 var(--sa-space-4) 0;
+    color: var(--sa-text-strong);
+    font-size: var(--sa-text-xl);
+    font-weight: 500;
+    letter-spacing: -0.015em;
+}
+
+/* ---------- Tables --------------------------------------------------------- */
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+th, td {
+    padding: var(--sa-space-3);
+    text-align: left;
+    border-bottom: 1px solid var(--sa-rule-soft);
+    font-size: var(--sa-text-sm);
+}
+th {
+    background: transparent;
+    font-family: var(--sa-font-sans);
+    font-weight: 500;
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sa-ink-50);
+    border-bottom: 1px solid var(--sa-rule);
+}
+tr:hover {
+    background: var(--sa-bg-muted);
+}
+
+/* ---------- Buttons -------------------------------------------------------- */
+/* Bootstrap provides .btn, .btn-primary etc. Only adjust where needed. */
+
+.btn {
+    border-radius: var(--sa-radius-sm);
+    font-family: var(--sa-font-sans);
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    padding: 7px 12px;
+    transition: background var(--sa-duration-fast) var(--sa-easing),
+                color var(--sa-duration-fast) var(--sa-easing),
+                border-color var(--sa-duration-fast) var(--sa-easing),
+                box-shadow var(--sa-duration-fast) var(--sa-easing);
+}
+.btn:focus-visible {
+    outline: none;
+    box-shadow: var(--sa-ring-focus);
+}
+.btn-primary {
+    background: var(--sa-ink);
+    border-color: var(--sa-ink);
+    color: var(--sa-bg-page);
+}
+.btn-primary:hover,
+.btn-primary:focus {
+    background: #000;
+    border-color: #000;
+    color: var(--sa-bg-page);
+}
+.btn-secondary {
+    background: transparent;
+    border-color: var(--sa-rule);
+    color: var(--sa-ink);
+}
+.btn-secondary:hover,
+.btn-secondary:focus {
+    background: var(--sa-bg-muted);
+    border-color: var(--sa-border-strong);
+    color: var(--sa-ink);
+}
+.custom-btn-small,
+.btn-sm-x,
+.btn-sm {
+    padding: 4px 9px;
+    font-size: 11.5px;
+}
+
+/* Ghost button — used inline on dashboards. */
+.btn-ghost {
+    background: transparent;
+    border: 1px solid var(--sa-rule);
+    color: var(--sa-ink);
+}
+.btn-ghost:hover {
+    background: var(--sa-bg-muted);
+    border-color: var(--sa-border-strong);
+    color: var(--sa-ink);
+}
+
+/* ---------- Form controls -------------------------------------------------- */
+
+.form-group {
+    margin-bottom: var(--sa-space-4);
+}
+.form-group label {
+    display: block;
+    margin-bottom: var(--sa-space-1);
+    font-weight: 500;
+    color: var(--sa-text-default);
+    font-size: var(--sa-text-sm);
+}
+.form-group input,
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    padding: var(--sa-space-2) var(--sa-space-3);
+    border: 1px solid var(--sa-border-strong);
+    border-radius: var(--sa-radius-md);
+    font-size: var(--sa-text-sm);
+    color: var(--sa-text-strong);
+    background: var(--sa-bg-surface);
+    transition: border-color var(--sa-duration-fast) var(--sa-easing),
+                box-shadow var(--sa-duration-fast) var(--sa-easing);
+}
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+    outline: none;
+    border-color: var(--sa-border-focus);
+    box-shadow: var(--sa-ring-focus);
+}
+.form-group textarea {
+    min-height: 200px;
+    font-family: var(--sa-font-mono);
+    font-size: var(--sa-text-xs);
+    line-height: var(--sa-leading-snug);
+}
+.form-group small {
+    display: block;
+    margin-top: var(--sa-space-1);
+    font-size: var(--sa-text-xs);
+    color: var(--sa-text-muted);
+}
+
+/* ---------- Status pill / badge ------------------------------------------- */
+/* Default status chip is monochrome (paper-on-ink). Color is only added
+   when the chip explicitly carries an action-required (amber) or hard-error
+   (red) class — see the .sa-chip-* variants below. */
+
+.status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: var(--sa-radius-sm);
+    font-family: var(--sa-font-sans);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    border: 1px solid var(--sa-rule);
+    background: transparent;
+    color: var(--sa-ink-70);
+}
+.status-active   {
+    background: transparent;
+    color: var(--sa-ink-70);
+    border-color: var(--sa-rule);
+}
+.status-inactive {
+    background: var(--sa-danger-tint);
+    color: var(--sa-danger);
+    border-color: transparent;
+}
+
+/* ---------- Alerts (legacy class — Bootstrap also provides .alert-*) ------ */
+
+.alert {
+    padding: var(--sa-space-4);
+    margin-bottom: var(--sa-space-4);
+    border-radius: var(--sa-radius-md);
+    border: 1px solid transparent;
+    position: relative;
+    animation: slideInDown var(--sa-duration-base) var(--sa-easing);
+}
+.alert-error,
+.alert-danger {
+    background: var(--sa-danger-tint);
+    color: var(--sa-danger-text);
+    border-color: var(--sa-danger-border);
+}
+.alert-success {
+    background: var(--sa-success-tint);
+    color: var(--sa-success-text);
+    border-color: var(--sa-success-border);
+    font-weight: 500;
+}
+.alert-info {
+    background: var(--sa-info-tint);
+    color: var(--sa-info-text);
+    border-color: var(--sa-info-border);
+}
+.alert-warning {
+    background: var(--sa-warning-tint);
+    color: var(--sa-warning-text);
+    border-color: var(--sa-warning-border);
+}
+
+.sa-alert-close {
+    float: right;
+    background: none;
+    border: none;
+    font-size: 1.25em;
+    line-height: 1;
+    cursor: pointer;
+    color: inherit;
+    opacity: 0.6;
+    padding: 0 var(--sa-space-1);
+    margin-left: var(--sa-space-2);
+}
+.sa-alert-close:hover { opacity: 1; }
+
+@keyframes slideInDown {
+    from { transform: translateY(-8px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+}
+
+/* ---------- Tabs (legacy custom tabs) -------------------------------------- */
+
+.tabs {
+    display: flex;
+    border-bottom: 1px solid var(--sa-border);
+    margin-bottom: var(--sa-space-4);
+    gap: var(--sa-space-1);
+}
+.tab {
+    padding: var(--sa-space-2) var(--sa-space-4);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    color: var(--sa-text-muted);
+    font-size: var(--sa-text-sm);
+    transition: color var(--sa-duration-fast) var(--sa-easing),
+                border-color var(--sa-duration-fast) var(--sa-easing);
+}
+.tab:hover {
+    color: var(--sa-text-default);
+}
+.tab.active {
+    border-bottom-color: var(--sa-primary);
+    color: var(--sa-primary);
+    font-weight: 600;
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ---------- Back button container ----------------------------------------- */
+
+.back-button-container {
+    margin-bottom: var(--sa-space-5);
+}
+.btn-back {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sa-space-2);
+    text-decoration: none;
+}
+
+/* ---------- Test-mode banner ---------------------------------------------- */
+
+.sa-test-mode-banner {
+    background: var(--sa-warning-tint);
+    color: var(--sa-warning-text);
+    border-bottom: 1px solid var(--sa-warning-border);
+    padding: var(--sa-space-2) var(--sa-space-4);
+    text-align: center;
+    font-family: var(--sa-font-sans);
+    font-weight: 500;
+    font-size: var(--sa-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9999;
+}
+.sa-test-mode-spacer { height: 32px; }
+
+/* ---------- Focus ring everywhere (accessibility) ------------------------- */
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+    outline: none;
+    box-shadow: var(--sa-ring-focus);
+    border-radius: var(--sa-radius-sm);
+}
+
+/* ---------- Utilities (small, opt-in) ------------------------------------- */
+
+.sa-page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: var(--sa-space-4);
+    margin-bottom: var(--sa-space-6);
+    padding-bottom: var(--sa-space-5);
+    border-bottom: 1px solid var(--sa-rule);
+    flex-wrap: wrap;
+}
+.sa-page-header__title {
+    margin: 0;
+    font-family: var(--sa-font-serif);
+    font-size: 36px;
+    font-weight: 500;
+    color: var(--sa-text-strong);
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+.sa-page-header__subtitle {
+    margin: var(--sa-space-2) 0 0 0;
+    color: var(--sa-text-default);
+    font-size: var(--sa-text-sm);
+}
+.sa-page-header__actions {
+    display: flex;
+    gap: var(--sa-space-3);
+    flex-wrap: wrap;
+}
+
+.sa-stack-2 > * + * { margin-top: var(--sa-space-2); }
+.sa-stack-3 > * + * { margin-top: var(--sa-space-3); }
+.sa-stack-4 > * + * { margin-top: var(--sa-space-4); }
+
+/* Embedded mode: tighten outer container padding because the host's iframe
+   already provides chrome. */
+body.sa-embedded > .container {
+    padding-top: var(--sa-space-4);
+}
+
+/* Narrow viewport (iframe parents at ~960px) — make the page header stack. */
+@media (max-width: 960px) {
+    .sa-page-header {
+        align-items: stretch;
+    }
+    .sa-page-header__actions {
+        width: 100%;
+    }
+}
+
+/* ---------- Error page ---------------------------------------------------- */
+
+.sa-error-page {
+    max-width: 560px;
+    margin: var(--sa-space-7) auto;
+    text-align: center;
+}
+.sa-error-card {
+    padding: var(--sa-space-6);
+}
+.sa-error-title {
+    color: var(--sa-danger);
+    margin: 0 0 var(--sa-space-4) 0;
+    font-size: var(--sa-text-xl);
+    font-weight: 700;
+}
+.sa-error-message {
+    font-size: var(--sa-text-base);
+    color: var(--sa-text-muted);
+    margin-bottom: var(--sa-space-6);
+}
+
+/* ---------- Empty states -------------------------------------------------- */
+
+.sa-empty {
+    text-align: center;
+    padding: var(--sa-space-7) var(--sa-space-5);
+    color: var(--sa-text-muted);
+}
+.sa-empty__icon {
+    font-size: 2.5rem;
+    margin-bottom: var(--sa-space-4);
+    opacity: 0.5;
+}
+.sa-empty__title {
+    font-size: var(--sa-text-lg);
+    font-weight: 600;
+    color: var(--sa-text-default);
+    margin-bottom: var(--sa-space-2);
+}
+.sa-empty__hint {
+    font-size: var(--sa-text-sm);
+    color: var(--sa-text-muted);
+    margin-bottom: var(--sa-space-4);
+}
+
+/* ---------- Notice banners (page-scoped, not flash messages) -------------- */
+
+.sa-banner {
+    padding: var(--sa-space-4);
+    border-radius: var(--sa-radius-lg);
+    border: 1px solid transparent;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sa-space-3);
+    font-size: var(--sa-text-sm);
+    margin-bottom: var(--sa-space-4);
+}
+.sa-banner--info    { background: var(--sa-info-tint);    color: var(--sa-info-text);    border-color: var(--sa-info-border); }
+.sa-banner--success { background: var(--sa-success-tint); color: var(--sa-success-text); border-color: var(--sa-success-border); }
+.sa-banner--warning { background: var(--sa-warning-tint); color: var(--sa-warning-text); border-color: var(--sa-warning-border); }
+.sa-banner--danger  { background: var(--sa-danger-tint);  color: var(--sa-danger-text);  border-color: var(--sa-danger-border); }
+.sa-banner__icon  { font-size: 1.25rem; line-height: 1; flex-shrink: 0; }
+.sa-banner__title { font-weight: 600; margin-bottom: var(--sa-space-1); }
+
+/* ---------- Chip / pill badge --------------------------------------------- */
+
+.sa-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    background: transparent;
+    color: var(--sa-ink-70);
+    border: 1px solid var(--sa-rule);
+    border-radius: var(--sa-radius-sm);
+    font-family: var(--sa-font-sans);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+/* "Done" / informational states are monochrome — color is reserved for
+   action-required (amber) and hard error (red). */
+.sa-chip--primary { background: var(--sa-ink);          color: var(--sa-bg-page);     border-color: var(--sa-ink); }
+.sa-chip--success { background: transparent;            color: var(--sa-ink-70);      border-color: var(--sa-rule); }
+.sa-chip--warning { background: var(--sa-warning-tint); color: var(--sa-warning);     border-color: transparent; }
+.sa-chip--danger  { background: var(--sa-danger-tint);  color: var(--sa-danger);      border-color: transparent; }
+.sa-chip--neutral { background: transparent;            color: var(--sa-ink-70);      border-color: var(--sa-rule); }
+
+/* ---------- Filter bar ---------------------------------------------------- */
+
+.sa-filter-bar {
+    display: flex;
+    gap: var(--sa-space-5);
+    align-items: flex-end;
+    flex-wrap: wrap;
+    padding: var(--sa-space-4);
+    background: var(--sa-gray-50);
+    border: 1px solid var(--sa-border);
+    border-radius: var(--sa-radius-lg);
+    margin-bottom: var(--sa-space-4);
+    font-size: var(--sa-text-sm);
+}
+.sa-filter-bar__field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sa-space-1);
+}
+.sa-filter-bar__field label {
+    font-size: var(--sa-text-xs);
+    font-weight: 600;
+    color: var(--sa-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.sa-filter-bar__field select,
+.sa-filter-bar__field input {
+    padding: var(--sa-space-1) var(--sa-space-2);
+    border: 1px solid var(--sa-border-strong);
+    border-radius: var(--sa-radius-md);
+    font-size: var(--sa-text-sm);
+    background: var(--sa-bg-surface);
+}
+.sa-filter-bar__count {
+    margin-left: auto;
+    color: var(--sa-text-muted);
+    font-size: var(--sa-text-sm);
+}
+
+/* ---------- Progress bar -------------------------------------------------- */
+
+.sa-progress-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sa-space-2);
+}
+.sa-progress-track {
+    flex: 1;
+    min-width: 100px;
+    height: 8px;
+    background: var(--sa-gray-200);
+    border-radius: var(--sa-radius-pill);
+    overflow: hidden;
+}
+.sa-progress-fill {
+    height: 100%;
+    border-radius: inherit;
+    transition: width var(--sa-duration-base) var(--sa-easing);
+}
+.sa-progress-fill.is-complete { background: var(--sa-success); }
+.sa-progress-fill.is-partial  { background: var(--sa-warning); }
+.sa-progress-fill.is-low      { background: var(--sa-danger); }
+.sa-progress-meta {
+    min-width: 60px;
+    text-align: right;
+    font-size: var(--sa-text-xs);
+}
+.sa-progress-meta strong { color: var(--sa-text-strong); font-size: var(--sa-text-sm); }
+.sa-progress-meta small  { color: var(--sa-text-muted); display: block; }
+
+/* ---------- Pagination ---------------------------------------------------- */
+
+.sa-pagination {
+    margin-top: var(--sa-space-5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: var(--sa-space-2);
+}
+.sa-pagination__current {
+    padding: 0 var(--sa-space-4);
+    color: var(--sa-text-muted);
+    font-size: var(--sa-text-sm);
+}
+
+/* ---------- Text utilities ------------------------------------------------ */
+
+.sa-text-muted   { color: var(--sa-text-muted); }
+.sa-text-faint   { color: var(--sa-text-faint); }
+.sa-text-strong  { color: var(--sa-text-strong); }
+.sa-text-success { color: var(--sa-success); }
+.sa-text-warning { color: var(--sa-warning); }
+.sa-text-danger  { color: var(--sa-danger); }
+.sa-text-info    { color: var(--sa-info); }
+
+.sa-mono { font-family: var(--sa-font-mono); font-size: 0.85em; }
+
+/* ---------- Toolbar (page-action row above tables/grids) ------------------ */
+
+.sa-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--sa-space-3);
+    margin-bottom: var(--sa-space-4);
+    flex-wrap: wrap;
+}
+.sa-toolbar__actions {
+    display: flex;
+    gap: var(--sa-space-2);
+    flex-wrap: wrap;
+}
+
+/* ---------- Ledger atoms --------------------------------------------------
+   Small editorial primitives that map to the Ledger design system's
+   LLabel / LNum / LSpark / pipeline-column components. Pages opt in by
+   class — they cost nothing if unused.
+   ------------------------------------------------------------------------ */
+
+/* LLabel — uppercase tracked-out caption used above numbers and section
+   titles. Replaces ad-hoc ".text-uppercase small" combinations. */
+.sa-label {
+    font-family: var(--sa-font-sans);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sa-ink-50);
+    line-height: 1.2;
+}
+
+/* LNum — Newsreader serif number, tabular figures, tight tracking. Pair
+   with .sa-num-lg / .sa-num-xl to override size. */
+.sa-num-lg { font-size: 32px; }
+.sa-num-xl { font-size: 48px; }
+
+/* Mono code lockups (IDs, time stamps, percentages) */
+.sa-code {
+    font-family: var(--sa-font-mono);
+    font-size: 11.5px;
+    color: var(--sa-ink-70);
+    letter-spacing: 0.02em;
+}
+
+/* Datum block — "Label / big serif number / footnote" stack used on every
+   metric card and dashboard hero. */
+.sa-datum {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sa-space-2);
+}
+.sa-datum__label {
+    font-family: var(--sa-font-sans);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sa-ink-50);
+}
+.sa-datum__value {
+    font-family: var(--sa-font-serif);
+    font-size: 36px;
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: var(--sa-ink);
+    font-variant-numeric: tabular-nums;
+}
+.sa-datum__delta {
+    font-size: 12px;
+    color: var(--sa-ink-70);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.sa-datum__delta .delta-num { font-family: var(--sa-font-mono); }
+.sa-datum__delta--up   { color: var(--sa-ink-70); }
+.sa-datum__delta--down { color: var(--sa-ink-70); }
+.sa-datum__delta--alert { color: var(--sa-warning); }
+
+/* Pipeline column — Incoming / Running / Pipeline cards used at the top
+   of the dashboard. Three-column flat-bordered grid, mono counts,
+   serif money totals. */
+.sa-pipeline {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    background: var(--sa-bg-surface);
+    border: 1px solid var(--sa-rule);
+    margin-bottom: var(--sa-space-6);
+}
+.sa-pipeline__col {
+    padding: 20px 22px;
+    border-right: 1px solid var(--sa-rule);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.sa-pipeline__col:last-child { border-right: none; }
+.sa-pipeline__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+.sa-pipeline__title {
+    font-family: var(--sa-font-serif);
+    font-size: 22px;
+    font-weight: 500;
+    margin: 0;
+    letter-spacing: -0.01em;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--sa-ink);
+}
+.sa-pipeline__count {
+    font-family: var(--sa-font-mono);
+    font-size: 12px;
+    color: var(--sa-ink-50);
+    font-weight: 400;
+}
+.sa-pipeline__sub {
+    font-size: 12px;
+    color: var(--sa-ink-70);
+    margin-bottom: 14px;
+}
+.sa-pipeline__sub .total {
+    font-family: var(--sa-font-mono);
+    font-size: 11px;
+}
+.sa-pipeline__row {
+    padding: 10px 0;
+    border-top: 1px solid var(--sa-rule-soft);
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.sa-pipeline__row-meta {
+    flex: 1;
+    min-width: 0;
+}
+.sa-pipeline__row-who {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--sa-ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sa-pipeline__row-what {
+    font-size: 11.5px;
+    color: var(--sa-ink-70);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sa-pipeline__row-amount {
+    font-family: var(--sa-font-serif);
+    font-size: 14px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    color: var(--sa-ink);
+    flex-shrink: 0;
+}
+.sa-pipeline__row-stale {
+    font-family: var(--sa-font-mono);
+    font-size: 10.5px;
+    color: var(--sa-ink-50);
+    text-align: right;
+    margin-top: 2px;
+}
+.sa-pipeline__row-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--sa-ink-30);
+    margin-top: 6px;
+    flex-shrink: 0;
+}
+.sa-pipeline__row-dot--urgent { background: var(--sa-warning); }
+
+@media (max-width: 960px) {
+    .sa-pipeline { grid-template-columns: 1fr; }
+    .sa-pipeline__col {
+        border-right: none;
+        border-bottom: 1px solid var(--sa-rule);
+    }
+    .sa-pipeline__col:last-child { border-bottom: none; }
+}
+
+/* Toast notifications — corner-of-screen feedback for AJAX actions.
+   Single intent treatment: neutral surface with a left-stripe accent.
+   Color is reserved as signal (amber for warning, red for blocker), not
+   as background fill — consistent with the Ledger "color = signal" rule. */
+#sa-toast-root {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-width: 380px;
+    pointer-events: none;
+}
+.sa-toast {
+    pointer-events: auto;
+    background: var(--sa-bg-surface);
+    color: var(--sa-text-strong);
+    border: 1px solid var(--sa-border);
+    border-left: 3px solid var(--sa-ink);
+    border-radius: var(--sa-radius-md);
+    padding: 0.625rem 0.75rem;
+    box-shadow: var(--sa-shadow-lg);
+    font-size: var(--sa-text-sm);
+    line-height: var(--sa-leading-snug);
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    animation: sa-toast-in var(--sa-duration-base) var(--sa-easing);
+}
+.sa-toast.is-leaving { animation: sa-toast-out var(--sa-duration-base) var(--sa-easing) forwards; }
+.sa-toast-success { border-left-color: var(--sa-success); }
+.sa-toast-warning { border-left-color: var(--sa-warning); }
+.sa-toast-error   { border-left-color: var(--sa-danger); }
+.sa-toast-info    { border-left-color: var(--sa-info); }
+.sa-toast__icon {
+    font-family: var(--sa-font-mono);
+    font-weight: 600;
+    width: 1rem;
+    text-align: center;
+    flex-shrink: 0;
+    line-height: 1.4;
+}
+.sa-toast__msg { flex: 1; }
+.sa-toast__close {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font-size: 1.1em;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.5;
+    padding: 0;
+    transition: opacity var(--sa-duration-fast) var(--sa-easing);
+}
+.sa-toast__close:hover { opacity: 1; }
+@keyframes sa-toast-in  { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes sa-toast-out { to   { transform: translateX(20px); opacity: 0; } }
+
+/* Build stamp — bottom-right corner, monospace, low-contrast so it
+   doesn't compete with content. Click-through (pointer-events: none)
+   so it never blocks UI underneath. Sized to be readable when copy-
+   pasted into a bug report but ignorable otherwise. */
+.sa-build-stamp {
+    position: fixed;
+    bottom: 6px;
+    right: 10px;
+    z-index: 50;
+    pointer-events: none;
+    font-family: var(--sa-font-mono);
+    font-size: 11px;
+    color: var(--sa-ink-50);
+    background: rgba(244, 241, 234, 0.7); /* --sa-gray-50 (paper) at 70% */
+    padding: 2px 6px;
+    border-radius: 3px;
+    user-select: text;
+}
+@media print { .sa-build-stamp { display: none; } }

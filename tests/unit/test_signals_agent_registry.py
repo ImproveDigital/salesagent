@@ -68,6 +68,11 @@ class TestSignalsAgentRegistry:
         # adcp 3.9: pricing is now empty, pricing details moved to pricing_options (required)
         mock_signals = [
             {
+                "signal_id": {
+                    "source": "agent",
+                    "agent_url": "https://test.example/signals",
+                    "id": "seg1",
+                },
                 "signal_agent_segment_id": "seg1",
                 "name": "Test Signal",
                 "description": "Test description",

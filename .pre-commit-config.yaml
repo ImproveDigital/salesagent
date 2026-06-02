@@ -13,7 +13,7 @@ repos:
       # Check for tenant.config references
       - id: no-tenant-config
         name: No tenant.config references
-        entry: sh -c 'if grep -r "tenant\.config\|tenant\[.config.\]" --include="*.py" . | grep -v "test_migration\|postmortem\|pre-commit"; then echo "Found tenant.config references!"; exit 1; fi'
+        entry: sh -c 'if grep -rE "tenant\.config([^_a-zA-Z0-9]|$)|tenant\[.config.\]" --include="*.py" . | grep -v "test_migration\|postmortem\|pre-commit"; then echo "Found tenant.config references!"; exit 1; fi'
         language: system
         pass_filenames: false
 
@@ -201,14 +201,6 @@ repos:
         pass_filenames: false
 
 
-      # Validate MCP tool-schema parameter alignment (prevents datetime.combine bugs)
-      - id: mcp-schema-alignment
-        name: MCP tool-schema parameter alignment
-        entry: uv run python scripts/hooks/validate_mcp_schemas.py
-        language: system
-        files: '^(src/core/schemas\.py|src/core/main\.py)$'
-        pass_filenames: false
-
       # Check generated schemas are in sync with JSON schemas
       # NOTE: Removed this hook - script doesn't exist and check_schema_sync.py
       # already validates schema alignment (runs on every commit via adcp-schema-sync)
@@ -238,8 +230,8 @@ repos:
         entry: uv run python .pre-commit-hooks/check_code_duplication.py
         language: system
         files: '^(src|tests)/.*\.py$'
-        pass_filenames: false
-        always_run: true
+        pass_filenames: true
+        always_run: false
 
       # Suggest factory usage in test files (non-blocking)
       - id: suggest-test-factories
@@ -272,34 +264,31 @@ repos:
       - id: check-ast
       - id: debug-statements
 
-  - repo: https://github.com/psf/black
-    rev: 25.1.0
-    hooks:
-      - id: black
-        language_version: python3
-
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.10
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
 
-  # Type checking with mypy - ENFORCED (0 errors in src/)
-  # After achieving 100% compliance, mypy is now mandatory for all commits
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.18.2
+  # Type checking with mypy via the project's own venv (NOT
+  # mirrors-mypy's isolated environment). The previous hook listed
+  # ad-hoc additional_dependencies (including a stale adcp==3.2.0
+  # pin against an actual 4.x dependency, plus an incomplete
+  # type-stub set) which surfaced 200+ false-positive
+  # import-resolution errors that didn't appear under canonical
+  # `make quality`. Same class of bug fixed for adcp-client-python
+  # in upstream PR #431. Running with `uv run --extra dev mypy`
+  # gives the hook the same dependency resolution `make quality`
+  # uses — single source of truth.
+  - repo: local
     hooks:
       - id: mypy
-        args: [--config-file=mypy.ini]
-        additional_dependencies:
-          - sqlalchemy[mypy]==2.0.36
-          - types-requests
-          - types-python-dateutil
-          - types-pytz
-          - types-Markdown
-          - types-waitress
-          - adcp==3.2.0
-          - fastmcp
-          - alembic
+        name: mypy
+        entry: uv run --extra dev mypy
+        args: [--config-file=mypy.ini, src/]
+        language: system
+        types: [python]
+        pass_filenames: false
         files: '^src/'
         exclude: '^src/adapters/google_ad_manager_original\.py$'

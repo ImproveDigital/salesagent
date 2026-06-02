@@ -38,16 +38,25 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from src.core.exceptions import AdCPAdapterError, AdCPNotFoundError, AdCPValidationError
+from src.core.exceptions import (
+    AdCPAdapterError,
+    AdCPNotFoundError,
+    AdCPTermsRejectedError,
+    AdCPValidationError,
+)
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     CreateMediaBuyError,
     CreateMediaBuyRequest,
     CreateMediaBuyResult,
     CreateMediaBuySuccess,
+    Error,
     PricingOption,
+    SyncCreativeResult,
+    SyncCreativesResponse,
 )
 from src.core.testing_hooks import AdCPTestContext
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 # ---------------------------------------------------------------------------
 # Shared helpers for building mocks/fixtures
@@ -67,6 +76,7 @@ def _make_request(**overrides) -> CreateMediaBuyRequest:
     Start 1 day ahead, end 8 days ahead.
     """
     defaults = {
+        **required_request_kwargs(),
         "brand": {"domain": "testbrand.com"},
         "start_time": _future(1),
         "end_time": _future(8),
@@ -210,6 +220,10 @@ class _PatchContext:
         mock_uow.session = self.db_session
         mock_media_buys = MagicMock()
         mock_media_buys.get_by_principal.return_value = []  # no duplicate buyer_refs
+        # Default idempotency lookup misses — tests exercising the replay path
+        # override per-test. Bare MagicMock returns a truthy default and every
+        # request would otherwise look like an idempotency hit.
+        mock_media_buys.find_by_idempotency_key.return_value = None
         mock_uow.media_buys = mock_media_buys
 
         self._p_uow = patch("src.core.database.repositories.MediaBuyUoW", return_value=mock_uow)
@@ -225,21 +239,62 @@ class _PatchContext:
         self._p_uow.stop()
 
 
+class TestEmbeddedCampaignApprovalGate:
+    def test_storefront_owned_campaign_approval_skips_publisher_manual_approval(self):
+        from src.core.tools.media_buy_create import _effective_manual_approval_required
+
+        assert (
+            _effective_manual_approval_required(
+                tenant_approval_required=True,
+                adapter_approval_required=True,
+                publisher_owns_campaign=False,
+            )
+            is False
+        )
+
+    def test_publisher_owned_campaign_approval_preserves_manual_approval(self):
+        from src.core.tools.media_buy_create import _effective_manual_approval_required
+
+        assert (
+            _effective_manual_approval_required(
+                tenant_approval_required=True,
+                adapter_approval_required=False,
+                publisher_owns_campaign=True,
+            )
+            is True
+        )
+
+    def test_storefront_owned_campaign_approval_allows_auto_create_even_when_adapter_requires_approval(self):
+        from src.core.tools.media_buy_create import _effective_manual_approval_required
+
+        assert (
+            _effective_manual_approval_required(
+                tenant_approval_required=False,
+                adapter_approval_required=True,
+                publisher_owns_campaign=False,
+            )
+            is False
+        )
+
+
 # ===========================================================================
 # HIGH_RISK Tests
 # ===========================================================================
 
 
 class TestProductNotFound:
-    """GAP-001: Product not found returns CreateMediaBuyError with validation_error."""
+    """#351: nonexistent product_id raises AdCPProductNotFoundError so the
+    boundary translator emits spec-canonical ``PRODUCT_NOT_FOUND`` on the
+    wire — replaces the legacy generic ``VALIDATION_ERROR`` shape.
+    """
 
     @pytest.mark.asyncio
-    async def test_product_not_found_returns_error(self):
-        """When packages reference non-existent product_ids, return validation_error
-        with missing IDs listed.
-
-        Anchors: media_buy_create.py:1470-1473
+    async def test_product_not_found_raises_typed_error(self):
+        """When packages reference non-existent product_ids, raise
+        ``AdCPProductNotFoundError`` with the missing IDs in ``details``
+        so buyers can re-discover and retry.
         """
+        from src.core.exceptions import AdCPProductNotFoundError
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = _make_request(
@@ -261,16 +316,15 @@ class TestProductNotFound:
         existing_product = _mock_product("prod_exists")
 
         with _PatchContext(products=[existing_product]) as pc:
-            result = await _create_media_buy_impl(req=req, identity=pc.identity)
+            with pytest.raises(AdCPProductNotFoundError) as exc_info:
+                await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        assert isinstance(result, CreateMediaBuyResult)
-        assert isinstance(result.response, CreateMediaBuyError)
-        assert result.status == "failed"
-        errors = result.response.errors
-        assert len(errors) == 1
-        assert errors[0].code == "validation_error"
-        assert "prod_missing" in errors[0].message
-        assert "not found" in errors[0].message.lower()
+        assert exc_info.value.error_code == "PRODUCT_NOT_FOUND"
+        assert "prod_missing" in str(exc_info.value)
+        assert exc_info.value.details == {
+            "missing_product_ids": ["prod_missing"],
+            "field": "packages[].product_id",
+        }
 
 
 class TestMaxDailySpendExceeded:
@@ -307,7 +361,16 @@ class TestMaxDailySpendExceeded:
         assert result.status == "failed"
         errors = result.response.errors
         assert len(errors) == 1
-        assert errors[0].code == "validation_error"
+        # ``INVALID_REQUEST`` per AdCP 3.0 standard error-code enum — the
+        # canonical code for buyer-fixable shape / business-rule violations
+        # (max-daily-spend overage, past start_time, reversed dates). The
+        # pre-spec ``VALIDATION_ERROR`` was not in ``STANDARD_ERROR_CODES``
+        # and was dropped by buyer agents walking the enum for
+        # self-correction. Storyboards ``error_compliance/nonexistent_product``
+        # and ``error_compliance/reversed_dates_error`` both accept
+        # ``INVALID_REQUEST``; the latter also accepts ``VALIDATION_ERROR``
+        # — the intersection (and spec-canonical answer) is INVALID_REQUEST.
+        assert errors[0].code == "INVALID_REQUEST"
         assert "daily" in errors[0].message.lower()
 
     @pytest.mark.asyncio
@@ -466,6 +529,138 @@ class TestCreativeMissingUrl:
 
             assert exc_info.value.details.get("error_code") == "INVALID_CREATIVES"
 
+    def test_audio_vast_creative_does_not_require_dimensions(self):
+        from src.core.tools.media_buy_create import _validate_creatives_before_adapter_call
+
+        mock_package = MagicMock()
+        mock_package.creative_ids = ["creative_1"]
+        mock_package.product_id = None
+
+        mock_creative = MagicMock()
+        mock_creative.creative_id = "creative_1"
+        mock_creative.format = "audio_vast"
+        mock_creative.agent_url = "https://creative.example.com"
+        mock_creative.data = {"assets": {"vast_tag": {"url": "https://ads.example.com/audio.xml"}}}
+
+        mock_format_spec = MagicMock()
+        mock_format_spec.output_format_ids = None
+        mock_format_spec.type = "audio"
+
+        with (
+            patch("src.core.tools.media_buy_create._get_format_spec_sync", return_value=mock_format_spec),
+            patch(
+                "src.core.tools.media_buy_create.extract_media_url_and_dimensions",
+                return_value=("https://ads.example.com/audio.xml", None, None),
+            ),
+        ):
+            session = MagicMock()
+            session.scalars.return_value.all.return_value = [mock_creative]
+
+            _validate_creatives_before_adapter_call([mock_package], "test_tenant", session=session)
+
+
+class TestSpringServeTagModeCreativePreparation:
+    @staticmethod
+    def _audio_package(*, creative_ids=None):
+        from src.core.schemas import FormatId, MediaPackage
+
+        return MediaPackage(
+            package_id="pkg_audio",
+            name="Audio",
+            delivery_type="guaranteed",
+            impressions=1000,
+            format_ids=[FormatId(agent_url="https://creative.adcontextprotocol.org", id="audio_vast")],
+            creative_ids=creative_ids,
+        )
+
+    @staticmethod
+    def _creative(*, format_id="audio_vast", url="https://ads.example.com/audio.xml"):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            creative_id="creative_audio_vast",
+            name="Audio VAST",
+            agent_url="https://creative.adcontextprotocol.org",
+            format=format_id,
+            format_parameters={"duration_ms": 30000},
+            data={"assets": {"vast_tag": {"asset_type": "vast", "url": url}}},
+        )
+
+    def test_assigned_audio_vast_creative_becomes_vast_endpoint_url(self):
+        from src.core.tools.media_buy_create import _prepare_springserve_tag_mode_packages
+
+        adapter = MagicMock(adapter_name="springserve", demand_class="tag")
+        adapter._validate_creative_remote_url.return_value = None
+        package = self._audio_package(creative_ids=["creative_audio_vast"])
+        creative = self._creative()
+
+        with (
+            patch(
+                "src.core.tools.media_buy_create._load_creatives_by_id",
+                return_value={"creative_audio_vast": creative},
+            ),
+            patch("src.core.tools.media_buy_create._get_format_spec_sync", return_value=None),
+        ):
+            [prepared] = _prepare_springserve_tag_mode_packages(
+                adapter,
+                [package],
+                "test_tenant",
+                session=MagicMock(),
+            )
+
+        extra_fields = prepared.implementation_config["springserve"]["extra_demand_tag_fields"]
+        assert extra_fields["vast_endpoint_url"] == "https://ads.example.com/audio.xml"
+
+    def test_missing_tag_mode_creative_fails_before_adapter_call(self):
+        from src.core.tools.media_buy_create import _prepare_springserve_tag_mode_packages
+
+        adapter = MagicMock(adapter_name="springserve", demand_class="tag")
+        package = self._audio_package()
+
+        with pytest.raises(AdCPValidationError, match="no assigned audio_vast creative"):
+            _prepare_springserve_tag_mode_packages(adapter, [package], "test_tenant", session=MagicMock())
+
+    def test_multiple_tag_mode_creatives_fail_before_adapter_call(self):
+        from src.core.tools.media_buy_create import _prepare_springserve_tag_mode_packages
+
+        adapter = MagicMock(adapter_name="springserve", demand_class="tag")
+        package = self._audio_package(creative_ids=["creative_1", "creative_2"])
+
+        with pytest.raises(AdCPValidationError, match="requires exactly one VAST creative"):
+            _prepare_springserve_tag_mode_packages(adapter, [package], "test_tenant", session=MagicMock())
+
+    def test_non_vast_tag_mode_creative_fails_before_adapter_call(self):
+        from src.core.tools.media_buy_create import _prepare_springserve_tag_mode_packages
+
+        adapter = MagicMock(adapter_name="springserve", demand_class="tag")
+        package = self._audio_package(creative_ids=["creative_audio_vast"])
+        creative = self._creative(format_id="audio_30s")
+
+        with patch(
+            "src.core.tools.media_buy_create._load_creatives_by_id",
+            return_value={"creative_audio_vast": creative},
+        ):
+            with pytest.raises(AdCPValidationError, match="requires a VAST format"):
+                _prepare_springserve_tag_mode_packages(adapter, [package], "test_tenant", session=MagicMock())
+
+    def test_invalid_vast_url_fails_before_adapter_call(self):
+        from src.core.tools.media_buy_create import _prepare_springserve_tag_mode_packages
+
+        adapter = MagicMock(adapter_name="springserve", demand_class="tag")
+        adapter._validate_creative_remote_url.return_value = "URL must use https"
+        package = self._audio_package(creative_ids=["creative_audio_vast"])
+        creative = self._creative(url="http://ads.example.com/audio.xml")
+
+        with (
+            patch(
+                "src.core.tools.media_buy_create._load_creatives_by_id",
+                return_value={"creative_audio_vast": creative},
+            ),
+            patch("src.core.tools.media_buy_create._get_format_spec_sync", return_value=None),
+        ):
+            with pytest.raises(AdCPValidationError, match="VAST URL is invalid"):
+                _prepare_springserve_tag_mode_packages(adapter, [package], "test_tenant", session=MagicMock())
+
     def test_creative_missing_dimensions_raises_invalid_creatives(self):
         """When creative has URL but missing dimensions, raise INVALID_CREATIVES.
 
@@ -502,6 +697,25 @@ class TestCreativeMissingUrl:
             assert exc_info.value.details.get("error_code") == "INVALID_CREATIVES"
 
 
+class TestCanonicalFormatCompatibility:
+    def test_requested_canonical_display_matches_legacy_product_format(self):
+        from src.core.schemas import FormatId
+        from src.core.tools.media_buy_create import _matching_supported_format
+
+        requested = FormatId(
+            agent_url="https://creative.adcontextprotocol.org",
+            id="display_image",
+            width=300,
+            height=250,
+        )
+        legacy_product_format = FormatId(
+            agent_url="https://creative.adcontextprotocol.org",
+            id="display_300x250",
+        )
+
+        assert _matching_supported_format(requested, [legacy_product_format]) is legacy_product_format
+
+
 class TestCreativeUploadFailure:
     """GAP-004: Creative upload failure raises CREATIVE_UPLOAD_FAILED.
 
@@ -510,6 +724,19 @@ class TestCreativeUploadFailure:
     1. A behavioral test exercising the actual code path through _create_media_buy_impl
     2. A behavioral test of the ToolError wrapping logic
     """
+
+    def test_failed_asset_status_raises_creative_upload_failed(self):
+        from src.core.schemas import AssetStatus
+        from src.core.tools.media_buy_create import _uploaded_platform_creative_id
+
+        with pytest.raises(AdCPAdapterError) as exc_info:
+            _uploaded_platform_creative_id(
+                [AssetStatus(creative_id="creative_original", status="failed", message="missing VAST URL")],
+                "creative_original",
+            )
+
+        assert exc_info.value.details.get("error_code") == "CREATIVE_UPLOAD_FAILED"
+        assert "missing VAST URL" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_creative_upload_failure_raises_tool_error(self):
@@ -558,8 +785,8 @@ class TestCreativeUploadFailure:
 
         # Mock adapter whose add_creative_assets raises a generic exception
         mock_adapter = MagicMock()
-        mock_adapter.manual_approval_required = False
-        mock_adapter.manual_approval_operations = []
+        mock_adapter.manual_approval_required = True
+        mock_adapter.manual_approval_operations = ["add_creative_assets"]
         mock_adapter.__class__.__name__ = "MockAdapter"
         mock_adapter.get_supported_pricing_models.return_value = {"cpm", "vcpm", "cpc", "flat_rate"}
         mock_adapter.validate_media_buy_request.return_value = []
@@ -589,6 +816,7 @@ class TestCreativeUploadFailure:
 
             with (
                 patch("src.core.tools.media_buy_create.process_and_upload_package_creatives") as mock_upload,
+                patch("src.core.tools.media_buy_create.publisher_owns_creative_approval", return_value=False),
                 patch("src.core.tools.media_buy_create.get_adapter", return_value=mock_adapter),
                 patch("src.core.tools.media_buy_create._validate_creatives_before_adapter_call"),
                 patch(
@@ -600,6 +828,23 @@ class TestCreativeUploadFailure:
                 patch(
                     "src.core.tools.media_buy_create._get_format_spec_sync",
                     return_value=MagicMock(output_format_ids=None),
+                ),
+                patch(
+                    "src.core.tools.media_buy_create.build_adapter_asset_from_stored_creative",
+                    return_value={
+                        "creative_id": "creative_no_platform",
+                        "package_assignments": ["pkg_prod_1_abc_1"],
+                        "format": "display_300x250_image",
+                        "format_id": {
+                            "agent_url": "https://creative.example.com",
+                            "id": "display_300x250_image",
+                        },
+                        "width": 300,
+                        "height": 250,
+                        "url": "https://example.com/ad.jpg",
+                        "asset_type": "image",
+                        "name": "Test Creative",
+                    },
                 ),
                 patch(
                     "src.core.tools.media_buy_create.extract_media_url_and_dimensions",
@@ -618,6 +863,135 @@ class TestCreativeUploadFailure:
                 assert exc_info.value.details.get("error_code") == "CREATIVE_UPLOAD_FAILED"
                 assert "creative_no_platform" in str(exc_info.value)
                 assert "Network timeout" in str(exc_info.value)
+                assert "add_creative_assets" not in mock_adapter.manual_approval_operations
+
+    @pytest.mark.asyncio
+    async def test_auto_upload_uses_current_response_package_id_for_each_package(self):
+        from src.core.schemas import AssetStatus
+        from src.core.schemas import Package as RespPackage
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creative_ids": ["creative_1"],
+                },
+                {
+                    "product_id": "prod_2",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creative_ids": ["creative_2"],
+                },
+            ]
+        )
+        product_1 = _mock_product("prod_1")
+        product_2 = _mock_product("prod_2")
+
+        creatives = []
+        for creative_id in ("creative_1", "creative_2"):
+            creative = MagicMock()
+            creative.creative_id = creative_id
+            creative.format = "display_300x250_image"
+            creative.agent_url = "https://creative.example.com"
+            creative.name = creative_id
+            creative.data = {}
+            creatives.append(creative)
+
+        response_packages = []
+        for package_id in ("pkg_prod_1_response", "pkg_prod_2_response"):
+            resp_package = MagicMock(spec=RespPackage)
+            resp_package.package_id = package_id
+            resp_package.platform_line_item_id = None
+            response_packages.append(resp_package)
+
+        adapter_response = MagicMock(spec=CreateMediaBuySuccess)
+        adapter_response.media_buy_id = "mb_test123"
+        adapter_response.packages = response_packages
+        adapter_response.creative_deadline = None
+        adapter_response.__class__ = CreateMediaBuySuccess
+
+        mock_adapter = MagicMock()
+        mock_adapter.manual_approval_required = False
+        mock_adapter.manual_approval_operations = []
+        mock_adapter.__class__.__name__ = "MockAdapter"
+        mock_adapter.get_supported_pricing_models.return_value = {"cpm", "vcpm", "cpc", "flat_rate"}
+        mock_adapter.validate_media_buy_request.return_value = []
+        mock_adapter.add_creative_assets.side_effect = [
+            [AssetStatus(creative_id="platform_1", status="approved")],
+            [AssetStatus(creative_id="platform_2", status="approved")],
+        ]
+
+        mock_schema_products = []
+        for product_id in ("prod_1", "prod_2"):
+            mock_schema_product = MagicMock()
+            mock_schema_product.product_id = product_id
+            mock_schema_product.name = f"Schema {product_id}"
+            mock_schema_product.implementation_config = None
+            mock_schema_product.format_ids = None
+            mock_schema_product.delivery_type = MagicMock(value="non_guaranteed")
+            mock_schema_products.append(mock_schema_product)
+
+        package_ids_used: list[str] = []
+
+        def build_asset(creative, package_id, format_spec):
+            package_ids_used.append(package_id)
+            return {
+                "creative_id": creative.creative_id,
+                "package_assignments": [package_id],
+                "format": "display_300x250_image",
+                "format_id": {
+                    "agent_url": "https://creative.example.com",
+                    "id": "display_300x250_image",
+                },
+                "width": 300,
+                "height": 250,
+                "url": "https://example.com/ad.jpg",
+                "asset_type": "image",
+                "name": creative.name,
+            }
+
+        with _PatchContext(products=[product_1, product_2]) as pc:
+            all_results = iter([[product_1, product_2], creatives])
+            first_results = iter([_mock_currency_limit(), None, None, None, None, None])
+            scalars_mock = MagicMock()
+            scalars_mock.all.side_effect = lambda: next(all_results)
+            scalars_mock.first.side_effect = lambda: next(first_results, None)
+            pc.db_session.scalars.return_value = scalars_mock
+
+            with (
+                patch("src.core.tools.media_buy_create.process_and_upload_package_creatives") as mock_upload,
+                patch("src.core.tools.media_buy_create.get_adapter", return_value=mock_adapter),
+                patch("src.core.tools.media_buy_create._validate_creatives_before_adapter_call"),
+                patch(
+                    "src.core.tools.media_buy_create._execute_adapter_media_buy_creation",
+                    return_value=adapter_response,
+                ),
+                patch("src.core.tools.media_buy_create._determine_media_buy_status", return_value="active"),
+                patch("src.core.tools.products.get_product_catalog", return_value=mock_schema_products),
+                patch("src.core.helpers.validate_creative_format_against_product", return_value=(True, None)),
+                patch(
+                    "src.core.tools.media_buy_create._get_format_spec_sync",
+                    return_value=MagicMock(output_format_ids=None),
+                ),
+                patch(
+                    "src.core.tools.media_buy_create.build_adapter_asset_from_stored_creative", side_effect=build_asset
+                ),
+                patch(
+                    "src.core.tools.media_buy_create.extract_media_url_and_dimensions",
+                    return_value=("https://example.com/ad.jpg", 300, 250),
+                ),
+                patch("src.core.tools.media_buy_create.extract_click_url", return_value=None),
+                patch("src.core.tools.media_buy_create.extract_impression_tracker_url", return_value=None),
+                patch("src.core.tools.media_buy_create.get_slack_notifier"),
+                patch("src.core.tools.media_buy_create.activity_feed"),
+            ):
+                mock_upload.return_value = (req.packages, {})
+                await _create_media_buy_impl(req=req, identity=pc.identity)
+
+        assert package_ids_used == ["pkg_prod_1_response", "pkg_prod_2_response"]
 
     def test_creative_upload_failure_wraps_exception_as_tool_error(self):
         """The try/except pattern at line 3162-3168 wraps generic exceptions
@@ -724,6 +1098,107 @@ class TestInlineCreativesProcessedBeforeApproval:
         assert call_order.index("creatives_processed") < call_order.index("approval_check"), (
             f"Creatives must be processed before approval check. Order: {call_order}"
         )
+
+    def test_inline_creative_sync_failure_raises_before_id_merge(self):
+        """Failed inline creative sync must not become a missing creative_id later."""
+        from src.core.helpers.creative_helpers import process_and_upload_package_creatives
+
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creatives": [
+                        {
+                            "creative_id": "inline_creative_1",
+                            "name": "Test Ad",
+                            "format_id": {
+                                "agent_url": "https://creative.example.com/",
+                                "id": "display_300x250_image",
+                            },
+                            "assets": {"banner_image": {"url": "https://example.com/ad.png"}},
+                            "variants": [],
+                        }
+                    ],
+                },
+            ]
+        )
+        failed_response = SyncCreativesResponse(
+            creatives=[
+                SyncCreativeResult(
+                    creative_id="inline_creative_1",
+                    action="failed",
+                    errors=[Error(code="validation_failed", message="missing asset dimensions")],
+                )
+            ]
+        )
+
+        with patch("src.core.tools.creatives._sync_creatives_impl", return_value=failed_response):
+            with pytest.raises(AdCPValidationError) as exc_info:
+                process_and_upload_package_creatives(
+                    packages=req.packages,
+                    context=ResolvedIdentity(
+                        principal_id="principal_1",
+                        tenant_id="test_tenant",
+                        tenant={"tenant_id": "test_tenant"},
+                    ),
+                    testing_ctx=AdCPTestContext(),
+                )
+
+        assert exc_info.value.details["error_code"] == "CREATIVES_UPLOAD_FAILED"
+        assert exc_info.value.details["creative_errors"][0]["creative_id"] == "inline_creative_1"
+        assert exc_info.value.details["creative_errors"][0]["errors"][0]["code"] == "validation_failed"
+
+    def test_inline_creative_transient_sync_failure_raises_adapter_error(self):
+        """Creative-agent outages should stay transient, not validation errors."""
+        from src.core.helpers.creative_helpers import process_and_upload_package_creatives
+
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creatives": [
+                        {
+                            "creative_id": "inline_creative_1",
+                            "name": "Test Ad",
+                            "format_id": {
+                                "agent_url": "https://creative.example.com/",
+                                "id": "display_300x250_image",
+                            },
+                            "assets": {"banner_image": {"url": "https://example.com/ad.png"}},
+                            "variants": [],
+                        }
+                    ],
+                },
+            ]
+        )
+        failed_response = SyncCreativesResponse(
+            creatives=[
+                SyncCreativeResult(
+                    creative_id="inline_creative_1",
+                    action="failed",
+                    errors=[Error(code="creative_agent_unreachable", message="agent unavailable")],
+                )
+            ]
+        )
+
+        with patch("src.core.tools.creatives._sync_creatives_impl", return_value=failed_response):
+            with pytest.raises(AdCPAdapterError) as exc_info:
+                process_and_upload_package_creatives(
+                    packages=req.packages,
+                    context=ResolvedIdentity(
+                        principal_id="principal_1",
+                        tenant_id="test_tenant",
+                        tenant={"tenant_id": "test_tenant"},
+                    ),
+                    testing_ctx=AdCPTestContext(),
+                )
+
+        assert exc_info.value.details["error_code"] == "CREATIVES_UPLOAD_FAILED"
+        assert exc_info.value.details["creative_errors"][0]["errors"][0]["code"] == "creative_agent_unreachable"
 
 
 class TestMultipleInvalidCreativesAccumulated:
@@ -1229,6 +1704,53 @@ class TestMainFlowObligations:
         mock_exec.assert_called_once_with(req, ANY, ANY, ANY, ANY, ANY, ANY, tenant=ANY)
 
     @pytest.mark.asyncio
+    async def test_storefront_owned_campaign_approval_uses_mcp_a2a_create_path(self):
+        """Embedded storefront-owned approval does not block MCP/A2A create_media_buy."""
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request()
+        product = _mock_product("prod_1")
+
+        mock_schema_product = MagicMock()
+        mock_schema_product.product_id = "prod_1"
+        mock_schema_product.name = "Test Product"
+        mock_schema_product.implementation_config = None
+        mock_schema_product.format_ids = None
+        mock_schema_product.delivery_type = MagicMock()
+        mock_schema_product.delivery_type.value = "non_guaranteed"
+
+        with _PatchContext(products=[product], human_review_required=True) as pc:
+            with (
+                patch("src.core.tools.media_buy_create.publisher_owns_campaign_approval", return_value=False),
+                patch("src.core.tools.media_buy_create.get_adapter") as mock_adapter_fn,
+                patch("src.core.tools.media_buy_create.process_and_upload_package_creatives") as mock_upload,
+                patch("src.core.tools.media_buy_create._execute_adapter_media_buy_creation") as mock_exec,
+                patch("src.core.tools.media_buy_create._determine_media_buy_status", return_value="active"),
+                patch("src.core.tools.products.get_product_catalog", return_value=[mock_schema_product]),
+                patch("src.core.tools.media_buy_create.get_slack_notifier"),
+                patch("src.core.tools.media_buy_create.activity_feed"),
+            ):
+                mock_adapter = MagicMock()
+                mock_adapter.manual_approval_required = True
+                mock_adapter.manual_approval_operations = ["create_media_buy"]
+                mock_adapter.__class__.__name__ = "MockAdapter"
+                mock_adapter_fn.return_value = mock_adapter
+                mock_upload.return_value = (req.packages, {})
+
+                from src.core.schemas import Package as RespPkg
+
+                resp_pkg = RespPkg(package_id="pkg_1", product_id="prod_1", budget=5000.0)
+                mock_exec.return_value = CreateMediaBuySuccess(media_buy_id="mb_storefront", packages=[resp_pkg])
+
+                result = await _create_media_buy_impl(req=req, identity=pc.identity)
+
+        assert isinstance(result.response, CreateMediaBuySuccess)
+        assert result.response.media_buy_id == "mb_storefront"
+        assert req._already_approved is True
+        assert "create_media_buy" not in mock_adapter.manual_approval_operations
+        mock_exec.assert_called_once_with(req, ANY, ANY, ANY, ANY, ANY, ANY, tenant=ANY)
+
+    @pytest.mark.asyncio
     async def test_format_id_validation(self):
         """Format ID validation runs for packages with format_ids.
 
@@ -1445,8 +1967,20 @@ class TestManualApprovalObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
+        # Spec ``create_media_buy_response`` variant-1 (sync-success): when the
+        # seller has minted a buy id synchronously, the response carries
+        # ``media_buy_id`` + ``packages`` + ``media_buy_status`` describing
+        # what's blocking activation. Without creatives in the request that
+        # media-buy status is ``pending_creatives`` (buyer's next call is
+        # ``sync_creatives``).
+        # Variant-3 (``status='submitted'``, no ``media_buy_id``) is reserved
+        # for cases where no buy was minted.
+        from adcp.types import MediaBuyStatus
+
         assert isinstance(result.response, CreateMediaBuySuccess)
-        assert result.status == "submitted"  # Not "completed"
+        assert result.response.media_buy_id is not None
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
+        assert result.status == "completed"
 
     @pytest.mark.asyncio
     async def test_adapter_requires_review_enters_manual_path(self):
@@ -1475,8 +2009,12 @@ class TestManualApprovalObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
+        from adcp.types import MediaBuyStatus
+
         assert isinstance(result.response, CreateMediaBuySuccess)
-        assert result.status == "submitted"
+        assert result.response.media_buy_id is not None
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
+        assert result.status == "completed"
 
     @pytest.mark.asyncio
     async def test_seller_notification_sent_on_manual_approval(self):
@@ -1508,7 +2046,7 @@ class TestManualApprovalObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        assert result.status == "submitted"
+        assert result.status == "completed"
         mock_notifier.notify_media_buy_event.assert_called_once_with(
             event_type="approval_required",
             media_buy_id=ANY,
@@ -1520,10 +2058,17 @@ class TestManualApprovalObligations:
         )
 
     @pytest.mark.asyncio
-    async def test_response_envelope_status_is_submitted(self):
-        """Manual approval response has status 'submitted', not 'completed'.
+    async def test_response_envelope_carries_media_buy_with_pending_creatives(self):
+        """Manual approval response is variant-1 with ``MediaBuyStatus.pending_creatives``.
 
         Covers: UC-002-ALT-MANUAL-APPROVAL-REQUIRED-06
+
+        When the seller mints a buy synchronously (manual-approval workflow
+        included), the response carries ``media_buy_id`` + ``packages`` per
+        the spec sync-success variant. Without creatives in the request, the
+        ``MediaBuyStatus`` reports ``pending_creatives`` so the buyer's next
+        call (``sync_creatives``) is unambiguous. ``workflow_step_id`` is
+        preserved as an internal handle excluded from the wire output.
         """
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
@@ -1546,8 +2091,12 @@ class TestManualApprovalObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        assert result.status == "submitted"
+        from adcp.types import MediaBuyStatus
+
+        assert result.status == "completed"
         assert isinstance(result.response, CreateMediaBuySuccess)
+        assert result.response.media_buy_id is not None
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
         assert result.response.workflow_step_id is not None
 
     @pytest.mark.asyncio
@@ -1578,7 +2127,8 @@ class TestManualApprovalObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        assert result.status == "submitted"
+        assert result.status == "completed"
+        assert isinstance(result.response, CreateMediaBuySuccess)
         mock_exec.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1612,8 +2162,10 @@ class TestManualApprovalObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        # Pending approval means it's ready for accept/reject
-        assert result.status == "submitted"
+        # Sync-success envelope: buy minted, pending governance review.
+        # ``workflow_step_id`` is the internal handle for the rejection workflow.
+        assert result.status == "completed"
+        assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.workflow_step_id is not None
 
     @pytest.mark.asyncio
@@ -1646,9 +2198,207 @@ class TestManualApprovalObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
+        # Spec variant-1 (sync-success): buy was minted synchronously.
+        # ``workflow_step_id`` is preserved as the internal handle the buyer
+        # can use server-side (excluded from the wire). For polling at the
+        # protocol level, the buyer uses ``media_buy_id`` to query status.
         assert isinstance(result.response, CreateMediaBuySuccess)
-        assert result.response.workflow_step_id is not None
+        assert result.response.media_buy_id is not None
         assert result.response.workflow_step_id == "step_1"
+
+
+class TestPendingCreativesVariantClassification:
+    """Pin the variant-1 vs variant-3 split for synchronously-minted buys.
+
+    Regression guard for the over-correction in PR #183. PR #183 routed every
+    workflow-step-pending path through the spec's variant-3 envelope
+    (``status='submitted'`` + ``task_id``, no ``media_buy_id``). That envelope
+    is for genuinely async cases where the seller hasn't decided whether to
+    mint a buy. When the seller has already minted a buy synchronously, the
+    response must use variant-1 (sync-success) carrying ``media_buy_id`` +
+    ``packages`` + a ``MediaBuyStatus`` describing what's blocking activation.
+
+    Without these tests the five storyboard scenarios that exercise
+    "buy without creatives" (pending_creatives_to_start/create_buy_no_creatives,
+    inventory_list_targeting/create_buy_with_lists,
+    inventory_list_no_match/create_buy_no_match,
+    invalid_transitions/create_buy,
+    creative_fate_after_cancellation/create_buy) regress on the wire shape.
+    """
+
+    @pytest.mark.asyncio
+    async def test_buy_without_creatives_emits_variant_one_with_pending_creatives(self):
+        """No creatives in request → variant-1 (sync-success) / pending_creatives.
+
+        The buyer's next step is ``sync_creatives``; ``MediaBuyStatus.pending_creatives``
+        names exactly that blocker.
+        """
+        from adcp.types import MediaBuyStatus
+
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        # Default _make_request() builds a single package with no creatives.
+        req = _make_request()
+        # Sanity check the test setup: this scenario MUST send no creatives.
+        for pkg in req.packages or []:
+            assert not getattr(pkg, "creative_ids", None)
+            assert not getattr(pkg, "creatives", None)
+
+        product = _mock_product("prod_1")
+
+        with _PatchContext(products=[product], human_review_required=True) as pc:
+            with (
+                patch("src.core.tools.media_buy_create.process_and_upload_package_creatives") as mock_upload,
+                patch("src.core.tools.media_buy_create.get_adapter") as mock_adapter_fn,
+                patch("src.core.tools.media_buy_create.get_slack_notifier"),
+                patch("src.core.tools.media_buy_create.activity_feed"),
+                patch("src.core.tools.media_buy_create.get_audit_logger"),
+            ):
+                mock_upload.return_value = (req.packages, {})
+                mock_adapter = MagicMock()
+                mock_adapter.manual_approval_required = False
+                mock_adapter.manual_approval_operations = ["create_media_buy"]
+                mock_adapter_fn.return_value = mock_adapter
+
+                result = await _create_media_buy_impl(req=req, identity=pc.identity)
+
+        assert isinstance(result.response, CreateMediaBuySuccess)
+        assert result.response.media_buy_id is not None
+        assert result.response.packages is not None and len(result.response.packages) == 1
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
+        # Wrapper-level TaskStatus is "completed" — the seller's sync work is done.
+        assert result.status == "completed"
+
+    def test_request_has_creatives_helper_classifies_status(self):
+        """Direct test of the variant-1 status classifier.
+
+        ``_request_has_creatives`` is the split criterion that drives the
+        ``MediaBuyStatus`` selection in the workflow-step-pending paths.
+        Pinning it independently of the full pipeline guards against the
+        next time someone reaches for variant-3 (``submitted``) when they
+        should pick a ``MediaBuyStatus`` from ``{pending_creatives,
+        pending_start}``.
+        """
+        from src.core.tools.media_buy_create import _request_has_creatives
+
+        # No creatives → False (drives MediaBuyStatus.pending_creatives).
+        no_creatives = _make_request(
+            packages=[{"product_id": "prod_1", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}]
+        )
+        assert _request_has_creatives(no_creatives) is False
+
+        # Pre-uploaded creative ids → True (drives MediaBuyStatus.pending_start).
+        with_ids = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creative_ids": ["cr_existing"],
+                }
+            ]
+        )
+        assert _request_has_creatives(with_ids) is True
+
+        # Inline creative objects → True (also drives pending_start).
+        with_inline = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creatives": [
+                        {
+                            "creative_id": "inline_1",
+                            "name": "Inline",
+                            "format_id": {
+                                "agent_url": "https://creative.example.com/",
+                                "id": "display_300x250",
+                            },
+                            "assets": {"banner_image": {"url": "https://example.com/ad.png"}},
+                            "variants": [],
+                        }
+                    ],
+                }
+            ]
+        )
+        assert _request_has_creatives(with_inline) is True
+
+        # Package-level creative assignments → True.
+        with_assignments = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creative_assignments": [{"creative_id": "cr_assigned"}],
+                }
+            ]
+        )
+        assert _request_has_creatives(with_assignments) is True
+
+    def test_confirmed_at_populates_for_seller_committed_statuses(self):
+        """Create responses expose confirmed_at once the seller has committed."""
+        from adcp.types import MediaBuyStatus
+
+        from src.core.tools.media_buy_create import _confirmed_at_for_create_status
+
+        confirmed_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+        assert _confirmed_at_for_create_status(MediaBuyStatus.active.value, confirmed_at) == confirmed_at
+        assert _confirmed_at_for_create_status(MediaBuyStatus.completed.value, confirmed_at) == confirmed_at
+        assert _confirmed_at_for_create_status(MediaBuyStatus.pending_start.value, confirmed_at) == confirmed_at
+        assert _confirmed_at_for_create_status(MediaBuyStatus.pending_creatives.value, confirmed_at) == confirmed_at
+        assert _confirmed_at_for_create_status("submitted", confirmed_at) is None
+
+    @pytest.mark.asyncio
+    async def test_config_disabled_auto_create_emits_variant_one(self):
+        """Tenant-config-disabled auto_create still mints a buy → variant-1.
+
+        Covers the second of the two PR #183 emit sites (config-driven approval
+        requirement). Like the manual-approval branch, the buy is minted
+        synchronously, so the response must carry ``media_buy_id`` (not the
+        variant-3 ``task_id``-only envelope).
+        """
+        from adcp.types import MediaBuyStatus
+
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request()
+        product = _mock_product("prod_1")
+
+        with _PatchContext(
+            products=[product],
+            human_review_required=False,
+            auto_create_media_buys=False,
+        ) as pc:
+            with (
+                patch("src.core.tools.media_buy_create.process_and_upload_package_creatives") as mock_upload,
+                patch("src.core.tools.media_buy_create.get_adapter") as mock_adapter_fn,
+                patch("src.core.tools.media_buy_create.get_slack_notifier"),
+                patch("src.core.tools.media_buy_create.activity_feed"),
+                patch("src.core.tools.media_buy_create.get_audit_logger"),
+                patch("src.core.tools.products.get_product_catalog") as mock_catalog,
+            ):
+                mock_upload.return_value = (req.packages, {})
+                mock_adapter = MagicMock()
+                mock_adapter.__class__.__name__ = "MockAdServer"
+                mock_adapter.manual_approval_required = False
+                mock_adapter.manual_approval_operations = []
+                mock_adapter_fn.return_value = mock_adapter
+
+                schema_product = MagicMock()
+                schema_product.product_id = "prod_1"
+                schema_product.name = "Test Product"
+                schema_product.implementation_config = {"auto_create_enabled": True}
+                mock_catalog.return_value = [schema_product]
+
+                result = await _create_media_buy_impl(req=req, identity=pc.identity)
+
+        assert isinstance(result.response, CreateMediaBuySuccess)
+        assert result.response.media_buy_id is not None
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
+        assert result.status == "completed"
 
 
 class TestInlineCreativeObligations:
@@ -1706,6 +2456,58 @@ class TestInlineCreativeObligations:
         mock_upload.assert_called_once_with(packages=ANY, context=ANY, testing_ctx=ANY)
 
     @pytest.mark.asyncio
+    async def test_inline_creatives_can_enter_manual_approval_path(self):
+        """Inline creatives are compatible with manual approval routing.
+
+        Covers: UC-002-ALT-WITH-INLINE-CREATIVES-05
+        """
+        from adcp.types import MediaBuyStatus
+
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creatives": [
+                        {
+                            "creative_id": "inline_manual_1",
+                            "name": "Manual Review Ad",
+                            "format_id": {"agent_url": "https://creative.example.com/", "id": "display_300x250"},
+                            "assets": {"banner_image": {"url": "https://example.com/ad.png"}},
+                            "variants": [],
+                        }
+                    ],
+                },
+            ]
+        )
+        product = _mock_product("prod_1")
+
+        with _PatchContext(products=[product], human_review_required=True) as pc:
+            with (
+                patch("src.core.tools.media_buy_create.process_and_upload_package_creatives") as mock_upload,
+                patch("src.core.tools.media_buy_create.get_adapter") as mock_adapter_fn,
+                patch("src.core.tools.media_buy_create.get_slack_notifier"),
+                patch("src.core.tools.media_buy_create.activity_feed"),
+                patch("src.core.tools.media_buy_create.get_audit_logger"),
+            ):
+                mock_upload.return_value = (req.packages, {"pkg-1": ["inline_manual_1"]})
+                mock_adapter = MagicMock()
+                mock_adapter.manual_approval_required = False
+                mock_adapter.manual_approval_operations = ["create_media_buy"]
+                mock_adapter_fn.return_value = mock_adapter
+
+                result = await _create_media_buy_impl(req=req, identity=pc.identity)
+
+        assert isinstance(result.response, CreateMediaBuySuccess)
+        assert result.response.media_buy_id is not None
+        assert result.response.status == "completed"
+        assert result.response.media_buy_status == MediaBuyStatus.pending_start
+        mock_upload.assert_called_once_with(packages=ANY, context=ANY, testing_ctx=ANY)
+
+    @pytest.mark.asyncio
     async def test_inline_creative_format_validation(self):
         """Inline creative format IDs are validated via format spec lookup.
 
@@ -1725,27 +2527,27 @@ class TestInlineCreativeObligations:
         assert "FORMAT_VALIDATION_ERROR" in str(exc_info.value.details)
 
     @pytest.mark.asyncio
-    async def test_unapproved_creatives_may_trigger_manual_approval(self):
-        """Unapproved creatives may trigger manual approval path.
+    async def test_assigned_unapproved_creatives_do_not_hold_pending_creatives(self):
+        """Assigned creatives move the buy out of pending_creatives.
 
-        Covers: UC-002-ALT-WITH-INLINE-CREATIVES-05
+        Covers: UC-002-MAIN-21
 
         Note: The approval determination considers adapter settings and tenant
-        settings independently of creative state. Creative approval state
-        influences the media buy status post-creation.
+        settings independently of creative state. Creative approval state is
+        exposed through creative_approvals, not the media-buy status.
         """
         from src.core.tools.media_buy_create import _determine_media_buy_status
 
-        # When creatives are not approved, status reflects pending activation
+        # Per AdCP, pending_creatives means the buy has no creatives assigned.
+        # Once creatives are attached, status falls back to start/manual gates
+        # even if creative review is still pending.
         status = _determine_media_buy_status(
             manual_approval_required=False,
             has_creatives=True,
-            creatives_approved=False,
             start_time=datetime.now(UTC) + timedelta(days=1),
             end_time=datetime.now(UTC) + timedelta(days=8),
         )
-        # Unapproved creatives -> pending_activation (waiting for creative approval)
-        assert status == "pending_activation"
+        assert status == "pending_start"
 
 
 class TestProposalBasedObligations:
@@ -1792,6 +2594,7 @@ class TestProposalBasedObligations:
         """
         # proposal_id and total_budget coexist on the schema
         req = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "test.com"},
             start_time=_future(1),
             end_time=_future(8),
@@ -1809,7 +2612,13 @@ class TestProposalBasedObligations:
         Covers: UC-002-ALT-PROPOSAL-BASED-MEDIA-06
 
         Note: Even with proposal_id, product validation still runs on packages.
+
+        Per #351, the missing-product path raises ``AdCPProductNotFoundError``
+        so the boundary translator maps it to spec-canonical
+        ``PRODUCT_NOT_FOUND`` on the wire (instead of the generic
+        ``VALIDATION_ERROR`` the old ``ValueError`` produced).
         """
+        from src.core.exceptions import AdCPProductNotFoundError
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         # Request with proposal_id but packages referencing non-existent product
@@ -1827,10 +2636,15 @@ class TestProposalBasedObligations:
         with _PatchContext(products=[]) as pc:
             # No products in DB -> products not found
             pc.db_session.scalars.return_value.all.return_value = []
-            result = await _create_media_buy_impl(req=req, identity=pc.identity)
+            with pytest.raises(AdCPProductNotFoundError) as exc_info:
+                await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        assert isinstance(result.response, CreateMediaBuyError)
-        assert any("not found" in e.message.lower() for e in result.response.errors)
+        assert exc_info.value.error_code == "PRODUCT_NOT_FOUND"
+        assert "nonexistent_product" in str(exc_info.value)
+        assert exc_info.value.details == {
+            "missing_product_ids": ["nonexistent_product"],
+            "field": "packages[].product_id",
+        }
 
 
 class TestCrossCuttingObligations:
@@ -1889,9 +2703,14 @@ class TestCrossCuttingObligations:
 
                 result = await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        # Manual path: adapter was NOT called, but records were persisted
-        assert result.status == "submitted"
+        # Manual path: adapter was NOT called, but records were persisted and
+        # a media_buy_id was minted synchronously. Spec variant-1 (sync-success):
+        # the response identifies the buy via ``media_buy_id``; ``workflow_step_id``
+        # is the internal handle for governance state. ``MediaBuyStatus`` reports
+        # what's blocking activation.
+        assert result.status == "completed"
         mock_exec.assert_not_called()
+        assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id is not None
 
     @pytest.mark.asyncio
@@ -1928,7 +2747,15 @@ class TestExtensionObligations:
         """
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
-        req = _make_request()
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_eur_fixed",
+                }
+            ]
+        )
         product = _mock_product("prod_1", currency="EUR")
 
         # Build adapter_config mock with GAM currency constraint
@@ -2272,10 +3099,17 @@ class TestPostconditionObligations:
         """On validation failure, no records are created.
 
         Covers: UC-002-POST-01
+
+        Per #351, the nonexistent-product path raises
+        ``AdCPProductNotFoundError`` (spec ``PRODUCT_NOT_FOUND``) rather
+        than returning a ``CreateMediaBuyError`` wrapper. The
+        postcondition this test pins — no DB writes on failure — is
+        the same.
         """
+        from src.core.exceptions import AdCPProductNotFoundError
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
-        # Non-existent product -> validation failure inside _impl
+        # Non-existent product -> typed raise inside _impl
         req = _make_request(
             packages=[
                 {
@@ -2287,12 +3121,11 @@ class TestPostconditionObligations:
         )
 
         with _PatchContext() as pc:
-            result = await _create_media_buy_impl(req=req, identity=pc.identity)
+            with pytest.raises(AdCPProductNotFoundError):
+                await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        # Validation failure -> error response, no DB records created
-        assert isinstance(result.response, CreateMediaBuyError)
-        assert result.status == "failed"
-        # UoW session.add should NOT have been called (no records created)
+        # The postcondition: no DB records created.
+        # UoW session.add should NOT have been called.
         pc.db_session.add.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2300,10 +3133,15 @@ class TestPostconditionObligations:
         """Error messages include enough info for buyer to fix and retry.
 
         Covers: UC-002-POST-03
+
+        Per #351, the typed exception carries the missing product_ids
+        in ``details`` and the spec ``field`` path so buyers can drop the
+        offending IDs and retry without parsing the message.
         """
+        from src.core.exceptions import AdCPProductNotFoundError
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
-        # Missing product -> error with product ID listed
+        # Missing product -> typed raise with product ID in details
         req = _make_request(
             packages=[
                 {
@@ -2316,12 +3154,16 @@ class TestPostconditionObligations:
 
         with _PatchContext(products=[]) as pc:
             pc.db_session.scalars.return_value.all.return_value = []
-            result = await _create_media_buy_impl(req=req, identity=pc.identity)
+            with pytest.raises(AdCPProductNotFoundError) as exc_info:
+                await _create_media_buy_impl(req=req, identity=pc.identity)
 
-        assert isinstance(result.response, CreateMediaBuyError)
-        error_msg = result.response.errors[0].message
-        # Message should identify which product was not found
-        assert "nonexistent_prod" in error_msg
+        # Message identifies the product. Details give buyers a
+        # programmatic handle for retry (missing IDs + field path).
+        assert "nonexistent_prod" in str(exc_info.value)
+        assert exc_info.value.details == {
+            "missing_product_ids": ["nonexistent_prod"],
+            "field": "packages[].product_id",
+        }
 
 
 class TestUpgradeObligations:
@@ -2352,33 +3194,168 @@ class TestUpgradeObligations:
         req = _make_request(ext={"custom_field": "value", "custom_num": 42})
         assert req.ext is not None
 
-    def test_account_field_in_success_response(self):
-        """CreateMediaBuySuccess has account field (optional).
+    def test_account_field_removed_from_success_response(self):
+        """CreateMediaBuySuccess no longer has account field.
 
         Covers: UC-002-UPG-07
         """
-        assert "account" in CreateMediaBuySuccess.model_fields
+        assert "account" not in CreateMediaBuySuccess.model_fields
 
         from src.core.schemas import Package as RespPkg
 
-        # Verify account can be set on success
-        resp = CreateMediaBuySuccess(
-            media_buy_id="mb_1",
-            packages=[RespPkg(package_id="p1", product_id="prod_1", budget=100)],
-            account=None,  # Optional
-        )
-        assert resp.account is None
+        with pytest.raises(ValidationError, match="account"):
+            CreateMediaBuySuccess(
+                media_buy_id="mb_1",
+                packages=[RespPkg(package_id="p1", product_id="prod_1", budget=100)],
+                account=None,
+            )
 
-    def test_sandbox_flag_in_success_response(self):
-        """CreateMediaBuySuccess has sandbox field (optional).
+    def test_sandbox_flag_removed_from_success_response(self):
+        """CreateMediaBuySuccess no longer has sandbox field.
 
         Covers: UC-002-UPG-09
         """
-        assert "sandbox" in CreateMediaBuySuccess.model_fields
+        assert "sandbox" not in CreateMediaBuySuccess.model_fields
 
         from src.core.schemas import Package as RespPkg
 
-        resp = CreateMediaBuySuccess(
-            media_buy_id="mb_1", packages=[RespPkg(package_id="p1", product_id="prod_1", budget=100)], sandbox=True
+        with pytest.raises(ValidationError, match="sandbox"):
+            CreateMediaBuySuccess(
+                media_buy_id="mb_1",
+                packages=[RespPkg(package_id="p1", product_id="prod_1", budget=100)],
+                sandbox=True,
+            )
+
+
+# ===========================================================================
+# Issue #72 — measurement_terms negotiation
+# ===========================================================================
+
+
+class TestMeasurementTermsRejection:
+    """Issue #72: Aggressive measurement_terms must surface as TERMS_REJECTED.
+
+    The AdCP storyboard ``media_buy_seller/measurement_terms_rejected`` sends
+    ``max_variance_percent: 0`` — a tolerance no third-party measurement
+    vendor can guarantee. The seller must respond with a typed error that
+    wire-projects to ``code: "TERMS_REJECTED"`` and ``recovery: "correctable"``
+    so the buyer agent relaxes the terms and retries with a fresh
+    idempotency_key. Without the validation branch the request leaks through
+    to a downstream exception and the framework defaults to INTERNAL_ERROR.
+
+    Closes: salesagent#72
+    """
+
+    @pytest.mark.asyncio
+    async def test_aggressive_max_variance_percent_raises_terms_rejected(self):
+        """``max_variance_percent: 0`` raises AdCPTermsRejectedError BEFORE
+        the workflow_step is created, so the wire envelope projects to
+        TERMS_REJECTED instead of INTERNAL_ERROR.
+        """
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 25000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "measurement_terms": {
+                        "billing_measurement": {
+                            "vendor": {"domain": "videoamp.example"},
+                            "measurement_window": "c30",
+                            "max_variance_percent": 0,
+                        },
+                        "makegood_policy": {
+                            "available_remedies": ["credit"],
+                        },
+                    },
+                }
+            ]
         )
-        assert resp.sandbox is True
+
+        with _PatchContext() as pc:
+            with pytest.raises(AdCPTermsRejectedError) as exc_info:
+                await _create_media_buy_impl(req=req, identity=pc.identity)
+
+        # Wire projection contract: error_code → wire ``code``,
+        # recovery → wire ``recovery``.
+        assert exc_info.value.error_code == "TERMS_REJECTED"
+        assert exc_info.value.recovery == "correctable"
+        # The error message must point the buyer at the offending field.
+        assert "max_variance_percent" in exc_info.value.message
+        # The details payload carries the field path so the wire envelope
+        # can project it to the AdCP error envelope's ``field`` attribute.
+        assert exc_info.value.details is not None
+        assert "packages[0]" in exc_info.value.details["field"]
+
+    @pytest.mark.asyncio
+    async def test_relaxed_max_variance_percent_passes_validation(self):
+        """``max_variance_percent: 10`` (the storyboard's relaxed retry
+        value) clears the measurement_terms gate. The request continues
+        through downstream validation — any later error is unrelated to
+        TERMS_REJECTED and proves the gate is not over-rejecting.
+        """
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 25000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "measurement_terms": {
+                        "billing_measurement": {
+                            "vendor": {"domain": "videoamp.example"},
+                            "measurement_window": "c7",
+                            "max_variance_percent": 10,
+                        },
+                        "makegood_policy": {
+                            "available_remedies": ["credit", "additional_delivery"],
+                        },
+                    },
+                }
+            ]
+        )
+
+        with _PatchContext() as pc:
+            with patch("src.core.tools.media_buy_create.get_adapter") as mock_adapter:
+                mock_adapter.return_value = MagicMock(
+                    manual_approval_required=False,
+                    manual_approval_operations=["create_media_buy"],
+                )
+                # Whatever happens after the measurement_terms gate, it must
+                # NOT be TERMS_REJECTED — that proves the gate accepted the
+                # relaxed proposal and the request is on the success path.
+                try:
+                    await _create_media_buy_impl(req=req, identity=pc.identity)
+                except AdCPTermsRejectedError:
+                    pytest.fail("Relaxed max_variance_percent=10 must clear the measurement_terms validation gate")
+                except Exception:
+                    # Downstream failures (DB mock incompleteness, adapter
+                    # stub missing fields) are expected — the gate is what
+                    # this test exercises.
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_no_measurement_terms_passes_validation(self):
+        """Requests that omit measurement_terms entirely (the common case)
+        must not be rejected — the validation gate is purely additive.
+        """
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        req = _make_request()  # no measurement_terms
+
+        with _PatchContext() as pc:
+            with patch("src.core.tools.media_buy_create.get_adapter") as mock_adapter:
+                mock_adapter.return_value = MagicMock(
+                    manual_approval_required=False,
+                    manual_approval_operations=["create_media_buy"],
+                )
+                try:
+                    await _create_media_buy_impl(req=req, identity=pc.identity)
+                except AdCPTermsRejectedError:
+                    pytest.fail("Absent measurement_terms must not trigger TERMS_REJECTED")
+                except Exception:
+                    # Downstream failures are unrelated to this gate.
+                    pass

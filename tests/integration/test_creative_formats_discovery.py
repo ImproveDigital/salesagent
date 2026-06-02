@@ -72,31 +72,6 @@ class TestAuthOptionalForDiscovery:
         ids = {f.format_id.id for f in response.formats}
         assert ids == {"fmt_1", "fmt_2"}
 
-    def test_a2a_returns_formats_with_no_auth_token(self, integration_db):
-        """UC-005-MAIN-MCP-02: A2A wrapper succeeds without auth_token.
-
-        Given an identity with tenant context but auth_token=None,
-        When calling list_creative_formats_raw (A2A),
-        Then the response is a valid ListCreativeFormatsResponse.
-        """
-        formats = [_make_format("a2a_fmt", "A2A Display")]
-
-        with CreativeFormatsEnv() as env:
-            TenantFactory(tenant_id="test_tenant")
-            env.set_registry_formats(formats)
-
-            identity_no_token = PrincipalFactory.make_identity(
-                principal_id="anon_buyer",
-                tenant_id="test_tenant",
-                protocol="a2a",
-                auth_token=None,
-            )
-            response = env.call_a2a(identity=identity_no_token)
-
-        assert isinstance(response, ListCreativeFormatsResponse)
-        assert len(response.formats) == 1
-        assert response.formats[0].format_id.id == "a2a_fmt"
-
     def test_impl_with_no_auth_token_via_call_via(self, integration_db):
         """UC-005-MAIN-MCP-02: call_via(IMPL) with explicit no-token identity.
 
@@ -116,29 +91,6 @@ class TestAuthOptionalForDiscovery:
                 auth_token=None,
             )
             result = env.call_via(Transport.IMPL, identity=identity_no_token)
-
-        assert result.is_success
-        assert isinstance(result.payload, ListCreativeFormatsResponse)
-        assert len(result.payload.formats) == 1
-
-    def test_a2a_with_no_auth_token_via_call_via(self, integration_db):
-        """UC-005-MAIN-MCP-02: call_via(A2A) with explicit no-token identity.
-
-        Verifies A2A transport dispatch succeeds without auth token.
-        """
-        formats = [_make_format("a2a_dispatch", "A2A Dispatch Format")]
-
-        with CreativeFormatsEnv() as env:
-            TenantFactory(tenant_id="test_tenant")
-            env.set_registry_formats(formats)
-
-            identity_no_token = PrincipalFactory.make_identity(
-                principal_id="anon_buyer",
-                tenant_id="test_tenant",
-                protocol="a2a",
-                auth_token=None,
-            )
-            result = env.call_via(Transport.A2A, identity=identity_no_token)
 
         assert result.is_success
         assert isinstance(result.payload, ListCreativeFormatsResponse)
@@ -253,10 +205,10 @@ class TestTenantResolutionFailure:
                 principal_id="anon_buyer",
                 tenant_id="unknown",
                 tenant=None,
-                protocol="a2a",
+                protocol="mcp",
                 auth_token=None,
             )
-            result = env.call_via(Transport.A2A, identity=identity)
+            result = env.call_via(Transport.IMPL, identity=identity)
 
         assert result.is_error
         assert isinstance(result.error, AdCPAuthenticationError)

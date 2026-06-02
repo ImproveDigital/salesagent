@@ -25,6 +25,7 @@ from src.core.database.database_session import get_db_session
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import CreateMediaBuyRequest, PackageRequest, Targeting
 from src.core.testing_hooks import AdCPTestContext
+from tests.factories.spec_required_kwargs import required_request_kwargs
 from tests.integration.conftest import add_required_setup_data, create_test_product_with_pricing
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db, pytest.mark.asyncio]
@@ -88,6 +89,22 @@ class TestCreateMediaBuyV24Format:
                 delivery_type="guaranteed",
                 pricing_model="CPM",
                 rate="10.0",
+                is_fixed=True,
+                currency="USD",
+                min_spend_per_package="1000.0",
+                targeting_template={},
+            )
+
+            product_usd_2 = create_test_product_with_pricing(
+                session=session,
+                tenant_id="test_tenant_v24",
+                product_id="prod_test_v24_usd_2",
+                name="Test Product V24 USD 2",
+                description="Second test product for same-currency multi-package buys",
+                format_ids=[{"agent_url": "https://test.com", "id": "display_300x250"}],
+                delivery_type="guaranteed",
+                pricing_model="CPM",
+                rate="12.0",
                 is_fixed=True,
                 currency="USD",
                 min_spend_per_package="1000.0",
@@ -165,6 +182,7 @@ class TestCreateMediaBuyV24Format:
                 "tenant_id": "test_tenant_v24",
                 "principal_id": "test_principal_v24",
                 "product_id_usd": "prod_test_v24_usd",
+                "product_id_usd_2": "prod_test_v24_usd_2",
                 "product_id_eur": "prod_test_v24_eur",
                 "product_id_gbp": "prod_test_v24_gbp",
                 # Use generated pricing_option_id format (not database ID)
@@ -243,6 +261,7 @@ class TestCreateMediaBuyV24Format:
         # This exercises the FULL serialization path including response_packages construction
         # NOTE: budget is at package level per AdCP v2.4 spec (not a top-level parameter)
         req = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             packages=[p.model_dump() for p in packages],
             start_time=datetime.now(UTC) + timedelta(days=1),
@@ -306,6 +325,7 @@ class TestCreateMediaBuyV24Format:
         )
 
         req = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             packages=[p.model_dump() for p in packages],
             start_time=datetime.now(UTC) + timedelta(days=1),
@@ -343,11 +363,8 @@ class TestCreateMediaBuyV24Format:
         # Verify nested targeting was serialized (if present in response)
         # Note: targeting_overlay may or may not be included in response depending on impl
 
-    async def test_create_media_buy_multiple_packages_with_budgets_mcp(self, setup_test_tenant):
-        """Test MCP path with multiple packages, each with different budgets.
-
-        This tests the iteration over packages in response construction.
-        """
+    async def test_create_media_buy_rejects_mixed_package_currencies_mcp(self, setup_test_tenant):
+        """Test MCP path rejects packages selected in different currencies."""
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         packages = [
@@ -377,26 +394,57 @@ class TestCreateMediaBuyV24Format:
             protocol="mcp",
         )
 
-        # Total budget is sum of all package budgets
-        total_budget_value = sum(pkg.budget for pkg in packages)
-
         req = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             packages=[p.model_dump() for p in packages],
             start_time=datetime.now(UTC) + timedelta(days=1),
             end_time=datetime.now(UTC) + timedelta(days=31),
             po_number="TEST-V24-003",
         )
+        result = await _create_media_buy_impl(req=req, identity=identity)
+
+        assert result.status == "failed"
+        assert result.response.errors
+        assert result.response.errors[0].code == "INVALID_REQUEST"
+        assert "same currency" in result.response.errors[0].message
+
+    async def test_create_media_buy_allows_same_currency_multiple_packages_mcp(self, setup_test_tenant):
+        """Test MCP path accepts multiple packages when selected pricing currencies match."""
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        packages = [
+            PackageRequest(
+                product_id=setup_test_tenant["product_id_usd"],
+                pricing_option_id=setup_test_tenant["pricing_option_id_usd"],
+                budget=3000.0,
+            ),
+            PackageRequest(
+                product_id=setup_test_tenant["product_id_usd_2"],
+                pricing_option_id=setup_test_tenant["pricing_option_id_usd"],
+                budget=2500.0,
+            ),
+        ]
+        identity = ResolvedIdentity(
+            principal_id="test_principal_v24",
+            tenant_id="test_tenant_v24",
+            tenant={"tenant_id": "test_tenant_v24"},
+            testing_context=AdCPTestContext(dry_run=True, test_session_id="test_session"),
+            protocol="mcp",
+        )
+
+        req = CreateMediaBuyRequest(
+            **required_request_kwargs(),
+            brand={"domain": "testbrand.com"},
+            packages=[p.model_dump() for p in packages],
+            start_time=datetime.now(UTC) + timedelta(days=1),
+            end_time=datetime.now(UTC) + timedelta(days=31),
+            po_number="TEST-V24-004",
+        )
         response, _ = await _create_media_buy_impl(req=req, identity=identity)
 
-        # Verify all packages serialized correctly
         assert response.media_buy_id
-        assert len(response.packages) == 3
-
-        # Serialize response to check packages are dicts
-        response_dict = response.model_dump()
-        package_ids = [pkg["package_id"] for pkg in response_dict["packages"]]
-        assert len(package_ids) == 3
+        assert len(response.packages) == 2
 
     async def test_create_media_buy_with_package_budget_a2a(self, setup_test_tenant):
         """Test A2A path with packages containing Budget objects.
@@ -424,6 +472,7 @@ class TestCreateMediaBuyV24Format:
         )
 
         req = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             packages=[p.model_dump() for p in packages],
             start_time=datetime.now(UTC) + timedelta(days=1),
@@ -462,6 +511,7 @@ class TestCreateMediaBuyV24Format:
         # Standard AdCP format with explicit package
         # pricing_option_id format: {model}_{currency}_{fixed|auction}
         req = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             packages=[
                 PackageRequest(

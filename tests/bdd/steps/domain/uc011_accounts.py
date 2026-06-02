@@ -74,16 +74,27 @@ def _brand_id_str(bid: Any) -> str | None:
 def _find_account_by_brand(resp: Any, domain: str, brand_id: str | None = None) -> Any:
     """Find an account in sync response by brand domain (and optional brand_id)."""
     for acct in resp.accounts:
-        if acct.brand.domain != domain:
+        brand = _brand_ref(acct)
+        if brand.domain != domain:
             continue
         if brand_id is not None:
-            acct_bid = _brand_id_str(getattr(acct.brand, "brand_id", None))
+            acct_bid = _brand_id_str(getattr(brand, "brand_id", None))
             if acct_bid != brand_id:
                 continue
         return acct
-    domains = [a.brand.domain for a in resp.accounts]
+    domains = [_brand_ref(a).domain for a in resp.accounts]
     suffix = f" and brand_id '{brand_id}'" if brand_id else ""
     raise AssertionError(f"No account found for domain '{domain}'{suffix}. Available: {domains}")
+
+
+def _brand_ref(acct: Any) -> Any:
+    """Return account brand as an object with .domain/.brand_id attributes."""
+    brand = acct.brand
+    if isinstance(brand, dict):
+        from adcp.types.generated_poc.core.brand_ref import BrandReference
+
+        return BrandReference.model_validate(brand)
+    return brand
 
 
 def _make_governance_agent(
@@ -99,10 +110,7 @@ def _make_governance_agent(
     """
     from adcp.types.generated_poc.core.account import GovernanceAgent
 
-    agent = GovernanceAgent(
-        url=url,
-        categories=categories,
-    )
+    agent = GovernanceAgent(url=url)
     return agent.model_dump()
 
 
@@ -1598,9 +1606,11 @@ def then_account_processed_normally(ctx: dict, domain: str) -> None:
     resp = ctx["response"]
     acct = _find_account_by_brand(resp, domain)
     actual = _action_str(acct.action)
-    assert actual in ("created", "updated", "unchanged"), (
-        f"Expected normal processing for {domain}, got action '{actual}'"
-    )
+    assert actual in (
+        "created",
+        "updated",
+        "unchanged",
+    ), f"Expected normal processing for {domain}, got action '{actual}'"
     ctx["last_account"] = acct
 
 
@@ -2329,9 +2339,10 @@ def then_db_field_unchanged(ctx: dict, field: str) -> None:
         db_val = getattr(db_acct, field, None)
         # The field should have its original value (set at creation), not be None
         # unless it was always None. The key assertion: sync didn't overwrite it.
-        assert db_val is not None or field in ("advertiser", "rate_card"), (
-            f"Expected {field} to be preserved but got None"
-        )
+        assert db_val is not None or field in (
+            "advertiser",
+            "rate_card",
+        ), f"Expected {field} to be preserved but got None"
 
 
 @then(parsers.parse('the agent has exactly one access grant for brand domain "{domain}"'))

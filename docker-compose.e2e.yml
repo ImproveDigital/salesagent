@@ -30,7 +30,13 @@ services:
       retries: 5
 
   adcp-server:
-    build: .
+    build:
+      context: .
+      # ``LOCKFILE_HASH`` invalidates the Dockerfile uv install layer
+      # when uv.lock changes. ``tests/e2e/conftest.py`` computes and
+      # exports the hash before invoking docker-compose. See CLAUDE.md.
+      args:
+        LOCKFILE_HASH: ${LOCKFILE_HASH:-set-this-build-arg}
     environment:
       DATABASE_URL: postgresql://adcp_user:secure_password_change_me@postgres:5432/adcp?sslmode=disable
       SKIP_NGINX: "true"
@@ -39,6 +45,8 @@ services:
       SUPER_ADMIN_EMAILS: ${SUPER_ADMIN_EMAILS:-}
       ADCP_TESTING: ${ADCP_TESTING:-true}
       ADCP_AUTH_TEST_MODE: ${ADCP_AUTH_TEST_MODE:-true}
+      MANAGED_INSTANCE: ${MANAGED_INSTANCE:-true}
+      TENANT_MANAGEMENT_API_KEY: ${TENANT_MANAGEMENT_API_KEY:-}
       CREATE_DEMO_TENANT: "true"
       DELIVERY_WEBHOOK_INTERVAL: ${DELIVERY_WEBHOOK_INTERVAL:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-PEg0SNGQyvzi4Nft-ForSzK8AGXyhRtql1MgoUsfUHk=}  # TEST ONLY — never use in production
@@ -54,7 +62,7 @@ services:
     volumes:
       - ./audit_logs:/app/audit_logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "python", "scripts/healthcheck.py", "8080"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -68,7 +76,7 @@ services:
     ports:
       - "127.0.0.1:${ADCP_SALES_PORT:-8092}:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "nginx -t >/dev/null 2>&1 && test -s /var/run/nginx.pid"]
       interval: 10s
       timeout: 5s
       retries: 5

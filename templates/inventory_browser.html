@@ -4,21 +4,12 @@
 
 {% block content %}
 <div class="container-fluid mt-4">
-    <!-- Breadcrumb Navigation -->
-    <nav aria-label="breadcrumb">
-        <ol class="breadcrumb">
-            <li class="breadcrumb-item"><a href="{{ url_for('core.index') }}">Dashboard</a></li>
-            <li class="breadcrumb-item"><a href="{{ url_for('tenants.tenant_settings', tenant_id=tenant.tenant_id) }}">{{ tenant.name }}</a></li>
-            <li class="breadcrumb-item active" aria-current="page">Inventory Browser</li>
-        </ol>
-    </nav>
-
-    <div class="row">
-        <div class="col-12">
-            <h2>GAM Inventory Browser</h2>
-            <p class="text-muted">Browse and manage Google Ad Manager inventory for {{ tenant.name }}</p>
+    <header class="sa-page-header">
+        <div>
+            <h2 class="sa-page-header__title">GAM Inventory Browser</h2>
+            <p class="sa-page-header__subtitle">Browse and manage Google Ad Manager inventory for {{ tenant.name }}</p>
         </div>
-    </div>
+    </header>
 
     <!-- Sync Status -->
     <div class="row mt-3">
@@ -194,28 +185,30 @@
 
 /* Selected node highlight */
 #adUnitTree .tree-node-header.selected {
-    background-color: #e3f2fd;
-    border-left: 3px solid #1976d2;
+    background-color: var(--sa-primary-tint);
+    border-left: 3px solid var(--sa-primary);
 }
 
 .inventory-size {
     display: inline-block;
-    padding: 2px 8px;
+    padding: 2px var(--sa-space-2);
     margin: 2px;
-    background-color: #f8f9fa;
-    border: 1px solid #dee2e6;
-    border-radius: 3px;
+    background-color: var(--sa-gray-50);
+    border: 1px solid var(--sa-border);
+    border-radius: var(--sa-radius-sm);
     font-size: 0.85em;
+    color: var(--sa-text-default);
 }
 
 .search-result-item {
-    padding: 10px;
-    border-bottom: 1px solid #dee2e6;
+    padding: var(--sa-space-3);
+    border-bottom: 1px solid var(--sa-border);
     cursor: pointer;
+    transition: background-color var(--sa-duration-fast) var(--sa-easing);
 }
 
 .search-result-item:hover {
-    background-color: #f8f9fa;
+    background-color: var(--sa-gray-50);
 }
 </style>
 
@@ -407,9 +400,16 @@ function showInventoryDetail(item, type) {
     if (sizes.length > 0) {
         html += '<tr><th>Sizes:</th><td>';
         sizes.forEach(size => {
-            html += `<span class="inventory-size">${size.width}x${size.height}</span>`;
+            html += `<span class="inventory-size">${formatInventorySize(size)}</span>`;
         });
         html += '</td></tr>';
+    }
+
+    const capabilities = item.capabilities || (item.metadata && item.metadata.adcp_capabilities) || {};
+    if (capabilities.slot_kind) {
+        html += `<tr><th>Capabilities:</th><td>${formatCapabilities(capabilities)}</td></tr>`;
+    } else if (sizes.some(size => formatInventorySize(size) === '1x1')) {
+        html += '<tr><th>Capabilities:</th><td><span class="badge bg-warning text-dark">Needs setup</span></td></tr>';
     }
 
     if (item.metadata) {
@@ -429,6 +429,9 @@ function showInventoryDetail(item, type) {
             <button class="btn btn-sm btn-primary" onclick="assignToProduct()">
                 Assign to Product
             </button>
+            <a class="btn btn-sm btn-outline-primary" href="${scriptRoot}/tenant/${tenantId}/inventory/capabilities/${type}/${item.id}">
+                Configure capabilities
+            </a>
             <button class="btn btn-sm btn-secondary" onclick="copyInventoryId('${item.id}')">
                 Copy ID
             </button>
@@ -436,6 +439,37 @@ function showInventoryDetail(item, type) {
     `;
 
     detail.innerHTML = html;
+}
+
+function formatInventorySize(size) {
+    if (typeof size === 'string') return size;
+    if (size && size.width && size.height) return `${size.width}x${size.height}`;
+    return 'unknown';
+}
+
+function formatCapabilities(capabilities) {
+    const parts = [];
+    if (capabilities.slot_kind) {
+        parts.push(capabilities.slot_kind.replaceAll('_', ' '));
+    }
+    const dims = capabilities.dimensions || {};
+    if (dims.min_width || dims.max_width || dims.min_height || dims.max_height) {
+        parts.push(`${dims.min_width || '?'}-${dims.max_width || '?'}w × ${dims.min_height || '?'}-${dims.max_height || '?'}h`);
+    }
+    const modes = capabilities.render_modes || {};
+    const enabledModes = Object.entries(modes).filter(([, enabled]) => enabled).map(([mode]) => mode.toUpperCase());
+    if (enabledModes.length) parts.push(enabledModes.join(', '));
+    if (capabilities.safeframe && capabilities.safeframe !== 'unknown') {
+        parts.push(`SafeFrame ${capabilities.safeframe}`);
+    }
+    const safeframeConfig = capabilities.safeframe_config || {};
+    const expansionModes = [];
+    if (safeframeConfig.allow_overlay_expansion) expansionModes.push('overlay');
+    if (safeframeConfig.allow_push_expansion) expansionModes.push('push');
+    if (expansionModes.length) {
+        parts.push(`expands ${expansionModes.join('/')}`);
+    }
+    return parts.join(' · ');
 }
 
 function getStatusColor(status) {

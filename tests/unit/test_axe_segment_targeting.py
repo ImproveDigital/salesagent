@@ -7,6 +7,7 @@ targeting_overlay for create_media_buy and update_media_buy operations.
 from datetime import UTC
 
 from src.core.schemas import CreateMediaBuyRequest, PackageRequest, Targeting, UpdateMediaBuyRequest
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 
 def test_targeting_has_axe_segment_fields():
@@ -65,6 +66,7 @@ def test_create_media_buy_request_with_axe_segments():
     from datetime import datetime
 
     request = CreateMediaBuyRequest(
+        **required_request_kwargs(),
         brand={"domain": "example.com"},
         start_time=datetime(2025, 1, 15, 0, 0, 0, tzinfo=UTC),
         end_time=datetime(2025, 2, 15, 23, 59, 59, tzinfo=UTC),
@@ -101,6 +103,7 @@ def test_update_media_buy_request_with_axe_segments():
     from src.core.schemas import AdCPPackageUpdate
 
     request = UpdateMediaBuyRequest(
+        **required_request_kwargs(),
         media_buy_id="mb_test_001",
         packages=[
             AdCPPackageUpdate(

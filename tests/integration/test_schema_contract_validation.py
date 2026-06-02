@@ -27,7 +27,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 # V3: Consolidated pricing types - CpmAuctionPricingOption/CpmFixedRatePricingOption → CpmPricingOption
 # Use fixed_price for fixed-rate, floor_price for auction
 from adcp import CpmPricingOption
-from adcp.types.generated_poc.core.signal_pricing_option import SignalPricingOption
 
 from src.core.schemas import (
     Budget,
@@ -38,6 +37,7 @@ from src.core.schemas import (
     SignalDeployment,
     Targeting,
 )
+from tests.helpers.adcp_factories import create_test_reporting_capabilities
 
 
 class AdCPSchemaContractValidator:
@@ -188,6 +188,7 @@ class TestProductSchemaContract:
                 "provider": "Google Ad Manager with IAS viewability",
                 "notes": "MRC-accredited viewability. 50% in-view for 1s display / 2s video",
             },
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "measurement": {
                 "type": "brand_lift",
                 "attribution": "deterministic_purchase",
@@ -213,9 +214,7 @@ class TestProductSchemaContract:
                     min_spend_per_package=2000.0,
                 )
             ],
-            # Internal fields
             "expires_at": datetime(2025, 12, 31, tzinfo=UTC),
-            "implementation_config": {"gam_placement_id": "12345"},
         }
 
         # AdCP spec required fields
@@ -229,8 +228,13 @@ class TestProductSchemaContract:
             "pricing_options",
         }
 
-        # Internal-only fields that should not appear in AdCP output
-        internal_only_fields = {"expires_at", "implementation_config", "targeting_template"}
+        # ``expires_at`` was promoted from internal-only to AdCP spec field
+        # somewhere in adcp 3.x → 4.x; it's now emitted on the wire.
+        # Phase 2 slice 5: implementation_config / targeting_template no longer
+        # belong on the wire-shape Product schema — they live on ResolvedProduct
+        # or the ORM model. Pydantic's extra="forbid" at construction would
+        # reject them outright, so they can't sneak into the dump.
+        internal_only_fields: set[str] = set()
 
         validator.validate_schema_contract(Product, test_data, adcp_spec_fields, internal_only_fields)
 
@@ -246,6 +250,7 @@ class TestProductSchemaContract:
             ],
             "delivery_type": "non_guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": True,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -285,6 +290,7 @@ class TestProductSchemaContract:
                 "provider": "Nielsen DAR with IAS viewability",
                 "notes": "MRC-accredited viewability. Panel-based demographic measurement updated monthly.",
             },
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "measurement": {
                 "type": "incremental_sales_lift",
                 "attribution": "probabilistic",
@@ -328,6 +334,7 @@ class TestProductSchemaContract:
             ],
             "delivery_type": "non_guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -373,7 +380,12 @@ class TestCreativeSchemaContract:
         test_data = {
             "creative_id": "creative_contract_test",
             "name": "Creative Contract Test",
-            "format_id": FormatId(agent_url="https://creative.adcontextprotocol.org", id="display_300x250"),
+            "format_id": FormatId(
+                agent_url="https://creative.adcontextprotocol.org",
+                id="display_image",
+                width=300,
+                height=250,
+            ),
             "assets": {
                 "banner_image": {
                     "url": "https://example.com/creative.jpg",
@@ -402,7 +414,12 @@ class TestCreativeSchemaContract:
         test_data = {
             "creative_id": "video_contract_test",
             "name": "Video Creative Contract Test",
-            "format_id": FormatId(agent_url="https://creative.adcontextprotocol.org", id="video_640x480"),
+            "format_id": FormatId(
+                agent_url="https://creative.adcontextprotocol.org",
+                id="video_standard",
+                width=640,
+                height=480,
+            ),
             "assets": {
                 "video_file": {
                     "url": "https://example.com/video.mp4",
@@ -467,7 +484,17 @@ class TestSignalSchemaContract:
 
     def test_signal_adcp_contract_compliance(self, validator):
         """Test Signal schema AdCP spec compliance."""
+        from adcp.types.generated_poc.core.vendor_pricing_option import VendorPricingOption
+
         test_data = {
+            # adcp 4.4 added the universal SignalId discriminated identifier and
+            # made it required. ``source='agent' + agent_url + id`` matches the
+            # signals-agent shape we mint.
+            "signal_id": {
+                "source": "agent",
+                "agent_url": "https://signals.example.com",
+                "id": "signal_contract_test",
+            },
             "signal_agent_segment_id": "signal_contract_test",
             "name": "Signal Contract Test",
             "description": "Testing signal contract compliance",
@@ -477,8 +504,10 @@ class TestSignalSchemaContract:
             "deployments": [
                 SignalDeployment(platform="test_platform", is_live=True, type="platform", scope="platform-wide")
             ],
+            # 4.4 unified signal pricing onto the shared VendorPricingOption
+            # discriminated union (model='cpm' = VendorPricingOption7).
             "pricing_options": [
-                SignalPricingOption.model_validate(
+                VendorPricingOption.model_validate(
                     {"pricing_option_id": "cpm_usd", "cpm": 3.50, "currency": "USD", "model": "cpm"}
                 )
             ],
@@ -486,6 +515,7 @@ class TestSignalSchemaContract:
 
         # AdCP spec required fields for signals
         adcp_spec_fields = {
+            "signal_id",
             "signal_agent_segment_id",
             "name",
             "description",
@@ -567,6 +597,7 @@ class TestGetProductsResponseContract:
                         currency="USD",
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),
             ),
             Product(
                 product_id="response_test_2",
@@ -591,6 +622,7 @@ class TestGetProductsResponseContract:
                         price_guidance={"p50": 10.0, "p90": 15.0},
                     )
                 ],
+                reporting_capabilities=create_test_reporting_capabilities(),
             ),
         ]
 
@@ -633,6 +665,7 @@ class TestSchemaEvolutionSafety:
             ],
             "delivery_type": "guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -669,6 +702,7 @@ class TestSchemaEvolutionSafety:
             ],
             "delivery_type": "non_guaranteed",
             "delivery_measurement": {"provider": "Google Ad Manager"},
+            "reporting_capabilities": create_test_reporting_capabilities(),
             "is_custom": False,
             "publisher_properties": [
                 {"publisher_domain": "example.com", "selection_type": "all"}
@@ -720,6 +754,7 @@ class TestSchemaEvolutionSafety:
                     min_spend_per_package=Decimal("2000.00"),  # Decimal input
                 )
             ],
+            reporting_capabilities=create_test_reporting_capabilities(),
         )
 
         adcp_output = product_with_decimal.model_dump()

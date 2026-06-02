@@ -12,6 +12,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal
+from tests.factories.spec_required_kwargs import required_request_kwargs
 from tests.helpers.adcp_factories import create_test_package_request_dict
 from tests.integration.conftest import create_test_product_with_pricing
 from tests.utils.database_helpers import create_tenant_with_timestamps, get_utc_now
@@ -232,6 +233,7 @@ class TestMCPEndpointsComprehensive:
 
         # Test: Standard AdCP format with explicit packages
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
             po_number="PO-V24-67890",
             packages=[

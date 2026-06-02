@@ -11,14 +11,23 @@ from typing import Any
 
 from a2a.types import Task, TaskStatusUpdateEvent
 from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
-from adcp.types import CreativeAction, McpWebhookPayload, SyncCreativeResult, SyncCreativesSuccessResponse
-from adcp.types.generated_poc.core.context import ContextObject
+from adcp.types import (
+    ContextObject,
+    CreativeAction,
+    McpWebhookPayload,
+    SyncCreativeResult,
+    TaskType,
+)
+from adcp.types.generated_poc.creative.sync_creatives_response import (
+    SyncCreativesResponse1 as SyncCreativesSuccessResponse,
+)
 from adcp.webhooks import GeneratedTaskStatus
 
 from src.core.database.models import (
     PushNotificationConfig as DBPushNotificationConfig,
 )
 from src.core.database.repositories.creative import CreativeRepository
+from src.core.feature_flags import is_creative_pre_approval_gate_enabled
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 # TODO: Missing module - these functions need to be implemented
@@ -40,6 +49,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_capabilities import require_capability_blueprint
 from src.core.database.repositories.uow import AdminCreativeUoW
 
 # Note: CreativeFormat table was dropped in migration f2addf453200
@@ -49,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 # Create Blueprint
 creatives_bp = Blueprint("creatives", __name__)
+creatives_bp.before_request(require_capability_blueprint("creative_approval"))
 
 # Global ThreadPoolExecutor for async AI review (managed lifecycle)
 _ai_review_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai_review_")
@@ -239,10 +250,20 @@ async def _call_webhook_for_creative_status(
                     context_id=step_context_id,
                 )
             else:
-                # TODO: Fix in adcp python client - create_mcp_webhook_payload should return
-                # McpWebhookPayload instead of dict[str, Any] for proper type safety
-                mcp_payload_dict = create_mcp_webhook_payload(step_step_id, GeneratedTaskStatus.completed, result_dict)
-                payload = McpWebhookPayload.model_construct(**mcp_payload_dict)
+                # adcp 5.0+: returns McpWebhookPayload directly; task_type must be a
+                # TaskType enum member. step_tool_name is free-form (may include
+                # internal review actions outside the enum); coerce or fall back to
+                # the canonical creative-sync action for this webhook surface.
+                try:
+                    task_type_arg: Any = TaskType(step_tool_name) if step_tool_name else TaskType.sync_creatives
+                except ValueError:
+                    task_type_arg = TaskType.sync_creatives
+                payload = create_mcp_webhook_payload(
+                    step_step_id,
+                    GeneratedTaskStatus.completed,
+                    task_type_arg,
+                    result=result_dict,
+                )
 
             metadata = {
                 "task_type": step_tool_name
@@ -383,7 +404,7 @@ def add_ai(tenant_id, **kwargs):
 
 @creatives_bp.route("/analyze", methods=["POST"])
 @log_admin_action("analyze")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def analyze(tenant_id, **kwargs):
     """Analyze creative format with AI."""
     try:
@@ -498,7 +519,7 @@ def _send_post_commit_side_effects(
 
 @creatives_bp.route("/review/<creative_id>/approve", methods=["POST"])
 @log_admin_action("approve_creative")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def approve_creative(tenant_id, creative_id, **kwargs):
     """Approve a creative."""
     try:
@@ -634,13 +655,64 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     if mb:
                         new_status = _compute_media_buy_status_from_flight_dates(mb)
                         mb.status = new_status
-                        mb.approved_at = datetime.now(UTC)
+                        approved_at = datetime.now(UTC)
+                        mb.approved_at = approved_at
+                        if mb.confirmed_at is None:
+                            mb.confirmed_at = approved_at
                         mb.approved_by = "system"
                     # auto-commits
 
                 logger.info(f"[CREATIVE APPROVAL] Media buy {action['media_buy_id']} successfully created in adapter")
             else:
                 logger.error(f"[CREATIVE APPROVAL] Adapter creation failed for {action['media_buy_id']}: {error_msg}")
+
+        # Pre-approval gate retroactive push (#145):
+        # The buy-approval flow holds back pending_review creatives when
+        # the per-tenant gate is on. For buys that are already live in
+        # the ad server (status NOT in pending_creatives/draft — those
+        # were handled by the media_buy_actions loop above), push the
+        # newly-approved creative to the live line item now.
+        already_handled_buy_ids = {a["media_buy_id"] for a in media_buy_actions}
+        # Snapshot the flag value inside the UoW context — the Tenant ORM
+        # instance is detached once the session closes, so accessing flag
+        # columns outside this block raises DetachedInstanceError.
+        with AdminCreativeUoW(tenant_id) as uow_check:
+            assert uow_check.tenant_config is not None
+            tenant_for_flag = uow_check.tenant_config.get_tenant()
+            pre_approval_gate_enabled = is_creative_pre_approval_gate_enabled(tenant_for_flag)
+        if pre_approval_gate_enabled:
+            from src.core.tools.media_buy_create import push_creative_to_existing_buy
+
+            for assignment in assignments:
+                if assignment.media_buy_id in already_handled_buy_ids:
+                    continue
+                with AdminCreativeUoW(tenant_id) as uow_buy:
+                    assert uow_buy.media_buys is not None
+                    mb = uow_buy.media_buys.get_by_id(assignment.media_buy_id)
+                if mb is None or mb.status in {"pending_creatives", "draft"}:
+                    continue
+                logger.info(
+                    f"[CREATIVE APPROVAL] Gate retroactive push: creative {creative_id} → "
+                    f"live media buy {assignment.media_buy_id} (status={mb.status})"
+                )
+                push_success, push_err = push_creative_to_existing_buy(
+                    creative_id=creative_id,
+                    media_buy_id=assignment.media_buy_id,
+                    tenant_id=tenant_id,
+                )
+                if not push_success:
+                    logger.error(
+                        f"[CREATIVE APPROVAL] Retroactive push failed for creative "
+                        f"{creative_id} → buy {assignment.media_buy_id}: {push_err}"
+                    )
+
+        from src.admin.services.webhook_publisher import emit_event
+
+        emit_event(
+            tenant_id,
+            "creative.status_changed",
+            {"creative_id": creative_id, "new_status": "approved"},
+        )
 
         return jsonify({"success": True, "status": "approved"})
 
@@ -651,7 +723,7 @@ def approve_creative(tenant_id, creative_id, **kwargs):
 
 @creatives_bp.route("/review/<creative_id>/reject", methods=["POST"])
 @log_admin_action("reject_creative")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def reject_creative(tenant_id, creative_id, **kwargs):
     """Reject a creative with comments."""
     try:
@@ -740,6 +812,18 @@ def reject_creative(tenant_id, creative_id, **kwargs):
             operation="reject_creative",
             tenant_id=tenant_id,
             actor=rejected_by,
+        )
+
+        from src.admin.services.webhook_publisher import emit_event
+
+        emit_event(
+            tenant_id,
+            "creative.status_changed",
+            {
+                "creative_id": creative_id,
+                "new_status": "rejected",
+                "rejection_reason": rejection_reason,
+            },
         )
 
         return jsonify({"success": True, "status": "rejected"})
@@ -1290,7 +1374,7 @@ def _ai_review_creative_impl_inner(
 
 @creatives_bp.route("/review/<creative_id>/ai-review", methods=["POST"])
 @log_admin_action("ai_review_creative")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def ai_review_creative(tenant_id, creative_id, **kwargs):
     """Flask endpoint wrapper for AI review."""
     result = _ai_review_creative_impl(tenant_id, creative_id)

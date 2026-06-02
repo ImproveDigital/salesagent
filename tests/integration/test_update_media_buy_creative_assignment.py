@@ -1,5 +1,6 @@
 """Integration tests for update_media_buy creative assignment functionality."""
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,9 +8,11 @@ from sqlalchemy import select
 
 from src.core.database.models import Creative as DBCreative
 from src.core.database.models import CreativeAssignment as DBAssignment
+from src.core.database.models import MediaPackage
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import UpdateMediaBuyRequest, UpdateMediaBuyResponse
 from src.core.tools.media_buy_update import _update_media_buy_impl
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 
 @pytest.mark.requires_db
@@ -67,15 +70,24 @@ def test_update_media_buy_assigns_creatives_to_package(integration_db):
             principal_id="test_principal",
             order_name="Test Order",
             advertiser_name="Test Advertiser",
-            start_date="2025-11-01",
-            end_date="2025-11-30",
-            start_time="2025-11-01T00:00:00Z",
-            end_time="2025-11-30T23:59:59Z",
+            start_date=(datetime.now(UTC) + timedelta(days=1)).date(),
+            end_date=(datetime.now(UTC) + timedelta(days=8)).date(),
+            start_time=datetime.now(UTC) + timedelta(days=1),
+            end_time=datetime.now(UTC) + timedelta(days=8),
+            status="pending_creatives",
+            approved_at=datetime(2026, 1, 1, tzinfo=UTC),
             raw_request={
                 "packages": [{"package_id": "pkg_default", "impressions": 100000, "products": ["test_product"]}]
             },
         )
         session.add(media_buy)
+        session.add(
+            MediaPackage(
+                media_buy_id="test_buy_123",
+                package_id="pkg_default",
+                package_config={"product_id": "test_product", "impressions": 100000},
+            )
+        )
 
         # Create creatives (FK to principal now satisfied)
         creative1 = DBCreative(
@@ -84,7 +96,8 @@ def test_update_media_buy_assigns_creatives_to_package(integration_db):
             principal_id="test_principal",
             name="Creative 1",
             agent_url="https://creative.adcontextprotocol.org",
-            format="display",
+            format="display_image",
+            format_parameters={"width": 300, "height": 250},
             status="ready",
             data={"platform_creative_id": "gam_123"},
         )
@@ -94,7 +107,8 @@ def test_update_media_buy_assigns_creatives_to_package(integration_db):
             principal_id="test_principal",
             name="Creative 2",
             agent_url="https://creative.adcontextprotocol.org",
-            format="display",
+            format="display_image",
+            format_parameters={"width": 300, "height": 250},
             status="ready",
             data={"platform_creative_id": "gam_456"},
         )
@@ -129,6 +143,7 @@ def test_update_media_buy_assigns_creatives_to_package(integration_db):
 
         # Call update_media_buy with creative assignment
         req = UpdateMediaBuyRequest(
+            **required_request_kwargs(),
             media_buy_id="test_buy_123",
             packages=[
                 {
@@ -169,6 +184,9 @@ def test_update_media_buy_assigns_creatives_to_package(integration_db):
         assert len(assignments) == 2
         assigned_creative_ids = {a.creative_id for a in assignments}
         assert assigned_creative_ids == {"creative_1", "creative_2"}
+        updated_buy = session.scalars(select(MediaBuy).filter_by(media_buy_id="test_buy_123")).first()
+        assert updated_buy is not None
+        assert updated_buy.status == "pending_start"
 
 
 @pytest.mark.requires_db
@@ -236,6 +254,14 @@ def test_update_media_buy_replaces_creatives(integration_db):
         )
         session.add(media_buy)
         session.flush()  # Ensure media_buy exists before creating assignments
+        session.add(
+            MediaPackage(
+                media_buy_id="test_buy_456",
+                package_id="pkg_default",
+                package_config={"product_id": "test_product", "impressions": 100000},
+            )
+        )
+        session.flush()
 
         # Create creatives (FK to principal now satisfied)
         creative1 = DBCreative(
@@ -244,7 +270,8 @@ def test_update_media_buy_replaces_creatives(integration_db):
             principal_id="test_principal",
             name="Creative 1",
             agent_url="https://creative.adcontextprotocol.org",
-            format="display",
+            format="display_image",
+            format_parameters={"width": 300, "height": 250},
             status="ready",
             data={},
         )
@@ -254,7 +281,8 @@ def test_update_media_buy_replaces_creatives(integration_db):
             principal_id="test_principal",
             name="Creative 2",
             agent_url="https://creative.adcontextprotocol.org",
-            format="display",
+            format="display_image",
+            format_parameters={"width": 300, "height": 250},
             status="ready",
             data={},
         )
@@ -264,7 +292,8 @@ def test_update_media_buy_replaces_creatives(integration_db):
             principal_id="test_principal",
             name="Creative 3",
             agent_url="https://creative.adcontextprotocol.org",
-            format="display",
+            format="display_image",
+            format_parameters={"width": 300, "height": 250},
             status="ready",
             data={},
         )
@@ -310,6 +339,7 @@ def test_update_media_buy_replaces_creatives(integration_db):
 
         # Call update_media_buy to replace creative_1 with creative_2 and creative_3
         req = UpdateMediaBuyRequest(
+            **required_request_kwargs(),
             media_buy_id="test_buy_456",
             packages=[
                 {
@@ -409,6 +439,13 @@ def test_update_media_buy_rejects_missing_creatives(integration_db):
             },
         )
         session.add(media_buy)
+        session.add(
+            MediaPackage(
+                media_buy_id="test_buy_789",
+                package_id="pkg_default",
+                package_config={"product_id": "test_product", "impressions": 100000},
+            )
+        )
         session.commit()
 
     # Create identity for the new _update_media_buy_impl signature
@@ -439,6 +476,7 @@ def test_update_media_buy_rejects_missing_creatives(integration_db):
 
         # Call update_media_buy with non-existent creative IDs
         req = UpdateMediaBuyRequest(
+            **required_request_kwargs(),
             media_buy_id="test_buy_789",
             packages=[
                 {
@@ -525,6 +563,13 @@ def test_creative_assignments_with_weights(integration_db):
             },
         )
         session.add(media_buy)
+        session.add(
+            MediaPackage(
+                media_buy_id="test_buy_weights",
+                package_id="pkg_default",
+                package_config={"product_id": "test_product", "impressions": 100000},
+            )
+        )
 
         # Create creatives (FK to principal now satisfied)
         creative1 = DBCreative(
@@ -533,7 +578,8 @@ def test_creative_assignments_with_weights(integration_db):
             principal_id="test_principal",
             name="Creative 1",
             agent_url="https://creative.adcontextprotocol.org",
-            format="display",
+            format="display_image",
+            format_parameters={"width": 300, "height": 250},
             status="ready",
             data={},
         )
@@ -543,7 +589,8 @@ def test_creative_assignments_with_weights(integration_db):
             principal_id="test_principal",
             name="Creative 2",
             agent_url="https://creative.adcontextprotocol.org",
-            format="display",
+            format="display_image",
+            format_parameters={"width": 300, "height": 250},
             status="ready",
             data={},
         )
@@ -576,6 +623,7 @@ def test_creative_assignments_with_weights(integration_db):
 
         # Call update_media_buy with creative_assignments (not creative_ids)
         req = UpdateMediaBuyRequest(
+            **required_request_kwargs(),
             media_buy_id="test_buy_weights",
             packages=[
                 {
@@ -669,6 +717,13 @@ def test_creative_assignments_replaces_all(integration_db):
             },
         )
         session.add(media_buy)
+        session.add(
+            MediaPackage(
+                media_buy_id="test_buy_replace",
+                package_id="pkg_default",
+                package_config={"product_id": "test_product", "impressions": 100000},
+            )
+        )
 
         # Create three creatives
         for cid in ["c1", "c2", "c3"]:
@@ -679,7 +734,8 @@ def test_creative_assignments_replaces_all(integration_db):
                     principal_id="test_principal",
                     name=f"Creative {cid}",
                     agent_url="https://creative.adcontextprotocol.org",
-                    format="display",
+                    format="display_image",
+                    format_parameters={"width": 300, "height": 250},
                     status="ready",
                     data={},
                 )
@@ -735,6 +791,7 @@ def test_creative_assignments_replaces_all(integration_db):
 
         # Send creative_assignments with ONLY c2 and c3 — c1 should be REMOVED
         req = UpdateMediaBuyRequest(
+            **required_request_kwargs(),
             media_buy_id="test_buy_replace",
             packages=[
                 {

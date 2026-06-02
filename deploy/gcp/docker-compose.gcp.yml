@@ -1,0 +1,68 @@
+# GCP test deployment: app only, no local Postgres, no nginx.
+# DATABASE_URL points at Fly MPG via the WireGuard tunnel running on the host.
+# adcp-server binds directly to port 8000 — same FastAPI app serves /admin, /mcp,
+# /a2a, /health.
+#
+# Usage on the VM:
+#   LOCKFILE_HASH=$(shasum -a 256 uv.lock | awk '{print $1}') \
+#     docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d --build
+
+services:
+  # db-init runs alembic against the *test clone* (fly-db). The clone is a
+  # snapshot of hosted-sales-agent restored via pg_dump/pg_restore, so this
+  # deploy validates the branch's migrations + code against real data shape
+  # without touching the live hosted-sales-agent DB.
+  db-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        LOCKFILE_HASH: ${LOCKFILE_HASH:-set-this-build-arg}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
+    entrypoint: []
+    env_file:
+      - path: .env.gcp
+        required: true
+    environment:
+      PYTHONPATH: "/app"
+    command: ["python", "scripts/ops/migrate.py"]
+    network_mode: "host"
+    volumes:
+      - /etc/resolv.conf:/etc/resolv.conf:ro
+
+  adcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        LOCKFILE_HASH: ${LOCKFILE_HASH:-set-this-build-arg}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
+    entrypoint: []
+    env_file:
+      - path: .env.gcp
+        required: true
+    environment:
+      SKIP_NGINX: "true"
+      SKIP_CRON: "true"
+      ADCP_SALES_PORT: "8000"
+      ADCP_AUTH_TEST_MODE: "false"
+      ENVIRONMENT: "production"
+      PYTHONPATH: "/app/.venv/lib/python3.13/site-packages"
+      PYTHONUNBUFFERED: "1"
+      FLASK_ENV: production
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    network_mode: "host"
+    volumes:
+      - /etc/resolv.conf:/etc/resolv.conf:ro
+    command: ["python", "scripts/run_server.py"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py", "8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

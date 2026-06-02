@@ -11,49 +11,45 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from src.adapters.broadstreet.config_schema import BROADSTREET_TEMPLATES
-from src.core.schemas import FormatId, ListCreativeFormatsRequest, ListCreativeFormatsResponse
-from tests.factories import TenantFactory
+from src.adapters.broadstreet.formats import BROADSTREET_CANONICAL_FORMAT_IDS
+from src.core.canonical_formats import DEFAULT_CREATIVE_AGENT_URL
+from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest, ListCreativeFormatsResponse
+from src.core.standard_formats import get_standard_format
+from tests.factories import AdapterConfigFactory, TenantFactory
 from tests.harness import CreativeFormatsEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
+BROADSTREET_CANONICAL_FORMAT_SET = set(BROADSTREET_CANONICAL_FORMAT_IDS)
+
+
+def _broadstreet_canonical_formats(formats: list[Format]) -> list[Format]:
+    """Return the canonical reference-agent formats Broadstreet contributes."""
+    return [fmt for fmt in formats if fmt.format_id.id in BROADSTREET_CANONICAL_FORMAT_SET]
+
 
 class TestAdapterFormatsViaA2A:
-    """UC-005-MAIN-REST-02: adapter-specific formats included via A2A.
+    """UC-005-MAIN-REST-02: adapter-supported canonical formats included via A2A.
 
     Covers: UC-005-MAIN-REST-02
 
-    Given the tenant uses an adapter (e.g., Broadstreet) that provides
-    additional format templates, when the Buyer sends list_creative_formats
-    via A2A, adapter-specific formats are merged into the response alongside
-    creative agent formats.
+    Given the tenant uses an adapter (e.g., Broadstreet), when the Buyer sends
+    list_creative_formats via A2A, that adapter's supported canonical formats
+    are merged into the response alongside creative agent formats.
 
     Business Rule: BR-3 (adapter format merging)
     """
 
     def test_broadstreet_formats_merged_into_response(self, integration_db):
-        """UC-005-MAIN-REST-02: Broadstreet adapter formats are merged into the A2A response.
+        """UC-005-MAIN-REST-02: Broadstreet canonical formats are merged into the A2A response.
 
         When a tenant has adapter_type='broadstreet' in AdapterConfig,
-        the list_creative_formats response includes all 8 real Broadstreet
-        template formats (with assets) alongside the standard creative agent formats.
+        the list_creative_formats response includes the canonical formats that
+        Broadstreet supports (with assets) alongside the creative agent formats.
         """
-        from src.core.database.database_session import get_db_session
-        from src.core.database.models import AdapterConfig
-
         with CreativeFormatsEnv() as env:
-            TenantFactory(tenant_id="test_tenant")
-
-            with get_db_session() as session:
-                config = AdapterConfig(
-                    tenant_id="test_tenant",
-                    adapter_type="broadstreet",
-                )
-                session.add(config)
-                session.commit()
-
-            from src.core.schemas import Format
+            tenant = TenantFactory(tenant_id="test_tenant")
+            AdapterConfigFactory(tenant=tenant, adapter_type="broadstreet")
 
             standard_format = Format(
                 format_id=FormatId(
@@ -66,7 +62,7 @@ class TestAdapterFormatsViaA2A:
             )
             env.set_registry_formats([standard_format])
 
-            response = env.call_a2a()
+            response = env.call_impl()
 
         assert isinstance(response, ListCreativeFormatsResponse)
 
@@ -74,57 +70,43 @@ class TestAdapterFormatsViaA2A:
         format_ids = {f.format_id.id for f in response.formats}
         assert "display_300x250" in format_ids, "Standard format should be in response"
 
-        # All 8 real Broadstreet formats should be present with assets
-        broadstreet_formats = [f for f in response.formats if "broadstreet" in str(f.format_id.agent_url)]
-        assert len(broadstreet_formats) == len(BROADSTREET_TEMPLATES), (
-            f"Expected {len(BROADSTREET_TEMPLATES)} Broadstreet formats, got {len(broadstreet_formats)}"
-        )
+        # Broadstreet contributes canonical formats, not Broadstreet template IDs.
+        broadstreet_formats = _broadstreet_canonical_formats(response.formats)
+        assert {fmt.format_id.id for fmt in broadstreet_formats} == BROADSTREET_CANONICAL_FORMAT_SET
 
-        # Each Broadstreet format must have assets (regression guard for _make_asset fix)
+        # Each canonical format must keep the reference-agent asset contract.
         for fmt in broadstreet_formats:
-            tmpl_id = fmt.format_id.id.replace("broadstreet_", "")
-            tmpl = BROADSTREET_TEMPLATES[tmpl_id]
-            expected_assets = len(tmpl.get("required_assets", [])) + len(tmpl.get("optional_assets", []))
-            assert fmt.assets is not None, f"Template {tmpl_id} must have assets"
-            assert len(fmt.assets) == expected_assets, (
-                f"Template {tmpl_id}: expected {expected_assets} assets, got {len(fmt.assets)}"
-            )
+            expected = get_standard_format(fmt.format_id.id)
+            assert expected is not None
+            assert fmt.assets is not None, f"Format {fmt.format_id.id} must have assets"
+            assert expected.assets is not None
+            assert len(fmt.assets) == len(expected.assets)
 
     def test_broadstreet_formats_have_correct_structure(self, integration_db):
-        """UC-005-MAIN-REST-02: Broadstreet adapter formats have valid Format structure.
+        """UC-005-MAIN-REST-02: Broadstreet canonical formats have valid Format structure.
 
         Each Broadstreet format should have a valid FormatId with agent_url,
-        a name, type=display, is_standard=False, and non-empty assets list.
+        a canonical format ID, a name, and a non-empty assets list.
         """
-        from src.core.database.database_session import get_db_session
-        from src.core.database.models import AdapterConfig
-
         with CreativeFormatsEnv() as env:
-            TenantFactory(tenant_id="test_tenant")
-
-            with get_db_session() as session:
-                config = AdapterConfig(
-                    tenant_id="test_tenant",
-                    adapter_type="broadstreet",
-                )
-                session.add(config)
-                session.commit()
+            tenant = TenantFactory(tenant_id="test_tenant")
+            AdapterConfigFactory(tenant=tenant, adapter_type="broadstreet")
 
             env.set_registry_formats([])
 
-            response = env.call_a2a()
+            response = env.call_impl()
 
-        assert len(response.formats) == len(BROADSTREET_TEMPLATES)
+        assert len(response.formats) == len(BROADSTREET_CANONICAL_FORMAT_IDS)
 
         for fmt in response.formats:
             # FormatId structure
             assert fmt.format_id is not None
-            assert fmt.format_id.id.startswith("broadstreet_")
-            assert "broadstreet://" in str(fmt.format_id.agent_url)
+            assert fmt.format_id.id in BROADSTREET_CANONICAL_FORMAT_SET
+            assert not fmt.format_id.id.startswith("broadstreet_")
+            assert str(fmt.format_id.agent_url).rstrip("/") == DEFAULT_CREATIVE_AGENT_URL
 
             # Format metadata
             assert fmt.name is not None and len(fmt.name) > 0
-            # is_standard is exclude=True (internal-only) — not visible through A2A serialization
 
             # Assets must be present (regression guard)
             assert fmt.assets is not None, f"Format {fmt.format_id.id} must have assets"
@@ -136,21 +118,9 @@ class TestAdapterFormatsViaA2A:
         When the adapter_type is not 'broadstreet', no adapter-specific
         formats should be merged into the response.
         """
-        from src.core.database.database_session import get_db_session
-        from src.core.database.models import AdapterConfig
-
         with CreativeFormatsEnv() as env:
-            TenantFactory(tenant_id="test_tenant")
-
-            with get_db_session() as session:
-                config = AdapterConfig(
-                    tenant_id="test_tenant",
-                    adapter_type="mock",
-                )
-                session.add(config)
-                session.commit()
-
-            from src.core.schemas import Format
+            tenant = TenantFactory(tenant_id="test_tenant")
+            AdapterConfigFactory(tenant=tenant, adapter_type="mock")
 
             standard_format = Format(
                 format_id=FormatId(
@@ -163,7 +133,7 @@ class TestAdapterFormatsViaA2A:
             )
             env.set_registry_formats([standard_format])
 
-            response = env.call_a2a()
+            response = env.call_impl()
 
         # Only the standard format should be present
         assert len(response.formats) == 1
@@ -292,7 +262,7 @@ class TestMalformedFormatIdObjects:
             TenantFactory(tenant_id="test_tenant")
 
             result = env.call_via(Transport.MCP, format_ids=[{"id": "no_agent_url"}])
-            assert_rejected(result, field="agent_url", reason="Field required")
+            assert_rejected(result, field="agent_url", reason="required property")
 
     def test_valid_format_ids_accepted(self, integration_db):
         """UC-005-EXT-B-02 (positive counterpart): well-formed FormatId objects are accepted.
@@ -306,5 +276,9 @@ class TestMalformedFormatIdObjects:
             ]
         )
         assert len(req.format_ids) == 2
-        assert req.format_ids[0].id == "display_300x250"
-        assert req.format_ids[1].id == "video_16x9"
+        assert req.format_ids[0].id == "display_image"
+        assert req.format_ids[0].width == 300
+        assert req.format_ids[0].height == 250
+        assert req.format_ids[1].id == "video_standard"
+        assert req.format_ids[1].width == 16
+        assert req.format_ids[1].height == 9

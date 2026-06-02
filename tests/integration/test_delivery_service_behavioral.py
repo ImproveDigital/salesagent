@@ -213,7 +213,7 @@ class TestSendWebhookEnhancedAuthBlockedSkip:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://blocked.example.com/webhook",
+                url="https://example.com/blocked-webhook",
                 auth_blocked_at=datetime(2025, 6, 1, tzinfo=UTC),
             )
 
@@ -261,7 +261,7 @@ class TestSendWebhookEnhancedHmacSigning:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://hmac.example.com/webhook",
+                url="https://example.com/hmac-webhook",
                 webhook_secret="a" * 32,  # Exactly 32 chars — meets minimum
             )
 
@@ -306,7 +306,7 @@ class TestSendWebhookEnhancedHmacSigning:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://hmac-verify.example.com/webhook",
+                url="https://example.com/hmac-verify-webhook",
                 webhook_secret=secret,
             )
 
@@ -363,7 +363,7 @@ class TestSendWebhookEnhancedBearerAuth:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://bearer.example.com/webhook",
+                url="https://example.com/bearer-webhook",
                 authentication_type="bearer",
                 authentication_token="my-secret-token-xyz",
             )
@@ -415,7 +415,7 @@ class TestSendWebhookEnhancedHappyPath:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://happy.example.com/webhook",
+                url="https://example.com/happy-webhook",
             )
 
             env.set_http_response(200)
@@ -431,8 +431,13 @@ class TestSendWebhookEnhancedHappyPath:
             assert result is True
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
             post_mock.assert_called_once()
-            assert post_mock.call_args.args[0] == "https://happy.example.com/webhook"
-            assert post_mock.call_args.kwargs["json"] == payload
+            assert post_mock.call_args.args[0] == "https://example.com/happy-webhook"
+            # Slice 3 of signing-non-embedded: body sent via ``content=``
+            # (not ``json=``) so wire bytes are byte-identical to signature
+            # input. Decode here for the equality assertion.
+            import json as _json
+
+            assert _json.loads(post_mock.call_args.kwargs["content"]) == payload
 
     def test_no_configs_returns_false(self, integration_db):
         """When no PushNotificationConfig exists, _send_webhook_enhanced returns False.
@@ -492,7 +497,7 @@ class TestDeliverWithBackoffSuccess:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://success.example.com/webhook",
+                url="https://example.com/success-webhook",
             )
 
             env.set_http_response(200)
@@ -507,7 +512,7 @@ class TestDeliverWithBackoffSuccess:
             assert result is True
 
             # Circuit breaker should remain CLOSED (success recorded)
-            endpoint_key = "t1:https://success.example.com/webhook"
+            endpoint_key = "t1:https://example.com/success-webhook"
             state, failure_count = service.get_circuit_breaker_state(endpoint_key)
             assert state == CircuitState.CLOSED
             assert failure_count == 0
@@ -544,7 +549,7 @@ class TestDeliverWithBackoffRetry:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://failing.example.com/webhook",
+                url="https://example.com/failing-webhook",
             )
 
             env.set_http_response(500)
@@ -566,7 +571,7 @@ class TestDeliverWithBackoffRetry:
             assert env.mock["sleep"].call_count == 2
 
             # Circuit breaker should record failure
-            endpoint_key = "t1:https://failing.example.com/webhook"
+            endpoint_key = "t1:https://example.com/failing-webhook"
             state, failure_count = service.get_circuit_breaker_state(endpoint_key)
             assert failure_count == 1
 
@@ -604,7 +609,7 @@ class TestDeliverWithBackoffTimeout:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://timeout.example.com/webhook",
+                url="https://example.com/timeout-webhook",
             )
 
             # Make httpx.Client().post() raise TimeoutException
@@ -627,7 +632,7 @@ class TestDeliverWithBackoffTimeout:
             assert post_mock.call_count == 3
 
             # Circuit breaker should record failure
-            endpoint_key = "t1:https://timeout.example.com/webhook"
+            endpoint_key = "t1:https://example.com/timeout-webhook"
             state, failure_count = service.get_circuit_breaker_state(endpoint_key)
             assert failure_count == 1
 
@@ -664,7 +669,7 @@ class TestIsAdjustedNotificationType:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://adjusted.example.com/webhook",
+                url="https://example.com/adjusted-webhook",
             )
 
             env.set_http_response(200)
@@ -682,7 +687,10 @@ class TestIsAdjustedNotificationType:
 
             assert result is True
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
-            sent_payload = post_mock.call_args.kwargs["json"]
+            # Body now arrives via ``content=`` bytes; decode for inspection.
+            import json as _json
+
+            sent_payload = _json.loads(post_mock.call_args.kwargs["content"])
             assert sent_payload["notification_type"] == "adjusted"
             assert sent_payload["is_adjusted"] is True
 
@@ -719,14 +727,14 @@ class TestQueueFullDropsWebhook:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://full-queue.example.com/webhook",
+                url="https://example.com/full-queue-webhook",
             )
 
             env.set_http_response(200)
             service = env.get_service()
 
             # Pre-populate the queue to capacity (use small max_size)
-            endpoint_key = "t1:https://full-queue.example.com/webhook"
+            endpoint_key = "t1:https://example.com/full-queue-webhook"
             small_queue = WebhookQueue(max_size=1)
             small_queue.enqueue({"dummy": "data"})  # Fill it
             service._queues[endpoint_key] = small_queue
@@ -771,7 +779,7 @@ class TestWeakSecretNoSignature:
             PushNotificationConfigFactory(
                 tenant=tenant,
                 principal=principal,
-                url="https://weak-secret.example.com/webhook",
+                url="https://example.com/weak-secret-webhook",
                 webhook_secret="tooshort",  # < 32 chars
             )
 

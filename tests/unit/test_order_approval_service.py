@@ -91,6 +91,38 @@ def test_start_approval_creates_sync_job(mock_db_session):
     assert sync_job_call.progress["webhook_url"] == "https://example.com/webhook"
 
 
+def test_stale_approval_cleanup_does_not_remove_new_registry_entry(mock_db_session):
+    """A delayed old thread cleanup must not remove a newer approval entry."""
+    import src.services.order_approval_service as service
+
+    with (
+        patch(
+            "src.services.order_approval_service._generate_approval_id",
+            side_effect=["approval_12345_old", "approval_12345_new"],
+        ),
+        patch("src.services.order_approval_service._run_approval_thread"),
+    ):
+        old_id = start_order_approval_background(
+            order_id="12345",
+            media_buy_id="mb_123",
+            tenant_id="tenant_1",
+            principal_id="principal_1",
+        )
+        new_id = start_order_approval_background(
+            order_id="12345",
+            media_buy_id="mb_456",
+            tenant_id="tenant_1",
+            principal_id="principal_1",
+        )
+
+    with service._approval_lock:
+        service._active_approvals.pop(old_id, None)
+
+    active_approvals = get_active_approvals()
+    assert old_id not in active_approvals
+    assert new_id in active_approvals
+
+
 def test_start_approval_rejects_duplicate(mock_db_session):
     """Test that starting approval for same order fails."""
     from src.core.database.models import SyncJob
@@ -228,6 +260,27 @@ def test_webhook_notification_sent_on_success():
         # Check authentication header
         headers = call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test_token"
+
+
+def test_webhook_notification_refuses_public_http_url(monkeypatch):
+    """Approval callbacks should not deliver legacy stored HTTP URLs."""
+    from src.services.order_approval_service import _send_approval_webhook
+
+    monkeypatch.delenv("ADCP_AUTH_TEST_MODE", raising=False)
+    monkeypatch.delenv("WEBHOOK_ALLOW_PRIVATE_IPS", raising=False)
+
+    with patch("src.services.order_approval_service.get_db_session") as mock_db, patch("httpx.Client") as mock_httpx:
+        _send_approval_webhook(
+            webhook_url="http://example.com/webhook",
+            tenant_id="tenant_1",
+            principal_id="principal_1",
+            media_buy_id="mb_123",
+            status="approved",
+            message="Order approved successfully",
+        )
+
+    mock_db.assert_not_called()
+    mock_httpx.return_value.__enter__.return_value.post.assert_not_called()
 
 
 @patch("src.services.order_approval_service.time.sleep")

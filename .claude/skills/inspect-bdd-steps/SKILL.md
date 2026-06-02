@@ -50,8 +50,8 @@ Options:
 - `--output PATH` — Override report output path
 - `--then-only` — Only inspect Then steps (default: true)
 
-Review the generated report and use findings to inform beads-58u
-(assertion mismatch fixes) or create new tasks.
+Review the generated report and use findings to drive assertion-mismatch
+fixes; file GitHub issues for tracking if needed.
 
 ## When to Use
 

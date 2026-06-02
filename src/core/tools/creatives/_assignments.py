@@ -5,7 +5,9 @@ from typing import Any
 
 from src.core.database.repositories.uow import CreativeUoW
 from src.core.exceptions import AdCPNotFoundError, AdCPValidationError
+from src.core.format_cache import canonical_format_identity
 from src.core.schemas import SyncCreativeResult
+from src.core.tools.media_buy_create import _status_after_creative_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,10 @@ def _process_assignments(
     assignments_by_creative: dict[str, list[str]] = {}  # creative_id -> [package_ids]
     assignment_errors_by_creative: dict[str, dict[str, str]] = {}  # creative_id -> {package_id: error}
     media_buys_with_new_assignments: dict[str, Any] = {}  # media_buy_id -> MediaBuy object
+    failed_result_ids = {
+        result.creative_id for result in results if getattr(result.action, "value", result.action) == "failed"
+    }
+    successful_result_ids = {result.creative_id for result in results} - failed_result_ids
 
     # AdCP v3 spec defines assignments as list[{creative_id, package_id, ...}];
     # normalise to dict form {creative_id: [package_ids]} for internal processing.
@@ -57,8 +63,19 @@ def _process_assignments(
                     assignment_errors_by_creative[creative_id] = {}
 
                 for package_id in package_ids:
+                    if creative_id in failed_result_ids:
+                        assignment_errors_by_creative[creative_id][package_id] = (
+                            f"Creative {creative_id} failed validation; assignment skipped"
+                        )
+                        logger.warning(
+                            "Skipping assignment for failed creative: creative=%s package=%s",
+                            creative_id,
+                            package_id,
+                        )
+                        continue
+
                     # Find which media buy this package belongs to
-                    pkg_result = assignment_repo.find_package_with_media_buy(package_id)
+                    pkg_result = assignment_repo.find_package_with_media_buy(package_id, principal_id=principal_id)
 
                     media_buy_id = None
                     actual_package_id = None
@@ -81,6 +98,13 @@ def _process_assignments(
 
                     # Validate creative format against package product formats
                     db_creative_result = assignment_repo.get_creative_by_id(creative_id)
+                    if db_creative_result is None and creative_id not in successful_result_ids:
+                        error_msg = f"Creative not found: {creative_id}"
+                        assignment_errors_by_creative[creative_id][package_id] = error_msg
+                        if validation_mode == "strict":
+                            raise AdCPNotFoundError(error_msg, recovery="correctable")
+                        logger.warning("Creative not found during assignment: %s, skipping", creative_id)
+                        continue
 
                     # Get product_id from package_config
                     product_id = db_package.package_config.get("product_id") if db_package.package_config else None
@@ -90,36 +114,33 @@ def _process_assignments(
                         product = assignment_repo.get_product_by_id(product_id)
 
                         if product and product.format_ids:
-                            # Build set of supported formats (agent_url, format_id) tuples
-                            supported_formats: set[tuple[str, str]] = set()
+                            # Build set of supported canonical format identities.
+                            # Older persisted products may still carry legacy
+                            # reference-agent IDs like display_300x250; compare
+                            # them as display_image + width/height so canonical
+                            # migration does not collapse all display sizes.
+                            supported_formats: set[tuple[str, str, int | None, int | None, int | None]] = set()
                             for fmt in product.format_ids:
                                 if isinstance(fmt, dict):
                                     agent_url_val = fmt.get("agent_url")
                                     format_id_val = fmt.get("id") or fmt.get("format_id")
                                     if agent_url_val and format_id_val:
-                                        supported_formats.add((str(agent_url_val), str(format_id_val)))
+                                        supported_formats.add(canonical_format_identity(fmt))
 
                             # Check creative format against supported formats
                             creative_agent_url = db_creative_result.agent_url
                             creative_format_id = db_creative_result.format
-
-                            # Allow /mcp URL variant (creative agent may return format with /mcp suffix)
-                            def normalize_url(url: str | None) -> str | None:
-                                if not url:
-                                    return None
-                                return url.rstrip("/").removesuffix("/mcp")
-
-                            normalized_creative_url = normalize_url(creative_agent_url)
-                            is_supported = False
-
-                            for supported_url, supported_format_id in supported_formats:
-                                normalized_supported_url = normalize_url(supported_url)
-                                if (
-                                    normalized_creative_url == normalized_supported_url
-                                    and creative_format_id == supported_format_id
-                                ):
-                                    is_supported = True
-                                    break
+                            format_parameters = getattr(db_creative_result, "format_parameters", None)
+                            if not isinstance(format_parameters, dict):
+                                format_parameters = {}
+                            creative_identity = canonical_format_identity(
+                                {
+                                    "agent_url": creative_agent_url,
+                                    "id": creative_format_id,
+                                    **format_parameters,
+                                }
+                            )
+                            is_supported = creative_identity in supported_formats
 
                             if not supported_formats:
                                 # Product has no format restrictions - allow all
@@ -133,7 +154,10 @@ def _process_assignments(
                                     else creative_format_id
                                 )
                                 supported_formats_display = ", ".join(
-                                    [f"{url}/{fmt_id}" if url else fmt_id for url, fmt_id in supported_formats]
+                                    [
+                                        f"{url}/{fmt_id}" + (f" {width}x{height}" if width and height else "")
+                                        for url, fmt_id, width, height, _duration_ms in supported_formats
+                                    ]
                                 )
                                 error_msg = (
                                     f"Creative {creative_id} format '{creative_format_display}' "
@@ -197,11 +221,22 @@ def _process_assignments(
                     if actual_package_id is not None:
                         assignments_by_creative[creative_id].append(actual_package_id)
 
-            # Update media buy status if needed (draft -> pending_creatives)
+            # Update media buy status if needed. ``pending_creatives`` means no
+            # creatives are assigned, so attaching creatives clears that blocker
+            # independently of creative review state.
             for mb_id, mb_obj in media_buys_with_new_assignments.items():
-                if mb_obj.status == "draft" and mb_obj.approved_at is not None:
-                    mb_obj.status = "pending_creatives"
-                    logger.info(f"[SYNC_CREATIVES] Media buy {mb_id} transitioned from draft to pending_creatives")
+                previous_status = mb_obj.status
+                next_status = _status_after_creative_attachment(
+                    current_status=previous_status,
+                    approved_at=mb_obj.approved_at,
+                    start_time=mb_obj.start_time,
+                    end_time=mb_obj.end_time,
+                )
+                if next_status is not None:
+                    mb_obj.status = next_status
+                    logger.info(
+                        f"[SYNC_CREATIVES] Media buy {mb_id} transitioned from {previous_status} to {mb_obj.status}"
+                    )
 
             # UoW auto-commits on clean exit
 

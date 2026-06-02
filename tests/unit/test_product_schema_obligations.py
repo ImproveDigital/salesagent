@@ -18,7 +18,8 @@ CONFIRMED (57 tests) — Schema fields, required/optional, types, XOR constraint
     channels, required_axe_integrations, required_features, required_geo_targeting,
     signal_targeting, standard_formats_only)
   GetProductsRequest (all fields optional, product_selectors→brand dependency)
-  GetProductsResponse (products required; proposals, property_list_applied optional)
+  GetProductsResponse (products required; proposals, property_list_applied,
+    catalog_applied optional)
   PricingOption XOR (fixed_price XOR floor_price, CPA always fixed)
   Proposal (proposal_id, name, allocations required; allocations sum to 100%)
   Pagination (max_results: min=1, max=100, default=50; has_more + cursor)
@@ -67,6 +68,22 @@ VALID_CATALOG_MATCH = {"submitted_count": 10, "matched_count": 5}
 VALID_CATALOG_TYPES = ["product"]
 VALID_CONVERSION_TRACKING = {"platform_managed": True}
 VALID_DATA_PROVIDER_SIGNALS = [{"selection_type": "all", "data_provider_domain": "polk.com"}]
+VALID_INCLUDED_SIGNALS = [
+    {
+        "signal_ref": {"scope": "product", "signal_id": "sports_fans"},
+        "name": "Sports Fans",
+        "value_type": "binary",
+    }
+]
+VALID_SIGNAL_TARGETING_RULES = {"selection_mode": "optional", "max_selected_signals": 2}
+VALID_SIGNAL_TARGETING_OPTIONS = [
+    {
+        "signal_ref": {"scope": "product", "signal_id": "auto_intenders"},
+        "name": "Auto Intenders",
+        "value_type": "binary",
+        "allowed_targeting_modes": ["include", "exclude"],
+    }
+]
 VALID_FORECAST = {
     "currency": "USD",
     "method": "estimate",
@@ -258,6 +275,24 @@ class TestProductConversion36Fields:
         assert schema.forecast is not None
         assert schema.signal_targeting_allowed is True
 
+    def test_beta4_signal_fields_present_when_populated(self):
+        """Beta 4 signal fields appear in converted product when set.
+
+        Covers: UC-001-MAIN-18
+        """
+        product = _make_db_product(
+            included_signals=VALID_INCLUDED_SIGNALS,
+            signal_targeting_rules=VALID_SIGNAL_TARGETING_RULES,
+            signal_targeting_options=VALID_SIGNAL_TARGETING_OPTIONS,
+            signal_targeting_allowed=True,
+        )
+
+        dumped = convert_product_model_to_schema(product).model_dump(mode="json", exclude_none=True)
+
+        assert dumped["included_signals"][0]["signal_ref"]["signal_id"] == "sports_fans"
+        assert dumped["signal_targeting_rules"]["max_selected_signals"] == 2
+        assert dumped["signal_targeting_options"][0]["signal_ref"]["signal_id"] == "auto_intenders"
+
     def test_36_fields_optional_when_null(self):
         """Conversion succeeds when all 6 new fields are null.
 
@@ -418,14 +453,14 @@ class TestResponseAssembly:
         dumped = resp.model_dump()
         assert dumped.get("property_list_applied") is True
 
-    def test_response_includes_product_selectors_applied(self):
-        """Response includes product_selectors_applied when set.
+    def test_response_includes_catalog_applied(self):
+        """Response includes catalog_applied when set.
 
         Covers: UC-001-MAIN-36
         """
-        resp = GetProductsResponse(products=[], product_selectors_applied=True)
+        resp = GetProductsResponse(products=[], catalog_applied=True)
         dumped = resp.model_dump()
-        assert dumped.get("product_selectors_applied") is True
+        assert dumped.get("catalog_applied") is True
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +561,7 @@ class TestNoBriefSchemaObligations:
         # The schema allows brief=None on GetProductsRequest
         from src.core.schemas import GetProductsRequest
 
-        req = GetProductsRequest()
+        req = GetProductsRequest(buying_mode="wholesale")
         assert req.brief is None
 
 
@@ -560,7 +595,7 @@ class TestAnonymousDiscoverySchema:
         assert self._is_visible_anonymous(product)
 
     def test_anonymous_pricing_suppression(self):
-        """Anonymous response strips pricing detail from serialized output.
+        """Anonymous brief/discovery response strips pricing detail from serialized output.
 
         Covers: UC-001-ALT-ANONYMOUS-DISCOVERY-05
         """
@@ -1016,7 +1051,7 @@ class TestPaginatedDiscoverySchema:
         # GetProductsRequest.pagination is optional; default page size is 50
         from src.core.schemas import GetProductsRequest
 
-        req = GetProductsRequest()
+        req = GetProductsRequest(buying_mode="wholesale")
         assert req.pagination is None  # Not specified = use server default (50)
 
     async def test_pagination_min_max_results_bounds(self):
@@ -1466,6 +1501,7 @@ class TestGetProductsRequestSchema:
         from src.core.schemas import GetProductsRequest
 
         req = GetProductsRequest(
+            buying_mode="wholesale",
             brief="video ads for sports fans",
             brand={"domain": "nike.com"},
             account={"account_id": "acct_001"},
@@ -1486,25 +1522,27 @@ class TestGetProductsRequestSchema:
         """
         from src.core.schemas import GetProductsRequest
 
-        req = GetProductsRequest()
+        req = GetProductsRequest(buying_mode="wholesale")
         assert req.brief is None
         assert req.brand is None
         assert req.filters is None
 
-    def test_request_rejects_unknown_fields_in_dev(self):
-        """GetProductsRequest rejects unknown fields in dev mode (extra=forbid).
+    def test_request_keeps_unknown_fields_off_spec_attributes(self):
+        """GetProductsRequest accepts forward-compat extras but doesn't bind them
+        to spec attributes.
 
         Covers: CONSTR-GET-PRODUCTS-REQUEST-01
-        """
-        import os
 
+        Phase 2 slice 7: GetProductsRequest is now an alias for the AdCP library
+        type, which uses ``extra='allow'`` for forward compatibility with future
+        spec extensions. Unknown fields land on ``model_extra`` rather than
+        raising — but they don't show up as named attributes on the request.
+        """
         from src.core.schemas import GetProductsRequest
 
-        # In dev/test mode (default), extra=forbid should reject unknown fields
-        env = os.environ.get("ENVIRONMENT", "")
-        if env != "production":
-            with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-                GetProductsRequest(**{"brief": "test", "unknown_field_xyz": "bad"})
+        req = GetProductsRequest(buying_mode="wholesale", brief="test", unknown_field_xyz="bad")
+        assert not hasattr(req, "unknown_field_xyz") or req.unknown_field_xyz == "bad"
+        assert req.model_extra == {"unknown_field_xyz": "bad"}
 
     def test_request_has_channels_filter(self):
         """GetProductsRequest filters support channels field (v3 addition).

@@ -89,7 +89,7 @@ class _DataPreservationEnv(IntegrationEnv):
 
 def _make_format_id(agent_url: str, format_id: str):
     """Create a proper FormatId model for test mocks."""
-    from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
+    from src.core.schemas import FormatId as LibraryFormatId
 
     return LibraryFormatId(agent_url=agent_url, id=format_id)
 
@@ -288,15 +288,15 @@ class TestCreativeSyncDataPreservation:
                 }
             )
 
-            # User-provided assets (ImageAsset adds alt_text/format/provenance defaults after parsing)
+            # User-provided assets after parsing and wire normalization. The
+            # SDK-compatible shape backfills ``asset_type='image'`` from the
+            # ``url+width+height`` shape and strips optional null fields.
             user_assets = {
                 "banner_image": {
+                    "asset_type": "image",
                     "url": "https://user-creative.example.com/banner.png",
                     "width": 300,
                     "height": 250,
-                    "alt_text": None,
-                    "format": None,
-                    "provenance": None,
                 }
             }
 
@@ -364,7 +364,7 @@ class TestCreativeSyncDataPreservation:
                         "creative_id": "preserve-gen-url-001",
                         "name": "User Video Creative",
                         "format_id": {"agent_url": DEFAULT_AGENT_URL, "id": "video_generative"},
-                        "assets": {"video": {"url": user_url, "duration": 30}},
+                        "assets": {"video": {"url": user_url, "width": 1920, "height": 1080, "duration": 30}},
                     }
                 ],
             )

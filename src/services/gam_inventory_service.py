@@ -12,20 +12,24 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import String, and_, create_engine, delete, func, or_, select, text
-from sqlalchemy.orm import Session, scoped_session, sessionmaker
+from sqlalchemy import String, and_, delete, func, inspect, or_, select, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from src.adapters.gam_inventory_discovery import (
     GAMInventoryDiscovery,
 )
-from src.core.database.db_config import DatabaseConfig
 from src.core.database.models import GAMInventory, Product, ProductInventoryMapping
+from src.services.gam_db_session import LazyScopedSession
 
-# Create database session factory
-engine = create_engine(DatabaseConfig.get_connection_string())
-SessionLocal = sessionmaker(bind=engine)
-# Use scoped_session for thread-local sessions
-db_session = scoped_session(SessionLocal)
+# Use a lazy scoped_session proxy so importing admin modules in unit tests does not create a DB engine.
+db_session = LazyScopedSession()
+
+
+def get_service_engine() -> Engine:
+    """Return the canonical SQLAlchemy engine used by this legacy service."""
+    return db_session.engine
+
 
 logger = logging.getLogger(__name__)
 
@@ -611,18 +615,34 @@ class GAMInventoryService:
             key_mapping = {row.name: row.inventory_id for row in results}
 
             if key_mapping:
-                # Update adapter_config via repository
+                # Update adapter_config via repository.
+                # Inventory sync is a platform-level operation — set the management_api_caller
+                # flag so the embedded-tenant guard allows the write to AdapterConfig.
                 from src.core.database.repositories.adapter_config import AdapterConfigRepository
 
-                adapter_repo = AdapterConfigRepository(self.db, tenant_id)
-                adapter_repo.update_custom_targeting_keys(key_mapping)
-                self.db.commit()
+                prev_flag = self.db.info.get("management_api_caller", False)
+                self.db.info["management_api_caller"] = True
+                try:
+                    adapter_repo = AdapterConfigRepository(self.db, tenant_id)
+                    adapter_repo.update_custom_targeting_keys(key_mapping)
+                    self.db.commit()
+                finally:
+                    self.db.info["management_api_caller"] = prev_flag
                 logger.info(
                     f"Updated adapter_config.custom_targeting_keys with {len(key_mapping)} keys for tenant {tenant_id}"
                 )
             else:
                 logger.info(f"No custom targeting keys found in gam_inventory for tenant {tenant_id}")
         except Exception as e:
+            # Prior sync phases (ad units, placements, labels, targeting
+            # keys) have each called _flush_batch+commit before reaching
+            # this method, so a full-session rollback here drops only the
+            # uncommitted adapter_config update — there's nothing else to
+            # lose. Required so subsequent phases (audience segments,
+            # mark-stale) can keep using the session; otherwise every later
+            # statement raises PendingRollbackError that buries the
+            # original cause in logs.
+            self.db.rollback()
             logger.error(f"Failed to update adapter_config.custom_targeting_keys: {e}", exc_info=True)
 
     def _convert_item_to_db_format(self, tenant_id: str, inventory_type: str, item, sync_time: datetime) -> dict:
@@ -728,15 +748,14 @@ class GAMInventoryService:
             self.db.commit()
 
         try:
+            gam_inventory_mapper = inspect(GAMInventory)
             if to_insert:
                 logger.info(f"📝 Starting bulk insert of {len(to_insert)} items...")
-                # SQLAlchemy accepts model class but mypy expects Mapper type
-                self.db.bulk_insert_mappings(GAMInventory, to_insert)  # type: ignore[arg-type]
+                self.db.bulk_insert_mappings(gam_inventory_mapper, to_insert)
                 logger.info(f"✅ Batch inserted {len(to_insert)} items")
             if to_update:
                 logger.info(f"📝 Starting bulk update of {len(to_update)} items...")
-                # SQLAlchemy accepts model class but mypy expects Mapper type
-                self.db.bulk_update_mappings(GAMInventory, to_update)  # type: ignore[arg-type]
+                self.db.bulk_update_mappings(gam_inventory_mapper, to_update)
                 logger.info(f"✅ Batch updated {len(to_update)} items")
             logger.info("💾 Committing batch transaction (120s timeout)...")
             _commit_with_timeout()
@@ -748,7 +767,7 @@ class GAMInventoryService:
             self.db.rollback()
             raise TimeoutError(
                 "Database commit timed out after 120s - possible lost connection, lock contention, or large transaction"
-            )
+            ) from e
         except (OperationalError, DBAPIError) as e:
             # Connection errors - log and re-raise with context
             logger.error(f"❌ Database connection error during batch write: {e}")
@@ -760,7 +779,7 @@ class GAMInventoryService:
                 "Database connection lost during batch write. This can happen in long-running syncs if the connection times out.",
                 params=None,
                 orig=e.orig if hasattr(e, "orig") and e.orig is not None else Exception("Unknown error"),
-            )
+            ) from e
         except Exception as e:
             logger.error(f"❌ Batch write failed: {e}", exc_info=True)
             logger.error(f"   Insert count: {len(to_insert)}, Update count: {len(to_update)}")

@@ -270,11 +270,14 @@ class TestEqualDateRangeReturnsInvalidDateRangeError:
 
     Covers: UC-004-EXT-E-01
 
-    BR-RULE-013: start_date >= end_date is invalid.
+    AdCP `get_media_buy_delivery` defines start_date/end_date as inclusive
+    date-only inputs; same-day is the full 24-hour UTC day, not invalid.
     """
 
-    def test_equal_dates_returns_invalid_date_range(self, integration_db):
+    def test_equal_dates_returns_full_day_window(self, integration_db):
         """Covers: UC-004-EXT-E-01"""
+        from datetime import UTC, datetime
+
         from tests.factories import PrincipalFactory, TenantFactory
         from tests.harness import DeliveryPollEnv
 
@@ -289,9 +292,9 @@ class TestEqualDateRangeReturnsInvalidDateRangeError:
             )
 
             assert isinstance(response, GetMediaBuyDeliveryResponse)
-            assert response.media_buy_deliveries == []
-            assert len(response.errors) == 1
-            assert response.errors[0].code == "invalid_date_range"
+            assert not [e for e in response.errors if e.code == "invalid_date_range"]
+            assert response.reporting_period.start == datetime(2026, 3, 15, 0, 0, 0, tzinfo=UTC)
+            assert response.reporting_period.end == datetime(2026, 3, 15, 23, 59, 59, 999999, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -906,7 +909,7 @@ class TestPackageDeliveryStatus:
 
             resp = env.call_impl(
                 media_buy_ids=["mb_future"],
-                status_filter=[MediaBuyStatus.pending_activation],
+                status_filter=[MediaBuyStatus.pending_start],
                 start_date="2025-01-01",
                 end_date="2025-03-15",
             )
@@ -1016,7 +1019,7 @@ class TestPackageDeliveryStatus:
             resp = env.call_impl(
                 media_buy_ids=["mb_future", "mb_active", "mb_completed"],
                 status_filter=[
-                    MediaBuyStatus.pending_activation,
+                    MediaBuyStatus.pending_start,
                     MediaBuyStatus.active,
                     MediaBuyStatus.completed,
                 ],
@@ -1424,7 +1427,7 @@ class TestUnpopulatedFieldsGraceful:
             spend=250.0,
             clicks=0,
             ctr=None,
-            video_completions=None,
+            completed_views=None,
             completion_rate=None,
         )
         assert not hasattr(totals, "effective_rate") or "effective_rate" not in DeliveryTotals.model_fields
@@ -1445,7 +1448,7 @@ class TestUnpopulatedFieldsGraceful:
             impressions=5000.0,
             spend=250.0,
             clicks=None,
-            video_completions=None,
+            completed_views=None,
             pacing_index=1.0,
             pricing_model=None,
             rate=None,
@@ -1660,8 +1663,8 @@ class TestDeliveryMetricsFieldPresence:
             assert totals.clicks is not None or hasattr(totals, "clicks")
             assert hasattr(totals, "ctr")
 
-    def test_totals_include_video_completions_field(self, integration_db):
-        """Delivery totals include video_completions field (where applicable).
+    def test_totals_include_completed_views_field(self, integration_db):
+        """Delivery totals include completed_views field (where applicable).
 
         Covers: UC-004-MAIN-19
         """
@@ -1681,8 +1684,8 @@ class TestDeliveryMetricsFieldPresence:
             )
 
             delivery = result.media_buy_deliveries[0]
-            assert hasattr(delivery.totals, "video_completions")
-            assert delivery.totals.video_completions is None
+            assert hasattr(delivery.totals, "completed_views")
+            assert delivery.totals.completed_views is None
 
     def test_totals_include_conversions_field(self, integration_db):
         """Delivery totals include conversions metric field.
@@ -2348,8 +2351,8 @@ class TestCustomDateRangeBothProvided:
                 start_date="2026-03-01",
                 end_date="2026-03-07",
             )
-            assert response.reporting_period.start == datetime(2026, 3, 1, tzinfo=UTC)
-            assert response.reporting_period.end == datetime(2026, 3, 7, tzinfo=UTC)
+            assert response.reporting_period.start == datetime(2026, 3, 1, 0, 0, 0, tzinfo=UTC)
+            assert response.reporting_period.end == datetime(2026, 3, 7, 23, 59, 59, 999999, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------

@@ -7,43 +7,39 @@ shared implementation pattern from CLAUDE.md.
 import logging
 import os
 import time
-from typing import Any, cast
+from typing import Any
 
-from adcp import FormatId, ProductFilters
+from adcp import FormatId
 from adcp import GetProductsRequest as GetProductsRequestGenerated
-from adcp import Product as LibraryProduct
-from adcp.types import PropertyListReference, PushNotificationConfig
-from adcp.types.generated_poc.core.brand_ref import BrandReference
-from adcp.types.generated_poc.core.context import ContextObject
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
+from adcp.types import PropertyListReference
 from pydantic import ValidationError
 
 from src.adapters import get_adapter_default_channels
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import get_principal_object
+from src.core.embedded_runtime import mark_compose_disabled, publisher_owns_compose_products
 from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schema_helpers import create_get_products_request
+from src.core.sandbox import account_ref_from_request, sandbox_mode_for_request, zero_pricing_for_sandbox
 from src.core.schemas import (
-    GetProductsResponse,
-    Product,  # Extends library Product
+    GetProductsResponse,  # Extends library Product
 )
 from src.core.testing_hooks import AdCPTestContext
-from src.core.tool_context import ToolContext
-from src.core.validation_helpers import format_validation_error, safe_parse_json_field
+from src.core.tracing import traced
+from src.core.validation_helpers import safe_parse_json_field
 from src.services.policy_check_service import PolicyCheckService, PolicyStatus
 
 logger = logging.getLogger(__name__)
 
 
-def get_recommended_cpm(product: Product) -> float | None:
+def get_recommended_cpm(product: Any) -> float | None:
     """Extract recommended CPM from product's pricing_options.
 
     Uses p75 (75th percentile) as the recommended value per AdCP price_guidance spec.
 
     Args:
-        product: Product schema object
+        product: Anything with a ``pricing_options`` attribute — Product
+            schema, ResolvedProduct, or duck-typed mock.
 
     Returns:
         Recommended CPM value (p75) from price_guidance, or None if not available
@@ -58,8 +54,36 @@ def get_recommended_cpm(product: Product) -> float | None:
     return None
 
 
+def _default_pricing_option_support(pricing_option: Any, supported_models: set[str]) -> tuple[bool, str | None]:
+    pricing_model = getattr(pricing_option, "pricing_model", "")
+    pricing_model_str = getattr(pricing_model, "value", pricing_model)
+    is_supported = str(pricing_model_str).lower() in supported_models
+    if is_supported:
+        return True, None
+
+    return False, f"Current adapter does not support {str(pricing_model_str).upper()} pricing"
+
+
+def _get_pricing_option_support(
+    adapter: Any, pricing_option: Any, supported_models: set[str]
+) -> tuple[bool, str | None]:
+    support_checker = getattr(adapter, "get_pricing_option_support", None)
+    if callable(support_checker):
+        result = support_checker(pricing_option)
+        if (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and isinstance(result[0], bool)
+            and (result[1] is None or isinstance(result[1], str))
+        ):
+            return result
+
+    return _default_pricing_option_support(pricing_option, supported_models)
+
+
 # Import conversion utilities from dedicated module to avoid circular imports
-from src.core.product_conversion import convert_product_model_to_schema
+from src.core.product_conversion import convert_product_model_to_resolved
+from src.core.resolved_product import ResolvedProduct
 
 
 def extract_product_property_ids(
@@ -142,6 +166,44 @@ def filter_products_by_property_list(
     return [p for p in products if should_include_product_for_property_list(p, allowed_properties)]
 
 
+def convert_product_models_to_resolved(
+    product_models: list[Any],
+    adapter_type: str | None,
+    source: str,
+) -> list[ResolvedProduct]:
+    """Convert product models, skipping individually invalid catalog entries."""
+    products: list[ResolvedProduct] = []
+    for product_obj in product_models:
+        product_id = getattr(product_obj, "product_id", "<unknown>")
+        try:
+            products.append(convert_product_model_to_resolved(product_obj, adapter_type=adapter_type))
+            logger.debug("Successfully converted %s product %s", source, product_id)
+        except (ValueError, ValidationError):
+            logger.warning(
+                "Skipping %s product %s because its catalog configuration is incomplete or invalid",
+                source,
+                product_id,
+                exc_info=True,
+            )
+    return products
+
+
+def _is_buyer_visible_product_model(product_model: Any) -> bool:
+    """Return whether a persisted product should be visible through buyer discovery."""
+    attrs = getattr(product_model, "__dict__", {})
+    if attrs.get("archived_at") is not None:
+        return False
+
+    implementation_config = attrs.get("implementation_config")
+    if implementation_config is None and "implementation_config" not in attrs:
+        implementation_config = getattr(product_model, "implementation_config", None)
+    if not isinstance(implementation_config, dict):
+        return True
+
+    return implementation_config.get("status") not in {"draft", "archived"}
+
+
+@traced
 async def _get_products_impl(
     req: GetProductsRequestGenerated, identity: ResolvedIdentity | None
 ) -> GetProductsResponse:
@@ -159,9 +221,9 @@ async def _get_products_impl(
     """
     start_time = time.time()
 
-    # Require at least one search criterion (brief, brand, or filters)
-    if not req.brief and not req.brand and not req.filters:
-        raise AdCPValidationError("At least one of 'brief', 'brand', or 'filters' is required")
+    # Buying-mode invariants live in the AdCP SDK.
+    # Keep this check before auth so request-shape errors win.
+    validate_get_products_buying_mode(req)
 
     # Extract identity fields
     if identity is None:
@@ -189,6 +251,10 @@ async def _get_products_impl(
 
     # Get the Principal object with ad server mappings
     principal = get_principal_object(principal_id, tenant_id=identity.tenant_id) if principal_id else None
+    request_account_ref = account_ref_from_request(req)
+    sandbox_mode = sandbox_mode_for_request(identity=identity, account_ref=request_account_ref)
+    if sandbox_mode.active:
+        logger.info("[GET_PRODUCTS] Sandbox/no-spend mode active: %s", sandbox_mode.diagnostic)
 
     # Extract offering text from brand (adcp 3.6.0: brand replaces brand_manifest).
     # req.brand is BrandReference | None (Pydantic model with .domain attribute).
@@ -346,24 +412,47 @@ async def _get_products_impl(
     # Query products via repository (tenant-scoped)
     from src.core.database.repositories.uow import ProductUoW
 
+    buying_mode = getattr(req.buying_mode, "value", req.buying_mode)
     with ProductUoW(tenant["tenant_id"]) as uow:
-        assert uow.products is not None
-        db_products = uow.products.list_all()
+        if buying_mode == "wholesale":
+            from src.core.inventory_profile_projection import (
+                default_wholesale_currency,
+                inventory_profiles_to_resolved_products,
+            )
 
-        # Convert database Product models to AdCP Product schema
-        products = []
-        for product_obj in db_products:
-            try:
-                validated_product = convert_product_model_to_schema(product_obj, adapter_type=tenant_adapter_type)
-                products.append(validated_product)
-                logger.debug(f"Successfully converted product {product_obj.product_id}")
-            except Exception as e:
-                error_msg = (
-                    f"Product '{product_obj.product_id}' failed to convert to AdCP schema. "
-                    f"This indicates data corruption or migration issue. Error: {e}"
-                )
-                logger.error(error_msg)
-                raise ValueError(error_msg) from e
+            assert uow.currency_limits is not None
+            assert uow.inventory_profiles is not None
+            assert uow.adapter_configs is not None
+            adapter_config = uow.adapter_configs.find_by_tenant()
+            preferred_currency = (
+                adapter_config.gam_network_currency
+                if adapter_config is not None
+                and adapter_config.adapter_type == "google_ad_manager"
+                and adapter_config.gam_network_currency
+                else None
+            )
+            products = inventory_profiles_to_resolved_products(
+                uow.inventory_profiles.list_all(),
+                adapter_type=tenant_adapter_type,
+                default_currency=default_wholesale_currency(
+                    uow.currency_limits.list_all(),
+                    preferred=preferred_currency,
+                ),
+            )
+        else:
+            assert uow.products is not None
+            from src.core.inventory_profile_projection import is_materialized_wholesale_product
+
+            db_products = [
+                product
+                for product in uow.products.list_all()
+                if _is_buyer_visible_product_model(product) and not is_materialized_wholesale_product(product)
+            ]
+
+            # Convert database Product models to ResolvedProduct (wire-shape +
+            # internal fields). Filter pipeline below operates on these; at the
+            # response boundary we project ``[r.wire for r in eligible]``.
+            products = convert_product_models_to_resolved(db_products, tenant_adapter_type, "static")
 
     logger.info(f"[GET_PRODUCTS] Got {len(products)} products from database for tenant {tenant['tenant_id']}")
 
@@ -427,21 +516,21 @@ async def _get_products_impl(
     try:
         from src.services.dynamic_products import generate_variants_for_brief
 
-        # Get our agent URL for deployment specification
-        our_agent_url = tenant.get("virtual_host")  # Our sales agent URL (e.g., https://sales.example.com)
+        if buying_mode != "wholesale":
+            # Get our agent URL for deployment specification
+            our_agent_url = tenant.get("virtual_host")  # Our sales agent URL (e.g., https://sales.example.com)
 
-        dynamic_variants = await generate_variants_for_brief(tenant["tenant_id"], brief_text, our_agent_url)
-        if dynamic_variants:
-            # Convert Product models to Product schemas for response
+            dynamic_variants = await generate_variants_for_brief(tenant["tenant_id"], brief_text, our_agent_url)
+            if dynamic_variants:
+                dynamic_variants = [product for product in dynamic_variants if _is_buyer_visible_product_model(product)]
+                # Convert Product models to Product schemas for response
 
-            for variant_model in dynamic_variants:
-                # Convert database model to schema (returns library Product)
-                # Cast to our extended Product type for mypy compatibility
-                variant_schema = convert_product_model_to_schema(variant_model, adapter_type=tenant_adapter_type)
-                # Type: ignore - library Product is compatible with our extended Product at runtime
-                products.append(variant_schema)
+                # Convert database models to ResolvedProduct (matches the static-product
+                # path above so the filter pipeline sees a uniform list type).
+                converted_dynamic = convert_product_models_to_resolved(dynamic_variants, tenant_adapter_type, "dynamic")
+                products.extend(converted_dynamic)
 
-            logger.info(f"[GET_PRODUCTS] Added {len(dynamic_variants)} dynamic product variants")
+                logger.info("[GET_PRODUCTS] Added %s dynamic product variants", len(converted_dynamic))
     except (ImportError, RuntimeError, OSError) as e:
         logger.warning(f"Failed to generate dynamic product variants: {e}. Continuing with static products only.")
 
@@ -600,21 +689,11 @@ async def _get_products_impl(
                     if adapter_channels and not request_channels.intersection(set(adapter_channels)):
                         continue
 
-            # Filter by device_types (local extension, not in AdCP spec)
-            requested_device_types = getattr(req.filters, "device_types", None)
-            if requested_device_types:
-                product_device_types = getattr(product, "device_types", None)
-                if product_device_types:
-                    # Product declares supported device types — must have intersection
-                    if not set(product_device_types).intersection(set(requested_device_types)):
-                        continue
-                # else: product has no device_types restriction — matches any filter
-
             # Product passed all filters
             filtered_products.append(product)
 
         products = filtered_products
-        logger.info(f"Applied filters: {req.filters.model_dump(exclude_none=True)}. {len(products)} products remain.")
+        logger.info("Applied get_products filters. %s products remain.", len(products))
 
     # Filter products based on policy compliance (if policy checks are enabled)
     eligible_products = []
@@ -723,50 +802,59 @@ async def _get_products_impl(
             # Get adapter in dry-run mode (no actual ad server calls)
             adapter = get_adapter(principal, dry_run=True, tenant=tenant)
 
-            supported_models = adapter.get_supported_pricing_models()
+            supported_models = {str(model).lower() for model in adapter.get_supported_pricing_models()}
 
             for product in eligible_products:
                 if product.pricing_options:
                     # Annotate each pricing option with "supported" flag
                     for option in product.pricing_options:
                         inner = option.root
-                        # Get pricing model as string (handle both enum and literal)
-                        pricing_model = getattr(inner.pricing_model, "value", inner.pricing_model)
                         # Add supported annotation (will be included in response)
                         # Dynamic attributes on discriminated union types
-                        is_supported = pricing_model in supported_models
-                        inner.supported = is_supported  # type: ignore[union-attr]
+                        is_supported, unsupported_reason = _get_pricing_option_support(adapter, inner, supported_models)
+                        inner.supported = is_supported
                         if not is_supported:
-                            inner.unsupported_reason = (  # type: ignore[union-attr]
-                                f"Current adapter does not support {str(pricing_model).upper()} pricing"
-                            )
+                            inner.unsupported_reason = unsupported_reason
         except (ImportError, RuntimeError, OSError, ValueError) as e:
             logger.warning(f"Failed to annotate pricing options with adapter support: {e}")
 
     # Filter pricing data for anonymous users
     # Do this BEFORE serialization to avoid reconstruction issues
-    if principal_id is None:  # Anonymous user
-        # Remove pricing data from products for anonymous users
-        # Set to empty list to hide pricing (will be excluded during serialization)
-        for product in eligible_products:
-            product.pricing_options = []
+    if sandbox_mode.active:
+        eligible_products = zero_pricing_for_sandbox(eligible_products)
 
-    # Our Product extends LibraryProduct - cast for type safety since list is invariant
-    # When serialized, Pydantic automatically uses library Product fields
-    # Internal-only fields (implementation_config) excluded by model_dump()
-    # Note: We use eligible_products (Product objects), not response_data (dicts)
-    # because Product objects have typed pricing_options (CpmFixedRatePricingOption, etc.)
-    # while dicts lose this type information during serialization
-    # adcp 2.16.0+ accepts subclass lists at runtime via BeforeValidator coercion,
-    # but mypy still needs cast() due to list invariance in static typing
+    if principal_id is None and buying_mode != "wholesale":  # Anonymous non-feed discovery
+        # Remove pricing data from products for anonymous users
+        # Set to empty list to hide pricing for curated discovery responses.
+        # Wholesale feed reads keep pricing because Product.pricing_options is
+        # required by the AdCP wire schema and buyers use the feed for catalog
+        # cache population.
+        # ResolvedProduct is frozen so we mutate the wire LibraryProduct directly.
+        for product in eligible_products:
+            product.wire.pricing_options = []
+
+    # Project ResolvedProduct → LibraryProduct at the wire boundary. The
+    # internal fields (implementation_config, countries, device_types,
+    # allowed_principal_ids) live on the dataclass and don't reach the wire
+    # by construction.
     resp = GetProductsResponse(
-        products=cast(list[LibraryProduct], eligible_products),
+        products=[r.wire for r in eligible_products],
         errors=None,
         context=req.context,
     )
+    if not publisher_owns_compose_products():
+        resp = mark_compose_disabled(resp)
 
-    # Log successful get_products call
+    # Log successful get_products call. The (operator, brand_domain) pair
+    # is the buyer-identity tuple the publisher dashboard groups Pipeline
+    # by — see #22 for the principal→account refactor that will eventually
+    # make this lookup go through the Account record directly.
     elapsed_ms = int((time.time() - start_time) * 1000)
+    account = request_account_ref
+    account_inner = getattr(account, "root", account)
+    operator = getattr(account_inner, "operator", None) or principal_id
+    brand_domain = req.brand.domain if req.brand else None
+    pricing_visibility = "full" if principal_id is not None or buying_mode == "wholesale" else "suppressed"
     audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
     audit_logger.log_operation(
         operation="get_products",
@@ -778,7 +866,12 @@ async def _get_products_impl(
             "product_count": len(eligible_products),
             "brief_length": len(brief_text),
             "has_filters": req.filters is not None,
-            "has_brand": req.brand is not None,
+            "buying_mode": buying_mode,
+            "pricing_visibility": pricing_visibility,
+            "sandbox_mode": sandbox_mode.diagnostic,
+            "is_anonymous": principal_id is None,
+            "operator": operator,
+            "brand_domain": brand_domain,
             "elapsed_ms": elapsed_ms,
         },
     )
@@ -786,124 +879,40 @@ async def _get_products_impl(
     return resp
 
 
-async def get_products(
-    brand: BrandReference | None = None,
-    brief: str = "",
-    adcp_version: str = "1.0.0",
-    filters: ProductFilters | None = None,
-    property_list: dict | None = None,
-    push_notification_config: PushNotificationConfig | None = None,
-    context: ContextObject | None = None,  # payload-level context
-    ctx: Context | ToolContext | None = None,
-):
-    """Get available products matching the brief.
+def validate_get_products_buying_mode(req: GetProductsRequestGenerated) -> None:
+    """Validate get_products buying-mode invariants through the AdCP SDK."""
+    from adcp.decisioning.refine import assert_buying_mode_consistent
+    from adcp.decisioning.types import AdcpError as SdkAdcpError
 
-    MCP tool wrapper aligned with adcp v3.6.0 spec.
+    from src.core.exceptions import AdCPInvalidRequestError
 
-    Args:
-        brand: Brand reference per adcp 3.6.0. Example: BrandReference(domain="acme.com")
-        brief: Brief description of the advertising campaign or requirements (optional)
-        adcp_version: Client's AdCP version (default: 1.0.0). V3+ clients get clean responses.
-        filters: Structured filters for product discovery (optional)
-        property_list: Property list reference for filtering by buyer's property list (optional)
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-        push_notification_config: Optional webhook configuration (accepted, ignored by this operation)
-
-    Returns:
-        ToolResult with human-readable text and structured data
-    """
-    # Build request object for shared implementation
     try:
-        req = create_get_products_request(
-            brief=brief,
-            brand=brand,
-            filters=filters,
-            property_list=property_list,
-            context=context,
+        assert_buying_mode_consistent(req)
+    except SdkAdcpError as exc:
+        details: dict[str, Any] = {"sdk_error_code": exc.code}
+        if exc.field:
+            details["field"] = exc.field
+        raise AdCPInvalidRequestError(str(exc), details=details) from exc
+
+    buying_mode = getattr(req.buying_mode, "value", req.buying_mode)
+    if buying_mode == "brief" and not req.brief:
+        raise AdCPInvalidRequestError(
+            "'brief' is required when buying_mode='brief'",
+            details={"field": "brief"},
         )
 
-    except ValidationError as e:
-        raise AdCPValidationError(format_validation_error(e, context="get_products request")) from e
-    except ValueError as e:
-        # Convert ValueError from helper to ToolError with clear message
-        raise AdCPValidationError(f"Invalid get_products request: {e}") from e
 
-    # Read identity pre-resolved by MCPAuthMiddleware
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-
-    # Call shared implementation
-    # Note: GetProductsRequest is now a flat class (not RootModel), so pass req directly
-    response = await _get_products_impl(req, identity)
-
-    # Return ToolResult with human-readable text and structured data
-    response_dict = response.model_dump(mode="json")
-    # Apply v2.x backward-compat fields only for pre-3.0 clients
-    from src.core.version_compat import apply_version_compat
-
-    response_dict = apply_version_compat("get_products", response_dict, adcp_version)
-    return ToolResult(content=str(response), structured_content=response_dict)
-
-
-async def get_products_raw(
-    brief: str,
-    brand: dict[str, Any] | BrandReference | None = None,
-    min_exposures: int | None = None,
-    filters: dict | None = None,
-    property_list: dict | None = None,
-    strategy_id: str | None = None,
-    context: dict | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> GetProductsResponse:
-    """Get available products matching the brief.
-
-    Raw function without @mcp.tool decorator for A2A server use.
-    Returns a clean GetProductsResponse model — v2 compat is applied
-    at the caller's boundary (A2A handler), not here.
-
-    Args:
-        brief: Brief description of the advertising campaign or requirements
-        brand: Brand reference per adcp 3.6.0 (BrandReference or dict with domain).
-               Dict is accepted since A2A passes JSON-deserialized dicts.
-        min_exposures: Minimum impressions needed for measurement validity (optional)
-        filters: Structured filters for product discovery (optional)
-        property_list: Property list reference for filtering by buyer's property list (optional)
-        strategy_id: Optional strategy ID for linking operations (optional)
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-        identity: Resolved identity from transport boundary (preferred over ctx)
-
-    Returns:
-        GetProductsResponse containing matching products
-    """
-    # Resolve identity from transport context if not provided
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-
-    # Create request object - adcp library validates schema
-    req = create_get_products_request(
-        brief=brief or "",
-        brand=brand,
-        filters=filters,
-        property_list=property_list,
-        context=context,
-    )
-
-    # Call shared implementation
-    return await _get_products_impl(req, identity)
-
-
-def get_product_catalog(tenant_id: str | None = None) -> list[Product]:
+def get_product_catalog(tenant_id: str | None = None) -> list[ResolvedProduct]:
     """Get products for a tenant.
 
     Args:
         tenant_id: Tenant ID to load products for. Falls back to ContextVar if not provided.
 
     Returns:
-        List of Product objects with full pricing options
+        List of ``ResolvedProduct`` (wire-shape ``LibraryProduct`` + internal
+        fields) — same shape ``_get_products_impl`` produces. Server-side
+        consumers read ``r.implementation_config`` etc. directly off the
+        dataclass; wire-bound consumers project ``r.wire``.
     """
     from src.core.database.repositories.uow import ProductUoW
 
@@ -915,10 +924,11 @@ def get_product_catalog(tenant_id: str | None = None) -> list[Product]:
     with ProductUoW(tenant_id) as uow:
         assert uow.products is not None
         products = uow.products.list_all_with_inventory()
+        products = [product for product in products if _is_buyer_visible_product_model(product)]
 
-        # Use convert_product_model_to_schema for consistency
-        loaded_products = []
-        for product in products:
-            loaded_products.append(convert_product_model_to_schema(product))
+        # Match the get_products pipeline: ORM → ResolvedProduct via the
+        # sidecar conversion, so internal fields (implementation_config,
+        # countries, etc.) travel alongside the wire shape.
+        loaded_products = [convert_product_model_to_resolved(product) for product in products]
 
     return loaded_products

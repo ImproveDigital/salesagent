@@ -178,8 +178,13 @@ class FormValidator:
 
     @staticmethod
     def validate_role(role: str) -> str | None:
-        """Validate user role."""
-        valid_roles = ["admin", "manager", "viewer"]
+        """Validate user role.
+
+        Canonical enum aligned with the embedded-mode contract. Legacy
+        ``manager`` rows were migrated to ``member`` — see
+        ``alembic/versions/8407a32e9b07_rename_user_role_manager_to_member.py``.
+        """
+        valid_roles = ["admin", "member", "viewer"]
         if role not in valid_roles:
             return f"Invalid role. Must be one of: {', '.join(valid_roles)}"
         return None
@@ -287,7 +292,9 @@ def normalize_agent_url(url: str) -> str:
             normalized = normalized.rstrip("/")
             break  # Only strip one suffix
 
-    return normalized
+    from src.core.canonical_formats import normalize_creative_agent_url
+
+    return normalize_creative_agent_url(normalized)
 
 
 def sanitize_form_data(data: dict[str, Any]) -> dict[str, Any]:

@@ -2,7 +2,7 @@
 
 ## When to Run
 
-Run quality gates **before any commit** and **before closing a beads task**.
+Run quality gates **before any commit**.
 
 ## Quick Check (Every Change)
 

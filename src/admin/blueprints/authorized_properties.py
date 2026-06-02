@@ -74,6 +74,9 @@ def _validate_property_form(
 
         identifier_count += 1
 
+    if not identifiers and property_type == "website":
+        identifiers.append({"type": "domain", "value": publisher_domain})
+
     if not identifiers:
         return False, PROPERTY_ERROR_MESSAGES["at_least_one_identifier"], None
 
@@ -332,7 +335,7 @@ def list_authorized_properties(tenant_id: str) -> str | Response:
 
 @authorized_properties_bp.route("/<tenant_id>/authorized-properties/upload", methods=["GET", "POST"])
 @log_admin_action("upload_authorized_properties")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def upload_authorized_properties(tenant_id: str) -> str | Response:
     """Upload authorized properties from JSON or CSV file."""
     if request.method == "GET":
@@ -401,7 +404,7 @@ def upload_authorized_properties(tenant_id: str) -> str | Response:
 
 @authorized_properties_bp.route("/<tenant_id>/authorized-properties/<property_id>/delete", methods=["POST"])
 @log_admin_action("delete_property")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def delete_property(tenant_id: str, property_id: str) -> Response:
     """Delete an authorized property."""
     try:
@@ -481,7 +484,7 @@ def list_property_tags(tenant_id: str) -> str | Response:
 
 @authorized_properties_bp.route("/<tenant_id>/property-tags/create", methods=["POST"])
 @log_admin_action("create_property_tag")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def create_property_tag(tenant_id: str) -> Response:
     """Create a new property tag."""
     try:
@@ -532,7 +535,7 @@ def create_property_tag(tenant_id: str) -> Response:
 
 @authorized_properties_bp.route("/<tenant_id>/authorized-properties/verify-all", methods=["POST"])
 @log_admin_action("verify_all_properties")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def verify_all_properties(tenant_id: str) -> Response:
     """Verify all pending properties against their adagents.json files."""
     try:
@@ -583,7 +586,7 @@ def verify_all_properties(tenant_id: str) -> Response:
 
 @authorized_properties_bp.route("/<tenant_id>/authorized-properties/sync-from-adagents", methods=["POST"])
 @log_admin_action("sync_properties_from_adagents")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def sync_properties_from_adagents(tenant_id: str) -> Response:
     """Sync properties and tags from publisher adagents.json files.
 
@@ -664,9 +667,9 @@ def sync_properties_from_adagents(tenant_id: str) -> Response:
                 # Note: Tenant.metadata field may not exist in model definition
                 # SQLAlchemy allows dynamic attributes; mypy doesn't recognize this
                 if not isinstance(tenant.metadata, dict):
-                    tenant.metadata = {}  # type: ignore[assignment,misc]
+                    tenant.metadata = {}  # type: ignore[assignment,misc]  # blocked by SQLAlchemy Base.metadata collision
 
-                metadata: dict[str, Any] = tenant.metadata  # type: ignore[assignment]
+                metadata: dict[str, Any] = tenant.metadata  # type: ignore[assignment]  # blocked by SQLAlchemy Base.metadata collision
 
                 # Update last sync timestamp (rate limiting)
                 metadata["last_property_sync"] = datetime.now(UTC).isoformat()
@@ -744,7 +747,7 @@ def sync_properties_from_adagents(tenant_id: str) -> Response:
 
 @authorized_properties_bp.route("/<tenant_id>/authorized-properties/<property_id>/verify-auto", methods=["POST"])
 @log_admin_action("verify_property_auto")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def verify_property_auto(tenant_id: str, property_id: str) -> Response:
     """Automatically verify a property against its adagents.json file."""
     try:
@@ -790,7 +793,7 @@ def verify_property_auto(tenant_id: str, property_id: str) -> Response:
 
 @authorized_properties_bp.route("/<tenant_id>/authorized-properties/create", methods=["GET", "POST"])
 @log_admin_action("create_property")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def create_property(tenant_id: str) -> str | Response:
     """Create a new authorized property."""
     if request.method == "GET":
@@ -863,7 +866,7 @@ def create_property(tenant_id: str) -> str | Response:
 
 @authorized_properties_bp.route("/<tenant_id>/authorized-properties/<property_id>/edit", methods=["GET", "POST"])
 @log_admin_action("edit_property")
-@require_tenant_access()
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 def edit_property(tenant_id: str, property_id: str) -> str | Response:
     """Edit an existing authorized property."""
     if request.method == "GET":

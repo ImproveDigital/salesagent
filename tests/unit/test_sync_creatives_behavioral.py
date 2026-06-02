@@ -2,7 +2,7 @@
 
 Locks current behavior for migration safety (Flask -> FastAPI).
 Tests organized by BR-RULE invariant, covering:
-- BR-RULE-040: Media buy status transitions (5 invariants, zero prior coverage)
+- BR-RULE-040: Media buy status transitions (6 invariants, zero prior coverage)
 - BR-RULE-033 inv2/inv3: Strict/lenient assignment modes
 - BR-RULE-037 inv6: Slack notification guard
 - BR-RULE-033 inv4 / BR-RULE-038 inv4: AdCPError propagation in strict mode
@@ -10,15 +10,17 @@ Tests organized by BR-RULE invariant, covering:
 Reference: salesagent-1xsp design field.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
 from src.core.exceptions import AdCPNotFoundError, AdCPValidationError
+from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import SyncCreativeResult
 from src.core.tools.creatives._assignments import _process_assignments
+from src.core.tools.creatives._sync import _effective_approval_mode, _sync_creatives_impl
 from src.core.tools.creatives._workflow import _send_creative_notifications
 from tests.harness import make_mock_uow
 
@@ -47,6 +49,8 @@ def _make_db_package():
         mb_status="draft",
         mb_approved_at=None,
         product_id=None,
+        start_time=None,
+        end_time=None,
     ):
         db_package = Mock()
         db_package.package_id = package_id
@@ -57,6 +61,8 @@ def _make_db_package():
         db_media_buy.media_buy_id = media_buy_id
         db_media_buy.status = mb_status
         db_media_buy.approved_at = mb_approved_at
+        db_media_buy.start_time = start_time or datetime.now(UTC) + timedelta(days=1)
+        db_media_buy.end_time = end_time or datetime.now(UTC) + timedelta(days=8)
 
         return db_package, db_media_buy
 
@@ -75,6 +81,84 @@ def _make_creative_uow(assignment_repo=None):
     return mock_uow, mock_assignment_repo
 
 
+class TestEmbeddedCreativeApprovalGate:
+    def test_storefront_owned_creative_approval_auto_approves_locally(self, monkeypatch):
+        monkeypatch.setenv("MANAGED_INSTANCE", "true")
+        monkeypatch.setenv("EMBEDDED_CAPABILITIES", '{"creative_approval": "storefront"}')
+
+        assert _effective_approval_mode("ai-powered") == "auto-approve"
+
+    def test_publisher_owned_creative_approval_preserves_mode(self, monkeypatch):
+        monkeypatch.setenv("MANAGED_INSTANCE", "true")
+        monkeypatch.setenv("EMBEDDED_CAPABILITIES", '{"creative_approval": "publisher"}')
+
+        assert _effective_approval_mode("ai-powered") == "ai-powered"
+
+    def test_storefront_owned_provenance_warning_keeps_existing_creative_approved(self, monkeypatch):
+        monkeypatch.setenv("MANAGED_INSTANCE", "true")
+        monkeypatch.setenv("EMBEDDED_CAPABILITIES", '{"creative_approval": "storefront"}')
+
+        creative_repo = MagicMock()
+        creative_repo.get_provenance_policies.return_value = [MagicMock()]
+        creative_repo.begin_nested.return_value.__enter__.return_value = None
+        creative_repo.begin_nested.return_value.__exit__.return_value = None
+
+        existing_creative = Mock()
+        existing_creative.creative_id = "creative_1"
+        existing_creative.status = "approved"
+        creative_repo.get_by_id.return_value = existing_creative
+
+        _, mock_uow = make_mock_uow(
+            repos={
+                "creatives": creative_repo,
+                "assignments": MagicMock(),
+            }
+        )
+
+        identity = ResolvedIdentity(
+            principal_id="principal_1",
+            tenant_id="tenant_1",
+            tenant={"tenant_id": "tenant_1", "approval_mode": "ai-powered", "slack_webhook_url": None},
+            protocol="mcp",
+        )
+        update_result = SyncCreativeResult(
+            creative_id="creative_1",
+            action=CreativeAction.updated,
+            status="approved",
+        )
+
+        with (
+            patch("src.core.tools.creatives._sync.CreativeUoW") as mock_uow_cls,
+            patch("src.core.creative_agent_registry.get_creative_agent_registry", return_value=MagicMock()),
+            patch("src.core.tools.creatives._sync.run_async_in_sync_context", return_value=[]),
+            patch("src.core.tools.creatives._sync._validate_creative_input") as mock_validate,
+            patch("src.core.tools.creatives._sync.check_provenance_required", return_value="provenance missing"),
+            patch("src.core.tools.creatives._sync._update_existing_creative", return_value=(update_result, False)),
+            patch("src.core.tools.creatives._sync._process_assignments", return_value=[]),
+            patch("src.core.tools.creatives._sync._create_sync_workflow_steps") as mock_create_workflows,
+            patch("src.core.tools.creatives._sync._audit_log_sync"),
+            patch("src.core.tools.creatives._sync.log_tool_activity"),
+        ):
+            mock_uow_cls.return_value.__enter__.return_value = mock_uow
+            mock_validate.return_value = MagicMock(format=MagicMock())
+
+            result = _sync_creatives_impl(
+                creatives=[
+                    {
+                        "creative_id": "creative_1",
+                        "name": "Creative 1",
+                        "format_id": {"agent_url": "https://example.com", "id": "display"},
+                    }
+                ],
+                identity=identity,
+            )
+
+        assert existing_creative.status == "approved"
+        assert result.creatives[0].status == "approved"
+        assert result.creatives[0].warnings == ["provenance missing"]
+        mock_create_workflows.assert_not_called()
+
+
 # ========================================================================
 # BR-RULE-040: Media buy status transitions (Priority 1)
 # ========================================================================
@@ -83,8 +167,9 @@ def _make_creative_uow(assignment_repo=None):
 class TestMediaBuyStatusTransitions:
     """BR-RULE-040: Media buy status transitions triggered by assignments.
 
-    When a creative is assigned to a package, the parent media buy's status
-    may transition from 'draft' to 'pending_creatives' if approved_at is set.
+    ``pending_creatives`` means no creatives are assigned. When a creative is
+    assigned to an approved or pending_creatives media buy, status falls back
+    to flight-date gates; unapproved drafts remain draft.
     """
 
     def _run_assignments(self, assignments, results, tenant, db_package, db_media_buy, db_creative=None):
@@ -122,8 +207,8 @@ class TestMediaBuyStatusTransitions:
                 validation_mode="strict",
             )
 
-    def test_draft_with_approved_at_transitions_to_pending_creatives(self, tenant, _make_db_package):
-        """rule-040-inv1: draft + approved_at -> pending_creatives."""
+    def test_draft_with_approved_at_transitions_to_pending_start(self, tenant, _make_db_package):
+        """rule-040-inv1: draft + approved_at + assignment -> pending_start."""
         db_package, db_media_buy = _make_db_package(
             mb_status="draft",
             mb_approved_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -138,7 +223,7 @@ class TestMediaBuyStatusTransitions:
             db_media_buy=db_media_buy,
         )
 
-        assert db_media_buy.status == "pending_creatives"
+        assert db_media_buy.status == "pending_start"
 
     def test_draft_without_approved_at_stays_draft(self, tenant, _make_db_package):
         """rule-040-inv2: draft without approved_at stays draft."""
@@ -158,8 +243,8 @@ class TestMediaBuyStatusTransitions:
 
         assert db_media_buy.status == "draft"
 
-    def test_non_draft_status_unchanged(self, tenant, _make_db_package):
-        """rule-040-inv3: non-draft status is not changed by assignments."""
+    def test_active_status_unchanged(self, tenant, _make_db_package):
+        """rule-040-inv3: active status is not changed by assignments."""
         db_package, db_media_buy = _make_db_package(
             mb_status="active",
             mb_approved_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -213,8 +298,8 @@ class TestMediaBuyStatusTransitions:
                 validation_mode="strict",
             )
 
-        # Status should be pending_creatives (transitioned once, not twice)
-        assert db_media_buy.status == "pending_creatives"
+        # Status should transition once, not once per creative.
+        assert db_media_buy.status == "pending_start"
 
     def test_both_created_and_updated_trigger_check(self, tenant, _make_db_package):
         """rule-040-inv5: both action=created and action=updated creatives trigger status check."""
@@ -253,7 +338,25 @@ class TestMediaBuyStatusTransitions:
                 validation_mode="strict",
             )
 
-        assert db_media_buy.status == "pending_creatives"
+        assert db_media_buy.status == "pending_start"
+
+    def test_pending_creatives_transitions_to_pending_start(self, tenant, _make_db_package):
+        """rule-040-inv6: pending_creatives clears once creatives are assigned."""
+        db_package, db_media_buy = _make_db_package(
+            mb_status="pending_creatives",
+            mb_approved_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        results = [SyncCreativeResult(creative_id="c1", action="created")]
+
+        self._run_assignments(
+            assignments={"c1": ["pkg_1"]},
+            results=results,
+            tenant=tenant,
+            db_package=db_package,
+            db_media_buy=db_media_buy,
+        )
+
+        assert db_media_buy.status == "pending_start"
 
 
 # ========================================================================
@@ -409,6 +512,52 @@ class TestLenientAssignmentSkip:
 
         # Valid assignment recorded in assigned_to
         assert results[0].assigned_to == ["pkg_valid"]
+
+    def test_assignment_for_failed_creative_is_skipped_without_fk_write(self, tenant, _make_db_package):
+        """A validation-failed creative must not be inserted into creative_assignments."""
+        db_package, db_media_buy = _make_db_package(package_id="pkg_1")
+        results = [SyncCreativeResult(creative_id="c_failed", action="failed")]
+
+        mock_uow, mock_repo = _make_creative_uow()
+        mock_repo.find_package_with_media_buy.return_value = (db_package, db_media_buy)
+
+        with patch("src.core.tools.creatives._assignments.CreativeUoW") as mock_uow_cls:
+            mock_uow_cls.return_value.__enter__.return_value = mock_uow
+
+            assignment_list = _process_assignments(
+                assignments={"c_failed": ["pkg_1"]},
+                results=results,
+                tenant=tenant,
+                validation_mode="strict",
+            )
+
+        assert assignment_list == []
+        mock_repo.find_package_with_media_buy.assert_not_called()
+        mock_repo.get_creative_by_id.assert_not_called()
+        mock_repo.create.assert_not_called()
+        assert results[0].assignment_errors == {"pkg_1": "Creative c_failed failed validation; assignment skipped"}
+
+    def test_strict_mode_missing_unprocessed_creative_raises_before_create(self, tenant, _make_db_package):
+        """Assignment-only references still fail clearly before an FK write."""
+        db_package, db_media_buy = _make_db_package(package_id="pkg_1")
+        results = [SyncCreativeResult(creative_id="c_other", action="created")]
+
+        mock_uow, mock_repo = _make_creative_uow()
+        mock_repo.find_package_with_media_buy.return_value = (db_package, db_media_buy)
+        mock_repo.get_creative_by_id.return_value = None
+
+        with patch("src.core.tools.creatives._assignments.CreativeUoW") as mock_uow_cls:
+            mock_uow_cls.return_value.__enter__.return_value = mock_uow
+
+            with pytest.raises(AdCPNotFoundError, match="Creative not found: c_missing"):
+                _process_assignments(
+                    assignments={"c_missing": ["pkg_1"]},
+                    results=results,
+                    tenant=tenant,
+                    validation_mode="strict",
+                )
+
+        mock_repo.create.assert_not_called()
 
 
 # ========================================================================

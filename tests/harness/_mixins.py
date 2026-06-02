@@ -484,6 +484,8 @@ class ProductMixin:
         if brand is None:
             brand = {"domain": "test.com"}
 
+        # Match the public transport compatibility default for omitted mode.
+        extra.setdefault("buying_mode", "brief")
         req = GetProductsRequestGenerated(
             brief=brief,
             brand=brand,

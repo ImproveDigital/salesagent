@@ -46,6 +46,11 @@ KNOWN_EMPTY_DOWNGRADE = {
     "017_handle_partial_schemas.py",
     # Legacy: fixes JSON encoding, no structural revert
     "e81e275c9b29_fix_price_guidance_json_encoding.py",
+    # Backfill: repairs gam_auth_method on adapter_config rows where SA JSON
+    # is populated but the column was left at its 'oauth' server-default. The
+    # upgrade query cannot be inverted unambiguously and the runtime no
+    # longer trusts gam_auth_method, so the downgrade is intentionally empty.
+    "d2e3f4a5b6c7_backfill_gam_auth_method_for_service_account_rows.py",
 }
 
 KNOWN_DOWNGRADE_COVERAGE_GAPS = {

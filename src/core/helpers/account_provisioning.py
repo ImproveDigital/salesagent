@@ -1,0 +1,321 @@
+"""Sprint 1.6 piece C: Account → GAM advertiser resolution at first-buy.
+
+Sits between ``_create_media_buy_impl`` and ``get_adapter()`` and answers
+"which GAM advertiser_id should this media buy attach to?" — consulting
+the Account row instead of (or before) the legacy
+``Principal.platform_mappings.gam_advertiser_id`` lookup.
+
+Branching:
+
+- ``Account.status == "active"`` + ``platform_mappings.google_ad_manager.advertiser_id``
+  set → return it. (Pre-mapped via Tenant Mgmt API or auto-provisioned
+  earlier.)
+- ``Account.status == "pending_provision"`` + ``Tenant.auto_provision_advertisers=True``
+  → call ``gam_create_advertiser_companyservice()`` to mint a new GAM
+  advertiser, persist it on the Account row, flip status to ``active``,
+  return.
+- ``Account.status == "pending_provision"`` + ``auto_provision_advertisers=False``
+  → return :class:`AdCPAccountNotProvisioned`. Caller raises; publisher
+  ops maps manually via the Admin UI / Tenant Mgmt API.
+- Sandbox accounts → return the per-tenant sandbox advertiser cached on
+  ``AdapterConfig.gam_sandbox_advertiser_id``. The caller traffics these
+  buys with zero platform economics instead of falling back to the legacy
+  Principal mapping.
+- ``identity.account_id is None`` (legacy buyers without ``account`` in
+  the request) → return ``None``. Caller uses the legacy
+  Principal.platform_mappings path. **Backward-compatible — existing
+  open-instance buyers see no behavior change.**
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+
+from src.core.database.database_session import get_db_session
+from src.core.database.models import Account, Tenant
+from src.core.exceptions import AdCPError
+from src.core.resolved_identity import ResolvedIdentity
+from src.core.sandbox import INTERCHANGE_SANDBOX_ZERO_RATE_CARD
+from src.services.protocol_change_webhooks import notify_account_status_changed
+
+logger = logging.getLogger(__name__)
+
+
+_ACCOUNT_GAM_KEY = "google_ad_manager"
+
+
+@dataclass(frozen=True)
+class GamAdvertiserProvisionResult:
+    """Result of an idempotent GAM advertiser provision attempt."""
+
+    advertiser_id: str
+    name: str
+    created: bool
+    dry_run: bool = False
+
+
+class AdCPAccountNotProvisioned(AdCPError):
+    """Raised when a buyer references an Account in ``pending_provision``
+    status on a tenant where ``auto_provision_advertisers=False``.
+
+    The publisher must map a GAM advertiser to the Account via the Admin
+    UI or ``POST /api/v1/tenant-management/tenants/{tid}/accounts`` before
+    this account can buy media.
+    """
+
+    code = "ACCOUNT_NOT_PROVISIONED"
+
+
+def _account_advertiser_id(account: Account) -> str | None:
+    mappings = account.platform_mappings or {}
+    return (mappings.get(_ACCOUNT_GAM_KEY) or {}).get("advertiser_id")
+
+
+def _set_account_advertiser_mapping(
+    account: Account, advertiser_id: str, advertiser_name: str | None, source: str
+) -> None:
+    """Stamp ``platform_mappings.google_ad_manager.advertiser_id`` on the
+    Account row. Caller must be inside a UoW / committed session."""
+    mappings = dict(account.platform_mappings or {})
+    gam_block = dict(mappings.get(_ACCOUNT_GAM_KEY) or {})
+    gam_block["advertiser_id"] = advertiser_id
+    if advertiser_name is not None:
+        gam_block["advertiser_name"] = advertiser_name
+    gam_block["provisioned_at"] = datetime.now(UTC).isoformat()
+    gam_block["provisioned_by"] = source
+    mappings[_ACCOUNT_GAM_KEY] = gam_block
+    account.platform_mappings = mappings
+
+
+def gam_create_advertiser_companyservice(
+    network_code: str,
+    config: dict[str, Any],
+    name: str,
+    *,
+    dry_run: bool = False,
+) -> str:
+    """Create or attach a GAM advertiser and return its id.
+
+    Backward-compatible wrapper for existing auto-provision call sites.
+    New management API surfaces should use
+    :func:`gam_ensure_advertiser_companyservice` so callers can tell whether
+    the endpoint actually proved create permission or attached an existing
+    company.
+    """
+    return gam_ensure_advertiser_companyservice(
+        network_code=network_code,
+        config=config,
+        name=name,
+        dry_run=dry_run,
+    ).advertiser_id
+
+
+def _is_gam_company_name_collision(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "unique_name" in message or "not_unique" in message or "already exists" in message
+
+
+def gam_ensure_advertiser_companyservice(
+    network_code: str,
+    config: dict[str, Any],
+    name: str,
+    *,
+    dry_run: bool = False,
+) -> GamAdvertiserProvisionResult:
+    """Idempotently ensure a GAM advertiser via ``CompanyService``.
+
+    On a name collision (an existing company with the same name and
+    ``type='ADVERTISER'``), looks up the existing id and returns
+    ``created=False`` instead of failing. A response with ``created=True`` is
+    the permission proof that the credential can create GAM advertisers.
+    ``created=False`` proves the advertiser can be found/read, not that create
+    permission exists.
+    """
+    if dry_run:
+        synthetic = f"dryrun_{abs(hash(name)) % 10**10}"
+        logger.info(f"[gam_create_advertiser] dry_run: would create {name!r}, returning {synthetic!r}")
+        return GamAdvertiserProvisionResult(advertiser_id=synthetic, name=name, created=False, dry_run=True)
+
+    from src.adapters.gam.client import GAMClientManager
+
+    manager = GAMClientManager(config=config, network_code=network_code)
+    client = manager.get_client()
+    company_service = client.GetService("CompanyService")
+    try:
+        result = company_service.createCompanies([{"name": name, "type": "ADVERTISER"}])
+        if not result:
+            raise RuntimeError(f"GAM CompanyService.createCompanies returned empty for {name!r}")
+        new_id = str(result[0]["id"])
+        logger.info(f"[gam_create_advertiser] created GAM advertiser {new_id} ({name!r})")
+        return GamAdvertiserProvisionResult(advertiser_id=new_id, name=name, created=True)
+    except Exception as exc:
+        # Name-collision attach. GAM raises an UNIQUE_NAME error inside an
+        # ApplicationException; rather than parse the SOAP fault we just
+        # query for the existing company by name and return its id. If THAT
+        # fails too, re-raise — caller treats this as a hard provisioning
+        # error.
+        if not _is_gam_company_name_collision(exc):
+            raise
+
+        from googleads import ad_manager
+
+        statement_builder = ad_manager.StatementBuilder()
+        statement_builder.Where("type = :type AND name = :name").WithBindVariable(
+            "type", "ADVERTISER"
+        ).WithBindVariable("name", name)
+        existing = company_service.getCompaniesByStatement(statement_builder.ToStatement())
+        if existing and getattr(existing, "results", None):
+            attach_id = str(existing.results[0]["id"])
+            logger.warning(f"[gam_create_advertiser] name collision on {name!r} — attaching existing id {attach_id}")
+            return GamAdvertiserProvisionResult(advertiser_id=attach_id, name=name, created=False)
+        raise
+
+
+def resolve_account_advertiser(
+    identity: ResolvedIdentity,
+    *,
+    adapter_config: dict[str, Any] | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Resolve the GAM advertiser id for ``identity.account_id``.
+
+    Returns:
+        - The advertiser id (string) when the Account is mapped (now or
+          via auto-provision).
+        - ``None`` when there's no Account context (legacy buyers) or
+          the Account is sandbox/non-GAM — caller falls back to legacy
+          ``Principal.platform_mappings`` resolution.
+
+    Raises:
+        :class:`AdCPAccountNotProvisioned` when an Account is in
+        ``pending_provision`` status on a tenant that doesn't auto-provision.
+    """
+    account_id = identity.account_id
+    if account_id is None:
+        return None
+
+    tenant_id = identity.tenant_id
+    if tenant_id is None:
+        return None
+
+    with get_db_session() as session:
+        account = session.scalars(select(Account).filter_by(tenant_id=tenant_id, account_id=account_id)).first()
+        if account is None:
+            # Account ref didn't resolve to a row — that's a buyer-side
+            # ref-validation failure that's surfaced upstream of here.
+            # Returning None lets the caller fall through; if there's no
+            # principal mapping either, the adapter raises its own error.
+            return None
+
+        if account.sandbox or account.rate_card == INTERCHANGE_SANDBOX_ZERO_RATE_CARD:
+            from src.services.buyer_advertiser_routing import ensure_sandbox_advertiser
+
+            sandbox_advertiser_id = ensure_sandbox_advertiser(session, tenant_id, dry_run=dry_run)
+            _set_account_advertiser_mapping(
+                account,
+                sandbox_advertiser_id,
+                advertiser_name="Sandbox (auto-created by salesagent — do not bill)",
+                source="auto:sandbox",
+            )
+            old_status = account.status
+            if old_status != "active":
+                account.status = "active"
+            account.updated_at = datetime.now(UTC)
+            session.commit()
+            if old_status != "active":
+                notify_account_status_changed(
+                    tenant_id=tenant_id,
+                    account_id=account.account_id,
+                    from_status=old_status,
+                    to_status="active",
+                    principal_id=account.principal_id,
+                )
+            return sandbox_advertiser_id
+
+        # Active + already mapped → fast path.
+        if account.status == "active":
+            return _account_advertiser_id(account)
+
+        # Pending provision: branch on tenant policy.
+        if account.status == "pending_provision":
+            tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if tenant is None:
+                return None
+
+            if not tenant.auto_provision_advertisers:
+                raise AdCPAccountNotProvisioned(
+                    f"Account {account_id!r} (operator={account.operator!r}, "
+                    f"brand={account.brand}) has no GAM advertiser mapped. Publisher must map "
+                    f"manually via the Admin UI before this account can buy media. "
+                    f"Tenant {tenant_id!r} has auto_provision_advertisers=False."
+                )
+
+            # Auto-provision path. Use the same naming template the design
+            # doc proposes; embeds operator + brand + (agent for billing=agent)
+            # so collisions across the publisher's network are unlikely.
+            name = _build_advertiser_name(account)
+            adapter_config = adapter_config or {}
+            network_code = adapter_config.get("network_code")
+            if not network_code and tenant.ad_server == "google_ad_manager":
+                # Fall back to AdapterConfig if caller didn't pass it.
+                from src.core.database.models import AdapterConfig as AdapterConfigModel
+
+                config_row = session.scalars(select(AdapterConfigModel).filter_by(tenant_id=tenant_id)).first()
+                if config_row is None or not config_row.gam_network_code:
+                    raise AdCPAccountNotProvisioned(
+                        f"Account {account_id!r} requires GAM advertiser provisioning but "
+                        f"tenant {tenant_id!r} has no AdapterConfig.gam_network_code configured."
+                    )
+                network_code = config_row.gam_network_code
+                adapter_config = {
+                    "network_code": network_code,
+                    "service_account_json": config_row.gam_service_account_json,
+                    "refresh_token": config_row.gam_refresh_token,
+                }
+
+            new_advertiser_id = gam_create_advertiser_companyservice(
+                network_code=str(network_code),
+                config=adapter_config,
+                name=name,
+                dry_run=dry_run,
+            )
+
+            _set_account_advertiser_mapping(
+                account, new_advertiser_id, advertiser_name=name, source="auto:create_media_buy"
+            )
+            old_status = account.status
+            account.status = "active"
+            account.updated_at = datetime.now(UTC)
+            session.commit()
+            notify_account_status_changed(
+                tenant_id=tenant_id,
+                account_id=account.account_id,
+                from_status=old_status,
+                to_status="active",
+                principal_id=account.principal_id,
+            )
+            return new_advertiser_id
+
+    return None
+
+
+def _build_advertiser_name(account: Account) -> str:
+    """Naming template per the design doc § Storage."""
+    operator = account.operator or "unknown"
+    brand = account.brand
+    domain = (
+        brand.get("domain")
+        if isinstance(brand, dict)
+        else getattr(brand, "domain", None)
+        if brand is not None
+        else None
+    )
+    domain = domain or "unknown"
+    if account.billing == "agent" and account.principal_id:
+        return f"{operator} × {domain} ({account.principal_id})"
+    return f"{operator} × {domain}"

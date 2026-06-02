@@ -37,6 +37,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 
+from tests.factories.spec_required_kwargs import required_request_kwargs
 from tests.harness._base import BaseTestEnv
 
 _MODULE = "src.core.tools.media_buy_update"
@@ -82,6 +83,9 @@ class MediaBuyUpdateEnv(BaseTestEnv):
         self._uow_instance = MagicMock()
         self._uow_instance.session = mock_session
         self._uow_instance.media_buys = MagicMock()
+        self._uow_instance.media_buys.get_by_id_for_update.side_effect = (
+            lambda media_buy_id: self._uow_instance.media_buys.get_by_id(media_buy_id)
+        )
         self._uow_instance.currency_limits = MagicMock()
         self._uow_instance.__enter__ = MagicMock(return_value=self._uow_instance)
         self._uow_instance.__exit__ = MagicMock(return_value=False)
@@ -168,9 +172,21 @@ class MediaBuyUpdateEnv(BaseTestEnv):
     # -- Impl call ----------------------------------------------------------
 
     def call_impl(self, media_buy_id: str = "mb-001", **kwargs: Any) -> Any:
-        """Build an UpdateMediaBuyRequest and call _update_media_buy_impl."""
-        from src.core.schemas import UpdateMediaBuyRequest
+        """Build an UpdateMediaBuyRequest and call _update_media_buy_impl.
+
+        Convenience: ``budget=`` kwarg is mapped to ``ext.salesagent.budget``
+        since AdCP spec has no top-level budget field. Mirrors what
+        spec-conformant buyers must do.
+        """
+        from src.core.schemas import Budget, UpdateMediaBuyRequest
         from src.core.tools.media_buy_update import _update_media_buy_impl
 
-        req = UpdateMediaBuyRequest(media_buy_id=media_buy_id, **kwargs)
+        if "budget" in kwargs:
+            budget_val = kwargs.pop("budget")
+            if isinstance(budget_val, Budget):
+                budget_val = budget_val.model_dump()
+            ext = kwargs.setdefault("ext", {}) or {}
+            ext.setdefault("salesagent", {})["budget"] = budget_val
+            kwargs["ext"] = ext
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id=media_buy_id, **kwargs)
         return _update_media_buy_impl(req=req, identity=self.identity)

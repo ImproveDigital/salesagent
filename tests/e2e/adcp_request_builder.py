@@ -10,10 +10,66 @@ import warnings
 from datetime import UTC, datetime
 from typing import Any
 
+_DEFAULT_BRAND: dict[str, Any] = {"domain": "testbrand.com"}
+
 
 def generate_buyer_ref(prefix: str = "test") -> str:
     """Generate a unique buyer reference."""
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def _build_reporting_webhook(url: str, reporting_frequency: str | None = None) -> dict[str, Any]:
+    """Build a 4.4-compliant ``ReportingWebhook`` block.
+
+    AdCP 4.4 made ``authentication.schemes`` and ``authentication.credentials``
+    required (Bearer or HMAC-SHA256, credentials min length 32). The
+    ``{"type": "none"}`` shape was rejected by SDK validation in 4.4.
+
+    Returns the inner block — callers wrap it under
+    ``push_notification_config`` (e.g. update_media_buy) or
+    ``reporting_webhook`` (e.g. create_media_buy) per spec naming.
+    """
+    block: dict[str, Any] = {
+        "url": url,
+        "authentication": {
+            "credentials": "test-webhook-bearer-token-at-least-32-chars-long",
+            "schemes": ["Bearer"],
+        },
+    }
+    if reporting_frequency is not None:
+        block["reporting_frequency"] = reporting_frequency
+    return block
+
+
+def _inject_wire_required_fields(
+    request: dict[str, Any],
+    *,
+    brand: dict[str, Any] | None,
+    idempotency_prefix: str,
+) -> None:
+    """Inject the adcp 4.4 wire-required ``account`` + ``idempotency_key``.
+
+    AdCP 4.4 made both fields required at the wire boundary on the
+    create_media_buy / update_media_buy / sync_creatives requests.
+    Real buyers must supply them; the test builders synthesise valid
+    values from the caller-supplied brand so e2e flows behave like real
+    callers without bypassing SDK validation.
+    ``adcp_version`` is intentionally omitted so MCP requests exercise the
+    protocol's legacy 3.0 default path.
+
+    * ``account`` is a natural-key reference (``{brand, operator}``)
+      where the operator defaults to the brand's domain — buyers using
+      a seller-assigned ``account_id`` instead can pass it through
+      manually after the builder returns.
+    * ``idempotency_key`` is a fresh UUID per call (no memoisation),
+      satisfying the spec pattern ``^[A-Za-z0-9_.:-]{16,255}$``. The
+      ``idempotency_prefix`` is a short tool-name marker (e.g.
+      ``"e2e"``, ``"e2e-update"``, ``"e2e-sync"``) for log-grepping.
+    """
+    actual_brand = brand if brand is not None else _DEFAULT_BRAND
+    operator = actual_brand.get("domain", "testbrand.com") if isinstance(actual_brand, dict) else "testbrand.com"
+    request["idempotency_key"] = f"{idempotency_prefix}-{uuid.uuid4()}"
+    request["account"] = {"brand": actual_brand, "operator": operator}
 
 
 def parse_tool_result(result: Any) -> dict[str, Any]:
@@ -57,7 +113,15 @@ def build_adcp_media_buy_request(
     brand: dict[str, Any] | None = None,  # AdCP 3.6.0: BrandReference with domain
     context: dict[str, Any] | None = None,
     creative_ids: list[str] | None = None,
-    pricing_option_id: str = "default",
+    # ``cpm_usd_fixed`` matches the auto-generated pricing_option_id for the
+    # CI seed products (``prod_display_premium``, ``prod_video_premium``) —
+    # built from ``f"{pricing_model}_{currency.lower()}_{fixed_str}"``. The
+    # previous default ``"default"`` did not match any seeded product, so
+    # ``create_media_buy`` returned a VALIDATION_ERROR; pre-#350 the e2e
+    # tests silently no-op'd on that error (returned early when
+    # ``media_buy_id`` was missing), masking real coverage. Once the wire
+    # promotes that error to a raise, the early-return mask is gone.
+    pricing_option_id: str = "cpm_usd_fixed",
 ) -> dict[str, Any]:
     """
     Build a valid AdCP create_media_buy request.
@@ -120,21 +184,12 @@ def build_adcp_media_buy_request(
         request["packages"][0]["targeting_overlay"] = targeting_overlay
 
     if webhook_url:
-        # AdCP-compliant ReportingWebhook authentication requires:
-        # - credentials: string with minLength 32 (shared secret or bearer token)
-        # - schemes: array of authentication schemes ["Bearer" or "HMAC-SHA256"]
-        request["reporting_webhook"] = {
-            "url": webhook_url,
-            "reporting_frequency": reporting_frequency,
-            "authentication": {
-                "credentials": "test-webhook-bearer-token-at-least-32-chars-long",
-                "schemes": ["Bearer"],
-            },
-        }
+        request["reporting_webhook"] = _build_reporting_webhook(webhook_url, reporting_frequency=reporting_frequency)
 
     if context:
         request["context"] = context
 
+    _inject_wire_required_fields(request, brand=brand, idempotency_prefix="e2e")
     return request
 
 
@@ -146,6 +201,7 @@ def build_sync_creatives_request(
     creative_ids: list[str] | None = None,
     delete_missing: bool = False,
     validation_mode: str = "strict",
+    brand: dict[str, Any] | None = None,
     # Deprecated: patch parameter removed in AdCP 2.5 - kept for backward compat
     patch: bool | None = None,
 ) -> dict[str, Any]:
@@ -180,20 +236,36 @@ def build_sync_creatives_request(
         "validation_mode": validation_mode,
         "delete_missing": delete_missing,
     }
+    # adcp 4.4 made both ``account`` and ``idempotency_key`` required at the
+    # wire boundary on sync_creatives. Real buyers must supply them; tests
+    # follow the same contract so the SDK validator accepts the call without
+    # server-side autogen.
+    _inject_wire_required_fields(request, brand=brand, idempotency_prefix="e2e-sync")
 
     if assignments:
-        request["assignments"] = assignments
+        # adcp 4.4 changed Assignment from a dict
+        # ``{creative_id: [package_id, ...]}`` to a flat list of
+        # ``Assignment`` objects ``{creative_id, package_id, weight?, placement_ids?}``.
+        # Accept the legacy dict shape for caller convenience and explode
+        # it to the 4.4 list shape — eventually callers should pass the
+        # list themselves and this branch can go.
+        if isinstance(assignments, dict):
+            request["assignments"] = [
+                {"creative_id": cid, "package_id": pid} for cid, pids in assignments.items() for pid in pids
+            ]
+        else:
+            request["assignments"] = assignments
 
     if creative_ids:
         request["creative_ids"] = creative_ids
 
     if webhook_url:
-        request["push_notification_config"] = {
-            "url": webhook_url,
-            "authentication": {"type": "none"},
-        }
+        request["push_notification_config"] = _build_reporting_webhook(webhook_url)
 
     return request
+
+
+_DEFAULT_FORMAT_AGENT_URL = "https://creative.adcontextprotocol.org/"
 
 
 def build_creative(
@@ -203,38 +275,49 @@ def build_creative(
     asset_url: str,
     click_through_url: str | None = None,
     status: str = "processing",
+    asset_type: str = "url",
+    width: int | None = None,
+    height: int | None = None,
 ) -> dict[str, Any]:
     """
-    Build a valid AdCP V2.4 creative object with assets.
+    Build a valid AdCP creative object with assets.
 
     Args:
         creative_id: Unique creative identifier
-        format_id: Format ID - either string (legacy) or FormatId dict with agent_url and id
+        format_id: Format ID — either a string (wrapped to FormatReference using
+            the AdCP creative-agent default agent_url) or a full FormatReference dict.
         name: Human-readable creative name
         asset_url: URL to the creative asset (converted to assets structure)
         click_through_url: Optional click-through destination
-        status: Creative status (default: processing). Valid: processing, approved, rejected, pending_review, archived
+        status: Creative status (default: processing).
+        asset_type: AssetVariant discriminator. Defaults to ``url`` because that
+            shape requires only ``url``. Pass ``image`` etc. and supply width+height
+            when testing dimension-bearing variants.
+        width / height: Required when ``asset_type == "image"`` or ``"video"``.
 
     Returns:
-        Valid AdCP V2.4 Creative dict with assets
+        Valid AdCP Creative dict with assets.
     """
-    # Build assets structure based on format type
-    # For display formats, use image asset
-    # For video formats, use video asset
-    # Default to image for now
-    assets: dict[str, Any] = {
-        "primary": {
-            "asset_type": "image",
-            "url": asset_url,
-        }
-    }
+    # Normalise format_id from string (pre-4.4 shape) to FormatReference.
+    if isinstance(format_id, str):
+        format_id = {"agent_url": _DEFAULT_FORMAT_AGENT_URL, "id": format_id}
+
+    primary_asset: dict[str, Any] = {"asset_type": asset_type, "url": asset_url}
+    if asset_type in ("image", "video"):
+        if width is None or height is None:
+            raise ValueError(
+                f"build_creative(asset_type={asset_type!r}) requires width and height — "
+                f"AdCP 4.4 makes them required on image/video asset variants."
+            )
+        primary_asset["width"] = width
+        primary_asset["height"] = height
 
     creative: dict[str, Any] = {
         "creative_id": creative_id,
         "format_id": format_id,
         "name": name,
-        "content_uri": asset_url,  # Required top-level URL field per AdCP spec
-        "assets": assets,
+        "content_uri": asset_url,
+        "assets": {"primary": primary_asset},
         "status": status,
     }
 
@@ -247,9 +330,11 @@ def build_creative(
 def build_update_media_buy_request(
     media_buy_id: str,
     active: bool | None = None,
-    budget: dict[str, Any] | None = None,
+    budget: float | None = None,
     packages: list[dict[str, Any]] | None = None,
     webhook_url: str | None = None,
+    brand: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build a valid AdCP update_media_buy request.
@@ -257,16 +342,18 @@ def build_update_media_buy_request(
     Args:
         media_buy_id: Media buy ID to update (required)
         active: Optional active status update
-        budget: Optional budget update
+        budget: Optional budget update (number per AdCP spec)
         packages: Optional package updates
         webhook_url: Optional webhook for async notifications
+        brand: BrandReference dict — used to synthesise the ``account`` natural
+            key (defaults to ``{"domain": "testbrand.com"}``).
+        context: Optional buyer-supplied context echoed on the response.
 
     Returns:
-        Valid AdCP UpdateMediaBuyRequest dict
+        Valid AdCP UpdateMediaBuyRequest dict.
     """
     request: dict[str, Any] = {"media_buy_id": media_buy_id}
 
-    # Add optional fields
     if active is not None:
         request["active"] = active
     if budget is not None:
@@ -274,11 +361,11 @@ def build_update_media_buy_request(
     if packages is not None:
         request["packages"] = packages
     if webhook_url:
-        request["push_notification_config"] = {
-            "url": webhook_url,
-            "authentication": {"type": "none"},
-        }
+        request["push_notification_config"] = _build_reporting_webhook(webhook_url)
+    if context is not None:
+        request["context"] = context
 
+    _inject_wire_required_fields(request, brand=brand, idempotency_prefix="e2e-update")
     return request
 
 

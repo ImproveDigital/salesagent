@@ -1,0 +1,574 @@
+{#
+FreeWheel Adapter Connection Configuration Template
+
+Included in the settings page when the FreeWheel adapter is selected.
+Supports two auth flows: OAuth2 password grant (canonical) and pre-minted
+bearer (escape hatch). Exactly one of (username+password) or api_token
+must be provided.
+
+Expected context:
+- adapter_config: dict with current adapter configuration
+- tenant_id: current tenant ID
+#}
+
+<div class="adapter-connection-config" data-adapter-type="freewheel">
+    <div class="form-section">
+        <h3>FreeWheel Publisher API Configuration</h3>
+
+        {# Proactive scope-state + freshness banners: populated on page
+           load. Each renders only when there's something to flag — no
+           noise when everything's healthy. #}
+        <div id="freewheel-scope-banner" style="display: none; margin-bottom: 1rem; padding: 0.75rem 1rem; border-radius: 6px; border: 1px solid;"></div>
+        <div id="freewheel-freshness-banner" style="display: none; margin-bottom: 1rem; padding: 0.75rem 1rem; border-radius: 6px; border: 1px solid;"></div>
+
+        <p class="text-muted" style="margin-bottom: 1.5rem;">
+            Connect to FreeWheel's Publisher API. The recommended setup is to provide your
+            FreeWheel User ID and password — the adapter mints and refreshes bearer tokens
+            automatically. Use the advanced section below only when a partner has provisioned
+            a pre-minted bearer for you (it expires in ~7 days and must be rotated manually).
+        </p>
+
+        <h4 style="margin-top: 1rem; margin-bottom: 0.75rem;">Sign-in Credentials (recommended)</h4>
+
+        <div class="form-group">
+            <label for="freewheel_username">User ID</label>
+            <input type="text" id="freewheel_username" name="freewheel_username"
+                   value="{{ adapter_config.get('username', '') if adapter_config else '' }}"
+                   placeholder="FreeWheel User ID (e.g. publisher@example.com)">
+            <small class="form-text text-muted">
+                Your FreeWheel sign-in identifier. Used with the password below to mint bearer tokens via OAuth2 password grant.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="freewheel_password">Password</label>
+            <input type="password" id="freewheel_password" name="freewheel_password"
+                   value=""
+                   placeholder="{% if adapter_config and adapter_config.get('username') %}(leave blank to keep existing){% else %}Enter password{% endif %}">
+            <small class="form-text text-muted">
+                Stored encrypted at rest. Leave blank to keep the previously saved password.
+            </small>
+        </div>
+
+        <details style="margin-top: 1rem; margin-bottom: 1rem;">
+            <summary style="cursor: pointer; font-weight: 500;">Advanced: pre-minted bearer token</summary>
+            <p class="text-muted" style="margin-top: 0.5rem;">
+                Use this when a partner has minted a token on your behalf, or for testing without
+                real credentials. The adapter will use this token directly and won't auto-refresh —
+                rotate manually when it expires (~7-day TTL).
+            </p>
+            <div class="form-group">
+                <label for="freewheel_api_token">API Token</label>
+                <input type="password" id="freewheel_api_token" name="freewheel_api_token"
+                       value=""
+                       placeholder="{% if adapter_config and adapter_config.get('api_token') %}(leave blank to keep existing){% else %}Paste bearer token{% endif %}">
+                <small class="form-text text-muted">
+                    Stored encrypted at rest. When set, takes precedence over username/password.
+                </small>
+            </div>
+        </details>
+
+        <div class="form-group">
+            <label for="freewheel_environment">Environment</label>
+            <select id="freewheel_environment" name="freewheel_environment" class="form-control">
+                <option value="production" {% if not adapter_config or adapter_config.get('environment', 'production') == 'production' %}selected{% endif %}>
+                    Production (api.freewheel.tv)
+                </option>
+                <option value="staging" {% if adapter_config and adapter_config.get('environment') == 'staging' %}selected{% endif %}>
+                    Staging (api.stg.freewheel.tv)
+                </option>
+            </select>
+            <small class="form-text text-muted">
+                Credentials are environment-scoped — staging credentials won't work in production and vice versa.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="freewheel_default_advertiser_id">Default Advertiser ID</label>
+            <input type="text" id="freewheel_default_advertiser_id" name="freewheel_default_advertiser_id"
+                   value="{{ adapter_config.get('default_advertiser_id', '') if adapter_config else '' }}"
+                   placeholder="Optional — used when principal has no freewheel mapping">
+            <small class="form-text text-muted">
+                Fallback FreeWheel advertiser ID for principals without explicit mappings.
+            </small>
+        </div>
+
+        <div class="form-group" style="margin-top: 1rem;">
+            <label for="freewheel_manual_approval_required">
+                <input type="checkbox" id="freewheel_manual_approval_required" name="freewheel_manual_approval_required"
+                       {% if adapter_config and adapter_config.get('manual_approval_required') %}checked{% endif %}>
+                Require Manual Approval
+            </label>
+            <small class="form-text text-muted">
+                When enabled, media buy operations require human approval before execution.
+            </small>
+        </div>
+
+        <div style="margin-top: 1.5rem; display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="saveFreeWheelConfig()" class="btn btn-primary">
+                Save Configuration
+            </button>
+            <button type="button" onclick="testFreeWheelConnection()" class="btn btn-secondary">
+                Test Connection
+            </button>
+            <span id="freewheel-connection-status"></span>
+        </div>
+
+        <hr style="margin: 2rem 0 1rem 0;">
+
+        <h4>Inventory Sync</h4>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Pull FreeWheel inventory taxonomy (sites, sections, series, video groups,
+            ad unit packages, ad unit nodes) into the local cache. The product setup
+            UI uses this cache so you can pick targeting from FreeWheel inventory
+            without round-tripping to the FW API on every page render.
+        </p>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="syncFreeWheelInventory()" class="btn btn-secondary">
+                Sync Inventory Now
+            </button>
+            <span id="freewheel-inventory-sync-status"></span>
+        </div>
+
+        <hr style="margin: 2rem 0 1rem 0;">
+
+        <h4>Reporting Sync</h4>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Pull a fresh delivery report from FreeWheel into the placement-stats cache —
+            populates impressions, completed views, clicks, and spend for the AdCP
+            delivery surfaces (<code>get_packages_snapshot</code> +
+            <code>get_media_buy_delivery</code>). Defaults to today's pacing across
+            all placements; usually finishes in 10-30 seconds.
+        </p>
+        <p class="text-muted" style="margin-bottom: 1rem; font-size: 0.85rem;">
+            Note: the Query Reporting API scope is still pending on most accounts —
+            if you see "scope not granted", run the API Permissions check below to
+            see the exact endpoints awaiting grant.
+        </p>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="syncFreeWheelReporting()" class="btn btn-secondary">
+                Sync Reporting Now
+            </button>
+            <span id="freewheel-reporting-sync-status"></span>
+        </div>
+
+        <hr style="margin: 2rem 0 1rem 0;">
+
+        <h4>API Permissions</h4>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Probe FreeWheel's API to verify the configured credentials have every scope
+            this adapter needs. Surfaces any IAM gaps before they bite mid-campaign —
+            each check is a cheap read, nothing is mutated upstream.
+        </p>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="checkFreeWheelPermissions()" class="btn btn-secondary">
+                Check API Permissions
+            </button>
+            <span id="freewheel-permissions-summary"></span>
+        </div>
+        <div id="freewheel-permissions-detail" style="margin-top: 1rem; display: none;"></div>
+    </div>
+</div>
+
+<script>
+function _freewheelPayload() {
+    const usernameEl = document.getElementById('freewheel_username');
+    const passwordEl = document.getElementById('freewheel_password');
+    const tokenEl = document.getElementById('freewheel_api_token');
+    const config = {
+        username: usernameEl.value || null,
+        environment: document.getElementById('freewheel_environment').value,
+        default_advertiser_id: document.getElementById('freewheel_default_advertiser_id').value || null,
+        manual_approval_required: document.getElementById('freewheel_manual_approval_required').checked
+    };
+    if (passwordEl.value) config.password = passwordEl.value;
+    if (tokenEl.value) {
+        config.api_token = tokenEl.value;
+        config.auth_mode = 'api_token';
+    } else if (usernameEl.value) {
+        config.auth_mode = 'password_grant';
+    }
+    return config;
+}
+
+function saveFreeWheelConfig() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const config = _freewheelPayload();
+
+    const hasStoredPasswordGrant = {{ 'true' if adapter_config and adapter_config.get('username') and adapter_config.get('password') else 'false' }};
+    const hasStoredToken = {{ 'true' if adapter_config and adapter_config.get('api_token') else 'false' }};
+    const submittingPasswordGrant = config.username && (config.password || hasStoredPasswordGrant);
+    const submittingToken = config.api_token || hasStoredToken;
+    if (!submittingPasswordGrant && !submittingToken) {
+        showNotification('Provide either a User ID + Password or an API Token', 'error');
+        return;
+    }
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapter-config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({adapter_type: 'freewheel', config: config})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showNotification('Configuration saved successfully', 'success');
+            document.getElementById('freewheel_password').value = '';
+            document.getElementById('freewheel_api_token').value = '';
+        } else {
+            showNotification('Failed to save: ' + (data.error || 'Unknown error'), 'error');
+        }
+    })
+    .catch(error => {
+        showNotification('Error saving configuration: ' + error.message, 'error');
+    });
+}
+
+function syncFreeWheelInventory() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('freewheel-inventory-sync-status');
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Syncing… (this can take 15-30s)</span>';
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/freewheel/sync-inventory', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const summary = Object.entries(data.counts || {})
+                .map(([k, v]) => k + '=' + v)
+                .join(', ');
+            statusEl.innerHTML = '<span style="color: #10b981;">✓ Synced ' + data.total_synced + ' items (' + summary + ')</span>';
+        } else if (data.counts && Object.keys(data.counts).length > 0) {
+            // Partial success — show counts + errors
+            const counts = Object.entries(data.counts).map(([k, v]) => k + '=' + v).join(', ');
+            const errors = Object.entries(data.errors || {}).map(([k, v]) => k + ': ' + v).join('; ');
+            statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Partial: synced ' + counts + ' but failed: ' + errors + '</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Sync failed') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function syncFreeWheelReporting() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('freewheel-reporting-sync-status');
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Submitting + polling… (10-30s typical)</span>';
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/freewheel/sync-reporting', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({}),  // defaults to today, all placements
+    })
+    .then(response => response.json().then(data => ({status: response.status, data: data})))
+    .then(({status, data}) => {
+        if (data.success) {
+            statusEl.innerHTML = '<span style="color: #10b981;">✓ Synced ' +
+                (data.placements_updated || 0) + ' placement(s) — job_id ' + (data.job_id || 'n/a') + '</span>';
+        } else if (status === 503 && data.scope_pending) {
+            statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Reporting API scope pending. ' +
+                'Check API Permissions for the exact denied endpoints.</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Sync failed') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function checkFreeWheelPermissions() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const summaryEl = document.getElementById('freewheel-permissions-summary');
+    const detailEl = document.getElementById('freewheel-permissions-detail');
+
+    summaryEl.innerHTML = '<span style="color: #6b7280;">Probing… (~5-10s)</span>';
+    detailEl.style.display = 'none';
+    detailEl.innerHTML = '';
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/freewheel/check-permissions', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success || !data.report) {
+            summaryEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Probe failed') + '</span>';
+            return;
+        }
+        const report = data.report;
+        if (report.error) {
+            summaryEl.innerHTML = '<span style="color: #ef4444;">✗ ' + report.error + '</span>';
+            return;
+        }
+
+        const checks = report.checks || [];
+        const requiredChecks = checks.filter(c => c.required);
+        const requiredGranted = requiredChecks.filter(c => c.granted).length;
+        const optionalChecks = checks.filter(c => !c.required);
+        const optionalGranted = optionalChecks.filter(c => c.granted).length;
+
+        if (report.fully_operational) {
+            summaryEl.innerHTML = '<span style="color: #10b981;">✓ Fully operational — ' +
+                requiredGranted + '/' + requiredChecks.length + ' required, ' +
+                optionalGranted + '/' + optionalChecks.length + ' nice-to-haves</span>';
+        } else {
+            const missing = requiredChecks.filter(c => !c.granted).map(c => c.description).join(', ');
+            summaryEl.innerHTML = '<span style="color: #f59e0b;">⚠ Missing required: ' + missing + '</span>';
+        }
+
+        // Group checks by feature for the operator-facing detail table.
+        const byFeature = {};
+        for (const c of checks) {
+            const key = c.feature || 'other';
+            if (!byFeature[key]) byFeature[key] = [];
+            byFeature[key].push(c);
+        }
+
+        const rows = [];
+        rows.push('<table style="width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem;">');
+        rows.push('<thead><tr style="text-align: left; border-bottom: 1px solid #e5e7eb;">' +
+                  '<th style="padding: 0.5rem;">Feature</th>' +
+                  '<th style="padding: 0.5rem;">Check</th>' +
+                  '<th style="padding: 0.5rem;">Required</th>' +
+                  '<th style="padding: 0.5rem; text-align: center;">Status</th>' +
+                  '<th style="padding: 0.5rem;">Detail</th>' +
+                  '</tr></thead><tbody>');
+
+        const features = Object.keys(byFeature).sort();
+        for (const feature of features) {
+            for (const c of byFeature[feature]) {
+                const statusIcon = c.granted ? '✓' : '✗';
+                const statusColor = c.granted ? '#10b981' : (c.required ? '#ef4444' : '#9ca3af');
+                const reqLabel = c.required ? 'yes' : 'no';
+                const detailText = c.detail ? c.detail : (c.granted ? '' : 'denied');
+                rows.push('<tr style="border-bottom: 1px solid #f3f4f6;">' +
+                    '<td style="padding: 0.5rem; color: #6b7280;">' + feature + '</td>' +
+                    '<td style="padding: 0.5rem;">' + c.description +
+                    '<br><small style="color: #9ca3af; font-family: monospace;">' + (c.probe_target || '') + '</small></td>' +
+                    '<td style="padding: 0.5rem; color: ' + (c.required ? '#374151' : '#9ca3af') + ';">' + reqLabel + '</td>' +
+                    '<td style="padding: 0.5rem; text-align: center; font-size: 1.1rem; color: ' + statusColor + ';">' + statusIcon + '</td>' +
+                    '<td style="padding: 0.5rem; color: #6b7280; font-size: 0.85rem;">' + detailText + '</td>' +
+                    '</tr>');
+            }
+        }
+        rows.push('</tbody></table>');
+        const checkedAt = new Date(report.checked_at).toLocaleString();
+        rows.push('<p style="margin-top: 0.75rem; color: #9ca3af; font-size: 0.85rem;">Checked ' + checkedAt + '</p>');
+
+        detailEl.innerHTML = rows.join('');
+        detailEl.style.display = 'block';
+    })
+    .catch(error => {
+        summaryEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function testFreeWheelConnection() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('freewheel-connection-status');
+    const username = document.getElementById('freewheel_username').value;
+    const password = document.getElementById('freewheel_password').value;
+    const apiToken = document.getElementById('freewheel_api_token').value;
+    const environment = document.getElementById('freewheel_environment').value;
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Testing...</span>';
+
+    const payload = {environment: environment};
+    if (username) payload.username = username;
+    if (password) payload.password = password;
+    if (apiToken) payload.api_token = apiToken;
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/freewheel/test-connection', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const ttl = data.expires_in ? Math.round(data.expires_in / 86400) + ' days' : '';
+            const mode = data.auth_mode === 'password_grant' ? ' via password grant' : ' via pre-minted token';
+            statusEl.innerHTML = '<span style="color: #10b981;">✓ Authenticated on ' +
+                data.environment + mode + (ttl ? ' (~' + ttl + ' remaining)' : '') + '</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Connection failed') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+// Auto-run permission check on page load. Renders a banner if a required
+// scope is missing OR if reporting is denied (delivery_reporting is
+// nice-to-have per the report shape, but its absence has real
+// operator-visible consequences — buyers see data_unavailable until
+// granted, so surface it). Quietly no-ops on auth failure / no creds
+// since the operator will see that via Test Connection.
+function autoCheckFreeWheelPermissions() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const bannerEl = document.getElementById('freewheel-scope-banner');
+    if (!bannerEl) return;
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/freewheel/check-permissions', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success || !data.report || data.report.error) {
+            // Don't show a banner when the probe itself can't run (no
+            // creds, auth failure). The credentials section already
+            // surfaces those states.
+            return;
+        }
+
+        const report = data.report;
+        const checks = report.checks || [];
+        const missingRequired = checks.filter(c => c.required && !c.granted);
+        const missingOptional = checks.filter(c => !c.required && !c.granted);
+
+        // Group features that are missing for the banner copy
+        const missingFeatures = new Set();
+        for (const c of [...missingRequired, ...missingOptional]) {
+            if (c.feature) missingFeatures.add(c.feature);
+        }
+
+        let severity, title, bodyText;
+        if (missingRequired.length > 0) {
+            severity = 'error';
+            title = '✗ Required FreeWheel API permissions are missing';
+            bodyText = missingRequired.map(c => c.description).join('; ');
+        } else if (missingFeatures.has('delivery_reporting')) {
+            severity = 'warn';
+            title = '⚠ Reporting API scope is pending';
+            bodyText = 'Delivery webhooks and buyer-facing pacing queries will surface ' +
+                       '\"data_unavailable\" until granted. Other features work normally. ' +
+                       'Other missing nice-to-haves: ' +
+                       (Array.from(missingFeatures).filter(f => f !== 'delivery_reporting').join(', ') || 'none') + '.';
+        } else if (missingOptional.length > 0) {
+            // Only nice-to-haves are missing and none of them is reporting —
+            // not worth a banner. Operator can still find it in Check API Permissions.
+            return;
+        } else {
+            // fully_operational, nothing to flag.
+            return;
+        }
+
+        const colors = severity === 'error'
+            ? {bg: '#fef2f2', border: '#fecaca', text: '#991b1b'}
+            : {bg: '#fffbeb', border: '#fed7aa', text: '#9a3412'};
+        bannerEl.style.backgroundColor = colors.bg;
+        bannerEl.style.borderColor = colors.border;
+        bannerEl.style.color = colors.text;
+        bannerEl.style.display = 'block';
+        bannerEl.innerHTML =
+            '<div style="font-weight: 600; margin-bottom: 0.25rem;">' + title + '</div>' +
+            '<div style="font-size: 0.9rem;">' + bodyText + '</div>' +
+            '<div style="font-size: 0.85rem; margin-top: 0.5rem;">' +
+            '<a href="#" onclick="document.getElementById(\'freewheel-permissions-detail\').scrollIntoView({behavior: \'smooth\'}); checkFreeWheelPermissions(); return false;">' +
+            'See full permissions checklist →</a>' +
+            '</div>';
+    })
+    .catch(() => {
+        // Best-effort — silent on transient failures so the page still loads.
+    });
+}
+
+// Stale-cache freshness banner. Inventory + reporting caches both have
+// last_synced_at timestamps; render a banner if either is stale or
+// never-synced. Two distinct signals:
+//   never_synced → operator hasn't run the sync yet (onboarding gap)
+//   stale → sync ran but more than threshold ago (probably broken job)
+function _formatAge(seconds) {
+    if (seconds == null) return 'never';
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.round(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.round(seconds / 3600) + 'h ago';
+    return Math.round(seconds / 86400) + 'd ago';
+}
+
+function checkFreeWheelFreshness() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const bannerEl = document.getElementById('freewheel-freshness-banner');
+    if (!bannerEl) return;
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/freewheel/cache-freshness', {
+        method: 'GET',
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) return;
+
+        const inv = data.inventory || {};
+        const rep = data.reporting || {};
+
+        const lines = [];
+        if (inv.never_synced) {
+            lines.push('<strong>Inventory cache is empty.</strong> Click \"Sync Inventory Now\" below to populate the product targeting pickers.');
+        } else if (inv.stale) {
+            lines.push('Inventory cache is <strong>' + _formatAge(inv.age_seconds) + '</strong> stale (threshold: ' + _formatAge(inv.threshold_seconds) + '). Consider re-syncing.');
+        }
+        if (rep.never_synced) {
+            // Don't double up if the scope banner is already shouting about reporting being denied
+            lines.push('Reporting cache is empty — buyers will see no delivery data until Sync Reporting runs (requires Tier 1 scope).');
+        } else if (rep.stale) {
+            lines.push('Reporting cache is <strong>' + _formatAge(rep.age_seconds) + '</strong> stale (threshold: ' + _formatAge(rep.threshold_seconds) + '). Buyer-facing delivery pacing may be out of date.');
+        }
+
+        if (lines.length === 0) {
+            return;  // Both caches are fresh — no banner.
+        }
+
+        // Pick severity by content: never_synced = info (onboarding), stale = warning
+        const anyNeverSynced = inv.never_synced || rep.never_synced;
+        const colors = anyNeverSynced
+            ? {bg: '#eff6ff', border: '#bfdbfe', text: '#1e40af'}   // blue (info)
+            : {bg: '#fffbeb', border: '#fed7aa', text: '#9a3412'};  // amber (warn)
+        bannerEl.style.backgroundColor = colors.bg;
+        bannerEl.style.borderColor = colors.border;
+        bannerEl.style.color = colors.text;
+        bannerEl.style.display = 'block';
+        const title = anyNeverSynced ? '⚙ Cache setup needed' : '⚠ Cache freshness';
+        bannerEl.innerHTML =
+            '<div style="font-weight: 600; margin-bottom: 0.25rem;">' + title + '</div>' +
+            '<ul style="margin: 0; padding-left: 1.25rem; font-size: 0.9rem;">' +
+            lines.map(l => '<li>' + l + '</li>').join('') +
+            '</ul>';
+    })
+    .catch(() => {});  // Silent on transient failure.
+}
+
+// Kick off the auto-checks after the page renders. Defer slightly so we
+// don't compete with other on-load work on slow links.
+function _runFreeWheelAutoChecks() {
+    autoCheckFreeWheelPermissions();
+    checkFreeWheelFreshness();
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _runFreeWheelAutoChecks);
+} else {
+    setTimeout(_runFreeWheelAutoChecks, 100);
+}
+</script>

@@ -67,7 +67,13 @@ class BroadstreetAdapter(AdServerAdapter):
     connection_config_class = BroadstreetConnectionConfig
     product_config_class = BroadstreetProductConfig
     capabilities = AdapterCapabilities(
-        supports_inventory_sync=True,
+        # Broadstreet has an in-memory zone manager (BroadstreetInventoryManager)
+        # but no persistence layer wiring run_inventory_sync. Flagging this
+        # capability False until the persistence work lands (#448) keeps the
+        # refresh path honest — a True flag without an implementation crashes
+        # the worker with NotImplementedError and shows a permanent "failed"
+        # sync row on the publisher's dashboard.
+        supports_inventory_sync=False,
         supports_inventory_profiles=True,
         inventory_entity_label="Zones",
         supports_custom_targeting=False,
@@ -368,7 +374,7 @@ class BroadstreetAdapter(AdServerAdapter):
         # Build campaign name
         first_product_name = next(iter(products_map.values()), {}).get("name", "Campaign")
         campaign_name = self.campaign_manager.build_campaign_name(
-            template="AdCP-{po_number}-{product_name}",
+            template=self.config.get("campaign_name_template") or "AdCP-{po_number}-{product_name}",
             po_number=request.po_number,
             product_name=first_product_name,
             advertiser_name=self.principal.name,
@@ -563,7 +569,7 @@ class BroadstreetAdapter(AdServerAdapter):
                     spend=spend,
                     clicks=int(impressions * 0.002),  # 0.2% CTR
                     ctr=0.2,
-                    video_completions=0,
+                    completed_views=0,
                     completion_rate=0.0,
                 ),
                 by_package=[],
@@ -575,7 +581,7 @@ class BroadstreetAdapter(AdServerAdapter):
         return AdapterGetMediaBuyDeliveryResponse(
             media_buy_id=media_buy_id,
             reporting_period=date_range,
-            totals=DeliveryTotals(impressions=0, spend=0, clicks=0, ctr=0.0, video_completions=0, completion_rate=0.0),
+            totals=DeliveryTotals(impressions=0, spend=0, clicks=0, ctr=0.0, completed_views=0, completion_rate=0.0),
             by_package=[],
             currency="USD",
         )
@@ -873,81 +879,15 @@ class BroadstreetAdapter(AdServerAdapter):
         return self.inventory_manager.build_inventory_response()
 
     def get_creative_formats(self) -> list[dict[str, Any]]:
-        """Return Broadstreet templates as AdCP creative formats.
+        """Return Broadstreet-supported AdCP canonical creative formats.
 
-        Converts Broadstreet template definitions to AdCP Format schema.
-        These formats are included in list_creative_formats responses when
-        Broadstreet is acting as both sales and creative agent.
+        Broadstreet-specific template choices such as cube/gallery/youtube are
+        adapter rendering options carried on creative asset metadata
+        (``template_type``), not separate AdCP format identities.
 
         Returns:
             List of format dictionaries matching AdCP Format schema
         """
-        from src.adapters.broadstreet.config_schema import BROADSTREET_TEMPLATES
+        from src.adapters.broadstreet.formats import broadstreet_creative_formats
 
-        formats = []
-        # Use tenant subdomain or adapter name for agent URL
-        agent_url = f"broadstreet://{self.tenant_id or 'default'}"
-
-        for template_id, template in BROADSTREET_TEMPLATES.items():
-            # Build assets list from required and optional assets
-            assets = []
-
-            # Required assets
-            for asset_id in template.get("required_assets", []):
-                asset_type = self._infer_asset_type(asset_id)
-                assets.append(
-                    {
-                        "item_type": "individual",
-                        "asset_id": asset_id,
-                        "asset_type": asset_type,
-                        "required": True,
-                        "name": asset_id.replace("_", " ").title(),
-                    }
-                )
-
-            # Optional assets
-            for asset_id in template.get("optional_assets", []):
-                asset_type = self._infer_asset_type(asset_id)
-                assets.append(
-                    {
-                        "item_type": "individual",
-                        "asset_id": asset_id,
-                        "asset_type": asset_type,
-                        "required": False,
-                        "name": asset_id.replace("_", " ").title(),
-                    }
-                )
-
-            formats.append(
-                {
-                    "format_id": {"id": f"broadstreet_{template_id}", "agent_url": agent_url},
-                    "name": template["name"],
-                    "type": "display",  # All Broadstreet formats are display
-                    "description": template.get("description", ""),
-                    "assets": assets,
-                    "is_standard": False,  # These are Broadstreet-specific formats
-                }
-            )
-
-        return formats
-
-    def _infer_asset_type(self, asset_id: str) -> str:
-        """Infer asset type from asset ID naming convention.
-
-        Args:
-            asset_id: Asset identifier (e.g., "front_image", "youtube_url", "headline")
-
-        Returns:
-            Asset type string (image, video, text, url)
-        """
-        asset_lower = asset_id.lower()
-        if "image" in asset_lower or "logo" in asset_lower:
-            return "image"
-        elif "video" in asset_lower or "youtube" in asset_lower:
-            return "video"
-        elif "url" in asset_lower or "click" in asset_lower:
-            return "url"
-        elif "html" in asset_lower:
-            return "html"
-        else:
-            return "text"  # Default to text for headlines, body, captions, etc.
+        return broadstreet_creative_formats()

@@ -6,16 +6,9 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from adcp import CreativeFilters
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.types.generated_poc.core.pagination_request import PaginationRequest
-from adcp.types.generated_poc.creative.list_creatives_request import (
-    Field1 as FieldModel,
+from adcp.types import (
+    ContextObject,
 )
-from adcp.types.generated_poc.creative.list_creatives_request import (
-    Sort,
-)
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import ValidationError
 
 from src.core.audit_logger import get_audit_logger
@@ -23,17 +16,17 @@ from src.core.database.repositories.uow import CreativeUoW
 from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
 from src.core.helpers import log_tool_activity
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schema_helpers import to_context_object
 from src.core.schemas import (
     Creative,
     ListCreativesResponse,
 )
-from src.core.tool_context import ToolContext
+from src.core.tracing import traced
 from src.core.validation_helpers import format_validation_error
 
 logger = logging.getLogger(__name__)
 
 
+@traced
 def _list_creatives_impl(
     media_buy_id: str | None = None,
     media_buy_ids: list[str] | None = None,
@@ -85,7 +78,11 @@ def _list_creatives_impl(
         ListCreativesResponse with filtered creative assets and pagination info
     """
     from adcp.types import CreativeFilters as LibraryCreativeFilters
-    from adcp.types.generated_poc.core.pagination_request import PaginationRequest as LibraryPagination
+    from adcp.types import PaginationRequest as LibraryPagination
+
+    # adcp 4.4 ships two ``Sort`` classes — a generic tasks-list one (re-exported
+    # at adcp.types) and a creative-specific one used by ``ListCreativesRequest``.
+    # Use the matching shape so the request validator accepts it.
     from adcp.types.generated_poc.creative.list_creatives_request import Sort as LibrarySort
 
     from src.core.schemas import ListCreativesRequest
@@ -96,13 +93,13 @@ def _list_creatives_impl(
     if created_after:
         try:
             created_after_dt = datetime.fromisoformat(created_after.replace("Z", "+00:00"))
-        except ValueError:
-            raise AdCPValidationError(f"Invalid created_after date format: {created_after}")
+        except ValueError as e:
+            raise AdCPValidationError(f"Invalid created_after date format: {created_after}") from e
     if created_before:
         try:
             created_before_dt = datetime.fromisoformat(created_before.replace("Z", "+00:00"))
-        except ValueError:
-            raise AdCPValidationError(f"Invalid created_before date format: {created_before}")
+        except ValueError as e:
+            raise AdCPValidationError(f"Invalid created_before date format: {created_before}") from e
 
     # Validate sort_order is valid Literal
     from typing import Literal
@@ -138,9 +135,17 @@ def _list_creatives_impl(
     if effective_media_buy_ids:
         filters_dict["media_buy_ids"] = effective_media_buy_ids
 
-    # Merge structured filters with flat params (flat params take precedence)
+    # Merge structured filters with flat params (flat params take precedence).
+    # The delegate can pass either a CreativeFilters model or a plain dict.
     if filters:
-        filters_dict = {**filters.model_dump(exclude_none=True), **filters_dict}
+        model_fields = getattr(type(filters), "model_fields", None)
+        if model_fields:
+            structured_dict = {
+                name: getattr(filters, name) for name in model_fields if getattr(filters, name) is not None
+            }
+        else:
+            structured_dict = {k: v for k, v in dict(filters).items() if v is not None}
+        filters_dict = {**structured_dict, **filters_dict}
 
     # Build structured objects
     structured_filters = LibraryCreativeFilters(**filters_dict) if filters_dict else None
@@ -150,17 +155,16 @@ def _list_creatives_impl(
     # 3.6.0: PaginationRequest is cursor-based (max_results, cursor). DB query uses offset/limit internally.
     structured_pagination = LibraryPagination(max_results=effective_limit)
 
-    # Build sort
-    field_mapping = {
-        "created_date": "created_date",
-        "updated_date": "updated_date",
-        "name": "name",
-        "status": "status",
-        "assignment_count": "assignment_count",
-        "performance_score": "performance_score",
-    }
-    mapped_field = field_mapping.get(sort_by, "created_date")
-    structured_sort = LibrarySort(field=mapped_field, direction=valid_sort_order)
+    # Build sort. The listing-specific ``Sort`` enum accepts the spec values
+    # below; reject anything else explicitly so callers don't get silently
+    # remapped (CLAUDE.md "No Quiet Failures").
+    _SPEC_SORT_FIELDS = {"created_date", "updated_date", "name", "status", "assignment_count"}
+    if sort_by not in _SPEC_SORT_FIELDS:
+        raise AdCPValidationError(
+            f"Unsupported sort_by={sort_by!r}. Must be one of: {sorted(_SPEC_SORT_FIELDS)}",
+            recovery="correctable",
+        )
+    structured_sort = LibrarySort(field=sort_by, direction=valid_sort_order)
 
     try:
         req = ListCreativesRequest(
@@ -192,12 +196,36 @@ def _list_creatives_impl(
     creatives = []
     total_count = 0
 
+    # Extract structured-only filter values (creative_ids, format_ids, statuses)
+    # from the validated request. These have no flat-param equivalent on the _impl
+    # signature, so prior to this fix they were silently dropped — list_creatives
+    # ignored filters.creative_ids and returned every creative in the library.
+    # Closes #318 (and #316).
+    structured_creative_ids: list[str] | None = None
+    structured_format_ids: list[str] | None = None
+    structured_statuses: list[str] | None = None
+    if req.filters:
+        if req.filters.creative_ids:
+            structured_creative_ids = list(req.filters.creative_ids)
+        if req.filters.format_ids:
+            # FormatReferenceStructuredObject has an ``id`` field (str). DB column
+            # ``Creative.format`` stores the bare format id, so match on ``.id``.
+            structured_format_ids = [fid.id for fid in req.filters.format_ids]
+        if req.filters.statuses:
+            # ``statuses`` is a list of CreativeStatus enum members. Use ``.value``
+            # to get the wire string ("approved", not "CreativeStatus.approved")
+            # so it matches the DB column.
+            structured_statuses = [s.value if hasattr(s, "value") else str(s) for s in req.filters.statuses]
+
     with CreativeUoW(tenant["tenant_id"]) as uow:
         assert uow.creatives is not None
         result = uow.creatives.get_by_principal(
             principal_id,
             status=status,
+            statuses=structured_statuses,
             format=format,
+            format_ids=structured_format_ids,
+            creative_ids=structured_creative_ids,
             tags=tags,
             created_after=created_after_dt,
             created_before=created_before_dt,
@@ -271,6 +299,13 @@ def _list_creatives_impl(
             # AdCP v1 spec compliant - only spec fields
             # Get assets dict from database (all production data uses AdCP v2.4 format)
             assets_dict = db_creative.data.get("assets", {}) if db_creative.data else {}
+            # DB rows can contain legacy asset dicts without ``asset_type`` or
+            # Pydantic asset variants serialized with optional null fields.
+            # Normalize before returning so the SDK's AssetVariant ``oneOf``
+            # validator sees the same JSON shape produced by fresh syncs.
+            from src.core.schemas._asset_type_compat import normalize_assets_for_wire
+
+            assets_dict = normalize_assets_for_wire(assets_dict)
 
             # Convert string status to CreativeStatus enum
             from src.core.schemas import CreativeStatus
@@ -303,6 +338,8 @@ def _list_creatives_impl(
     # Build filters_applied list from structured filters (typed CreativeFilters model)
     filters_applied: list[str] = []
     if req.filters:
+        if req.filters.creative_ids:
+            filters_applied.append(f"creative_ids={','.join(req.filters.creative_ids)}")
         if req.filters.media_buy_ids:
             filters_applied.append(f"media_buy_ids={','.join(req.filters.media_buy_ids)}")
         if req.filters.statuses:
@@ -370,150 +407,4 @@ def _list_creatives_impl(
         format_summary=None,
         status_summary=None,
         context=req.context,
-    )
-
-
-async def list_creatives(
-    media_buy_id: str = None,
-    media_buy_ids: list[str] = None,
-    status: str = None,
-    format: str = None,
-    tags: list[str] = None,
-    created_after: str = None,
-    created_before: str = None,
-    search: str = None,
-    filters: CreativeFilters | None = None,
-    sort: Sort | None = None,
-    pagination: PaginationRequest | None = None,
-    fields: list[FieldModel | str] | None = None,
-    include_performance: bool = False,
-    include_assignments: bool = False,
-    include_sub_assets: bool = False,
-    page: int = 1,
-    limit: int = 50,
-    sort_by: str = "created_date",
-    sort_order: str = "desc",
-    webhook_url: str | None = None,
-    context: ContextObject | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-):
-    """List and filter creative assets from the centralized library (AdCP v2.5).
-
-    MCP tool wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-    Supports both flat parameters (status, format, etc.) and nested objects (filters, sort, pagination)
-    for maximum flexibility.
-
-    Args:
-        media_buy_id: Filter by single media buy ID (backward compat)
-        media_buy_ids: Filter by multiple media buy IDs (AdCP 2.5)
-
-    Returns:
-        ToolResult with ListCreativesResponse data
-    """
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-
-    # Pass typed Pydantic models directly (no model_dump conversion needed)
-    fields_list = [f.value if isinstance(f, FieldModel) else f for f in fields] if fields else None
-
-    response = _list_creatives_impl(
-        media_buy_id=media_buy_id,
-        media_buy_ids=media_buy_ids,
-        status=status,
-        format=format,
-        tags=tags,
-        created_after=created_after,
-        created_before=created_before,
-        search=search,
-        filters=filters,
-        fields=fields_list,
-        include_performance=include_performance,
-        include_assignments=include_assignments,
-        include_sub_assets=include_sub_assets,
-        page=page,
-        limit=limit,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        context=context,
-        identity=identity,
-    )
-    return ToolResult(content=str(response), structured_content=response)
-
-
-def list_creatives_raw(
-    media_buy_id: str = None,
-    media_buy_ids: list[str] = None,
-    status: str = None,
-    format: str = None,
-    tags: list[str] = None,
-    created_after: str = None,
-    created_before: str = None,
-    search: str = None,
-    filters: CreativeFilters | None = None,
-    fields: list[str] | None = None,
-    include_performance: bool = False,
-    include_assignments: bool = False,
-    include_sub_assets: bool = False,
-    page: int = 1,
-    limit: int = 50,
-    sort_by: str = "created_date",
-    sort_order: str = "desc",
-    context: dict | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """List creative assets with filtering and pagination (raw function for A2A server use, AdCP v2.5).
-
-    Delegates to the shared implementation.
-
-    Args:
-        media_buy_id: Filter by single media buy ID (backward compat)
-        media_buy_ids: Filter by multiple media buy IDs (AdCP 2.5)
-        status: Filter by status (optional)
-        format: Filter by creative format (optional)
-        tags: Filter by creative group tags (optional)
-        created_after: Filter creatives created after this date (ISO format) (optional)
-        created_before: Filter creatives created before this date (ISO format) (optional)
-        search: Search in creative name or description (optional)
-        filters: Advanced filtering options (CreativeFilters model, optional)
-        fields: Specific fields to return (optional)
-        include_performance: Include performance metrics (optional)
-        include_assignments: Include package assignments (optional)
-        include_sub_assets: Include sub-assets (optional)
-        page: Page number for pagination (default: 1)
-        limit: Number of results per page (default: 50, max: 1000)
-        sort_by: Sort field (default: created_date)
-        sort_order: Sort order (default: desc)
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-        identity: ResolvedIdentity (transport-agnostic, preferred over ctx)
-
-    Returns:
-        ListCreativesResponse with filtered creative assets and pagination info
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx)
-
-    return _list_creatives_impl(
-        media_buy_id=media_buy_id,
-        media_buy_ids=media_buy_ids,
-        status=status,
-        format=format,
-        tags=tags,
-        created_after=created_after,
-        created_before=created_before,
-        search=search,
-        filters=filters,
-        fields=fields,
-        include_performance=include_performance,
-        include_assignments=include_assignments,
-        include_sub_assets=include_sub_assets,
-        page=page,
-        limit=limit,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        context=to_context_object(context),
-        identity=identity,
     )

@@ -52,35 +52,25 @@ Open `test_creative.py` → see 89 test names → 30 real, 59 stubs → know exa
 
 ## Protocol
 
-### Step 1: Cook the molecule
+For each entity, walk these steps in conversation:
 
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/entity-test-surface.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Surface: {all_args}"
-```
+| # | Step | What It Does |
+|---|------|-------------|
+| 1 | gather-obligations | Read `docs/test-obligations/` + `business-rules.md` + `constraints.md` for the entity, list every obligation ID with its scenario |
+| 2 | audit-existing | Find every existing test that covers any of those obligations — note file:line for each |
+| 3 | review | Verify the audit: missed tests? Mis-tagged obligations? Cross-cutting tests counted twice? |
+| 4 | triage | Decide for each obligation: covered (port to suite) vs gap (stub) — flag any that need user clarification |
+| 5 | generate-suite | Write `tests/unit/test_{entity}.py` with real ports + `@pytest.mark.skip(reason="STUB: <obligation-ID>")` stubs |
+| 6 | verify | `make quality`; every obligation appears exactly once; tagged tests run cleanly |
+| 7 | commit | Commit the suite |
 
-**Dry run first** (recommended):
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/entity-test-surface.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Surface: {all_args}" \
-  --dry-run
-```
+### Done when all entity suites committed
 
-### Step 2: Walk the molecule
+Coverage summary generated.
 
-```
-bd ready → bd show <atom-id> → execute → bd close <atom-id> → repeat
-```
+### Long-run state (multi-entity)
 
-Each entity goes through: gather-obligations → audit-existing → review → triage → generate-suite → verify → commit.
-
-### Step 3: Done when all atoms closed
-
-All entity suites committed. Coverage summary generated.
+If you're running this for several entities and the conversation grows long, persist the obligation→test mapping for each completed entity to `.claude/scratch/surface-{entity}.md` so subsequent entities (or follow-up work) can re-read it without scrolling.
 
 ## Naming Rules
 
@@ -92,4 +82,3 @@ Test names describe **behavior**, not bugs:
 
 - `/remediate` — Fill the stubs this skill creates
 - `/guard` — Structural guards that prevent new violations
-- `/mol-execute` — Execute individual beads tasks (now entity-suite-aware)

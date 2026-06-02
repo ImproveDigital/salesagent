@@ -20,9 +20,9 @@ TOOLS_DIR = Path("src/core/tools")
 
 # All _impl functions and their modules
 IMPL_REGISTRY = [
-    ("src.core.tools.capabilities", "_get_adcp_capabilities_impl"),
+    # capabilities response is built by adcp.decisioning.PlatformHandler from
+    # the DecisioningCapabilities object; no local _impl on the new architecture.
     ("src.core.tools.creative_formats", "_list_creative_formats_impl"),
-    ("src.core.tools.properties", "_list_authorized_properties_impl"),
     ("src.core.tools.products", "_get_products_impl"),
     ("src.core.tools.media_buy_create", "_create_media_buy_impl"),
     ("src.core.tools.media_buy_update", "_update_media_buy_impl"),
@@ -36,14 +36,11 @@ IMPL_REGISTRY = [
 ]
 
 # Known violations: (module_path, impl_name, wrapper_kind, missing_param)
-# Each entry is a known parameter drop that needs fixing.
-# Format: "module::impl_name::wrapper_kind::param_name"
-KNOWN_VIOLATIONS = {
-    # A2A wrapper for create_media_buy doesn't pass context_id
-    "src.core.tools.media_buy_create::_create_media_buy_impl::a2a::context_id",
-    # A2A wrapper for update_media_buy doesn't pass context_id
-    "src.core.tools.media_buy_update::_update_media_buy_impl::a2a::context_id",
-}
+# Each entry is a known parameter drop that needs fixing. Empty after the
+# legacy-stack deletion removed the flat-param MCP/A2A wrappers — the modern
+# stack hands typed AdCP requests straight to ``_impl`` via
+# ``core/platforms/_delegate.py``, so no wrapper layer can drop fields.
+KNOWN_VIOLATIONS: set[str] = set()
 
 # Parameters resolved at the boundary, not forwarded from the caller
 BOUNDARY_RESOLVED_PARAMS = {"identity"}

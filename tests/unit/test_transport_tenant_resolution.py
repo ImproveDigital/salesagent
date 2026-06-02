@@ -268,10 +268,8 @@ class TestImplFunctionsDoNotResolveTenant:
         "src.core.tools.signals",
         "src.core.tools.performance",
         "src.core.tools.products",
-        "src.core.tools.properties",
         "src.core.tools.creative_formats",
         "src.core.tools.capabilities",
-        "src.core.tools.task_management",
     ]
 
     @pytest.mark.parametrize("module_path", IMPL_MODULES)
@@ -297,10 +295,8 @@ class TestImplFunctionsDoNotResolveTenant:
         "src.core.tools.creatives.listing",
         "src.core.tools.signals",
         "src.core.tools.performance",
-        "src.core.tools.properties",
         "src.core.tools.creative_formats",
         "src.core.tools.capabilities",
-        "src.core.tools.task_management",
     ]
 
     @pytest.mark.parametrize("module_path", STRICT_MODULES)

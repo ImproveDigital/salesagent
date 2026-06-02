@@ -55,13 +55,19 @@ def main():
     """Check that all apply_testing_hooks usages have corresponding roundtrip tests."""
     repo_root = Path(__file__).parent.parent
 
-    # Find all apply_testing_hooks usages in main.py
-    main_py = repo_root / "src" / "core" / "main.py"
-    if not main_py.exists():
-        print("❌ src/core/main.py not found")
+    # Find all apply_testing_hooks usages across the tool modules.
+    tools_dir = repo_root / "src" / "core" / "tools"
+    if not tools_dir.exists():
+        print("❌ src/core/tools/ not found")
         return 1
 
-    operations_using_hooks = find_testing_hooks_usages(main_py)
+    operations_using_hooks: list[str] = []
+    seen: set[str] = set()
+    for py_file in tools_dir.rglob("*.py"):
+        for op in find_testing_hooks_usages(py_file):
+            if op not in seen:
+                seen.add(op)
+                operations_using_hooks.append(op)
 
     if not operations_using_hooks:
         # No testing hooks used, nothing to check

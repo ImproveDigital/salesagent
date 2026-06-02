@@ -2,29 +2,11 @@
 
 ## When Research is Needed
 
-Before implementing a beads task, research is warranted when:
-- The task involves unfamiliar code paths
+Before implementing, research is warranted when:
+- The work involves unfamiliar code paths
 - External library APIs need verification (doc-first rule)
 - Architecture decisions need to be made
-- The acceptance criteria are ambiguous
-
-## 3-Path Flow
-
-### Path 1: Research Complete
-Research answers all questions. Implementation can proceed.
-```bash
-bd label add <id> research:complete
-```
-
-### Path 2: Research Blocked
-Research reveals missing information or external blockers.
-```bash
-bd label add <id> research:blocked
-bd update <id> --notes="Blocked because: <reason>"
-```
-
-### Path 3: No Research Needed
-Task is clear and well-defined. Skip to implementation.
+- Requirements are ambiguous
 
 ## Research Process
 
@@ -43,19 +25,12 @@ Available documentation sources:
 - **CLAUDE.md**: Project patterns and architecture
 - **`/docs` directory**: Detailed project documentation
 
-### 3. Record Findings
+### 3. Record Findings (Optional)
 
-Create a research artifact:
-```
-.claude/research/<beads-id>.md
-```
+For non-trivial research, save an artifact under `.claude/research/<short-slug>.md`:
 
-Structure:
 ```markdown
-# Research: <task title>
-
-## Task
-<beads-id>: <description>
+# Research: <topic>
 
 ## Findings
 - Key finding 1
@@ -71,12 +46,6 @@ Structure:
 ## Implementation Notes
 - Start with: <suggested first step>
 - Watch out for: <potential pitfalls>
-```
-
-### 4. Update Task
-```bash
-bd label add <id> research:complete
-bd update <id> --notes="Research complete. See .claude/research/<id>.md"
 ```
 
 ## Tips

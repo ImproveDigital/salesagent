@@ -259,13 +259,9 @@ function initAdapterFormValidation() {
     addRealtimeValidation('gam_network_id', [validators.required, validators.networkId]);
     addRealtimeValidation('gam_credentials', [validators.required, validators.json]);
 
-    // Kevel validation
-    addRealtimeValidation('kevel_network_id', [validators.required, validators.networkId]);
-    addRealtimeValidation('kevel_api_key', [validators.required, validators.minLength(10)]);
-
-    // Triton validation
-    addRealtimeValidation('triton_station_id', [validators.required, validators.minLength(3)]);
-    addRealtimeValidation('triton_api_key', [validators.required, validators.minLength(10)]);
+    // Triton + FreeWheel validation runs in their connection-config templates
+    // (not here) since both are schema-driven via config_json rather than legacy
+    // form-field columns.
 }
 
 // Initialize validation for user form

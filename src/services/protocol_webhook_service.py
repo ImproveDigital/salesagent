@@ -17,19 +17,30 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import requests
 from a2a.types import Task, TaskStatusUpdateEvent
-from adcp import extract_webhook_result_data, get_adcp_signed_headers_for_webhook
+from adcp import extract_webhook_result_data
 from adcp.types import McpWebhookPayload
+from adcp.webhooks import generate_webhook_idempotency_key, sign_legacy_webhook
+from google.protobuf.json_format import MessageToDict
 
 from src.core.audit_logger import get_audit_logger
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
+from src.core.webhook_validator import WebhookURLValidator
+from src.services.webhook_signing import (
+    SIGNING_MODE_BOTH,
+    SIGNING_MODE_HMAC,
+    SIGNING_MODE_RFC9421,
+    SigningConfigurationError,
+    build_auth_headers,
+    load_active_signing_credential,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +64,17 @@ def _normalize_localhost_for_docker(url: str) -> str:
     return url
 
 
+def _redact_webhook_url(url: str) -> str:
+    """Return a log-safe webhook URL without credentials, path, query, or fragment."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or parsed.netloc or "[invalid-url]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunparse(parsed._replace(netloc=f"{host}{port}", path="/[redacted]", query="", fragment=""))
+    except Exception:
+        return "[invalid-url]"
+
+
 class ProtocolWebhookService:
     """
     Service for sending protocol-level push notifications to clients.
@@ -69,7 +91,7 @@ class ProtocolWebhookService:
     async def send_notification(
         self,
         push_notification_config: PushNotificationConfig,
-        payload: Task | TaskStatusUpdateEvent | McpWebhookPayload,
+        payload: Task | TaskStatusUpdateEvent | McpWebhookPayload | dict[str, Any],
         metadata: dict[str, Any],
     ) -> bool:
         """
@@ -91,14 +113,31 @@ class ProtocolWebhookService:
             )
             return False
 
+        is_valid, error = WebhookURLValidator.validate_delivery_url(push_notification_config.url)
+        if not is_valid:
+            logger.error(
+                "Refusing protocol webhook delivery to %s: %s",
+                _redact_webhook_url(push_notification_config.url),
+                error,
+            )
+            return False
+
         url = _normalize_localhost_for_docker(push_notification_config.url)
+        log_safe_url = _redact_webhook_url(url)
 
         # Prepare headers
-        headers = {"Content-Type": "application/json", "User-Agent": "AdCP-Sales-Agent/1.0"}
+        timestamp = datetime.now(UTC).isoformat()
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "AdCP-Sales-Agent/1.0",
+            "X-ADCP-Timestamp": timestamp,
+        }
 
         # Log sanitized config (exclude sensitive authentication_token)
         safe_config = {
-            "url": push_notification_config.url if hasattr(push_notification_config, "url") else None,
+            "url": _redact_webhook_url(push_notification_config.url)
+            if hasattr(push_notification_config, "url")
+            else None,
             "authentication_type": (
                 push_notification_config.authentication_type
                 if hasattr(push_notification_config, "authentication_type")
@@ -108,31 +147,74 @@ class ProtocolWebhookService:
         }
         logger.info(f"push_notification_config (sanitized): {safe_config}")
 
-        # Serialize payload to dict at the delivery boundary (for HMAC signing and JSON send)
+        # Serialize payload to dict at the delivery boundary (for HMAC signing and JSON send).
+        # Dispatch by concrete type rather than ``hasattr(model_dump)`` so a
+        # future protobuf release that ships a Pydantic façade can't silently
+        # change which path runs:
+        #
+        # * ``a2a.types.Task`` / ``TaskStatusUpdateEvent`` — protobuf messages
+        #   (a2a-sdk 1.0+ switched to ``a2a_pb2``). ``MessageToDict`` with
+        #   ``preserving_proto_field_name=False`` emits the JSON names from
+        #   the proto, which a2a-sdk defines as camelCase (``id``,
+        #   ``taskId``, ``contextId``) — exactly what the A2A wire spec
+        #   requires.
+        # * ``McpWebhookPayload`` — Pydantic; uses ``model_dump``.
+        # * raw dict — legacy callers pass an already-shaped payload.
         payload_dict: dict[str, Any]
-        if isinstance(payload, (Task, TaskStatusUpdateEvent, McpWebhookPayload)):
+        if isinstance(payload, (Task, TaskStatusUpdateEvent)):
+            payload_dict = MessageToDict(payload, preserving_proto_field_name=False)
+            payload_dict.setdefault("idempotency_key", generate_webhook_idempotency_key())
+        elif isinstance(payload, McpWebhookPayload):
             payload_dict = payload.model_dump(mode="json", exclude_none=True)
-        else:
+        elif isinstance(payload, dict):
             payload_dict = payload
-
-        # Apply authentication based on schemes
-        if (
-            push_notification_config.authentication_type == "HMAC-SHA256"
-            and push_notification_config.authentication_token
-        ):
-            # Sign payload with HMAC-SHA256
-            timestamp = str(int(time.time()))
-            get_adcp_signed_headers_for_webhook(
-                headers, push_notification_config.authentication_token, timestamp, payload_dict
+        else:
+            raise TypeError(
+                f"Unsupported webhook payload type {type(payload).__name__}: expected "
+                "Task / TaskStatusUpdateEvent (protobuf), McpWebhookPayload (pydantic), or dict"
             )
 
-        elif push_notification_config.authentication_type == "Bearer" and push_notification_config.authentication_token:
+        auth_type = (push_notification_config.authentication_type or "").lower()
+        signing_mode = getattr(push_notification_config, "signing_mode", SIGNING_MODE_HMAC) or SIGNING_MODE_HMAC
+        body_bytes = json.dumps(payload_dict).encode("utf-8")
+
+        # Apply authentication based on schemes. Presence of the legacy
+        # authentication block selects legacy mode; otherwise catalog
+        # registrations use the RFC 9421 webhook profile.
+        if auth_type == "hmac-sha256" and push_notification_config.authentication_token:
+            headers, body_bytes = sign_legacy_webhook(
+                push_notification_config.authentication_token,
+                payload_dict,
+                headers=headers,
+            )
+
+        elif auth_type == "bearer" and push_notification_config.authentication_token:
             # Use Bearer token authentication
             headers["Authorization"] = f"Bearer {push_notification_config.authentication_token}"
 
+        if signing_mode in (SIGNING_MODE_RFC9421, SIGNING_MODE_BOTH):
+            try:
+                active_credential = load_active_signing_credential(
+                    tenant_id=push_notification_config.tenant_id,
+                    signing_mode=signing_mode,
+                )
+                headers = build_auth_headers(
+                    signing_mode=signing_mode,
+                    method="POST",
+                    url=url,
+                    body=body_bytes,
+                    timestamp=timestamp,
+                    base_headers=headers,
+                    webhook_secret=getattr(push_notification_config, "webhook_secret", None),
+                    active_credential=active_credential,
+                )
+            except SigningConfigurationError as exc:
+                logger.error("Cannot sign protocol webhook for %s: %s", log_safe_url, exc)
+                return False
+
         # Send notification with retry logic and logging
         return await self._send_with_retry_and_logging(
-            url=url, payload=payload_dict, headers=headers, metadata=metadata
+            url=url, payload=payload_dict, body_bytes=body_bytes, headers=headers, metadata=metadata
         )
 
     @staticmethod
@@ -184,11 +266,17 @@ class ProtocolWebhookService:
         self,
         url: str,
         payload: dict[str, Any],
+        body_bytes: bytes,
         headers: dict,
         metadata: dict[str, Any],
         max_attempts: int = 3,
     ) -> bool:
         """Send webhook with exponential backoff retry logic, logging, and audit trail."""
+        is_valid, error = WebhookURLValidator.validate_delivery_url(url)
+        if not is_valid:
+            logger.error("Refusing protocol webhook delivery to %s: %s", _redact_webhook_url(url), error)
+            return False
+
         # Calculate payload size for metrics
         payload_size_bytes = len(json.dumps(payload).encode("utf-8"))
 
@@ -197,9 +285,7 @@ class ProtocolWebhookService:
         principal_id = metadata["principal_id"] if "principal_id" in metadata else None
         media_buy_id = metadata["media_buy_id"] if "media_buy_id" in metadata else None
 
-        # TODO: Fix type annotation discrepancy in adcp library - extract_webhook_result_data
-        # returns dict at runtime but is typed as AdcpAsyncResponseData | None
-        result = cast(dict[str, Any] | None, extract_webhook_result_data(payload))
+        result = extract_webhook_result_data(payload)
         # After serialization, payload is always a dict - extract task_id accordingly
         # A2A Task uses 'id', TaskStatusUpdateEvent uses 'task_id', MCP uses 'task_id'
         task_id = payload.get("id") or payload.get("task_id") or ""
@@ -213,6 +299,7 @@ class ProtocolWebhookService:
         # Create webhook delivery log entry
         log_id = str(uuid4())
         start_time = time.time()
+        log_safe_url = _redact_webhook_url(url)
 
         # Log to audit system (start)
         audit_logger = None
@@ -222,10 +309,16 @@ class ProtocolWebhookService:
 
         for attempt in range(max_attempts):
             try:
-                logger.info(f"Sending webhook for task {task_id} to {url} (attempt {attempt + 1}/{max_attempts})")
+                logger.info(
+                    "Sending webhook for task %s to %s (attempt %s/%s)",
+                    task_id,
+                    log_safe_url,
+                    attempt + 1,
+                    max_attempts,
+                )
 
                 def _post() -> requests.Response:
-                    return self._session.post(url, json=payload, headers=headers, timeout=10.0)
+                    return self._session.post(url, data=body_bytes, headers=headers, timeout=10.0)
 
                 response = await asyncio.to_thread(_post)
                 response.raise_for_status()

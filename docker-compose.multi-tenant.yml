@@ -48,7 +48,7 @@ services:
     ports:
       - "${PROXY_PORT:-8000}:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "nginx -t >/dev/null 2>&1 && test -s /var/run/nginx.pid"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -65,6 +65,8 @@ services:
       SKIP_NGINX: "true"
       SKIP_CRON: "true"
       ADCP_SALES_PORT: "8080"
+      ENVIRONMENT: "production"
+      FLASK_ENV: production
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       SUPER_ADMIN_EMAILS: ${SUPER_ADMIN_EMAILS:-}
       ADCP_TESTING: ${ADCP_TESTING:-}
@@ -77,7 +79,7 @@ services:
     volumes:
       - ./audit_logs:/app/audit_logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "python", "scripts/healthcheck.py", "8080"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -93,18 +95,20 @@ services:
     environment:
       DATABASE_URL: postgresql://adcp_user:secure_password_change_me@postgres:5432/adcp?sslmode=disable
       SKIP_NGINX: "true"
+      ENVIRONMENT: "production"
+      FLASK_ENV: production
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       SUPER_ADMIN_EMAILS: ${SUPER_ADMIN_EMAILS:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      ADCP_AUTH_TEST_MODE: ${ADCP_AUTH_TEST_MODE:-true}
+      ADCP_AUTH_TEST_MODE: ${ADCP_AUTH_TEST_MODE:-false}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./audit_logs:/app/audit_logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "python", "scripts/healthcheck.py", "8001"]
       interval: 30s
       timeout: 10s
       retries: 3

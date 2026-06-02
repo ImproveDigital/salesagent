@@ -71,7 +71,7 @@ class TestDeliveryTotalsFields:
         "spend",
         "clicks",
         "ctr",
-        "video_completions",
+        "completed_views",
         "completion_rate",
         "conversions",
         "viewability",
@@ -100,12 +100,16 @@ class TestPackageDeliveryFields:
         "impressions",
         "spend",
         "clicks",
-        "video_completions",
+        "completed_views",
         "pacing_index",
         "pricing_model",
         "rate",
         "currency",
         "by_placement",
+        "by_device_type",
+        "by_device_type_truncated",
+        "by_geo",
+        "by_geo_truncated",
     }
 
     def test_field_names(self):
@@ -316,7 +320,15 @@ class TestGetMediaBuyDeliveryResponseMethods:
 
 class TestAdapterPackageDelivery:
     def test_fields(self):
-        assert set(AdapterPackageDelivery.model_fields.keys()) == {"package_id", "impressions", "spend", "by_placement"}
+        # completed_views added in #225 Phase 1 — surfaces in-stream
+        # VAST completions to the impl layer.
+        assert set(AdapterPackageDelivery.model_fields.keys()) == {
+            "package_id",
+            "impressions",
+            "spend",
+            "completed_views",
+            "by_placement",
+        }
 
     def test_construction(self):
         obj = AdapterPackageDelivery(package_id="pkg_1", impressions=1000, spend=5.0)
@@ -325,7 +337,7 @@ class TestAdapterPackageDelivery:
 
 class TestAdapterGetMediaBuyDeliveryResponse:
     def test_fields(self):
-        expected = {"media_buy_id", "reporting_period", "totals", "by_package", "currency", "daily_breakdown"}
+        expected = {"media_buy_id", "reporting_period", "totals", "by_package", "currency", "daily_breakdown", "ext"}
         assert set(AdapterGetMediaBuyDeliveryResponse.model_fields.keys()) == expected
 
     def test_construction(self):

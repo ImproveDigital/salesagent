@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.core.schemas import Budget, CreateMediaBuyRequest, PackageRequest
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 
 class TestBudgetFormatCompatibility:
@@ -42,6 +43,7 @@ class TestBudgetFormatCompatibility:
         This test validates get_total_budget() correctly sums all package budgets.
         """
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testcampaign.com"},
             packages=[PackageRequest(product_id="prod_1", budget=2500.0, pricing_option_id="test_pricing")],
             start_time="2025-02-15T00:00:00Z",
@@ -58,6 +60,7 @@ class TestBudgetFormatCompatibility:
         This test validates that get_total_budget() correctly sums all package budgets.
         """
         request = CreateMediaBuyRequest(
+            **required_request_kwargs(),
             brand={"domain": "testcampaign.com"},
             packages=[
                 PackageRequest(product_id="prod_1", budget=5000.0, pricing_option_id="test_pricing"),

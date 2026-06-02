@@ -38,6 +38,14 @@ class ResolvedIdentity(BaseModel, frozen=True):
     # Tenant-level billing policy (BR-RULE-059) and account approval mode (BR-RULE-060)
     # are NOT fields on ResolvedIdentity — they live on identity.tenant (TenantContext).
 
+    # RFC 9421 signed-request verification state. Populated by
+    # SigningVerifyMiddleware before resolve_identity is called when the
+    # verifier accepts a signature. Both None for unsigned (bearer-only)
+    # requests. ``principal_id`` (above) identifies the caller regardless
+    # of auth method.
+    verified_agent_url: str | None = None
+    verified_key_id: str | None = None
+
     @property
     def is_authenticated(self) -> bool:
         """Check if this identity has a resolved principal."""
@@ -126,6 +134,17 @@ def _detect_tenant(headers: dict) -> tuple[str | None, dict | None]:
     return tenant_id, tenant_context
 
 
+def _resolve_embedded_buyer_identity(
+    headers: dict,
+    tenant_context: dict | None,
+    require_valid_token: bool,
+) -> str | None:
+    """Resolve trusted embedded buyer identity when no bearer token exists."""
+    from src.core.auth import _try_resolve_embedded_buyer_identity
+
+    return _try_resolve_embedded_buyer_identity(headers, tenant_context, require_valid_token)
+
+
 def resolve_identity(
     headers: dict,
     auth_token: str | None = None,
@@ -183,14 +202,16 @@ def resolve_identity(
             # Tenant discovered from token lookup (no headers matched)
             tenant_context = token_tenant
             tenant_id = token_tenant.get("tenant_id", tenant_id)
+    else:
+        principal_id = _resolve_embedded_buyer_identity(headers, tenant_context, require_valid_token)
 
     # Wrap raw dict in TenantContext if possible (both paths produce typed model)
-    tenant_model = tenant_context
+    tenant_model: Any = tenant_context
     if isinstance(tenant_context, dict) and "tenant_id" in tenant_context:
         from src.core.tenant_context import TenantContext
 
         try:
-            tenant_model = TenantContext.from_dict(tenant_context)  # type: ignore[assignment]  # TenantContext is a dict-compatible proxy
+            tenant_model = TenantContext.from_dict(tenant_context)
         except Exception:
             tenant_model = tenant_context  # Keep dict if model construction fails
 

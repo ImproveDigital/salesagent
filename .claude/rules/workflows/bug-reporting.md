@@ -2,16 +2,24 @@
 
 ## When You Find a Bug
 
-### 1. Create Beads Issue
+### 1. Capture the Bug
+Either fix it immediately (if small and in scope) or file a GitHub issue:
 ```bash
-bd create --title="Bug: <concise description>" --type=bug --priority=<0-4>
-```
+gh issue create --title "Bug: <concise description>" --label bug --body "$(cat <<'EOF'
+## Observed
+What actually happens.
 
-Include in the description:
-- **Observed behavior**: What actually happens
-- **Expected behavior**: What should happen
-- **Reproduction steps**: How to trigger it
-- **Affected area**: Which files/components
+## Expected
+What should happen.
+
+## Reproduction
+Steps to trigger.
+
+## Affected area
+Which files/components.
+EOF
+)"
+```
 
 ### 2. Validate Against Patterns
 
@@ -20,19 +28,14 @@ Before fixing, check:
 - Is this an AdCP spec compliance issue? (Check `tests/unit/test_adcp_contract.py`)
 - Is this a regression from a recent change? (Check `git log --oneline -20`)
 
-### 3. Write Regression Test
+### 3. Write Regression Test First
 
-**Always write the test FIRST:**
 ```bash
-# Write the failing test
 uv run pytest tests/unit/test_<area>.py::test_<bug_description> -x
 # Confirm it fails for the right reason
 ```
 
-The test should:
-- Demonstrate the bug clearly
-- Be minimal (test one thing)
-- Follow existing test patterns in the file
+The test should demonstrate the bug clearly, be minimal (test one thing), and follow existing patterns in the file.
 
 ### 4. Fix the Bug
 
@@ -45,22 +48,12 @@ The test should:
 make quality
 ```
 
-Verify:
-- New test passes
-- No existing tests broken
-- Formatting and linting clean
+Verify: new test passes, no existing tests broken, formatting and linting clean.
 
-### 6. Close and Commit
+### 6. Commit
 ```bash
-bd close <id>
 git add <specific-files>
 git commit -m "fix: <description of what was fixed>"
 ```
 
-## Bug Priority Guide
-
-- **P0 (critical)**: Data loss, security vulnerability, complete feature broken
-- **P1 (high)**: Major feature degraded, blocking other work
-- **P2 (medium)**: Feature works but incorrectly in some cases
-- **P3 (low)**: Minor issue, workaround exists
-- **P4 (backlog)**: Cosmetic, edge case, nice-to-have fix
+If a GitHub issue exists, reference it in the commit body (`Fixes #123`).

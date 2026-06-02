@@ -26,7 +26,7 @@ make setup
 3. Creates `.env` from `.env.template` (preserves existing values)
 4. Installs pre-commit hooks
 5. Checks for tox (optional, used by the test runner)
-6. Starts Docker services (`docker compose up -d`)
+6. Starts Docker services (`make compose-up`)
 7. Waits for database migrations to complete
 8. Verifies health check at `http://localhost:8000/health`
 
@@ -59,8 +59,8 @@ cp .env.template .env
 # 4. Install pre-commit hooks
 uvx pre-commit install
 
-# 5. Start Docker services
-docker compose up -d
+# 5. Build and start Docker services
+CONDUCTOR_PORT=8000 make compose-up
 
 # 6. Verify health
 curl http://localhost:8000/health
@@ -116,14 +116,14 @@ docker compose logs -f adcp-server  # Just the app server
 
 ```bash
 docker compose down             # Stop services
-docker compose up -d            # Start again
+CONDUCTOR_PORT=8000 make compose-up
 docker compose down -v          # Stop and reset database
 ```
 
 ### Rebuild after dependency changes
 
 ```bash
-docker compose build && docker compose up -d
+CONDUCTOR_PORT=8000 make compose-up
 ```
 
 ### Run database migrations manually
@@ -167,7 +167,7 @@ The `.env` file is created from `.env.template` during setup. Key variables:
 | `ADCP_AUTH_TEST_MODE` | `true` | Enables test login (disable for production) |
 | `CREATE_DEMO_TENANT` | `false` | Creates sample data on first startup |
 | `ENVIRONMENT` | `development` | `development` = strict validation, `production` = lenient |
-| `CONDUCTOR_PORT` | `8000` | Nginx proxy port |
+| `CONDUCTOR_PORT` | _(required)_ | Nginx proxy host port. Set per worktree by Conductor (no hardcoded default; missing value fails fast to prevent silent port collisions between worktrees). |
 
 For OAuth, GAM integration, and other production settings, see the comments in `.env.template` or [Environment Variables](../deployment/environment-variables.md).
 

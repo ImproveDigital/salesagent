@@ -17,6 +17,7 @@ from tests.helpers.adcp_factories import (
     create_test_cpm_pricing_option,
     create_test_format_id,
     create_test_publisher_properties_by_tag,
+    create_test_reporting_capabilities,
 )
 
 
@@ -35,12 +36,13 @@ def test_pricing_option_rootmodel_unwrapping():
         delivery_measurement={"provider": "test_provider", "notes": "Test"},
         publisher_properties=[create_test_publisher_properties_by_tag()],
         pricing_options=[create_test_cpm_pricing_option(currency="USD", rate=10.0)],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     po = product.pricing_options[0]
 
     # Should be wrapped in RootModel
-    assert hasattr(po, "root"), "pricing_options[0] should have .root attribute (is RootModel)"
+    assert hasattr(po, "root"), "pricing_options[0] should have .root attribute (is RootModel)"  # noqa: rootmodel
 
     # adcp 3.9: PricingOption RootModel now proxies attributes from .root,
     # so .pricing_model is accessible directly on the wrapper
@@ -70,6 +72,7 @@ def test_pricing_option_unwrap_helper():
         delivery_measurement={"provider": "test_provider", "notes": "Test"},
         publisher_properties=[create_test_publisher_properties_by_tag()],
         pricing_options=[create_test_cpm_pricing_option(currency="EUR", rate=15.0, is_fixed=True)],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # This is the pattern used in media_buy_create.py
@@ -100,6 +103,7 @@ def test_legacy_pricing_option_id_generation():
         delivery_measurement={"provider": "test_provider", "notes": "Test"},
         publisher_properties=[create_test_publisher_properties_by_tag()],
         pricing_options=[create_test_cpm_pricing_option(currency="USD", rate=10.0, is_fixed=True)],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # This is the FIXED logic from media_buy_create.py
@@ -132,6 +136,7 @@ def test_legacy_pricing_option_id_auction():
                 "price_guidance": {"floor": 1.0, "p50": 5.0},
             }
         ],
+        reporting_capabilities=create_test_reporting_capabilities(),
     )
 
     # FIXED logic
