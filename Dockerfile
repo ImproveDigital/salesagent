@@ -162,7 +162,7 @@ ENV SKIP_CRON=true
 
 # Expose the unified python port directly. Fly.io / upstream proxy
 # talks to this port; no in-image reverse proxy.
-EXPOSE 8080
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
