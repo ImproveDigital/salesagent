@@ -154,7 +154,7 @@ ENV ADCP_HOST=0.0.0.0
 # core/main.py serves MCP, A2A, and the Flask admin from one Starlette
 # binary on $ADCP_PORT. The bundled nginx thread in run_all_services.py
 # is unused on this fork — kept off via SKIP_NGINX=true.
-ENV SKIP_NGINX=true
+ENV SKIP_NGINX=false
 # Server-owned adapter schedulers replace the bundled supercronic inventory
 # sweep in the default container runtime. Operators can still opt back into
 # cron by overriding this, but should not run both mechanisms together.
@@ -166,7 +166,7 @@ EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["python", "scripts/healthcheck.py", "8000"]
+    CMD ["python", "scripts/healthcheck.py", "8080"]
 
 # Use venv Python directly as entrypoint (prepares for hardened images that lack bash)
 ENTRYPOINT ["/app/.venv/bin/python", "scripts/deploy/run_all_services.py"]
