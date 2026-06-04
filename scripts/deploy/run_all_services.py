@@ -225,9 +225,9 @@ def run_migrations():
 
 def run_mcp_server():
     """Run the MCP server."""
-    print("Starting MCP server on port 8080...")
+    port = os.environ.get("ADCP_SALES_PORT", "8000")
+    print(f"Starting MCP server on port {port}...")
     env = os.environ.copy()
-    env["ADCP_SALES_PORT"] = "8080"
     proc = subprocess.Popen(
         [sys.executable, "scripts/run_server.py"],
         env=env,
@@ -245,10 +245,9 @@ def run_mcp_server():
 
 def exec_mcp_server():
     """Replace this wrapper process with the unified MCP/A2A/Admin server."""
-    print("Starting MCP server on port 8080...")
-    env = os.environ.copy()
-    env["ADCP_SALES_PORT"] = "8080"
-    os.execvpe(sys.executable, [sys.executable, "scripts/run_server.py"], env)
+    port = os.environ.get("ADCP_SALES_PORT", "8000")
+    print(f"Starting MCP server on port {port}...")
+    os.execvpe(sys.executable, [sys.executable, "scripts/run_server.py"], os.environ.copy())
 
 
 def run_nginx():

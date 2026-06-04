@@ -178,7 +178,7 @@ ENV SKIP_CRON=false
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 \
       CMD ["python", "scripts/healthcheck.py", "8000"]
 
 
