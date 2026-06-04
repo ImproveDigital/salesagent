@@ -144,8 +144,8 @@ def get_engine():
             # Direct PostgreSQL settings (no PgBouncer)
             _engine = create_engine(
                 connection_string,
-                pool_size=10,  # Base connections in pool
-                max_overflow=20,  # Additional connections beyond pool_size
+                pool_size=5,  # Base connections in pool
+                max_overflow=5,  # Additional connections beyond pool_size
                 pool_timeout=pool_timeout,  # Seconds to wait for connection from pool
                 pool_recycle=3600,  # Recycle connections after 1 hour
                 pool_pre_ping=True,  # Test connections before use
