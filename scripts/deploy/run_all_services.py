@@ -225,9 +225,9 @@ def run_migrations():
 
 def run_mcp_server():
     """Run the MCP server."""
-    print("Starting MCP server on port 8080...")
+    port = os.environ.get("ADCP_SALES_PORT", "8000")
+    print(f"Starting MCP server on port {port}...")
     env = os.environ.copy()
-    env["ADCP_SALES_PORT"] = "8080"
     proc = subprocess.Popen(
         [sys.executable, "scripts/run_server.py"],
         env=env,
@@ -245,10 +245,9 @@ def run_mcp_server():
 
 def exec_mcp_server():
     """Replace this wrapper process with the unified MCP/A2A/Admin server."""
-    print("Starting MCP server on port 8080...")
-    env = os.environ.copy()
-    env["ADCP_SALES_PORT"] = "8080"
-    os.execvpe(sys.executable, [sys.executable, "scripts/run_server.py"], env)
+    port = os.environ.get("ADCP_SALES_PORT", "8000")
+    print(f"Starting MCP server on port {port}...")
+    os.execvpe(sys.executable, [sys.executable, "scripts/run_server.py"], os.environ.copy())
 
 
 def run_nginx():
@@ -376,7 +375,8 @@ def main():
     threads = []
 
     skip_cron = os.environ.get("SKIP_CRON", "false").lower() == "true"
-    skip_nginx = os.environ.get("SKIP_NGINX", "false").lower() == "true"
+    # TODO: remove hardcoded skip_nginx value
+    skip_nginx = True #os.environ.get("SKIP_NGINX", "false").lower() == "true"
     if skip_cron and skip_nginx:
         # In the single-process runtime used by e2e and most deployments, run
         # the ASGI server as PID 1 after migrations/init. Keeping a Python
