@@ -2564,6 +2564,113 @@ class TestDefaultGamAdvertiserId:
         assert resp.status_code == 200
         assert resp.get_json()["default_gam_advertiser_id"] is None
 
+    def test_provision_default_resources_false_by_default(self, client, auth_headers, cleanup_tenants, monkeypatch):
+        import src.admin.tenant_management_api as api_module
+
+        def _should_not_be_called(**_kw):
+            raise AssertionError("ensure must not be called when provision_default_resources is False")
+
+        monkeypatch.setattr(api_module, "gam_ensure_advertiser_companyservice", _should_not_be_called)
+
+        payload = _provision_payload(external_org_id="org_no_default_resources")
+        resp = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert resp.status_code == 201, resp.get_data(as_text=True)
+        tid = resp.get_json()["tenant_id"]
+        cleanup_tenants.append(tid)
+
+        get_resp = client.get(f"/api/v1/tenant-management/tenants/{tid}", headers=auth_headers)
+        assert get_resp.get_json()["default_gam_advertiser_id"] is None
+
+    def test_provision_sets_default_advertiser_from_cache(self, client, auth_headers, cleanup_tenants, integration_db):
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.gam_sync import GAMSyncRepository
+
+        payload = _provision_payload(external_org_id="org_cached_adv")
+        resp = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert resp.status_code == 201, resp.get_data(as_text=True)
+        tid = resp.get_json()["tenant_id"]
+        cleanup_tenants.append(tid)
+
+        adapter_dict = payload["adapter"]
+        with get_db_session() as session:
+            session.info["management_api_caller"] = True
+            GAMSyncRepository(session, tid).upsert_advertiser(
+                advertiser_id="cached-adv-456",
+                name="Interchange - Default",
+                status="active",
+            )
+            session.commit()
+
+        import src.admin.tenant_management_api as api_module
+
+        api_module._auto_provision_gam_default_advertiser(tid, adapter_dict)
+
+        get_resp = client.get(f"/api/v1/tenant-management/tenants/{tid}", headers=auth_headers)
+        assert get_resp.status_code == 200
+        assert get_resp.get_json()["default_gam_advertiser_id"] == "cached-adv-456"
+
+    def test_provision_calls_ensure_when_opted_in(self, client, auth_headers, cleanup_tenants, monkeypatch):
+        import src.admin.tenant_management_api as api_module
+        from src.core.helpers.account_provisioning import GamAdvertiserProvisionResult
+
+        monkeypatch.setattr(
+            api_module,
+            "gam_ensure_advertiser_companyservice",
+            lambda **_kw: GamAdvertiserProvisionResult(
+                advertiser_id="ensured-adv-789", name="Interchange - Default", created=True
+            ),
+        )
+
+        payload = _provision_payload(external_org_id="org_opted_in_adv", provision_default_resources=True)
+        resp = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert resp.status_code == 201, resp.get_data(as_text=True)
+        tid = resp.get_json()["tenant_id"]
+        cleanup_tenants.append(tid)
+
+        get_resp = client.get(f"/api/v1/tenant-management/tenants/{tid}", headers=auth_headers)
+        assert get_resp.status_code == 200
+        assert get_resp.get_json()["default_gam_advertiser_id"] == "ensured-adv-789"
+
+    def test_provision_skips_auto_provision_when_default_already_provided(
+        self, client, auth_headers, cleanup_tenants, monkeypatch
+    ):
+        import src.admin.tenant_management_api as api_module
+
+        def _should_not_be_called(**_kw):
+            raise AssertionError("ensure must not be called when default_gam_advertiser_id is already provided")
+
+        monkeypatch.setattr(api_module, "gam_ensure_advertiser_companyservice", _should_not_be_called)
+
+        payload = _provision_payload(
+            external_org_id="org_explicit_default_adv",
+            default_gam_advertiser_id="explicit-99",
+            provision_default_resources=True,
+        )
+        resp = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert resp.status_code == 201, resp.get_data(as_text=True)
+        cleanup_tenants.append(resp.get_json()["tenant_id"])
+
+        tid = resp.get_json()["tenant_id"]
+        get_resp = client.get(f"/api/v1/tenant-management/tenants/{tid}", headers=auth_headers)
+        assert get_resp.get_json()["default_gam_advertiser_id"] == "explicit-99"
+
+    def test_provision_succeeds_if_auto_provision_fails(self, client, auth_headers, cleanup_tenants, monkeypatch):
+        import src.admin.tenant_management_api as api_module
+
+        def _fail(**_kw):
+            raise RuntimeError("GAM unavailable")
+
+        monkeypatch.setattr(api_module, "gam_ensure_advertiser_companyservice", _fail)
+
+        payload = _provision_payload(external_org_id="org_auto_adv_fail", provision_default_resources=True)
+        resp = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert resp.status_code == 201, resp.get_data(as_text=True)
+        tid = resp.get_json()["tenant_id"]
+        cleanup_tenants.append(tid)
+
+        get_resp = client.get(f"/api/v1/tenant-management/tenants/{tid}", headers=auth_headers)
+        assert get_resp.get_json()["default_gam_advertiser_id"] is None
+
 
 class TestRuntimeGamAdvertiserRouting:
     class _CapturedGamAdapter:
