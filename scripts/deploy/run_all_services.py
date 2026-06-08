@@ -374,9 +374,11 @@ def main():
     # Start services in threads
     threads = []
 
-    skip_cron = os.environ.get("SKIP_CRON", "false").lower() == "true"
-    # TODO: remove hardcoded skip_nginx value
-    skip_nginx = True #os.environ.get("SKIP_NGINX", "false").lower() == "true"
+    #skip_cron = os.environ.get("SKIP_CRON", "false").lower() == "true"
+
+    #TODO: Remove skip_cron hardcoded value 
+    skip_cron = False
+    skip_nginx = os.environ.get("SKIP_NGINX", "false").lower() == "true"
     if skip_cron and skip_nginx:
         # In the single-process runtime used by e2e and most deployments, run
         # the ASGI server as PID 1 after migrations/init. Keeping a Python
