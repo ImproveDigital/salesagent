@@ -51,6 +51,7 @@ from tests.factories import (
     PublisherPartnerFactory,
     SyncJobFactory,
     TenantFactory,
+    TenantSignalFactory,
 )
 from tests.helpers.managed_tenant_api import (
     bind_factories_to_session,
@@ -1493,6 +1494,45 @@ class TestTenantStatus:
         assert sync["severity"] == "warning"
         assert sync["last_success_at"] is None
         assert sync["issue"]["action"] == "wait"
+
+    def test_inapplicable_gam_derived_streams_are_ok_at_status_endpoint(
+        self, client, auth_headers, cleanup_tenants, bound_factories
+    ):
+        """GAM-derived streams with no runnable prerequisites should not block status."""
+        tenant = TenantFactory(tenant_id="tenant_status_gam_inapplicable", ad_server="google_ad_manager")
+        cleanup_tenants.append(tenant.tenant_id)
+        AdapterConfigFactory(
+            tenant=tenant,
+            adapter_type="google_ad_manager",
+            gam_network_code="23312659540",
+        )
+        ProductFactory(
+            tenant=tenant,
+            product_id="ad_unit_only",
+            implementation_config={"targeted_ad_unit_ids": ["23313239368"]},
+        )
+        TenantSignalFactory(
+            tenant=tenant,
+            signal_id="audience_only",
+            adapter_config={"kind": "audience_segment", "segment_id": "98765"},
+        )
+        bound_factories.commit()
+
+        resp = client.get(f"/api/v1/tenant-management/tenants/{tenant.tenant_id}/status", headers=auth_headers)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        syncs = resp.get_json()["syncs"]
+
+        assert syncs["signal_coverage"]["status"] == "success"
+        assert syncs["signal_coverage"]["severity"] == "ok"
+        assert syncs["signal_coverage"]["issue"] is None
+        assert syncs["signal_coverage"]["item_count"] == 0
+
+        assert syncs["pricing_availability"]["status"] == "success"
+        assert syncs["pricing_availability"]["severity"] == "ok"
+        assert syncs["pricing_availability"]["issue"] is None
+        assert syncs["pricing_availability"]["item_count"] == 0
+
+        assert syncs["inventory"]["status"] == "never_run"
 
     def test_latest_successful_custom_targeting_clears_retry_health(
         self, client, auth_headers, cleanup_tenants, bound_factories

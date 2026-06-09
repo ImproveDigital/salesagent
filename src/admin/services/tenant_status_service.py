@@ -60,6 +60,10 @@ from src.core.inventory_profile_projection import (
     is_complete_inventory_profile,
     is_wholesale_owned_inventory_profile,
 )
+from src.services.gam_sync_applicability import (
+    gam_pricing_availability_applicable,
+    gam_signal_coverage_applicable,
+)
 
 # ---------------------------------------------------------------------------
 # In-memory cache (5-second TTL — see sprint 1.5 design § Caching)
@@ -178,17 +182,23 @@ def _syncs_block(session: Session, tenant: Tenant, adapter_type: str) -> StatusS
             adapter_type=adapter_type,
             sync_type="reporting",
         ),
-        signal_coverage=_sync_run_block(
+        signal_coverage=_applicability_aware_sync_run_block(
             repo.health_inputs_for_stream(adapter_type=adapter_type, sync_type="signal_coverage"),
             tenant=tenant,
             adapter_type=adapter_type,
             sync_type="signal_coverage",
+            is_applicable=gam_signal_coverage_applicable(
+                session, tenant_id=tenant.tenant_id, adapter_type=adapter_type
+            ),
         ),
-        pricing_availability=_sync_run_block(
+        pricing_availability=_applicability_aware_sync_run_block(
             repo.health_inputs_for_stream(adapter_type=adapter_type, sync_type="pricing_availability"),
             tenant=tenant,
             adapter_type=adapter_type,
             sync_type="pricing_availability",
+            is_applicable=gam_pricing_availability_applicable(
+                session, tenant_id=tenant.tenant_id, adapter_type=adapter_type
+            ),
         ),
     )
 
@@ -217,6 +227,19 @@ def _sync_run_block(
         item_count=_sync_item_count(run),
         error=public_sync_error_message(run.error_message) if run is not None else None,
     )
+
+
+def _applicability_aware_sync_run_block(
+    runs: list[SyncJob],
+    *,
+    tenant: Tenant,
+    adapter_type: str,
+    sync_type: str,
+    is_applicable: bool,
+) -> StatusSyncRunBlock:
+    if not is_applicable:
+        return StatusSyncRunBlock(status="success", severity="ok", item_count=0)
+    return _sync_run_block(runs, tenant=tenant, adapter_type=adapter_type, sync_type=sync_type)
 
 
 def _sync_detail_run(runs: list[SyncJob], health: SyncHealth) -> SyncJob | None:

@@ -30,7 +30,9 @@ def test_list_eligible_tenants_includes_gam_tenants_with_product_placements() ->
         patch("src.services.gam_pricing_availability_scheduler.get_db_session"),
         patch("src.services.gam_pricing_availability_scheduler.AdapterConfigAdminRepository") as adapter_repo,
         patch("src.services.gam_pricing_availability_scheduler.SyncJobAdminRepository") as sync_repo,
-        patch("src.services.gam_pricing_availability_scheduler._tenant_has_priced_placements") as has_products,
+        patch(
+            "src.services.gam_pricing_availability_scheduler.tenant_has_pricing_availability_placements"
+        ) as has_products,
     ):
         adapter_repo.return_value.list_all.return_value = [_pair("tenant_1"), _pair("tenant_2", "mock")]
         has_products.return_value = True
@@ -48,7 +50,10 @@ def test_list_eligible_tenants_skips_fresh_completed_run() -> None:
         patch("src.services.gam_pricing_availability_scheduler.get_db_session"),
         patch("src.services.gam_pricing_availability_scheduler.AdapterConfigAdminRepository") as adapter_repo,
         patch("src.services.gam_pricing_availability_scheduler.SyncJobAdminRepository") as sync_repo,
-        patch("src.services.gam_pricing_availability_scheduler._tenant_has_priced_placements", return_value=True),
+        patch(
+            "src.services.gam_pricing_availability_scheduler.tenant_has_pricing_availability_placements",
+            return_value=True,
+        ),
     ):
         adapter_repo.return_value.list_all.return_value = [_pair("tenant_1")]
         sync_repo.return_value.latest_for_triples.return_value = {
