@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-import pytest
 from adcp.types import DeliveryForecast
 
 from src.core.database.models import PricingOption, Product
@@ -230,21 +229,67 @@ def test_complete_price_guidance_report_recursively_splits_large_truncated_chunk
     ]
 
 
-def test_complete_price_guidance_report_fails_when_single_placement_is_still_truncated() -> None:
-    reporting = _reporting_with_reports(_report(placement_ids=["1"], possibly_truncated=True))
-
-    with pytest.raises(ValueError, match="single placement"):
-        _get_complete_price_guidance_report(
-            reporting,
-            date_range="this_month",
+def test_complete_price_guidance_report_marks_single_placement_truncation_incomplete() -> None:
+    reporting = _reporting_with_reports(
+        _report(
             placement_ids=["1"],
-            countries=None,
-            line_item_types=["PRICE_PRIORITY"],
-            min_group_impressions=1,
-            min_line_item_impressions=1,
-            bookability_safety_factor=1.0,
-            currency="USD",
+            possibly_truncated=True,
+            line_item_rows=[_line_item(placement_id="1", impressions=100_000, cpm=1.0)],
         )
+    )
+
+    report = _get_complete_price_guidance_report(
+        reporting,
+        date_range="this_month",
+        placement_ids=["1"],
+        countries=None,
+        line_item_types=["PRICE_PRIORITY"],
+        min_group_impressions=1,
+        min_line_item_impressions=1,
+        bookability_safety_factor=1.0,
+        currency="USD",
+    )
+
+    assert report["possibly_truncated"] is False
+    assert report["incomplete_report"] is True
+    assert report["incomplete_report_chunks"] == 1
+    assert report["truncated_single_placement_ids"] == ["1"]
+    assert [row["placement_id"] for row in report["line_item_rows"]] == ["1"]
+
+
+def test_complete_price_guidance_report_combines_incomplete_single_placement_chunks() -> None:
+    reporting = _reporting_with_reports(
+        _report(placement_ids=["1", "2"], possibly_truncated=True),
+        _report(
+            placement_ids=["1"],
+            possibly_truncated=True,
+            line_item_rows=[_line_item(placement_id="1", impressions=100_000, cpm=1.0)],
+        ),
+        _report(
+            placement_ids=["2"],
+            possibly_truncated=False,
+            line_item_rows=[_line_item(placement_id="2", impressions=10_000, cpm=2.0)],
+        ),
+    )
+
+    report = _get_complete_price_guidance_report(
+        reporting,
+        date_range="this_month",
+        placement_ids=["1", "2"],
+        countries=None,
+        line_item_types=["PRICE_PRIORITY"],
+        min_group_impressions=1,
+        min_line_item_impressions=1,
+        bookability_safety_factor=1.0,
+        currency="USD",
+    )
+
+    assert report["chunked"] is True
+    assert report["chunk_count"] == 2
+    assert report["incomplete_report"] is True
+    assert report["incomplete_report_chunks"] == 1
+    assert report["truncated_single_placement_ids"] == ["1"]
+    assert [row["placement_id"] for row in report["line_item_rows"]] == ["1", "2"]
 
 
 def test_product_guidance_builds_forecast_bookability_and_pricing_guidance() -> None:
@@ -284,6 +329,11 @@ def test_product_guidance_builds_forecast_bookability_and_pricing_guidance() -> 
             "window_start": "2026-05-01",
             "window_end": "2026-05-28",
             "filters": {"line_item_types": ["PRICE_PRIORITY"]},
+            "chunked": True,
+            "chunk_count": 2,
+            "incomplete_report": True,
+            "incomplete_report_chunks": 1,
+            "truncated_single_placement_ids": ["123"],
         },
         currency_limits={},
     )
@@ -295,6 +345,8 @@ def test_product_guidance_builds_forecast_bookability_and_pricing_guidance() -> 
     assert forecast.points[0].viewability is not None
     assert forecast.points[0].viewability.viewable_impressions.mid == 26_000
     assert forecast.points[0].viewability.viewable_rate.mid == 0.787879
+    assert guidance["forecast"]["ext"]["source"]["incomplete_report"] is True
+    assert guidance["forecast"]["ext"]["source"]["truncated_single_placement_ids"] == ["123"]
     assert guidance["pricing_guidance_by_model"]["cpm"] == {"p25": 1.0, "p50": 2.0, "p75": 2.0, "p90": 2.0}
     assert guidance["pricing_guidance_by_model"]["cpc"]["p25"] == 0.67
     assert guidance["bookability"]["bookable"] is True

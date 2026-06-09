@@ -50,7 +50,6 @@ DEFAULT_MAX_NETWORK_LINE_ITEMS = 600_000
 DEFAULT_MONTHLY_LINE_ITEM_SPACE_FRACTION = 0.01
 DEFAULT_ESTIMATED_LINE_ITEMS_PER_PACKAGE = 1
 GUIDANCE_VALID_FOR = timedelta(hours=6)
-TRUNCATED_REPORT_ERROR = "pricing/availability report truncated for a single placement; cannot split further"
 
 
 @dataclass
@@ -263,6 +262,8 @@ def _sync_product_guidance(
         "placement_ids_queried": len(placement_ids),
         "report_rows": int(report.get("raw_rows") or 0),
         "eligible_line_item_rows": int(report.get("eligible_line_item_rows") or 0),
+        "report_chunks": int(report.get("chunk_count") or 1),
+        "incomplete_report_chunks": int(report.get("incomplete_report_chunks") or 0),
     }
     return updated_product_ids, counts, {}
 
@@ -293,7 +294,7 @@ def _get_complete_price_guidance_report(
     if not report.get("possibly_truncated"):
         return report
     if len(placement_ids) <= 1:
-        raise ValueError(TRUNCATED_REPORT_ERROR)
+        return _mark_single_placement_report_incomplete(report, placement_ids[0])
 
     chunk_reports = _get_complete_price_guidance_report_chunks(
         reporting,
@@ -343,7 +344,8 @@ def _get_complete_price_guidance_report_chunks(
         )
         if report.get("possibly_truncated"):
             if len(chunk_placement_ids) <= 1:
-                raise ValueError(TRUNCATED_REPORT_ERROR)
+                reports.append(_mark_single_placement_report_incomplete(report, chunk_placement_ids[0]))
+                continue
             reports.extend(
                 _get_complete_price_guidance_report_chunks(
                     reporting,
@@ -389,6 +391,21 @@ def _get_price_guidance_report(
     )
 
 
+def _mark_single_placement_report_incomplete(report: dict[str, Any], placement_id: str) -> dict[str, Any]:
+    logger.warning(
+        "GAM pricing/availability report for placement_id=%s was still truncated after splitting; "
+        "using capped report rows and marking guidance incomplete",
+        placement_id,
+    )
+    return {
+        **report,
+        "possibly_truncated": False,
+        "incomplete_report": True,
+        "incomplete_report_chunks": 1,
+        "truncated_single_placement_ids": [placement_id],
+    }
+
+
 def _combine_price_guidance_reports(
     base_report: dict[str, Any],
     chunk_reports: list[dict[str, Any]],
@@ -398,10 +415,20 @@ def _combine_price_guidance_reports(
     line_item_rows = [row for report in chunk_reports for row in report.get("line_item_rows") or []]
     filters = dict(base_report.get("filters") or {})
     filters["placement_ids"] = placement_ids
+    incomplete_ids = sorted(
+        {
+            str(placement_id)
+            for report in chunk_reports
+            for placement_id in report.get("truncated_single_placement_ids") or []
+        }
+    )
     return {
         **base_report,
         "filters": filters,
         "possibly_truncated": False,
+        "incomplete_report": bool(incomplete_ids),
+        "incomplete_report_chunks": sum(int(report.get("incomplete_report_chunks") or 0) for report in chunk_reports),
+        "truncated_single_placement_ids": incomplete_ids,
         "chunked": True,
         "chunk_count": len(chunk_reports),
         "raw_rows": sum(int(report.get("raw_rows") or 0) for report in chunk_reports),
@@ -720,6 +747,11 @@ def _delivery_forecast(
                 "window_start": report.get("window_start"),
                 "window_end": report.get("window_end"),
                 "line_item_types": (report.get("filters") or {}).get("line_item_types"),
+                "chunked": bool(report.get("chunked")),
+                "chunk_count": report.get("chunk_count"),
+                "incomplete_report": bool(report.get("incomplete_report")),
+                "incomplete_report_chunks": report.get("incomplete_report_chunks"),
+                "truncated_single_placement_ids": report.get("truncated_single_placement_ids"),
             },
             "bookable": product_bookable,
             "line_item_capacity_guidance": capacity_guidance,
