@@ -8,7 +8,7 @@ and losing progress on container restarts.
 import logging
 import threading
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Global registry of running sync threads
 _active_syncs: dict[str, threading.Thread] = {}
 _sync_lock = threading.Lock()
+STALE_RUNNING_SYNC_AFTER = timedelta(hours=1)
 
 
 @contextmanager
@@ -41,6 +42,22 @@ def _sync_session():
         yield db
 
 
+def _is_stale_running_sync(sync_job: SyncJob, *, now: datetime | None = None) -> bool:
+    """Return whether a running SyncJob is old enough to be treated as dead.
+
+    Progress is not evidence that the sync is still alive: it may be a stale
+    phase payload left behind by a thread or container that died mid-sync.
+    This guard only runs when a caller is trying to start another sync for the
+    same tenant, so an hour-old running row is safer to clear than to let it
+    block future refreshes indefinitely.
+    """
+    started_at = sync_job.started_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+
+    return (now or datetime.now(UTC)) - started_at > STALE_RUNNING_SYNC_AFTER
+
+
 def start_inventory_sync_background(
     tenant_id: str,
     sync_mode: str = "incremental",
@@ -58,7 +75,7 @@ def start_inventory_sync_background(
 
     Args:
         tenant_id: Tenant ID to sync
-        sync_mode: "full" (delete all and resync) or "incremental" (only sync changed items since last successful sync)
+        sync_mode: "full" (fetch all and mark stale after success) or "incremental" (only sync changed items since last successful sync)
         sync_types: Optional list of inventory types to sync
         custom_targeting_limit: Optional limit on custom targeting values
         audience_segment_limit: Optional limit on audience segments
@@ -102,35 +119,23 @@ def start_inventory_sync_background(
         # in-progress guard. Skip the guard if the running row matches our
         # pending id (defensive — shouldn't happen).
         if existing_sync and existing_sync.sync_id != pending_sync_id:
-            # Check if sync is stale (running for >1 hour with no progress updates)
-            from datetime import timedelta
-
-            # Get started_at as datetime (SQLAlchemy returns datetime for DateTime columns)
-            started_at_value: datetime = existing_sync.started_at
-
-            # Make started_at timezone-aware if it's naive (from database)
-            if started_at_value.tzinfo is None:
-                started_at_value = started_at_value.replace(tzinfo=UTC)
-
-            time_running = datetime.now(UTC) - started_at_value
-            is_stale = time_running > timedelta(hours=1) and not existing_sync.progress
-
-            if is_stale:
+            if _is_stale_running_sync(existing_sync):
                 # Mark stale sync as failed and allow new sync to start
                 existing_sync.status = "failed"
                 # SQLAlchemy DateTime column accepts datetime objects
                 existing_sync.completed_at = datetime.now(UTC)
                 existing_sync.error_message = (
-                    "Sync thread died (stale after 1+ hour with no progress) - marked as failed to allow fresh sync"
+                    "Sync thread died (stale after 1+ hour) - marked as failed to allow fresh sync"
                 )
                 db.commit()
                 logger.warning(
-                    f"Marked stale sync {existing_sync.sync_id} as failed (running since {existing_sync.started_at}, no progress)"
+                    f"Marked stale sync {existing_sync.sync_id} as failed (running since {existing_sync.started_at})"
                 )
             else:
                 # Sync is actually running, raise error
                 raise ValueError(
-                    f"Sync already running for tenant {tenant_id}: {existing_sync.sync_id} (started {started_at_value})"
+                    f"Sync already running for tenant {tenant_id}: {existing_sync.sync_id} "
+                    f"(started {existing_sync.started_at})"
                 )
 
         # Use the caller-supplied pending row when provided; otherwise create
@@ -236,7 +241,7 @@ def _run_sync_thread(
     job will remain in 'running' state until cleaned up.
 
     Progress tracking:
-    - Phase 0 (full mode only): Deleting existing inventory (1/7)
+    - Phase 0 (full mode only): Preparing full inventory sync (1/7)
     - Phase 1: Discovering Ad Units (2/7 or 1/6)
     - Phase 2: Discovering Placements (3/7 or 2/6)
     - Phase 3: Discovering Labels (4/7 or 3/6)
@@ -288,28 +293,47 @@ def _run_sync_thread(
         last_sync_time = None
         if sync_mode == "incremental":
             with _sync_session() as db:
-                from sqlalchemy import desc
+                from sqlalchemy import desc, func
 
-                last_successful_sync = db.scalars(
-                    select(SyncJob)
-                    .where(
-                        SyncJob.tenant_id == tenant_id,
-                        SyncJob.sync_type == "inventory",
-                        SyncJob.status == "completed",
+                from src.core.database.models import GAMInventory
+
+                current_ad_units = (
+                    db.scalar(
+                        select(func.count())
+                        .select_from(GAMInventory)
+                        .where(GAMInventory.tenant_id == tenant_id, GAMInventory.inventory_type == "ad_unit")
                     )
-                    .order_by(desc(SyncJob.completed_at))
-                ).first()
+                    or 0
+                )
 
-                if last_successful_sync and last_successful_sync.started_at:
-                    # Use started_at (not completed_at) to avoid missing items modified during the sync
-                    last_sync_time = last_successful_sync.started_at
-                    logger.info(f"[{sync_id}] Incremental sync: using last sync start time: {last_sync_time}")
-                else:
+                if current_ad_units == 0:
                     logger.warning(
-                        f"[{sync_id}] Incremental sync requested but no previous successful sync found - falling back to full sync"
+                        f"[{sync_id}] Incremental sync requested but tenant has no ad units cached - "
+                        "falling back to full sync"
                     )
                     sync_mode = "full"
-                    last_sync_time = None
+                else:
+                    last_successful_sync = db.scalars(
+                        select(SyncJob)
+                        .where(
+                            SyncJob.tenant_id == tenant_id,
+                            SyncJob.sync_type == "inventory",
+                            SyncJob.status == "completed",
+                        )
+                        .order_by(desc(SyncJob.completed_at))
+                    ).first()
+
+                    if last_successful_sync and last_successful_sync.started_at:
+                        # Use started_at (not completed_at) to avoid missing items modified during the sync
+                        last_sync_time = last_successful_sync.started_at
+                        logger.info(f"[{sync_id}] Incremental sync: using last sync start time: {last_sync_time}")
+                    else:
+                        logger.warning(
+                            f"[{sync_id}] Incremental sync requested but no previous successful sync found - "
+                            "falling back to full sync"
+                        )
+                        sync_mode = "full"
+                        last_sync_time = None
 
         # Calculate total phases
         total_phases = 7 if sync_mode == "full" else 6  # Add delete phase for full reset
@@ -332,18 +356,14 @@ def _run_sync_thread(
                 },
             )
 
-        # Phase 0: Full reset - delete all existing inventory (only for full sync)
+        # Phase 0: Full sync setup. Do not delete existing inventory before
+        # the first GAM read: if credentials fail or the thread dies, deleting
+        # up front empties the catalog and blocks selector binding. Successful
+        # full syncs upsert fresh rows and mark untouched non-ad-unit rows stale
+        # at the end.
         if sync_mode == "full":
-            update_progress("Deleting Existing Inventory", 1)
-            with _sync_session() as db:
-                from sqlalchemy import delete
-
-                from src.core.database.models import GAMInventory
-
-                stmt = delete(GAMInventory).where(GAMInventory.tenant_id == tenant_id)
-                db.execute(stmt)
-                db.commit()
-                logger.info(f"[{sync_id}] Full reset: deleted all existing inventory for tenant {tenant_id}")
+            update_progress("Preparing Full Inventory Sync", 1)
+            logger.info(f"[{sync_id}] Full sync will preserve existing inventory until fresh GAM data is written")
 
         # Initialize inventory service for streaming writes
         with _sync_session() as db:

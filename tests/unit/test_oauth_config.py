@@ -260,14 +260,13 @@ class TestExtractUserInfo:
 
         from src.admin.blueprints.auth import extract_user_info
 
-        # Create a simple JWT (unsigned for testing)
+        # Create a simple JWT; extraction decodes it without signature verification.
         id_token_payload = {
             "email": "user@example.com",
             "name": "ID Token User",
             "picture": "https://example.com/photo.jpg",
         }
-        # Create unsigned token for testing
-        id_token = jwt.encode(id_token_payload, key="", algorithm="HS256")
+        id_token = jwt.encode(id_token_payload, key="test-secret-at-least-32-bytes-long", algorithm="HS256")
 
         token = {"id_token": id_token}
 
