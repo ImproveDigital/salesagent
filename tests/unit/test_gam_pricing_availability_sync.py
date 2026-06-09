@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import MagicMock
 
+import pytest
 from adcp.types import DeliveryForecast
 
 from src.core.database.models import PricingOption, Product
 from src.services.gam_pricing_availability_sync import (
     _apply_pricing_guidance,
+    _get_complete_price_guidance_report,
     _product_guidance_from_line_items,
     _product_targeted_placement_ids,
     _report_country_filters,
@@ -114,6 +117,134 @@ def test_report_country_filters_only_when_every_product_has_country_targeting() 
         ]
     ) == ["Canada", "US"]
     assert _report_country_filters([{"report_countries": ["US"]}, {"report_countries": []}]) is None
+
+
+def _report(
+    *,
+    placement_ids: list[str],
+    possibly_truncated: bool,
+    line_item_rows: list[dict] | None = None,
+) -> dict:
+    rows = list(line_item_rows or [])
+    return {
+        "possibly_truncated": possibly_truncated,
+        "date_range": "this_month",
+        "window_start": "2026-05-01",
+        "window_end": "2026-05-28",
+        "filters": {"placement_ids": placement_ids, "line_item_types": ["PRICE_PRIORITY"]},
+        "line_item_rows": rows,
+        "raw_rows": len(rows),
+        "eligible_line_item_rows": len(rows),
+    }
+
+
+def _reporting_with_reports(*reports: dict) -> MagicMock:
+    reporting = MagicMock()
+    reporting.network_timezone = "UTC"
+    reporting.get_placement_country_price_guidance.side_effect = list(reports)
+    return reporting
+
+
+def test_complete_price_guidance_report_splits_truncated_report_into_smaller_batches() -> None:
+    reporting = _reporting_with_reports(
+        _report(placement_ids=["1", "2", "3", "4"], possibly_truncated=True),
+        _report(
+            placement_ids=["1", "2"],
+            possibly_truncated=False,
+            line_item_rows=[_line_item(placement_id="1", impressions=10_000, cpm=1.0)],
+        ),
+        _report(
+            placement_ids=["3", "4"],
+            possibly_truncated=False,
+            line_item_rows=[_line_item(placement_id="4", impressions=20_000, cpm=2.0)],
+        ),
+    )
+
+    report = _get_complete_price_guidance_report(
+        reporting,
+        date_range="this_month",
+        placement_ids=["1", "2", "3", "4"],
+        countries=None,
+        line_item_types=["PRICE_PRIORITY"],
+        min_group_impressions=1,
+        min_line_item_impressions=1,
+        bookability_safety_factor=1.0,
+        currency="USD",
+    )
+
+    assert report["possibly_truncated"] is False
+    assert report["chunked"] is True
+    assert report["chunk_count"] == 2
+    assert report["raw_rows"] == 2
+    assert report["eligible_line_item_rows"] == 2
+    assert [row["placement_id"] for row in report["line_item_rows"]] == ["1", "4"]
+    assert report["filters"]["placement_ids"] == ["1", "2", "3", "4"]
+    assert [call.kwargs["placement_ids"] for call in reporting.get_placement_country_price_guidance.call_args_list] == [
+        ["1", "2", "3", "4"],
+        ["1", "2"],
+        ["3", "4"],
+    ]
+
+
+def test_complete_price_guidance_report_recursively_splits_large_truncated_chunks() -> None:
+    reporting = _reporting_with_reports(
+        _report(placement_ids=["1", "2", "3", "4"], possibly_truncated=True),
+        _report(placement_ids=["1", "2"], possibly_truncated=True),
+        _report(
+            placement_ids=["1"],
+            possibly_truncated=False,
+            line_item_rows=[_line_item(placement_id="1", impressions=10_000, cpm=1.0)],
+        ),
+        _report(
+            placement_ids=["2"],
+            possibly_truncated=False,
+            line_item_rows=[_line_item(placement_id="2", impressions=10_000, cpm=1.0)],
+        ),
+        _report(
+            placement_ids=["3", "4"],
+            possibly_truncated=False,
+            line_item_rows=[_line_item(placement_id="4", impressions=20_000, cpm=2.0)],
+        ),
+    )
+
+    report = _get_complete_price_guidance_report(
+        reporting,
+        date_range="this_month",
+        placement_ids=["1", "2", "3", "4"],
+        countries=None,
+        line_item_types=["PRICE_PRIORITY"],
+        min_group_impressions=1,
+        min_line_item_impressions=1,
+        bookability_safety_factor=1.0,
+        currency="USD",
+    )
+
+    assert report["chunk_count"] == 3
+    assert [row["placement_id"] for row in report["line_item_rows"]] == ["1", "2", "4"]
+    assert [call.kwargs["placement_ids"] for call in reporting.get_placement_country_price_guidance.call_args_list] == [
+        ["1", "2", "3", "4"],
+        ["1", "2"],
+        ["1"],
+        ["2"],
+        ["3", "4"],
+    ]
+
+
+def test_complete_price_guidance_report_fails_when_single_placement_is_still_truncated() -> None:
+    reporting = _reporting_with_reports(_report(placement_ids=["1"], possibly_truncated=True))
+
+    with pytest.raises(ValueError, match="single placement"):
+        _get_complete_price_guidance_report(
+            reporting,
+            date_range="this_month",
+            placement_ids=["1"],
+            countries=None,
+            line_item_types=["PRICE_PRIORITY"],
+            min_group_impressions=1,
+            min_line_item_impressions=1,
+            bookability_safety_factor=1.0,
+            currency="USD",
+        )
 
 
 def test_product_guidance_builds_forecast_bookability_and_pricing_guidance() -> None:
