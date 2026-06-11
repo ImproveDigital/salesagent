@@ -3,14 +3,14 @@
 # Cache bust: 2026-02-27
 
 # ── supercronic build stage ───────────────────────────────────────────
-# We build from source on Go 1.26.3 rather than pulling the upstream
+# We build from source on a patched Go toolchain rather than pulling the upstream
 # release binary because upstream v0.2.45 is still compiled against
 # Go 1.26.2, which carries 5 stdlib HIGH CVEs (DNS, HTTP/2, mail, Dial):
 #   CVE-2026-3388, CVE-2026-33854, CVE-2026-39820, CVE-2026-39836, CVE-2026-42499
-# All are fixed in Go 1.25.10 / 1.26.3. Pinning the toolchain here lets
-# us clear the gate without waiting on aptible/supercronic to cut a
-# new release.
-FROM golang:1.26.3-alpine AS supercronic-builder
+# CVE-2026-42504 is fixed in Go 1.25.11 / 1.26.4. Pinning the toolchain
+# here lets us clear the gate without waiting on aptible/supercronic to
+# cut a new release.
+FROM golang:1.26.4-alpine AS supercronic-builder
 RUN apk add --no-cache git
 ARG SUPERCRONIC_VERSION=v0.2.45
 RUN git clone --depth 1 --branch ${SUPERCRONIC_VERSION} https://github.com/aptible/supercronic.git /src
@@ -99,7 +99,7 @@ RUN echo 'path-exclude /usr/share/doc/*' > /etc/dpkg/dpkg.cfg.d/01_nodoc && \
     echo 'path-exclude /usr/share/linda/*' >> /etc/dpkg/dpkg.cfg.d/01_nodoc && \
     sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
 
-# Install runtime dependencies (build deps stay in builder)
+# Install runtime dependencies (no gcc/libpq-dev/git/curl — build deps stay in builder)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update --error-on=any && \
@@ -107,9 +107,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpq5 \
     nginx
 
-# Copy the per-arch supercronic binary we just built from source on Go
-# 1.26.3. See the ``supercronic-builder`` stage header for the CVE list
-# that drove this off the upstream release binary.
+# Copy the per-arch supercronic binary we just built from source on a
+# patched Go toolchain. See the ``supercronic-builder`` stage header for
+# the CVE list that drove this off the upstream release binary.
 ARG TARGETARCH
 COPY --from=supercronic-builder /out/supercronic-linux-${TARGETARCH} /usr/local/bin/supercronic
 RUN chmod +x /usr/local/bin/supercronic
@@ -178,8 +178,8 @@ ENV SKIP_CRON=false
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-      CMD ["python", "scripts/healthcheck.py", "8000"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["python", "scripts/healthcheck.py", "8000"]
 
 # Use venv Python directly as entrypoint (prepares for hardened images that lack bash)
 ENTRYPOINT ["/app/.venv/bin/python", "scripts/deploy/run_all_services.py"]

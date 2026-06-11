@@ -1,5 +1,3 @@
-include deployment/deployment.mk
-
 .PHONY: setup quality quality-fast quality-full pre-pr lint-fix lint typecheck duplication test-fast test-full
 .PHONY: test-stack-up test-stack-down test-all test-cov test-entity openapi
 .PHONY: test-int test-bdd test-e2e storyboard-smoke storyboard-non-guaranteed
