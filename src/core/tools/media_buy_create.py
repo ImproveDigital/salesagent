@@ -9,6 +9,7 @@ Handles media buy creation including:
 """
 
 import logging
+import os
 import time
 import uuid
 from collections.abc import Sequence
@@ -1657,6 +1658,8 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             # and creatives may have been uploaded after the initial approval attempt.
             logger.info(f"[APPROVAL] Attempting to approve order {response.media_buy_id} in GAM")
             try:
+                from src.adapters.gam.managers.orders import GAMOrderApprovalPermissionDenied
+
                 adapter = get_adapter(principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_context)
                 if hasattr(adapter, "orders_manager") and adapter.orders_manager:
                     approval_success = adapter.orders_manager.approve_order(response.media_buy_id)
@@ -1673,6 +1676,17 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         return False, error_msg
                 else:
                     logger.info("[APPROVAL] Adapter does not support order approval, skipping")
+            except GAMOrderApprovalPermissionDenied:
+                # Expected: service account has no approval permission.
+                # Background status polling was already started during adapter creation.
+                # The media buy will be activated once a human approves the order in GAM.
+                logger.info(
+                    f"[APPROVAL] Service account cannot approve GAM order {response.media_buy_id} — "
+                    f"order will remain in DRAFT until approved externally. "
+                    f"Background status polling is running."
+                )
+                # Skip setting media buy to 'active' — the background poller handles that.
+                return True, None
             except Exception as approval_error:
                 # Approval exception - return failure
                 error_msg = f"Failed to approve order {response.media_buy_id}: {str(approval_error)}"
@@ -2437,8 +2451,9 @@ async def _create_media_buy_impl(
     # wire so buyer agents relax terms and retry with a fresh idempotency_key.
     _validate_measurement_terms(req)
 
-    # Validate setup completion (only in production, skip for testing)
-    if not testing_ctx.dry_run and not testing_ctx.test_session_id:
+    # Validate setup completion (only in production, skip for testing/dev)
+    _skip_setup_check = os.environ.get("ADCP_SKIP_SETUP_CHECK") == "true"
+    if not testing_ctx.dry_run and not testing_ctx.test_session_id and not _skip_setup_check:
         try:
             validate_setup_complete(tenant["tenant_id"])
         except SetupIncompleteError as e:
