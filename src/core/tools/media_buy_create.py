@@ -2452,7 +2452,7 @@ async def _create_media_buy_impl(
     _validate_measurement_terms(req)
 
     # Validate setup completion (only in production, skip for testing/dev)
-    _skip_setup_check = os.environ.get("ADCP_TESTING") == "true" or os.environ.get("ADCP_SKIP_SETUP_CHECK") == "true"
+    _skip_setup_check = os.environ.get("ADCP_SKIP_SETUP_CHECK") == "true"
     if not testing_ctx.dry_run and not testing_ctx.test_session_id and not _skip_setup_check:
         try:
             validate_setup_complete(tenant["tenant_id"])
