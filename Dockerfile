@@ -99,13 +99,20 @@ RUN echo 'path-exclude /usr/share/doc/*' > /etc/dpkg/dpkg.cfg.d/01_nodoc && \
     echo 'path-exclude /usr/share/linda/*' >> /etc/dpkg/dpkg.cfg.d/01_nodoc && \
     sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
 
-# Install runtime dependencies (no gcc/libpq-dev/git/curl — build deps stay in builder)
+# Install runtime dependencies (build deps stay in builder)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update --error-on=any && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     libpq5 \
     nginx
+
+# Install runtime dependencies (no gcc/libpq-dev/git/curl — build deps stay in builder)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update --error-on=any && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libpq5
 
 # Copy the per-arch supercronic binary we just built from source on a
 # patched Go toolchain. See the ``supercronic-builder`` stage header for
@@ -156,6 +163,7 @@ RUN mkdir -p /var/log/nginx /var/run && \
     chown -R www-data:www-data /var/log/nginx /var/run
 
 # Add .venv to PATH and set PYTHONPATH for module imports
+# Add .venv to PATH and set PYTHONPATH for module imports
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 ENV PYTHONUNBUFFERED=1
@@ -178,8 +186,8 @@ ENV SKIP_CRON=false
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["python", "scripts/healthcheck.py", "8000"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+      CMD ["python", "scripts/healthcheck.py", "8000"]
 
 # Use venv Python directly as entrypoint (prepares for hardened images that lack bash)
 ENTRYPOINT ["/app/.venv/bin/python", "scripts/deploy/run_all_services.py"]

@@ -830,6 +830,9 @@ class FormatIdRef(BaseModel):
 
     agent_url: str = Field(..., min_length=1, max_length=2048)
     id: str = Field(..., min_length=1, max_length=255)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    duration_ms: int | None = Field(default=None, ge=1)
 
 
 class WholesalePricingOptionResponse(BaseModel):
@@ -1082,7 +1085,58 @@ class SignalMappingKindCapability(BaseModel):
     candidate_type: str | None = Field(default=None, max_length=80)
     supports_search: bool = True
     supports_parent_filter: bool = False
-    adapter_config_schema: dict[str, Any] = Field(default_factory=dict)
+    adapter_config_schema: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "JSON Schema for adapter_config. Mapping kinds may include x-authoring metadata "
+            "for generic signal-authoring UI construction."
+        ),
+    )
+
+
+class SignalCandidateTypeCapability(BaseModel):
+    """One adapter candidate type that a signal-authoring client can browse."""
+
+    model_config = _config()
+
+    candidate_type: str = Field(..., min_length=1, max_length=80)
+    label: str = Field(..., min_length=1, max_length=200)
+    description: str | None = None
+    mapping_kind: str | None = Field(default=None, max_length=80)
+    directly_mappable: bool = False
+    browse_only: bool = False
+    parent_candidate_type: str | None = Field(default=None, max_length=80)
+    child_candidate_types: list[str] = Field(default_factory=list)
+    supports_search: bool = True
+    supports_pagination: bool = True
+    supports_parent_filter: bool = False
+
+
+class SignalMappingKindTargetingSemantics(BaseModel):
+    """Targeting behavior for one signal mapping kind."""
+
+    model_config = _config()
+
+    mapping_kind: str = Field(..., min_length=1, max_length=80)
+    supports_composed: bool = False
+    composition_models: list[str] = Field(default_factory=list)
+    supported_modes: list[str] = Field(default_factory=list)
+    buyer_targeting_fields: list[str] = Field(default_factory=list)
+    participates_in_composed_authoring: bool = False
+    exclusive_with_other_signals: bool = False
+    notes: str | None = None
+
+
+class SignalTargetingSemantics(BaseModel):
+    """Adapter-level signal targeting and composition behavior."""
+
+    model_config = _config()
+
+    supports_composed: bool = False
+    composition_models: list[str] = Field(default_factory=list)
+    supported_modes: list[str] = Field(default_factory=list)
+    buyer_targeting_fields: list[str] = Field(default_factory=list)
+    mapping_kinds: list[SignalMappingKindTargetingSemantics] = Field(default_factory=list)
 
 
 class SignalAdapterCapabilitiesResponse(BaseModel):
@@ -1093,6 +1147,10 @@ class SignalAdapterCapabilitiesResponse(BaseModel):
     adapter: str
     supports_signal_mapping_authoring: bool
     mapping_kinds: list[SignalMappingKindCapability] = Field(default_factory=list)
+    supported_candidate_types: list[str] = Field(default_factory=list)
+    candidate_types: list[SignalCandidateTypeCapability] = Field(default_factory=list)
+    default_candidate_type: str | None = None
+    targeting_semantics: SignalTargetingSemantics = Field(default_factory=SignalTargetingSemantics)
     value_types: list[str] = Field(default_factory=lambda: ["binary", "categorical", "numeric"])
 
 
