@@ -43,7 +43,6 @@ from src.adapters.gam.managers.orders import (
     NON_GUARANTEED_LINE_ITEM_TYPES,
 )
 from src.adapters.gam.pricing_compatibility import PricingCompatibility
-from src.adapters.gam_data_freshness import validate_and_log_freshness
 from src.core.audit_logger import AuditLogger
 from src.core.sandbox import is_sandbox_trafficking_request
 from src.core.schemas import (
@@ -64,25 +63,6 @@ from src.core.schemas import (
 
 # Set up logger
 logger = logging.getLogger(__name__)
-
-
-def _clamp_target_date_to_now(end_dt: datetime) -> datetime:
-    """Clamp a reporting-window ``end`` to "now" for freshness validation.
-
-    Ad-hoc ``get_media_buy_delivery`` queries may legitimately extend past
-    "now" (e.g. a buyer polling ``[today, tomorrow]``). GAM cannot have
-    produced data for a future boundary, so the freshness validator would
-    reject every such window as stale. Clamping to "now" lets the validator
-    apply its real check ("does the report cover up to now?") instead of an
-    impossible one ("does the report cover up to tomorrow?").
-
-    Naive datetimes are clamped against a naive ``now`` so the comparison
-    doesn't raise; aware datetimes against ``datetime.now(UTC)``.
-    """
-    now = datetime.now(UTC)
-    if end_dt.tzinfo is None:
-        now = now.replace(tzinfo=None)
-    return min(end_dt, now)
 
 
 class GoogleAdManager(AdServerAdapter):
@@ -1211,17 +1191,6 @@ class GoogleAdManager(AdServerAdapter):
             requested_timezone="America/New_York",
         )
 
-        # Validate data freshness. See `_clamp_target_date_to_now`: ad-hoc
-        # buyer queries can extend past "now", and GAM cannot have produced
-        # data for a future boundary. The webhook delivery path is unaffected
-        # because it calls `is_data_fresh_for_webhook` directly with its own
-        # yesterday-anchored target.
-        target_date = _clamp_target_date_to_now(date_range.end)
-        is_fresh = validate_and_log_freshness(reporting_data, media_buy_id, target_date=target_date)
-
-        if not is_fresh:
-            raise ValueError(f"GAM data is not fresh enough for media buy {media_buy_id}")
-
         # Aggregate totals across all packages
         total_impressions = reporting_data.metrics.get("total_impressions", 0)
         total_clicks = reporting_data.metrics.get("total_clicks", 0)
@@ -1344,7 +1313,7 @@ class GoogleAdManager(AdServerAdapter):
         Uses stats stored in the GAMLineItem table (synced every ~15 minutes by the
         background sync job). The staleness is derived from the last_synced timestamp.
         """
-        from datetime import UTC, datetime
+        from datetime import datetime
 
         from sqlalchemy import select
 
