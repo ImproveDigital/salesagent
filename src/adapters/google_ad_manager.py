@@ -1145,6 +1145,7 @@ class GoogleAdManager(AdServerAdapter):
             # Extract package information from raw_request
             raw_request = media_buy.raw_request or {}
             packages_data = raw_request.get("packages", [])
+            gam_order_id = media_buy.external_id  # GAM order ID — must scope the report to this order
 
         # Initialize GAM reporting service
         if self.dry_run or not self.client:
@@ -1170,6 +1171,29 @@ class GoogleAdManager(AdServerAdapter):
 
         reporting_service = GAMReportingService(self.client)
 
+        # Without a GAM order ID we have no way to scope the report — returning
+        # advertiser-wide totals would mix this order's metrics with every other
+        # order on the account and produce incorrect numbers on the detail page.
+        if not gam_order_id:
+            logger.warning(
+                "No GAM order ID (external_id) for media buy %s — cannot fetch order-scoped delivery metrics",
+                media_buy_id,
+            )
+            return AdapterGetMediaBuyDeliveryResponse(
+                media_buy_id=media_buy_id,
+                reporting_period=date_range,
+                by_package=[],
+                totals=DeliveryTotals(
+                    impressions=0,
+                    spend=0,
+                    clicks=0,
+                    ctr=0.0,
+                    completed_views=None,
+                    completion_rate=None,
+                ),
+                currency=str(media_buy.currency or "USD"),
+            )
+
         # date_range.start/.end are AwareDatetime objects
         start_dt = date_range.start
         end_dt = date_range.end
@@ -1183,11 +1207,11 @@ class GoogleAdManager(AdServerAdapter):
         else:
             range_type = "lifetime"
 
-        # Fetch delivery data from GAM
-        # Note: We'll aggregate across all line items associated with this media buy
+        # Fetch delivery data scoped to this specific GAM order
         reporting_data = reporting_service.get_reporting_data(
             date_range=cast("Literal['lifetime', 'this_month', 'today']", range_type),
             advertiser_id=self.advertiser_id,
+            order_id=gam_order_id,
             requested_timezone="America/New_York",
         )
 
