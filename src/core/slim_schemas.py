@@ -173,10 +173,21 @@ CREATE_MEDIA_BUY_SLIM_SCHEMA: dict = {
                     "creatives": {
                         "type": "array",
                         "description": (
-                            "Inline creative assets to upload and assign to this package. "
-                            "Each item needs: creative_id (str), name (str), "
-                            "format_kind (e.g. 'image'), assets (object keyed by slot). "
-                            "Example asset slot: image: {asset_type:'image', url, width, height}."
+                            "Inline creative assets to upload and assign to this package (one-shot path). "
+                            "Two approaches:\n"
+                            "  1. One-shot: include creatives here with format_id or format_kind + assets.\n"
+                            "  2. Two-step: call sync_creatives first, then reference creative_id here "
+                            "     (omit format_id/format_kind/assets).\n"
+                            "format_id vs format_kind: use format_id {agent_url, id} when you need to "
+                            "reference a named format from a specific creative agent. "
+                            "Always call list_creative_formats first to discover the correct agent_url "
+                            "(returned in creative_agents[].agent_url — typically "
+                            "'https://creative.adcontextprotocol.org/'). "
+                            "Use format_kind (enum string) for the simpler canonical-format path. "
+                            "format_id and format_kind are mutually exclusive.\n"
+                            "assets keys are slot names from the format (e.g. banner_image, click_url). "
+                            "banner_image: {asset_type:'image', url, width, height}. "
+                            "click_url: {asset_type:'url', url, url_type:'clickthrough'}."
                         ),
                         "items": {
                             "type": "object",
@@ -184,8 +195,37 @@ CREATE_MEDIA_BUY_SLIM_SCHEMA: dict = {
                             "properties": {
                                 "creative_id": {"type": "string"},
                                 "name": {"type": "string"},
+                                # format_id: legacy named-format path — agent_url discovered via
+                                # list_creative_formats creative_agents[].agent_url
+                                "format_id": {
+                                    "type": "object",
+                                    "description": (
+                                        "Named-format path. Always {agent_url, id}. "
+                                        "agent_url MUST be discovered from list_creative_formats "
+                                        "response's creative_agents[].agent_url "
+                                        "(e.g. 'https://creative.adcontextprotocol.org/'). "
+                                        "Mutually exclusive with format_kind."
+                                    ),
+                                    "properties": {
+                                        "agent_url": {
+                                            "type": "string",
+                                            "description": (
+                                                "URL of the agent that owns this format. "
+                                                "Discover via list_creative_formats creative_agents[].agent_url. "
+                                                "Example: 'https://creative.adcontextprotocol.org/'"
+                                            ),
+                                        },
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Format ID, e.g. 'display_300x250'.",
+                                        },
+                                    },
+                                    "required": ["agent_url", "id"],
+                                },
+                                # format_kind: 3.1+ canonical-format path — simpler alternative to format_id
                                 "format_kind": {
                                     "type": "string",
+                                    "description": "Canonical format name. Mutually exclusive with format_id.",
                                     "enum": [
                                         "image",
                                         "html5",
@@ -196,7 +236,14 @@ CREATE_MEDIA_BUY_SLIM_SCHEMA: dict = {
                                         "native_in_feed",
                                     ],
                                 },
-                                "assets": {"type": "object"},
+                                "assets": {
+                                    "type": "object",
+                                    "description": (
+                                        "Slot values keyed by slot name from the format. "
+                                        "banner_image: {asset_type:'image', url, width, height}. "
+                                        "click_url: {asset_type:'url', url, url_type:'clickthrough'}."
+                                    ),
+                                },
                             },
                         },
                     },
