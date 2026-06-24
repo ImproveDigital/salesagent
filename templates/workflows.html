@@ -2,6 +2,7 @@
 
 {% block title %}Workflows Dashboard - {{ tenant.name }}{% endblock %}
 
+{% from '_macros.html' import currency_symbol %}
 {% block content %}
 <div class="container">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
@@ -29,7 +30,7 @@
             <p style="margin: 0.5rem 0 0 0; color: #666;">Completed Today</p>
         </div>
         <div class="card" style="text-align: center;">
-            <h3 style="margin: 0; color: #95a5a6;">${{ "{:,.0f}".format(summary.total_spend) }}</h3>
+            <h3 style="margin: 0; color: #95a5a6;">{{ currency_symbol(summary.currency) }}{{ "{:,.0f}".format(summary.total_spend) }}</h3>
             <p style="margin: 0.5rem 0 0 0; color: #666;">Total Active Spend</p>
         </div>
     </div>
@@ -81,7 +82,7 @@
                         <td><code>{{ buy.media_buy_id }}</code></td>
                         <td>{{ buy.order_name }}</td>
                         <td>{{ buy.advertiser_name }}</td>
-                        <td>${{ "{:,.0f}".format(buy.budget) }}</td>
+                        <td>{{ currency_symbol(buy.currency) }}{{ "{:,.0f}".format(buy.budget) }}</td>
                         <td>{{ buy.start_date }}</td>
                         <td>{{ buy.end_date }}</td>
                         <td>
