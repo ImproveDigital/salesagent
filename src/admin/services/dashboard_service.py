@@ -313,6 +313,24 @@ class DashboardService:
     # resolution below.
     # ------------------------------------------------------------------
 
+    def _primary_currency(self, session) -> str:
+        """Return the tenant's primary currency code (GAM network → first CurrencyLimit → EUR)."""
+        from sqlalchemy import select
+
+        from src.core.database.models import AdapterConfig, CurrencyLimit
+
+        stmt = select(AdapterConfig).filter_by(tenant_id=self.tenant_id)
+        adapter = session.scalars(stmt).first()
+        if adapter and adapter.gam_network_currency:
+            return str(adapter.gam_network_currency)
+
+        stmt = select(CurrencyLimit).filter_by(tenant_id=self.tenant_id).order_by(CurrencyLimit.currency_code)
+        limit = session.scalars(stmt).first()
+        if limit:
+            return str(limit.currency_code)
+
+        return "EUR"
+
     def get_ledger_dashboard(self) -> dict[str, Any]:
         """Aggregate everything the Ledger dashboard renders.
 
@@ -323,10 +341,17 @@ class DashboardService:
         with get_db_session() as session:
             repo = MediaBuyRepository(session, self.tenant_id)
             tenant = self._load_tenant(session)
+            primary_currency = self._primary_currency(session)
+            masthead = self._masthead(session, tenant)
+            masthead["currency"] = primary_currency
+            incoming = self._incoming(repo)
+            incoming["currency"] = primary_currency
+            running = self._running(repo)
+            running["currency"] = primary_currency
             return {
-                "masthead": self._masthead(session, tenant),
-                "incoming": self._incoming(repo),
-                "running": self._running(repo),
+                "masthead": masthead,
+                "incoming": incoming,
+                "running": running,
                 "pipeline": self._pipeline(session),
                 "revenue_chart": self._revenue_chart(session, repo, days=30),
                 "needs_attention": self._needs_attention(session, repo),

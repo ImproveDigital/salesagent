@@ -2,6 +2,7 @@
 
 {% block title %}{{ tenant.name }} - Dashboard{% endblock %}
 
+{% from '_macros.html' import currency_symbol %}
 {% block content %}
 <style>
     .dashboard-grid {
@@ -770,7 +771,7 @@
     </div>
     <div class="ld-masthead__rev">
         <div class="ld-masthead__rev-label">Net revenue, last 30d</div>
-        <div class="ld-masthead__rev-value">${{ "{:,.0f}".format(m.net_revenue_30d) }}</div>
+        <div class="ld-masthead__rev-value">{{ currency_symbol(m.currency) }}{{ "{:,.0f}".format(m.net_revenue_30d) }}</div>
         <div class="ld-masthead__rev-delta">
             {% if m.revenue_delta_pct > 0 %}
                 <i class="fas fa-arrow-up" style="font-size:10px;"></i>
@@ -820,7 +821,7 @@
             {% endif %}
         </div>
         <div class="sa-pipeline__sub">
-            Offers waiting on you · <span class="total">${{ "{:,.0f}".format(inc.total_value) }} potential</span>
+            Offers waiting on you · <span class="total">{{ currency_symbol(inc.currency) }}{{ "{:,.0f}".format(inc.total_value) }} potential</span>
         </div>
         {% for r in inc.rows %}
             <a class="sa-pipeline__row" href="{{ script_name }}/tenant/{{ tenant.tenant_id }}/media-buy/{{ r.media_buy_id }}" style="text-decoration:none; color:inherit;">
@@ -830,7 +831,7 @@
                     <div class="sa-pipeline__row-what">{{ r.order_name }}</div>
                 </div>
                 <div>
-                    <div class="sa-pipeline__row-amount">${{ "{:,.0f}".format(r.budget) }}</div>
+                    <div class="sa-pipeline__row-amount">{{ currency_symbol(r.currency) }}{{ "{:,.0f}".format(r.budget) }}</div>
                     <div class="sa-pipeline__row-stale">{{ r.age_relative }}</div>
                 </div>
             </a>
@@ -850,7 +851,7 @@
             </h3>
         </div>
         <div class="sa-pipeline__sub">
-            Live deals delivering now · <span class="total">${{ "{:,.0f}".format(run.total_value) }} committed</span>
+            Live deals delivering now · <span class="total">{{ currency_symbol(run.currency) }}{{ "{:,.0f}".format(run.total_value) }} committed</span>
         </div>
         {% for r in run.rows %}
             <a class="sa-pipeline__row" href="{{ script_name }}/tenant/{{ tenant.tenant_id }}/media-buy/{{ r.media_buy_id }}" style="text-decoration:none; color:inherit;">
@@ -867,7 +868,7 @@
                     <div class="sa-pipeline__row-what">{{ r.order_name }}</div>
                 </div>
                 <div>
-                    <div class="sa-pipeline__row-amount">${{ "{:,.0f}".format(r.rate_per_week) }}/wk</div>
+                    <div class="sa-pipeline__row-amount">{{ currency_symbol(r.currency) }}{{ "{:,.0f}".format(r.rate_per_week) }}/wk</div>
                     <div class="sa-pipeline__row-stale{% if r.pacing == 'under' %}" style="color: var(--sa-warning);{% endif %}">
                         {{ r.pacing }}
                     </div>
@@ -923,8 +924,8 @@
             <div>
                 <div class="sa-label">Revenue · 30 days</div>
                 <div class="figures">
-                    <span class="sa-num sa-num-lg">${{ "{:,.0f}".format(m.net_revenue_30d) }}</span>
-                    <span class="vs">vs ${{ "{:,.0f}".format(m.net_revenue_prior_30) }} prior</span>
+                    <span class="sa-num sa-num-lg">{{ currency_symbol(m.currency) }}{{ "{:,.0f}".format(m.net_revenue_30d) }}</span>
+                    <span class="vs">vs {{ currency_symbol(m.currency) }}{{ "{:,.0f}".format(m.net_revenue_prior_30) }} prior</span>
                 </div>
             </div>
             <div class="ld-chart-periods">
@@ -1049,8 +1050,8 @@
                         </span>
                     {% endif %}
                 </td>
-                <td class="col-object">${{ "{:,.0f}".format(buy.budget) }}</td>
-                <td class="col-object">${{ "{:,.0f}".format(buy.spend) }}</td>
+                <td class="col-object">{{ currency_symbol(buy.currency) }}{{ "{:,.0f}".format(buy.budget) }}</td>
+                <td class="col-object">{{ currency_symbol(buy.currency) }}{{ "{:,.0f}".format(buy.spend) }}</td>
                 <td class="col-status">{{ buy.created_at_relative }}</td>
             </tr>
             {% else %}
