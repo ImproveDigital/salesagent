@@ -1410,7 +1410,26 @@ function testGAMServiceAccountConnection() {
         button.innerHTML = 'Test Connection';
 
         if (data.success) {
-            alert('✅ Connection successful!\n\nNetwork: ' + (data.networks?.[0]?.displayName || 'N/A') + '\nNetwork Code: ' + (data.networks?.[0]?.networkCode || 'N/A'));
+            const network = data.networks?.[0];
+            if (network) {
+                window.gamDetectedCurrency = network.currencyCode || 'USD';
+                window.gamSecondaryCurrencies = network.secondaryCurrencyCodes || [];
+                window.gamDetectedTimezone = network.timeZone || null;
+
+                // Persist detected currency/timezone immediately — service account
+                // flows have no separate save step that would carry these values.
+                fetch(`${config.scriptName}/tenant/${config.tenantId}/gam/configure`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        auth_method: 'service_account',
+                        network_currency: network.currencyCode,
+                        secondary_currencies: network.secondaryCurrencyCodes || [],
+                        network_timezone: network.timeZone || null
+                    })
+                }).catch(() => {}); // best-effort, don't block the alert
+            }
+            alert('✅ Connection successful!\n\nNetwork: ' + (network?.displayName || 'N/A') + '\nNetwork Code: ' + (network?.networkCode || 'N/A') + '\nCurrency: ' + (network?.currencyCode || 'N/A'));
         } else {
             alert('❌ Connection failed!\n\n' + (data.error || 'Unknown error') + '\n\nPlease make sure:\n1. You authorized the service account in GAM under Admin → Global Settings → API access → "Add a service account user" (NOT through the Users page — that path sends an email invitation and will not work for service accounts)\n2. The service account now appears under Admin → Access & authorization → Users as an active user (this is how you verify the authorization took effect)\n3. You assigned the Trafficker role\n4. You clicked Save in GAM\n5. The network code is correct');
         }

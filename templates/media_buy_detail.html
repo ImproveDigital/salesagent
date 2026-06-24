@@ -59,6 +59,12 @@
             <span class="label">Media Buy ID:</span>
             <span class="value">{{ media_buy.media_buy_id }}</span>
         </div>
+        {% if media_buy.external_id %}
+        <div class="detail-row">
+            <span class="label">External ID:</span>
+            <span class="value">{{ media_buy.external_id }}</span>
+        </div>
+        {% endif %}
         <div class="detail-row">
             <span class="label">Status:</span>
             <span class="value">

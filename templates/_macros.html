@@ -9,5 +9,5 @@
         'MYR': 'RM', 'PHP': '₱',
         'TRY': '₺', 'RUB': '₽', 'ZAR': 'R'
     } -%}
-    {{- symbols.get(code, code) -}}
+    {{- symbols[code] if code in symbols else code -}}
 {%- endmacro %}

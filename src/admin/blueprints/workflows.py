@@ -46,7 +46,7 @@ def list_workflows(tenant_id, **kwargs):
         media_buys = media_buy_repo.list_all_ordered_by_created()
 
         # Resolve tenant primary currency (GAM network → first CurrencyLimit → USD)
-        primary_currency = "EUR"
+        primary_currency = "USD"
         adapter = db.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
         if adapter and adapter.gam_network_currency:
             primary_currency = str(adapter.gam_network_currency)

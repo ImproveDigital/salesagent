@@ -146,7 +146,7 @@ def _extract_safe_request_data() -> dict[str, str]:
 
     # JSON data
     elif request.is_json:
-        json_data = request.get_json() or {}
+        json_data = request.get_json(silent=True) or {}
         for key, value in json_data.items():
             if not _is_sensitive_field(key):
                 safe_fields[key] = _sanitize_value(value)
