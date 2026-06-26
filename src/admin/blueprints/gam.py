@@ -441,6 +441,15 @@ def configure_gam(tenant_id):
                 # Only update service_account_json if provided (to allow network code updates without resending JSON)
                 if service_account_json:
                     adapter_config.gam_service_account_json = service_account_json
+                    try:
+                        import json as _json
+
+                        sa_data = _json.loads(service_account_json)
+                        client_email = sa_data.get("client_email")
+                        if client_email:
+                            adapter_config.gam_service_account_email = client_email
+                    except Exception:
+                        pass
                 adapter_config.gam_refresh_token = None
 
             # Also update tenant's ad_server field
