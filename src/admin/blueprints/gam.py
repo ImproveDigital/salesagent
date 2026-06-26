@@ -1119,6 +1119,30 @@ def test_gam_connection(tenant_id):
                 # It's okay if we can't fetch companies/users
                 result["warning"] = f"Connected but couldn't fetch all resources: {str(e)}"
 
+        # Persist currency/timezone from the verified network into adapter_config.
+        # Only fills fields that are currently empty — never overwrites network_code,
+        # auth_method, credentials, or any other existing config.
+        if networks:
+            try:
+                network = networks[0]
+                detected_currency = network.get("currencyCode")
+                detected_secondary = network.get("secondaryCurrencyCodes") or []
+                detected_timezone = network.get("timeZone")
+                with get_db_session() as db_session:
+                    from src.core.database.models import AdapterConfig
+
+                    adapter_config = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
+                    if adapter_config:
+                        if detected_currency and not adapter_config.gam_network_currency:
+                            adapter_config.gam_network_currency = detected_currency
+                        if detected_secondary and not adapter_config.gam_secondary_currencies:
+                            adapter_config.gam_secondary_currencies = detected_secondary
+                        if detected_timezone and not adapter_config.gam_network_timezone:
+                            adapter_config.gam_network_timezone = detected_timezone
+                        db_session.commit()
+            except Exception as persist_err:
+                logger.warning(f"Could not persist network currency from test connection: {persist_err}")
+
         return jsonify(result)
 
     except Exception as e:

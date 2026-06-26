@@ -205,7 +205,7 @@ class DashboardService:
                 if start_date and end_date:
                     days_in_flight = (end_date - start_date).days + 1
                     if days_in_flight > 0:
-                        daily_revenue += float(buy.delivered_amount) / days_in_flight
+                        daily_revenue += float(buy.budget or 0) / days_in_flight
 
             revenue_data.append({"date": day.isoformat(), "revenue": round(daily_revenue, 2)})
 
@@ -424,14 +424,20 @@ class DashboardService:
         from sqlalchemy import select
 
         stmt = (
-            select(MediaBuy.delivered_amount)
+            select(MediaBuy.delivered_amount)            
             .where(MediaBuy.tenant_id == self.tenant_id)
             .where(MediaBuy.approved_at != None)  # noqa: E711
             .where(MediaBuy.approved_at >= start)
             .where(MediaBuy.approved_at < end)
-            .where(MediaBuy.status.in_(["active", "completed"]))
             .where(MediaBuy.delivered_amount != None)  # noqa: E711
         )
+        # total = 0.0
+        # for budget, delivered in session.execute(stmt):
+        #     if delivered is not None:
+        #         total += float(delivered)
+        #     elif budget is not None:
+        #         total += float(budget)
+        # return total
         return sum(float(row) for (row,) in session.execute(stmt))
 
     def _incoming(self, repo: MediaBuyRepository) -> dict[str, Any]:

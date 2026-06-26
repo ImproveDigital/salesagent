@@ -1415,19 +1415,6 @@ function testGAMServiceAccountConnection() {
                 window.gamDetectedCurrency = network.currencyCode || 'USD';
                 window.gamSecondaryCurrencies = network.secondaryCurrencyCodes || [];
                 window.gamDetectedTimezone = network.timeZone || null;
-
-                // Persist detected currency/timezone immediately — service account
-                // flows have no separate save step that would carry these values.
-                fetch(`${config.scriptName}/tenant/${config.tenantId}/gam/configure`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        auth_method: 'service_account',
-                        network_currency: network.currencyCode,
-                        secondary_currencies: network.secondaryCurrencyCodes || [],
-                        network_timezone: network.timeZone || null
-                    })
-                }).catch(() => {}); // best-effort, don't block the alert
             }
             alert('✅ Connection successful!\n\nNetwork: ' + (network?.displayName || 'N/A') + '\nNetwork Code: ' + (network?.networkCode || 'N/A') + '\nCurrency: ' + (network?.currencyCode || 'N/A'));
         } else {
