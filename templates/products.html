@@ -3,6 +3,7 @@
 {% block title %}Products - {{ tenant_name }} - Sales Agent Admin{% endblock %}
 
 {% block content %}
+{% from '_macros.html' import currency_symbol %}
 {% set can_manage_products = publisher_owns('compose_products') %}
 <!-- Product Design Guide -->
 <div class="sa-banner sa-banner--info" style="margin-bottom: var(--sa-space-4);">
@@ -95,9 +96,9 @@
                             <div class="product-card-price">
                                 <span class="badge" style="background: #28a745;">{{ first_option.pricing_model }}</span>
                                 {% if first_option.is_fixed and first_option.rate %}
-                                    <strong>{{ first_option.currency }} ${{ "%.2f"|format(first_option.rate) }}</strong>
+                                    <strong>{{ currency_symbol(first_option.currency) }}{{ "%.2f"|format(first_option.rate) }}</strong>
                                 {% elif not first_option.is_fixed and first_option.price_guidance and first_option.price_guidance.floor %}
-                                    <span style="font-size: 0.9rem;">Floor: {{ first_option.currency }} ${{ "%.2f"|format(first_option.price_guidance.floor) }}</span>
+                                    <span style="font-size: 0.9rem;">Floor: {{ currency_symbol(first_option.currency) }}{{ "%.2f"|format(first_option.price_guidance.floor) }}</span>
                                 {% endif %}
                             </div>
                         {% endif %}
@@ -243,13 +244,13 @@
                         {% if first_option.is_fixed and first_option.rate %}
                             {# Fixed price #}
                             <br>
-                            <span style="font-weight: 600;">{{ first_option.currency }} ${{ "%.2f"|format(first_option.rate) }}</span>
+                            <span style="font-weight: 600;">{{ currency_symbol(first_option.currency) }}{{ "%.2f"|format(first_option.rate) }}</span>
                         {% elif not first_option.is_fixed and first_option.price_guidance %}
                             {# Auction pricing with guidance #}
                             {% if first_option.price_guidance.floor %}
-                                {{ first_option.currency }} ${{ "%.2f"|format(first_option.price_guidance.floor) }}
+                                {{ currency_symbol(first_option.currency) }}{{ "%.2f"|format(first_option.price_guidance.floor) }}
                                 {% if first_option.price_guidance.p75 %}
-                                    - ${{ "%.2f"|format(first_option.price_guidance.p75) }}
+                                    - {{ currency_symbol(first_option.currency) }}{{ "%.2f"|format(first_option.price_guidance.p75) }}
                                 {% endif %}
                             {% endif %}
                         {% else %}

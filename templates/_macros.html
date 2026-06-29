@@ -1,0 +1,13 @@
+{% macro currency_symbol(code) -%}
+    {%- set symbols = {
+        'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'CHF': 'CHF',
+        'CAD': 'CA$', 'AUD': 'A$', 'NZD': 'NZ$', 'SGD': 'S$', 'HKD': 'HK$',
+        'NOK': 'kr', 'SEK': 'kr', 'DKK': 'kr',
+        'PLN': 'zł', 'CZK': 'Kč', 'HUF': 'Ft', 'RON': 'lei',
+        'BRL': 'R$', 'MXN': 'MX$', 'ARS': 'ARS',
+        'CNY': '¥', 'KRW': '₩', 'INR': '₹', 'THB': '฿', 'IDR': 'Rp',
+        'MYR': 'RM', 'PHP': '₱',
+        'TRY': '₺', 'RUB': '₽', 'ZAR': 'R'
+    } -%}
+    {{- symbols[code] if code in symbols else code -}}
+{%- endmacro %}

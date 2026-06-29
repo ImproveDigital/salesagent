@@ -11,7 +11,7 @@ from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.admin.utils.embedded_capabilities import require_capability_blueprint
 from src.core.database.database_session import get_db_session
-from src.core.database.models import Context
+from src.core.database.models import AdapterConfig, Context, CurrencyLimit
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
@@ -45,12 +45,25 @@ def list_workflows(tenant_id, **kwargs):
         media_buy_repo = MediaBuyRepository(db, tenant_id)
         media_buys = media_buy_repo.list_all_ordered_by_created()
 
+        # Resolve tenant primary currency (GAM network → first CurrencyLimit → USD)
+        primary_currency = "USD"
+        adapter = db.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
+        if adapter and adapter.gam_network_currency:
+            primary_currency = str(adapter.gam_network_currency)
+        else:
+            cl = db.scalars(
+                select(CurrencyLimit).filter_by(tenant_id=tenant_id).order_by(CurrencyLimit.currency_code)
+            ).first()
+            if cl:
+                primary_currency = str(cl.currency_code)
+
         # Build summary stats
         summary = {
             "active_buys": len([mb for mb in media_buys if mb.status == "active"]),
             "pending_tasks": len(pending_steps),
             "completed_today": 0,  # TODO: Calculate from workflow history
             "total_spend": sum(mb.budget or 0 for mb in media_buys if mb.status == "active"),
+            "currency": primary_currency,
         }
 
         # Format all workflow steps for display in tasks tab

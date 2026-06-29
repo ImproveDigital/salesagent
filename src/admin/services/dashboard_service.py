@@ -196,6 +196,10 @@ class DashboardService:
 
             daily_revenue = 0.0
             for buy in daily_buys:
+                # Skip buys with no GAM delivery confirmation — budget alone is unreliable
+                # (order may not have been created, needs creative, line item missing, etc.)
+                if buy.delivered_amount is None:
+                    continue
                 start_date = type_cast(date | None, buy.start_date)
                 end_date = type_cast(date | None, buy.end_date)
                 if start_date and end_date:
@@ -309,6 +313,24 @@ class DashboardService:
     # resolution below.
     # ------------------------------------------------------------------
 
+    def _primary_currency(self, session) -> str:
+        """Return the tenant's primary currency code (GAM network → first CurrencyLimit → EUR)."""
+        from sqlalchemy import select
+
+        from src.core.database.models import AdapterConfig, CurrencyLimit
+
+        stmt = select(AdapterConfig).filter_by(tenant_id=self.tenant_id)
+        adapter = session.scalars(stmt).first()
+        if adapter and adapter.gam_network_currency:
+            return str(adapter.gam_network_currency)
+
+        stmt = select(CurrencyLimit).filter_by(tenant_id=self.tenant_id).order_by(CurrencyLimit.currency_code)
+        limit = session.scalars(stmt).first()
+        if limit:
+            return str(limit.currency_code)
+
+        return "EUR"
+
     def get_ledger_dashboard(self) -> dict[str, Any]:
         """Aggregate everything the Ledger dashboard renders.
 
@@ -319,10 +341,17 @@ class DashboardService:
         with get_db_session() as session:
             repo = MediaBuyRepository(session, self.tenant_id)
             tenant = self._load_tenant(session)
+            primary_currency = self._primary_currency(session)
+            masthead = self._masthead(session, tenant)
+            masthead["currency"] = primary_currency
+            incoming = self._incoming(repo)
+            incoming["currency"] = primary_currency
+            running = self._running(repo)
+            running["currency"] = primary_currency
             return {
-                "masthead": self._masthead(session, tenant),
-                "incoming": self._incoming(repo),
-                "running": self._running(repo),
+                "masthead": masthead,
+                "incoming": incoming,
+                "running": running,
                 "pipeline": self._pipeline(session),
                 "revenue_chart": self._revenue_chart(session, repo, days=30),
                 "needs_attention": self._needs_attention(session, repo),
@@ -388,25 +417,28 @@ class DashboardService:
     def _net_revenue_in_window(self, session, start: datetime, end: datetime) -> float:
         """Net revenue for media buys approved in [start, end].
 
-        Prefers the delivery snapshot (`delivered_amount`) when present;
-        falls back to budget for buys that have never been polled.
+        Only counts buys with confirmed GAM delivery data (delivered_amount IS NOT NULL).
+        Buys that never ran in GAM (needs creative, line item not created, etc.) have no
+        delivery snapshot and are excluded — budget alone is not a reliable revenue signal.
         """
         from sqlalchemy import select
 
         stmt = (
-            select(MediaBuy.budget, MediaBuy.delivered_amount)
+            select(MediaBuy.delivered_amount)            
             .where(MediaBuy.tenant_id == self.tenant_id)
             .where(MediaBuy.approved_at != None)  # noqa: E711
             .where(MediaBuy.approved_at >= start)
             .where(MediaBuy.approved_at < end)
+            .where(MediaBuy.delivered_amount != None)  # noqa: E711
         )
-        total = 0.0
-        for budget, delivered in session.execute(stmt):
-            if delivered is not None:
-                total += float(delivered)
-            elif budget is not None:
-                total += float(budget)
-        return total
+        # total = 0.0
+        # for budget, delivered in session.execute(stmt):
+        #     if delivered is not None:
+        #         total += float(delivered)
+        #     elif budget is not None:
+        #         total += float(budget)
+        # return total
+        return sum(float(row) for (row,) in session.execute(stmt))
 
     def _incoming(self, repo: MediaBuyRepository) -> dict[str, Any]:
         """Offers waiting on a yes / no / counter from the publisher."""

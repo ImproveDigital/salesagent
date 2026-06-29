@@ -1761,12 +1761,16 @@ def edit_product(tenant_id, product_id):
                             )
 
                         base_config["targeted_ad_unit_ids"] = id_list
+                    else:
+                        base_config.pop("targeted_ad_unit_ids", None)
 
                     placement_ids = form_data.get("targeted_placement_ids", "").strip()
                     if placement_ids:
                         base_config["targeted_placement_ids"] = [
                             id.strip() for id in placement_ids.split(",") if id.strip()
                         ]
+                    else:
+                        base_config.pop("targeted_placement_ids", None)
 
                     base_config["include_descendants"] = form_data.get("include_descendants") == "on"
 
