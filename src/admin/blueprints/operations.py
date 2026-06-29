@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
 from adcp.types import CreateMediaBuySuccessResponse, Package
@@ -19,6 +20,65 @@ logger = logging.getLogger(__name__)
 
 # Create blueprint
 operations_bp = Blueprint("operations", __name__)
+
+# Creative statuses that count as ready to deliver (mirrors approve_creative gate).
+_APPROVED_CREATIVE_STATUSES = ("approved", "active")
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """Normalize a datetime to UTC (treating naive datetimes as UTC)."""
+    if dt is None:
+        return None
+    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _validate_media_buy_approval(media_buy, assignments, creatives, now: datetime) -> str | None:
+    """Validate that a media buy is ready to be approved.
+
+    Returns a human-readable error message if approval must be blocked, or
+    ``None`` if all gates pass. Pure function (no DB/Flask) so it can be
+    unit-tested directly.
+
+    Gates, in priority order:
+    1. At least one creative must be assigned.
+    2. No assigned creative may be rejected.
+    3. Every assigned creative must be approved.
+    4. The flight window must be consistent and not already ended.
+    """
+    if not assignments:
+        return "Cannot approve: no creatives are assigned to this media buy. Assign and approve creatives first."
+
+    creative_by_id = {c.creative_id: c for c in creatives}
+    rejected: list[str] = []
+    unapproved: list[str] = []
+    for assignment in assignments:
+        creative = creative_by_id.get(assignment.creative_id)
+        if creative is None:
+            unapproved.append(assignment.creative_id)
+        elif creative.status == "rejected":
+            rejected.append(assignment.creative_id)
+        elif creative.status not in _APPROVED_CREATIVE_STATUSES:
+            unapproved.append(assignment.creative_id)
+
+    if rejected:
+        return (
+            f"Cannot approve: {len(rejected)} creative(s) are rejected "
+            f"({', '.join(rejected)}). Remove or replace them first."
+        )
+    if unapproved:
+        return (
+            f"Cannot approve: {len(unapproved)} creative(s) are not yet approved "
+            f"({', '.join(unapproved)}). Approve the creatives first."
+        )
+
+    start_time = _as_utc(getattr(media_buy, "start_time", None))
+    end_time = _as_utc(getattr(media_buy, "end_time", None))
+    if end_time and end_time <= now:
+        return "Cannot approve: the flight window has already ended."
+    if start_time and end_time and end_time <= start_time:
+        return "Cannot approve: the flight end time must be after the start time."
+
+    return None
 
 
 # @operations_bp.route("/targeting", methods=["GET"])
@@ -377,6 +437,34 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 }
 
             if action == "approve":
+                # Required pre-approval validation: block approval (without touching
+                # the workflow step or pushing to the ad server) when creatives are
+                # not ready or the flight window is invalid.
+                if media_buy and media_buy.status == "pending_approval":
+                    from src.core.database.models import Creative, CreativeAssignment
+
+                    pre_assignments = db_session.scalars(
+                        select(CreativeAssignment).filter_by(tenant_id=tenant_id, media_buy_id=media_buy_id)
+                    ).all()
+                    pre_creative_ids = [a.creative_id for a in pre_assignments]
+                    pre_creatives = (
+                        db_session.scalars(
+                            select(Creative).filter(
+                                Creative.tenant_id == tenant_id, Creative.creative_id.in_(pre_creative_ids)
+                            )
+                        ).all()
+                        if pre_creative_ids
+                        else []
+                    )
+                    validation_error = _validate_media_buy_approval(
+                        media_buy, pre_assignments, pre_creatives, datetime.now(UTC)
+                    )
+                    if validation_error:
+                        flash(validation_error, "error")
+                        return redirect(
+                            url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                        )
+
                 step.status = "approved"
                 step.updated_at = datetime.now(UTC)
 
