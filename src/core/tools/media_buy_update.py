@@ -497,8 +497,11 @@ def _validate_update_submission(
             f"Invalid start_time: {eff_start.isoformat()} is in the past. start_time must be 'asap' or a future time.",
         )
 
-    # end_time must be after start_time (mirrors the apply-path check).
-    if eff_start is not None and eff_end is not None and eff_end <= eff_start:
+    # end_time must be after start_time (mirrors the apply-path check). Only
+    # enforced when a date is actually being changed — a pure budget/pause
+    # update must not be rejected for a buy's pre-existing date bounds.
+    dates_changing = new_start_provided or req.end_time is not None
+    if dates_changing and eff_start is not None and eff_end is not None and eff_end <= eff_start:
         return _err(
             "invalid_date_range",
             f"Invalid date range: end_time ({eff_end.isoformat()}) must be after start_time ({eff_start.isoformat()}).",

@@ -79,6 +79,12 @@ class TestDateRangeValidation:
             is None
         )
 
+    def test_no_date_change_skips_range_check_even_if_existing_bounds_inverted(self):
+        # A pure budget update must not be rejected for the buy's pre-existing
+        # date bounds — the range check only applies when a date is changing.
+        inverted = _buy(start=datetime(2026, 8, 1, tzinfo=UTC), end=datetime(2026, 7, 1, tzinfo=UTC))
+        assert _validate_update_submission(_req(ext={"salesagent": {"budget": 3}}), inverted, NOW) is None
+
 
 class TestPastStartValidation:
     def test_concrete_past_start_rejected(self):
