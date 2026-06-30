@@ -88,14 +88,13 @@ def require_auth(f):
 def get_tenant_access(tenant_id: str) -> bool:
     """Check if the current user has access to the specified tenant"""
     # Handle admin_ui style sessions
-    if "role" in session:
         # Super admin has access to all tenants
-        if session.get("role") == "super_admin":
-            return True
+    if session.get("role") == "super_admin":
+        return True
 
-        # Check if user has access to this specific tenant
-        if session.get("tenant_id") == tenant_id:
-            return True
+    # Check if user has access to this specific tenant
+    if session.get("tenant_id") == tenant_id:
+        return True
 
     # Handle legacy user object style (if any)
     user = session.get("user", {})
