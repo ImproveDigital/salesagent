@@ -306,6 +306,27 @@ class DashboardService:
 
         return {"labels": [d["date"] for d in revenue_data], "data": [d["revenue"] for d in revenue_data]}
 
+    def get_revenue_trend(self, days: int) -> dict[str, Any]:
+        """Daily revenue trend plus net totals for a custom window.
+
+        Drives the dashboard revenue chart's period filter (7D / 30D / 90D / YTD).
+        ``net_revenue``/``net_revenue_prior`` use the same window definition as the
+        masthead so switching to 30D matches the headline figure.
+        """
+        with get_db_session() as session:
+            repo = MediaBuyRepository(session, self.tenant_id)
+            trend = self._calculate_revenue_trend(session, days=days, repo=repo)
+            now = datetime.now(UTC)
+            net = self._net_revenue_in_window(session, now - timedelta(days=days), now)
+            net_prior = self._net_revenue_in_window(session, now - timedelta(days=2 * days), now - timedelta(days=days))
+            return {
+                "labels": [d["date"] for d in trend],
+                "values": [d["revenue"] for d in trend],
+                "currency": self._primary_currency(session),
+                "net_revenue": round(float(net), 2),
+                "net_revenue_prior": round(float(net_prior), 2),
+            }
+
     # ------------------------------------------------------------------
     # Ledger dashboard — Incoming / Running / Pipeline three-stage view.
     # See https://github.com/bokelley/salesagent/issues/22 for the
@@ -424,7 +445,7 @@ class DashboardService:
         from sqlalchemy import select
 
         stmt = (
-            select(MediaBuy.delivered_amount)            
+            select(MediaBuy.delivered_amount)
             .where(MediaBuy.tenant_id == self.tenant_id)
             .where(MediaBuy.approved_at != None)  # noqa: E711
             .where(MediaBuy.approved_at >= start)
