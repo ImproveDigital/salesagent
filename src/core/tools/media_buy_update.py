@@ -337,10 +337,15 @@ def _check_guaranteed_immutable(
 
     Returns ``None`` when the request is safe to proceed. Returns a
     prepared ``UpdateMediaBuyError`` (code ``guaranteed_line_item_immutable``)
-    when at least one package's product is configured as a guaranteed
-    GAM line item (``STANDARD`` or ``SPONSORSHIP``) and the request
-    touches any reservation field (``start_time``, ``end_time``,
-    ``budget``).
+    when the buy has already been approved/pushed to GAM, at least one
+    package's product is configured as a guaranteed GAM line item
+    (``STANDARD`` or ``SPONSORSHIP``), and the request touches any
+    reservation field (``start_time``, ``end_time``, ``budget``).
+
+    Default-allow when the buy has not yet been approved/pushed to GAM
+    (``approved_at`` unset and ``external_id`` unstamped) — GAM only locks
+    reservation fields after approval, so a draft / pending_approval buy
+    has no GAM Order or LineItem to reject.
 
     Default-allow on unknown ``line_item_type`` so this never blocks new
     GAM types Google introduces later.
@@ -353,9 +358,20 @@ def _check_guaranteed_immutable(
     if not requested:
         return None
 
+    assert uow.media_buys is not None
+
+    # GAM only locks reservation fields once the line item is approved and
+    # reserving inventory. Before that (draft / pending_approval) no GAM Order
+    # or LineItem exists — external_id is unstamped and approved_at is unset —
+    # so the fields are freely editable and there is nothing for GAM to reject.
+    # Scheduled / active / paused buys have been pushed to GAM (external_id set,
+    # approved_at set) and stay blocked.
+    buy = uow.media_buys.get_by_id(media_buy_id)
+    if buy is None or (buy.approved_at is None and not buy.external_id):
+        return None
+
     from src.core.database.models import Product as ModelProduct
 
-    assert uow.media_buys is not None
     packages = uow.media_buys.get_packages(media_buy_id)
     if not packages:
         return None
@@ -607,7 +623,14 @@ def _update_media_buy_impl(
         # impl before the first commits both reach this point. Mirrors the
         # create-path pattern at media_buy_create.py:1471-1489. Skipped in
         # dry_run since dry_run never writes a workflow step to read back.
-        if not testing_ctx.dry_run and req.idempotency_key:
+        #
+        # Skipped on approval replay (bypass_manual_approval=True): the
+        # operator-approved replay reuses the deferred step's idempotency_key,
+        # whose cached response is a "requires_approval" deferral — not a
+        # terminal result. Replaying it would echo the deferral back and the
+        # approved update would never execute. The approval path must run the
+        # mutation for real, so the idempotency short-circuit is bypassed here.
+        if not testing_ctx.dry_run and req.idempotency_key and not bypass_manual_approval:
             from src.core.database.repositories.workflow import WorkflowRepository
 
             workflow_repo = WorkflowRepository(session, tenant["tenant_id"])

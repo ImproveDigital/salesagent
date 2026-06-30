@@ -207,6 +207,38 @@ class TestIdempotencyReplaySkippedConditions:
 
         m_repo.return_value.find_by_idempotency_key.assert_not_called()
 
+    def test_approval_replay_bypasses_idempotency_short_circuit(self, patches):
+        # The operator-approved replay (_replay_update_media_buy) re-enters the
+        # impl with the deferred step's OWN idempotency_key. That step's cached
+        # response is a "requires_approval" deferral, not a terminal result —
+        # replaying it verbatim would echo the deferral back and the approved
+        # update would never execute. bypass_manual_approval=True must skip the
+        # idempotency short-circuit so the mutation runs for real.
+        uow = _make_uow(_make_buy())
+        cached = {
+            "media_buy_id": "mb_1",
+            "affected_packages": [],
+            "workflow_step_id": "step_first",
+        }
+        existing_step = MagicMock(step_id="step_first", status="requires_approval", response_data=cached)
+
+        with (
+            patch(f"{MODULE}.MediaBuyUoW", return_value=uow),
+            patch("src.core.database.repositories.workflow.WorkflowRepository") as m_repo,
+        ):
+            m_repo.return_value.find_by_idempotency_key.return_value = existing_step
+
+            req = UpdateMediaBuyRequest(
+                **required_request_kwargs(idempotency_key="key-abc-123xxxxx"),
+                media_buy_id="mb_1",
+            )
+            _update_media_buy_impl(req=req, identity=_make_identity(), bypass_manual_approval=True)
+
+        # The replay block is gated on `not bypass_manual_approval`, so the
+        # cached deferral is never even looked up; the impl proceeds normally.
+        m_repo.return_value.find_by_idempotency_key.assert_not_called()
+        patches["ctx_manager"].create_workflow_step.assert_called()
+
     def test_step_without_response_data_does_not_replay(self, patches):
         # An in-flight step (response_data still null) is not a completed
         # call — let the second call proceed normally and let the SDK
