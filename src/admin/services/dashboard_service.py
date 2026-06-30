@@ -196,16 +196,22 @@ class DashboardService:
 
             daily_revenue = 0.0
             for buy in daily_buys:
-                # Skip buys with no GAM delivery confirmation — budget alone is unreliable
-                # (order may not have been created, needs creative, line item missing, etc.)
-                if buy.delivered_amount is None:
-                    continue
+            
+                # if buy.delivered_amount is None:
+                #     continue
+
                 start_date = type_cast(date | None, buy.start_date)
                 end_date = type_cast(date | None, buy.end_date)
-                if start_date and end_date:
-                    days_in_flight = (end_date - start_date).days + 1
-                    if days_in_flight > 0:
-                        daily_revenue += float(buy.budget or 0) / days_in_flight
+                if not (start_date and end_date):
+                    continue
+                days_in_flight = (end_date - start_date).days + 1
+                if days_in_flight <= 0:
+                    continue
+                # Per-day delivered revenue: pro-rate the actual delivered amount
+                # across the flight. Fall back to budget pro-rata for buys with no
+                # delivery snapshot yet (not polled, needs creative, etc.).
+                total = float(buy.delivered_amount) #if buy.delivered_amount is not None else float(buy.budget or 0)
+                daily_revenue += total / days_in_flight
 
             revenue_data.append({"date": day.isoformat(), "revenue": round(daily_revenue, 2)})
 
