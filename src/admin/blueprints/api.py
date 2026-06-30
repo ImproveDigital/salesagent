@@ -1,15 +1,15 @@
 """API management blueprint."""
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 
 from src.admin.utils import require_auth
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.database_session import get_db_session
-from src.core.database.models import MediaBuy, Principal, Product
+from src.core.database.models import Product
 
 logger = logging.getLogger(__name__)
 
@@ -37,48 +37,19 @@ def api_health():
 @api_bp.route("/tenant/<tenant_id>/revenue-chart")
 @require_auth()
 def revenue_chart_api(tenant_id):
-    """API endpoint for revenue chart data."""
-    period = request.args.get("period", "7d")
+    """API endpoint for the dashboard revenue chart — daily revenue trend for the selected period."""
+    from src.admin.services.dashboard_service import DashboardService
 
-    # Parse period
-    if period == "7d":
-        days = 7
-    elif period == "30d":
-        days = 30
-    elif period == "90d":
-        days = 90
+    period = (request.args.get("period") or "30d").lower()
+
+    # Parse period into a day count. YTD spans from Jan 1 of the current year.
+    if period == "ytd":
+        today = datetime.now(UTC).date()
+        days = (today - today.replace(month=1, day=1)).days + 1
     else:
-        days = 7
+        days = {"7d": 7, "30d": 30, "90d": 90}.get(period, 30)
 
-    with get_db_session() as db_session:
-        # Calculate date range
-        date_start = datetime.now(UTC) - timedelta(days=days)
-
-        # Query revenue by principal
-        stmt = (
-            select(Principal.name, func.sum(MediaBuy.budget).label("revenue"))
-            .join(
-                MediaBuy,
-                (MediaBuy.principal_id == Principal.principal_id) & (MediaBuy.tenant_id == Principal.tenant_id),
-            )
-            .filter(
-                MediaBuy.tenant_id == tenant_id,
-                MediaBuy.created_at >= date_start,
-                MediaBuy.status.in_(["active", "completed"]),
-            )
-            .group_by(Principal.name)
-            .order_by(func.sum(MediaBuy.budget).desc())
-            .limit(10)
-        )
-        results = db_session.execute(stmt).all()
-
-        labels = []
-        values = []
-        for name, revenue in results:
-            labels.append(name or "Unknown")
-            values.append(float(revenue) if revenue else 0.0)
-
-        return jsonify({"labels": labels, "values": values})
+    return jsonify(DashboardService(tenant_id).get_revenue_trend(days))
 
 
 @api_bp.route("/oauth/status", methods=["GET"])

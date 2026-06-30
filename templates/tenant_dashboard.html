@@ -633,6 +633,11 @@
     .ld-chart-periods .period {
         padding: 4px 8px;
         border: 1px solid transparent;
+        cursor: pointer;
+        user-select: none;
+    }
+    .ld-chart-periods .period:hover {
+        border-color: var(--sa-ink-70);
     }
     .ld-chart-periods .period.is-active {
         border-color: var(--sa-ink);
@@ -922,17 +927,17 @@
     <div class="ld-chart-card">
         <div class="ld-chart-head">
             <div>
-                <div class="sa-label">Revenue · 30 days</div>
+                <div class="sa-label" id="revenuePeriodLabel">Revenue · 30 days</div>
                 <div class="figures">
-                    <span class="sa-num sa-num-lg">{{ currency_symbol(m.currency) }}{{ "{:,.0f}".format(m.net_revenue_30d) }}</span>
-                    <span class="vs">vs {{ currency_symbol(m.currency) }}{{ "{:,.0f}".format(m.net_revenue_prior_30) }} prior</span>
+                    <span class="sa-num sa-num-lg" id="revenueNetValue">{{ currency_symbol(m.currency) }}{{ "{:,.2f}".format(m.net_revenue_30d) }}</span>
+                    <span class="vs" id="revenuePriorValue">vs {{ currency_symbol(m.currency) }}{{ "{:,.2f}".format(m.net_revenue_prior_30) }} prior</span>
                 </div>
             </div>
-            <div class="ld-chart-periods">
-                <span class="period">7D</span>
-                <span class="period is-active">30D</span>
-                <span class="period">90D</span>
-                <span class="period">YTD</span>
+            <div class="ld-chart-periods" id="revenuePeriods">
+                <span class="period" data-period="7d" data-label="7 days">7D</span>
+                <span class="period is-active" data-period="30d" data-label="30 days">30D</span>
+                <span class="period" data-period="90d" data-label="90 days">90D</span>
+                <span class="period" data-period="ytd" data-label="year to date">YTD</span>
             </div>
         </div>
         <div style="position: relative; height: 180px;">
@@ -1425,8 +1430,14 @@ const revenueCanvas = document.getElementById('revenueLedgerChart');
 if (revenueCanvas) {
     const inkColor = getComputedStyle(document.documentElement).getPropertyValue('--sa-ink').trim() || '#1a1815';
     const ruleSoft = 'rgba(26, 24, 21, 0.08)';
+    // Tenant currency symbol — never hardcode '$' (chart serves any currency).
+    const currencySymbol = {{ currency_symbol(m.currency) | tojson }};
+    const formatMoney = v => currencySymbol + Number(v).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    });
     const ctx = revenueCanvas.getContext('2d');
-    new Chart(ctx, {
+    const revenueChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: {{ chart_labels | tojson }},
@@ -1445,7 +1456,10 @@ if (revenueCanvas) {
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: ctx => formatMoney(ctx.parsed.y) } },
+            },
             scales: {
                 x: { grid: { display: false }, ticks: { display: false }, border: { display: false } },
                 y: {
@@ -1454,13 +1468,47 @@ if (revenueCanvas) {
                     ticks: {
                         font: { family: 'JetBrains Mono, monospace', size: 10 },
                         color: 'rgba(26, 24, 21, 0.5)',
-                        callback: v => '$' + v.toLocaleString(),
+                        callback: v => formatMoney(v),
                     },
                     border: { display: false },
                 }
             }
         }
     });
+
+    // Period filter (7D / 30D / 90D / YTD) — fetch the trend for the selected
+    // window and update the chart, headline figures, and label in place.
+    const periodsEl = document.getElementById('revenuePeriods');
+    if (periodsEl) {
+        periodsEl.addEventListener('click', async (event) => {
+            const btn = event.target.closest('.period');
+            if (!btn || btn.classList.contains('is-active')) return;
+
+            const period = btn.dataset.period;
+            const url = `{{ script_name }}/api/tenant/{{ tenant.tenant_id }}/revenue-chart?period=${period}`;
+            try {
+                const response = await fetch(url, { credentials: 'same-origin' });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+
+                revenueChart.data.labels = data.labels;
+                revenueChart.data.datasets[0].data = data.values;
+                revenueChart.update();
+
+                const netEl = document.getElementById('revenueNetValue');
+                const priorEl = document.getElementById('revenuePriorValue');
+                const labelEl = document.getElementById('revenuePeriodLabel');
+                if (netEl) netEl.textContent = formatMoney(data.net_revenue);
+                if (priorEl) priorEl.textContent = `vs ${formatMoney(data.net_revenue_prior)} prior`;
+                if (labelEl) labelEl.textContent = `Revenue · ${btn.dataset.label}`;
+
+                periodsEl.querySelectorAll('.period').forEach(p => p.classList.remove('is-active'));
+                btn.classList.add('is-active');
+            } catch (err) {
+                console.error('Failed to load revenue trend:', err);
+            }
+        });
+    }
 }
 
 function refreshDashboard() {
