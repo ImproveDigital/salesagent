@@ -196,6 +196,10 @@ class DashboardService:
 
             daily_revenue = 0.0
             for buy in daily_buys:
+              
+                if buy.delivered_amount is None:
+                    continue
+
                 start_date = type_cast(date | None, buy.start_date)
                 end_date = type_cast(date | None, buy.end_date)
                 if not (start_date and end_date):
