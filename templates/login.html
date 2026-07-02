@@ -74,7 +74,7 @@
         <div style="display: flex; flex-direction: column; gap: 0.75rem;">
             {% if not single_tenant_mode %}
             <!-- Super Admin button (multi-tenant only) -->
-            <form method="POST" action="/admin/test/auth" style="margin: 0;">
+            <form method="POST" action="{{ url_for('auth.test_auth') }}" style="margin: 0;">
                 <input type="hidden" name="email" value="test_super_admin@example.com">
                 <input type="hidden" name="password" value="test123">
                 <button type="submit" class="btn" style="width: 100%; background: #2563eb;">
@@ -84,7 +84,7 @@
             {% endif %}
 
             <!-- Admin button -->
-            <form method="POST" action="/admin/test/auth" style="margin: 0;">
+            <form method="POST" action="{{ url_for('auth.test_auth') }}" style="margin: 0;">
                 <input type="hidden" name="email" value="test_tenant_admin@example.com">
                 <input type="hidden" name="password" value="test123">
                 {% if tenant_context %}
