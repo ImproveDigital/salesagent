@@ -181,16 +181,16 @@ class DashboardService:
             return []
 
     def _calculate_revenue_trend(
-        self, db_session, days: int = 30, *, repo: MediaBuyRepository | None = None
+        self, db_session, days: int = 30, *, end_date: date | None = None, repo: MediaBuyRepository | None = None
     ) -> list[dict[str, Any]]:
-        """Calculate daily revenue for the last N days."""
+        """Calculate daily revenue for `days` days ending on `end_date` (default today)."""
         if repo is None:
             repo = MediaBuyRepository(db_session, self.tenant_id)
-        today = datetime.now(UTC).date()
+        anchor = end_date or datetime.now(UTC).date()
         revenue_data = []
 
         for i in range(days):
-            day = today - timedelta(days=days - 1 - i)
+            day = anchor - timedelta(days=days - 1 - i)
 
             daily_buys = repo.list_in_flight_on_date(day, statuses=["active", "completed"])
 
@@ -312,15 +312,18 @@ class DashboardService:
         """Daily revenue trend plus net totals for a custom window.
 
         Drives the dashboard revenue chart's period filter (7D / 30D / 90D / YTD).
-        ``net_revenue``/``net_revenue_prior`` use the same window definition as the
-        masthead so switching to 30D matches the headline figure.
+        ``net_revenue`` is the sum of the plotted series and ``net_revenue_prior``
+        the sum of the preceding equal-length window, so the headline always
+        matches the chart.
         """
         with get_db_session() as session:
             repo = MediaBuyRepository(session, self.tenant_id)
             trend = self._calculate_revenue_trend(session, days=days, repo=repo)
-            now = datetime.now(UTC)
-            net = self._net_revenue_in_window(session, now - timedelta(days=days), now)
-            net_prior = self._net_revenue_in_window(session, now - timedelta(days=2 * days), now - timedelta(days=days))
+            prior = self._calculate_revenue_trend(
+                session, days=days, end_date=datetime.now(UTC).date() - timedelta(days=days), repo=repo
+            )
+            net = sum(d["revenue"] for d in trend)
+            net_prior = sum(d["revenue"] for d in prior)
             return {
                 "labels": [d["date"] for d in trend],
                 "values": [d["revenue"] for d in trend],
@@ -415,8 +418,14 @@ class DashboardService:
         # to budget pro-rata (the legacy estimate) when the snapshot has
         # not been written yet (no delivery polls have happened).
         now = datetime.now(UTC)
-        net_30d = self._net_revenue_in_window(session, now - timedelta(days=30), now)
-        net_prior_30 = self._net_revenue_in_window(session, now - timedelta(days=60), now - timedelta(days=30))
+        # Headline mirrors the revenue chart (delivered, else budget) so the big
+        # number equals the sum of the plotted 30-day series. Prior window is the
+        # preceding 30 days, for the vs-prior delta.
+        net_30d = sum(d["revenue"] for d in self._calculate_revenue_trend(session, days=30))
+        net_prior_30 = sum(
+            d["revenue"]
+            for d in self._calculate_revenue_trend(session, days=30, end_date=now.date() - timedelta(days=30))
+        )
         delta_pct = 0.0
         if net_prior_30 > 0:
             delta_pct = ((net_30d - net_prior_30) / net_prior_30) * 100
@@ -436,32 +445,6 @@ class DashboardService:
             "revenue_delta_pct": round(delta_pct, 1),
             "today_label": now.strftime("%a, %b %-d"),
         }
-
-    def _net_revenue_in_window(self, session, start: datetime, end: datetime) -> float:
-        """Net revenue for media buys approved in [start, end].
-
-        Only counts buys with confirmed GAM delivery data (delivered_amount IS NOT NULL).
-        Buys that never ran in GAM (needs creative, line item not created, etc.) have no
-        delivery snapshot and are excluded — budget alone is not a reliable revenue signal.
-        """
-        from sqlalchemy import select
-
-        stmt = (
-            select(MediaBuy.delivered_amount)
-            .where(MediaBuy.tenant_id == self.tenant_id)
-            .where(MediaBuy.approved_at != None)  # noqa: E711
-            .where(MediaBuy.approved_at >= start)
-            .where(MediaBuy.approved_at < end)
-            .where(MediaBuy.delivered_amount != None)  # noqa: E711
-        )
-        # total = 0.0
-        # for budget, delivered in session.execute(stmt):
-        #     if delivered is not None:
-        #         total += float(delivered)
-        #     elif budget is not None:
-        #         total += float(budget)
-        # return total
-        return sum(float(row) for (row,) in session.execute(stmt))
 
     def _incoming(self, repo: MediaBuyRepository) -> dict[str, Any]:
         """Offers waiting on a yes / no / counter from the publisher."""
