@@ -20,11 +20,23 @@ from src.core.tools.media_buy_update import _check_guaranteed_immutable
 from tests.factories.spec_required_kwargs import required_request_kwargs
 
 
-def _make_uow(packages):
+def _make_uow(packages, buy="__default__"):
     uow = MagicMock()
     uow.media_buys = MagicMock()
     uow.media_buys.get_packages.return_value = packages
+    # Default buy looks approved/pushed to GAM so the guard still fires for the
+    # original type-based cases. Pass an explicit ``buy`` to override.
+    if buy == "__default__":
+        buy = _buy(approved_at="2026-01-01T00:00:00Z", external_id="gam_order_1")
+    uow.media_buys.get_by_id.return_value = buy
     return uow
+
+
+def _buy(approved_at=None, external_id=None):
+    b = MagicMock()
+    b.approved_at = approved_at
+    b.external_id = external_id
+    return b
 
 
 def _make_session(products):
@@ -188,5 +200,53 @@ class TestEdgeCases:
         req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_1", start_time="2026-06-01T00:00:00Z")
         uow = _make_uow([_pkg("prod_1")])
         session = _make_session([_product("prod_1", None)])
+
+        assert _check_guaranteed_immutable(req, "mb_1", uow, session, "t_1") is None
+
+
+class TestApprovalGate:
+    """Reservation immutability only applies once the buy is pushed to GAM.
+
+    A guaranteed product alone is not enough — GAM locks reservation fields at
+    approval, so draft / pending_approval buys (no GAM Order, no LineItem) must
+    still be editable.
+    """
+
+    def test_pending_approval_buy_allows_reservation_change(self):
+        # Buy never approved and never pushed to GAM (approved_at + external_id
+        # both unset) — no GAM footprint to reject. This is the mb_21e5342f73bc case.
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_1", start_time="2026-06-01T00:00:00Z")
+        uow = _make_uow([_pkg("prod_1")], buy=_buy(approved_at=None, external_id=None))
+        session = _make_session([_product("prod_1", "STANDARD")])
+
+        assert _check_guaranteed_immutable(req, "mb_1", uow, session, "t_1") is None
+        # Pre-GAM short-circuit: never reaches the product lookup.
+        uow.media_buys.get_packages.assert_not_called()
+
+    def test_approved_guaranteed_buy_still_blocks(self):
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_1", start_time="2026-06-01T00:00:00Z")
+        uow = _make_uow([_pkg("prod_1")], buy=_buy(approved_at="2026-01-01T00:00:00Z", external_id=None))
+        session = _make_session([_product("prod_1", "STANDARD")])
+
+        result = _check_guaranteed_immutable(req, "mb_1", uow, session, "t_1")
+        assert isinstance(result, UpdateMediaBuyError)
+        assert result.errors[0].code == "guaranteed_line_item_immutable"
+
+    def test_scheduled_buy_with_external_id_blocks(self):
+        # Auto-approved future-start buy: pushed to GAM (external_id stamped)
+        # even though approved_at may be unset. Reservation is locked.
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_1", start_time="2026-06-01T00:00:00Z")
+        uow = _make_uow([_pkg("prod_1")], buy=_buy(approved_at=None, external_id="gam_order_99"))
+        session = _make_session([_product("prod_1", "STANDARD")])
+
+        result = _check_guaranteed_immutable(req, "mb_1", uow, session, "t_1")
+        assert isinstance(result, UpdateMediaBuyError)
+        assert result.errors[0].details["line_item_type"] == "STANDARD"
+
+    def test_missing_buy_passes_through(self):
+        # Buy not found — nothing to protect; let downstream surface it.
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_1", start_time="2026-06-01T00:00:00Z")
+        uow = _make_uow([_pkg("prod_1")], buy=None)
+        session = _make_session([_product("prod_1", "STANDARD")])
 
         assert _check_guaranteed_immutable(req, "mb_1", uow, session, "t_1") is None
