@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from '_macros.html' import currency_symbol %}
 
 {% block title %}GAM Reporting - {{ tenant.name }}{% endblock %}
 
@@ -16,16 +17,17 @@
                         <option value="today">Today (Hourly)</option>
                         <option value="this_month" selected>This Month (Daily)</option>
                         <option value="lifetime">Lifetime (Daily)</option>
+                        <option value="all_time">All Time</option>
+
                     </select>
                 </div>
                 <div class="col-md-3">
                     <label for="timezone">Timezone</label>
                     <select id="timezone" class="form-control" onchange="updateReports()">
-                        <option value="America/New_York">Eastern Time</option>
-                        <option value="America/Chicago">Central Time</option>
-                        <option value="America/Denver">Mountain Time</option>
-                        <option value="America/Los_Angeles">Pacific Time</option>
-                        <option value="UTC">UTC</option>
+                        <option value="Europe/Amsterdam" selected>Amsterdam (CET/CEST)</option>
+                        <option value="Europe/London">London (GMT/BST)</option>
+                        <option value="Europe/Lisbon">Lisbon (WET/WEST)</option>
+                        <option value="Europe/Helsinki">Helsinki (EET/EEST)</option>
                     </select>
                 </div>
                 <div class="col-md-3">
@@ -237,6 +239,8 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet-choropleth@1.1.4/dist/choropleth.js"></script>
 
 <script>
+// Tenant reporting currency (GAM network currency), resolved server-side
+const CURRENCY = '{{ currency_symbol(currency) }}';
 let currentData = null;
 let timeChart = null;
 let adUnitChart = null;
@@ -324,8 +328,8 @@ function updateSummaryCards(data) {
     const avgCpm = totals.impressions > 0 ? (totals.spend / totals.impressions * 1000) : 0;
 
     document.getElementById('total-impressions').textContent = totals.impressions.toLocaleString();
-    document.getElementById('total-spend').textContent = '$' + totals.spend.toFixed(2);
-    document.getElementById('avg-cpm').textContent = '$' + avgCpm.toFixed(2);
+    document.getElementById('total-spend').textContent = CURRENCY + totals.spend.toFixed(2);
+    document.getElementById('avg-cpm').textContent = CURRENCY + avgCpm.toFixed(2);
     document.getElementById('country-count').textContent = 'N/A'; // Not available in simplified data
 
     // Populate filter dropdowns with unique values from data
@@ -449,8 +453,8 @@ function updateTableView(aggregation) {
             <td>${row.impressions.toLocaleString()}</td>
             <td>${row.clicks.toLocaleString()}</td>
             <td>${row.ctr.toFixed(2)}%</td>
-            <td>$${row.spend.toFixed(2)}</td>
-            <td>$${row.cpm.toFixed(2)}</td>
+            <td>${CURRENCY}${row.spend.toFixed(2)}</td>
+            <td>${CURRENCY}${row.cpm.toFixed(2)}</td>
         `;
         tableBody.appendChild(tr);
     });
@@ -526,7 +530,8 @@ function updateTimeChart(aggregation) {
     // Group data by date
     const timeData = {};
     currentData.data.forEach(row => {
-        const date = row.timestamp.split('T')[0];
+        // All-time data is aggregated server-side and has no timestamps
+        const date = row.timestamp ? row.timestamp.split('T')[0] : 'All Time';
         if (!timeData[date]) {
             timeData[date] = { impressions: 0, spend: 0, clicks: 0 };
         }
@@ -554,7 +559,7 @@ function updateTimeChart(aggregation) {
                 backgroundColor: 'rgba(75, 192, 192, 0.2)',
                 yAxisID: 'y1',
             }, {
-                label: 'Spend ($)',
+                label: 'Spend (' + CURRENCY + ')',
                 data: spend,
                 borderColor: 'rgb(255, 99, 132)',
                 backgroundColor: 'rgba(255, 99, 132, 0.2)',
@@ -583,7 +588,7 @@ function updateTimeChart(aggregation) {
                     position: 'right',
                     title: {
                         display: true,
-                        text: 'Spend ($)'
+                        text: 'Spend (' + CURRENCY + ')'
                     },
                     grid: {
                         drawOnChartArea: false,
@@ -642,8 +647,8 @@ async function updateCountryHeatmap() {
                 row.innerHTML = `
                     <td>${country.country || 'Unknown'}</td>
                     <td>${country.impressions.toLocaleString()}</td>
-                    <td>$${country.spend.toFixed(2)}</td>
-                    <td>$${country.avg_cpm.toFixed(2)}</td>
+                    <td>${CURRENCY}${country.spend.toFixed(2)}</td>
+                    <td>${CURRENCY}${country.avg_cpm.toFixed(2)}</td>
                     <td>${country.ctr.toFixed(2)}%</td>
                 `;
             });
@@ -728,8 +733,8 @@ function updateMapMarkers(map, countryData) {
             marker.bindPopup(`
                 <strong>${country.country}</strong><br>
                 Impressions: ${country.impressions.toLocaleString()}<br>
-                CPM: $${country.avg_cpm.toFixed(2)}<br>
-                Spend: $${country.spend.toFixed(2)}<br>
+                CPM: ${CURRENCY}${country.avg_cpm.toFixed(2)}<br>
+                Spend: ${CURRENCY}${country.spend.toFixed(2)}<br>
                 CTR: ${country.ctr.toFixed(2)}%
             `);
         }
@@ -785,15 +790,15 @@ function addMapLegend(map, minCPM, maxCPM) {
             <div style="font-weight: bold; margin-bottom: 5px;">CPM Range</div>
             <div style="display: flex; align-items: center; margin-bottom: 3px;">
                 <div style="width: 20px; height: 10px; background: rgb(255, 0, 0); margin-right: 5px; border: 1px solid #ccc;"></div>
-                <span>$${minCPM.toFixed(2)} (Low)</span>
+                <span>${CURRENCY}${minCPM.toFixed(2)} (Low)</span>
             </div>
             <div style="display: flex; align-items: center; margin-bottom: 3px;">
                 <div style="width: 20px; height: 10px; background: rgb(255, 255, 0); margin-right: 5px; border: 1px solid #ccc;"></div>
-                <span>$${midCPM.toFixed(2)}</span>
+                <span>${CURRENCY}${midCPM.toFixed(2)}</span>
             </div>
             <div style="display: flex; align-items: center;">
                 <div style="width: 20px; height: 10px; background: rgb(0, 255, 0); margin-right: 5px; border: 1px solid #ccc;"></div>
-                <span>$${maxCPM.toFixed(2)} (High)</span>
+                <span>${CURRENCY}${maxCPM.toFixed(2)} (High)</span>
             </div>
         `;
 
@@ -932,8 +937,8 @@ async function updateAdUnitAnalysis() {
                 row.innerHTML = `
                     <td title="${adUnit.ad_unit_id}">${adUnit.ad_unit_name || adUnit.ad_unit_id || 'Unknown'}</td>
                     <td>${adUnit.impressions.toLocaleString()}</td>
-                    <td>$${adUnit.spend.toFixed(2)}</td>
-                    <td>$${adUnit.avg_cpm.toFixed(2)}</td>
+                    <td>${CURRENCY}${adUnit.spend.toFixed(2)}</td>
+                    <td>${CURRENCY}${adUnit.avg_cpm.toFixed(2)}</td>
                     <td>${fillRate}</td>
                 `;
             });
@@ -958,7 +963,7 @@ async function updateAdUnitAnalysis() {
                     }),
                     datasets: [
                         {
-                            label: 'Spend ($)',
+                            label: 'Spend (' + CURRENCY + ')',
                             data: topAdUnits.map(au => au.spend),
                             backgroundColor: 'rgba(54, 162, 235, 0.6)',
                             borderColor: 'rgba(54, 162, 235, 1)',
@@ -966,7 +971,7 @@ async function updateAdUnitAnalysis() {
                             yAxisID: 'y'
                         },
                         {
-                            label: 'CPM ($)',
+                            label: 'CPM (' + CURRENCY + ')',
                             data: topAdUnits.map(au => au.avg_cpm),
                             backgroundColor: 'rgba(255, 99, 132, 0.6)',
                             borderColor: 'rgba(255, 99, 132, 1)',
@@ -1001,7 +1006,7 @@ async function updateAdUnitAnalysis() {
                             position: 'left',
                             title: {
                                 display: true,
-                                text: 'Spend ($)'
+                                text: 'Spend (' + CURRENCY + ')'
                             }
                         },
                         y2: {
@@ -1010,7 +1015,7 @@ async function updateAdUnitAnalysis() {
                             position: 'right',
                             title: {
                                 display: true,
-                                text: 'CPM ($)'
+                                text: 'CPM (' + CURRENCY + ')'
                             },
                             grid: {
                                 drawOnChartArea: false

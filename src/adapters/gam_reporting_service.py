@@ -174,7 +174,7 @@ class GAMReportingService:
 
     def get_reporting_data(
         self,
-        date_range: Literal["lifetime", "this_month", "today"],
+        date_range: Literal["lifetime", "this_month", "today", "all_time"],
         advertiser_id: str | None = None,
         order_id: str | None = None,
         line_item_id: str | None = None,
@@ -186,7 +186,9 @@ class GAMReportingService:
         Get reporting data for specified date range and filters
 
         Args:
-            date_range: One of "lifetime", "this_month", or "today"
+            date_range: One of "lifetime", "this_month", "today", or "all_time".
+                "all_time" spans GAM's full data retention (~3 years) and is
+                aggregated server-side (no DATE dimension, no time series).
             advertiser_id: Optional advertiser/company ID filter
             order_id: Optional order ID filter
             line_item_id: Optional line item ID filter
@@ -199,7 +201,11 @@ class GAMReportingService:
         """
         # Determine the appropriate dimensions and date range
         dimensions, start_date, end_date, granularity = self._get_report_config(
-            date_range, requested_timezone, include_country, include_ad_unit
+            date_range,
+            requested_timezone,
+            include_country,
+            include_ad_unit,
+            include_date=date_range != "all_time",
         )
 
         # Build the report query
@@ -283,6 +289,12 @@ class GAMReportingService:
                 granularity = "total"
             elif date_range == "this_month":
                 start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                end_date = now
+                granularity = "total"
+            elif date_range == "all_time":
+                # Span GAM's full reporting data retention (~3 years). Only
+                # available aggregated — one row per entity keeps this cheap.
+                start_date = (now - timedelta(days=3 * 365)).replace(hour=0, minute=0, second=0, microsecond=0)
                 end_date = now
                 granularity = "total"
             else:  # lifetime
@@ -2038,7 +2050,7 @@ class GAMReportingService:
 
     def get_country_breakdown(
         self,
-        date_range: Literal["lifetime", "this_month", "today"],
+        date_range: Literal["lifetime", "this_month", "today", "all_time"],
         advertiser_id: str | None = None,
         order_id: str | None = None,
         line_item_id: str | None = None,
@@ -2144,7 +2156,7 @@ class GAMReportingService:
 
     def get_ad_unit_breakdown(
         self,
-        date_range: Literal["lifetime", "this_month", "today"],
+        date_range: Literal["lifetime", "this_month", "today", "all_time"],
         advertiser_id: str | None = None,
         order_id: str | None = None,
         line_item_id: str | None = None,
@@ -2295,7 +2307,7 @@ class GAMReportingService:
     def get_advertiser_summary(
         self,
         advertiser_id: str,
-        date_range: Literal["lifetime", "this_month", "today"],
+        date_range: Literal["lifetime", "this_month", "today", "all_time"],
         requested_timezone: str = "America/New_York",
     ) -> dict[str, Any]:
         """

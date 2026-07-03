@@ -49,7 +49,7 @@ def reporting(tenant_id):
     from flask import render_template
 
     from src.core.database.database_session import get_db_session
-    from src.core.database.models import Tenant
+    from src.core.database.models import AdapterConfig, CurrencyLimit, Tenant
 
     with get_db_session() as db_session:
         tenant_obj = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -81,7 +81,20 @@ def reporting(tenant_id):
                 400,
             )
 
-        return render_template("gam_reporting.html", tenant=tenant)
+        # Resolve the tenant's reporting currency the same way the dashboard
+        # does: GAM network currency → first CurrencyLimit → EUR.
+        currency = "EUR"
+        adapter_config = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
+        if adapter_config and adapter_config.gam_network_currency:
+            currency = str(adapter_config.gam_network_currency)
+        else:
+            currency_limit = db_session.scalars(
+                select(CurrencyLimit).filter_by(tenant_id=tenant_id).order_by(CurrencyLimit.currency_code)
+            ).first()
+            if currency_limit:
+                currency = str(currency_limit.currency_code)
+
+        return render_template("gam_reporting.html", tenant=tenant, currency=currency)
 
 
 @operations_bp.route("/media-buy/<media_buy_id>", methods=["GET"])
@@ -238,17 +251,14 @@ def media_buy_detail(tenant_id, media_buy_id):
                         )
                         adapter = get_adapter(principal_schema, dry_run=False)
 
-                        # Calculate date range (last 7 days or campaign duration) - always use UTC
+                        # Request all-time delivery, independent of the buy's
+                        # flight/schedule dates. A span over a year makes the
+                        # GAM adapter classify the request as "all_time" (full
+                        # GAM data retention, aggregated); shorter spans
+                        # collapse to "today"/"this_month"/"lifetime" and drop
+                        # delivery from earlier periods.
                         end_date = datetime.now(UTC)
-                        seven_days_ago = datetime.now(UTC) - timedelta(days=7)
-
-                        # Convert media_buy.start_date (date) to datetime with UTC timezone
-                        mb_start = media_buy.start_date
-                        if mb_start:
-                            # Convert date to datetime (start of day) with UTC timezone
-                            mb_start = datetime.combine(mb_start, datetime.min.time()).replace(tzinfo=UTC)
-
-                        start_date = max(mb_start if mb_start else seven_days_ago, seven_days_ago)
+                        start_date = end_date - timedelta(days=3 * 365)
 
                         reporting_period = ReportingPeriod(start=start_date, end=end_date)
 

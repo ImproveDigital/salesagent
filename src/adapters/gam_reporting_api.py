@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # Create Blueprint
 gam_reporting_api = Blueprint("gam_reporting_api", __name__)
 
+# System default timezone for reporting (Azerion HQ)
+DEFAULT_REPORTING_TIMEZONE = "Europe/Amsterdam"
+
 # Input validation patterns
 TENANT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 PRINCIPAL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -88,7 +91,7 @@ def require_auth(f):
 def get_tenant_access(tenant_id: str) -> bool:
     """Check if the current user has access to the specified tenant"""
     # Handle admin_ui style sessions
-        # Super admin has access to all tenants
+    # Super admin has access to all tenants
     if session.get("role") == "super_admin":
         return True
 
@@ -114,11 +117,11 @@ def get_gam_reporting(tenant_id: str):
     Get GAM reporting data
 
     Query parameters:
-    - date_range: "lifetime", "this_month", or "today" (required)
+    - date_range: "lifetime", "this_month", "today", or "all_time" (required)
     - advertiser_id: Filter by advertiser ID (optional)
     - order_id: Filter by order ID (optional)
     - line_item_id: Filter by line item ID (optional)
-    - timezone: Requested timezone (default: America/New_York)
+    - timezone: Requested timezone (default: Europe/Amsterdam)
     """
     # Validate tenant_id
     if not validate_tenant_id(tenant_id):
@@ -138,8 +141,10 @@ def get_gam_reporting(tenant_id: str):
 
     # Get query parameters
     date_range = request.args.get("date_range")
-    if not date_range or date_range not in ["lifetime", "this_month", "today"]:
-        return jsonify({"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today"}), 400
+    if not date_range or date_range not in ["lifetime", "this_month", "today", "all_time"]:
+        return jsonify(
+            {"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today, all_time"}
+        ), 400
 
     # Validate optional numeric IDs
     advertiser_id = request.args.get("advertiser_id")
@@ -155,7 +160,7 @@ def get_gam_reporting(tenant_id: str):
         return jsonify({"error": "Invalid line_item_id format"}), 400
 
     # Validate timezone
-    timezone = request.args.get("timezone", "America/New_York")
+    timezone = request.args.get("timezone", DEFAULT_REPORTING_TIMEZONE)
     if not validate_timezone(timezone):
         return jsonify({"error": "Invalid timezone"}), 400
 
@@ -181,7 +186,7 @@ def get_gam_reporting(tenant_id: str):
         # Get the reporting data
         logger.info(f"Getting reporting data for tenant {tenant_id}, date_range={date_range}")
         # Type narrowing: We validated date_range above
-        date_range_literal = cast(Literal["lifetime", "this_month", "today"], date_range)
+        date_range_literal = cast(Literal["lifetime", "this_month", "today", "all_time"], date_range)
         report_data = reporting_service.get_reporting_data(
             date_range=date_range_literal,
             advertiser_id=advertiser_id,
@@ -220,8 +225,8 @@ def get_advertiser_summary(tenant_id: str, advertiser_id: str):
     Get summary reporting data for a specific advertiser
 
     Query parameters:
-    - date_range: "lifetime", "this_month", or "today" (required)
-    - timezone: Requested timezone (default: America/New_York)
+    - date_range: "lifetime", "this_month", "today", or "all_time" (required)
+    - timezone: Requested timezone (default: Europe/Amsterdam)
     """
     # Validate IDs
     if not validate_tenant_id(tenant_id):
@@ -243,10 +248,12 @@ def get_advertiser_summary(tenant_id: str, advertiser_id: str):
 
     # Get query parameters
     date_range = request.args.get("date_range")
-    if not date_range or date_range not in ["lifetime", "this_month", "today"]:
-        return jsonify({"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today"}), 400
+    if not date_range or date_range not in ["lifetime", "this_month", "today", "all_time"]:
+        return jsonify(
+            {"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today, all_time"}
+        ), 400
 
-    timezone = request.args.get("timezone", "America/New_York")
+    timezone = request.args.get("timezone", DEFAULT_REPORTING_TIMEZONE)
     if not validate_timezone(timezone):
         return jsonify({"error": "Invalid timezone"}), 400
 
@@ -264,7 +271,7 @@ def get_advertiser_summary(tenant_id: str, advertiser_id: str):
 
         # Get the advertiser summary
         # Type narrowing: We validated date_range above
-        date_range_literal = cast(Literal["lifetime", "this_month", "today"], date_range)
+        date_range_literal = cast(Literal["lifetime", "this_month", "today", "all_time"], date_range)
         summary = reporting_service.get_advertiser_summary(
             advertiser_id=advertiser_id, date_range=date_range_literal, requested_timezone=timezone
         )
@@ -284,10 +291,10 @@ def get_principal_reporting(tenant_id: str, principal_id: str):
     This endpoint automatically uses the principal's configured advertiser_id
 
     Query parameters:
-    - date_range: "lifetime", "this_month", or "today" (required)
+    - date_range: "lifetime", "this_month", "today", or "all_time" (required)
     - order_id: Filter by order ID (optional)
     - line_item_id: Filter by line item ID (optional)
-    - timezone: Requested timezone (default: America/New_York)
+    - timezone: Requested timezone (default: Europe/Amsterdam)
     """
     # Validate IDs
     if not validate_tenant_id(tenant_id):
@@ -319,8 +326,10 @@ def get_principal_reporting(tenant_id: str, principal_id: str):
 
     # Get query parameters
     date_range = request.args.get("date_range")
-    if not date_range or date_range not in ["lifetime", "this_month", "today"]:
-        return jsonify({"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today"}), 400
+    if not date_range or date_range not in ["lifetime", "this_month", "today", "all_time"]:
+        return jsonify(
+            {"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today, all_time"}
+        ), 400
 
     # Validate optional numeric IDs
     order_id = request.args.get("order_id")
@@ -332,7 +341,7 @@ def get_principal_reporting(tenant_id: str, principal_id: str):
         return jsonify({"error": "Invalid line_item_id format"}), 400
 
     # Validate timezone
-    timezone = request.args.get("timezone", "America/New_York")
+    timezone = request.args.get("timezone", DEFAULT_REPORTING_TIMEZONE)
     if not validate_timezone(timezone):
         return jsonify({"error": "Invalid timezone"}), 400
 
@@ -346,19 +355,19 @@ def get_principal_reporting(tenant_id: str, principal_id: str):
             adapter_config = db_session.scalars(stmt_config).first()
 
         if not adapter_config:
-            # Default to America/New_York if no config found
-            network_timezone = "America/New_York"
+            # Default to the system timezone if no config found
+            network_timezone = DEFAULT_REPORTING_TIMEZONE
         else:
             # TODO: Add gam_network_timezone field to adapter_config table if timezone configuration is needed
             # For now, use default timezone since config field no longer exists
-            network_timezone = "America/New_York"
+            network_timezone = DEFAULT_REPORTING_TIMEZONE
 
         # Create reporting service
         reporting_service = GAMReportingService(gam_client, network_timezone)
 
         # Get the reporting data
         # Type narrowing: We validated date_range above
-        date_range_literal = cast(Literal["lifetime", "this_month", "today"], date_range)
+        date_range_literal = cast(Literal["lifetime", "this_month", "today", "all_time"], date_range)
         report_data = reporting_service.get_reporting_data(
             date_range=date_range_literal,
             advertiser_id=advertiser_id,
@@ -399,11 +408,11 @@ def get_country_breakdown(tenant_id: str):
     Get GAM reporting data broken down by country
 
     Query parameters:
-    - date_range: "lifetime", "this_month", or "today" (required)
+    - date_range: "lifetime", "this_month", "today", or "all_time" (required)
     - advertiser_id: Filter by advertiser ID (optional)
     - order_id: Filter by order ID (optional)
     - line_item_id: Filter by line item ID (optional)
-    - timezone: Requested timezone (default: America/New_York)
+    - timezone: Requested timezone (default: Europe/Amsterdam)
     """
     # Validate tenant_id
     if not validate_tenant_id(tenant_id):
@@ -423,8 +432,10 @@ def get_country_breakdown(tenant_id: str):
 
     # Get query parameters
     date_range = request.args.get("date_range")
-    if not date_range or date_range not in ["lifetime", "this_month", "today"]:
-        return jsonify({"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today"}), 400
+    if not date_range or date_range not in ["lifetime", "this_month", "today", "all_time"]:
+        return jsonify(
+            {"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today, all_time"}
+        ), 400
 
     # Validate optional numeric IDs
     advertiser_id = request.args.get("advertiser_id")
@@ -440,7 +451,7 @@ def get_country_breakdown(tenant_id: str):
         return jsonify({"error": "Invalid line_item_id format"}), 400
 
     # Validate timezone
-    timezone = request.args.get("timezone", "America/New_York")
+    timezone = request.args.get("timezone", DEFAULT_REPORTING_TIMEZONE)
     if not validate_timezone(timezone):
         return jsonify({"error": "Invalid timezone"}), 400
 
@@ -461,7 +472,7 @@ def get_country_breakdown(tenant_id: str):
 
         # Get the country breakdown
         # Type narrowing: We validated date_range above
-        date_range_literal = cast(Literal["lifetime", "this_month", "today"], date_range)
+        date_range_literal = cast(Literal["lifetime", "this_month", "today", "all_time"], date_range)
         country_data = reporting_service.get_country_breakdown(
             date_range=date_range_literal,
             advertiser_id=advertiser_id,
@@ -484,12 +495,12 @@ def get_ad_unit_breakdown(tenant_id: str):
     Get GAM reporting data broken down by ad unit
 
     Query parameters:
-    - date_range: "lifetime", "this_month", or "today" (required)
+    - date_range: "lifetime", "this_month", "today", or "all_time" (required)
     - advertiser_id: Filter by advertiser ID (optional)
     - order_id: Filter by order ID (optional)
     - line_item_id: Filter by line item ID (optional)
     - country: Filter by country name (optional)
-    - timezone: Requested timezone (default: America/New_York)
+    - timezone: Requested timezone (default: Europe/Amsterdam)
     """
     # Validate tenant_id
     if not validate_tenant_id(tenant_id):
@@ -509,8 +520,10 @@ def get_ad_unit_breakdown(tenant_id: str):
 
     # Get query parameters
     date_range = request.args.get("date_range")
-    if not date_range or date_range not in ["lifetime", "this_month", "today"]:
-        return jsonify({"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today"}), 400
+    if not date_range or date_range not in ["lifetime", "this_month", "today", "all_time"]:
+        return jsonify(
+            {"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today, all_time"}
+        ), 400
 
     # Validate optional numeric IDs
     advertiser_id = request.args.get("advertiser_id")
@@ -529,7 +542,7 @@ def get_ad_unit_breakdown(tenant_id: str):
     country = request.args.get("country")
 
     # Validate timezone
-    timezone = request.args.get("timezone", "America/New_York")
+    timezone = request.args.get("timezone", DEFAULT_REPORTING_TIMEZONE)
     if not validate_timezone(timezone):
         return jsonify({"error": "Invalid timezone"}), 400
 
@@ -550,7 +563,7 @@ def get_ad_unit_breakdown(tenant_id: str):
 
         # Get the ad unit breakdown
         # Type narrowing: We validated date_range above
-        date_range_literal = cast(Literal["lifetime", "this_month", "today"], date_range)
+        date_range_literal = cast(Literal["lifetime", "this_month", "today", "all_time"], date_range)
         ad_unit_data = reporting_service.get_ad_unit_breakdown(
             date_range=date_range_literal,
             advertiser_id=advertiser_id,
@@ -574,8 +587,8 @@ def get_principal_summary(tenant_id: str, principal_id: str):
     Get summary reporting data for a specific principal (advertiser)
 
     Query parameters:
-    - date_range: "lifetime", "this_month", or "today" (required)
-    - timezone: Requested timezone (default: America/New_York)
+    - date_range: "lifetime", "this_month", "today", or "all_time" (required)
+    - timezone: Requested timezone (default: Europe/Amsterdam)
     """
     # Validate IDs
     if not validate_tenant_id(tenant_id):
@@ -607,10 +620,12 @@ def get_principal_summary(tenant_id: str, principal_id: str):
 
     # Get query parameters
     date_range = request.args.get("date_range")
-    if not date_range or date_range not in ["lifetime", "this_month", "today"]:
-        return jsonify({"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today"}), 400
+    if not date_range or date_range not in ["lifetime", "this_month", "today", "all_time"]:
+        return jsonify(
+            {"error": "Invalid or missing date_range. Must be one of: lifetime, this_month, today, all_time"}
+        ), 400
 
-    timezone = request.args.get("timezone", "America/New_York")
+    timezone = request.args.get("timezone", DEFAULT_REPORTING_TIMEZONE)
     if not validate_timezone(timezone):
         return jsonify({"error": "Invalid timezone"}), 400
 
@@ -624,19 +639,19 @@ def get_principal_summary(tenant_id: str, principal_id: str):
             adapter_config = db_session.scalars(stmt_config).first()
 
         if not adapter_config:
-            # Default to America/New_York if no config found
-            network_timezone = "America/New_York"
+            # Default to the system timezone if no config found
+            network_timezone = DEFAULT_REPORTING_TIMEZONE
         else:
             # TODO: Add gam_network_timezone field to adapter_config table if timezone configuration is needed
             # For now, use default timezone since config field no longer exists
-            network_timezone = "America/New_York"
+            network_timezone = DEFAULT_REPORTING_TIMEZONE
 
         # Create reporting service
         reporting_service = GAMReportingService(gam_client, network_timezone)
 
         # Get the advertiser summary
         # Type narrowing: We validated date_range above
-        date_range_literal = cast(Literal["lifetime", "this_month", "today"], date_range)
+        date_range_literal = cast(Literal["lifetime", "this_month", "today", "all_time"], date_range)
         summary = reporting_service.get_advertiser_summary(
             advertiser_id=advertiser_id, date_range=date_range_literal, requested_timezone=timezone
         )
