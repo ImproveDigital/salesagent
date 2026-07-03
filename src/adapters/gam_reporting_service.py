@@ -292,9 +292,12 @@ class GAMReportingService:
                 end_date = now
                 granularity = "total"
             elif date_range == "all_time":
-                # Span GAM's full reporting data retention (~3 years). Only
-                # available aggregated — one row per entity keeps this cheap.
-                start_date = (now - timedelta(days=3 * 365)).replace(hour=0, minute=0, second=0, microsecond=0)
+                # Span GAM's reporting data retention (3 years). Keep a margin
+                # inside the limit: GAM validates the start date against its
+                # own network clock, and a window of exactly 3*365 days fails
+                # with START_DATE_MORE_THAN_THREE_YEARS_AGO at the boundary.
+                # Only available aggregated — one row per entity keeps this cheap.
+                start_date = (now - timedelta(days=3 * 365 - 30)).replace(hour=0, minute=0, second=0, microsecond=0)
                 end_date = now
                 granularity = "total"
             else:  # lifetime
