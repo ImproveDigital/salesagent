@@ -183,10 +183,16 @@ class DashboardService:
     def _calculate_revenue_trend(
         self, db_session, days: int = 30, *, end_date: date | None = None, repo: MediaBuyRepository | None = None
     ) -> list[dict[str, Any]]:
-        """Calculate daily revenue for `days` days ending on `end_date` (default today)."""
+        """Calculate daily revenue for `days` days ending on `end_date` (default today).
+
+        Values are full precision — round at display time only, so that
+        window sums (net revenue headline) don't accumulate per-day
+        rounding error on small amounts.
+        """
         if repo is None:
             repo = MediaBuyRepository(db_session, self.tenant_id)
         anchor = end_date or datetime.now(UTC).date()
+        today = datetime.now(UTC).date()
         revenue_data = []
 
         for i in range(days):
@@ -196,10 +202,6 @@ class DashboardService:
 
             daily_revenue = 0.0
             for buy in daily_buys:
-              
-                if buy.delivered_amount is None:
-                    continue
-
                 start_date = type_cast(date | None, buy.start_date)
                 end_date = type_cast(date | None, buy.end_date)
                 if not (start_date and end_date):
@@ -207,13 +209,22 @@ class DashboardService:
                 days_in_flight = (end_date - start_date).days + 1
                 if days_in_flight <= 0:
                     continue
-                # Per-day delivered revenue: pro-rate the actual delivered amount
-                # across the flight. Fall back to budget pro-rata for buys with no
-                # delivery snapshot yet (not polled, needs creative, etc.).
-                total = float(buy.delivered_amount) if buy.delivered_amount is not None else float(buy.budget or 0)
-                daily_revenue += total / days_in_flight
+                if buy.delivered_amount is not None:
+                    # Actual delivered revenue: attribute across the *elapsed*
+                    # flight days only — money already earned can't belong to
+                    # future days. This keeps the window sum equal to the real
+                    # delivered amount for in-flight buys.
+                    elapsed_end = min(today, end_date)
+                    elapsed_days = (elapsed_end - start_date).days + 1
+                    if elapsed_days <= 0 or day > elapsed_end:
+                        continue
+                    daily_revenue += float(buy.delivered_amount) / elapsed_days
+                # else:
+                #     # No delivery snapshot yet (not polled, needs creative,
+                #     # etc.) — fall back to budget pro-rata over the flight.
+                #     daily_revenue += float(buy.budget or 0) / days_in_flight
 
-            revenue_data.append({"date": day.isoformat(), "revenue": round(daily_revenue, 2)})
+            revenue_data.append({"date": day.isoformat(), "revenue": daily_revenue})
 
         return revenue_data
 
@@ -231,12 +242,17 @@ class DashboardService:
         return 0.0
 
     def _calculate_estimated_spend(self, media_buy) -> float:
-        """Calculate estimated spend based on campaign progress.
+        """Spend for the dashboard table: real delivery snapshot when
+        available, calendar estimate otherwise.
 
-        For active campaigns, estimate based on days elapsed.
-        For completed campaigns, return full budget.
-        For pending/draft campaigns, return 0.
+        With no snapshot: active campaigns estimate budget × elapsed/total
+        days, completed campaigns return full budget, pending/draft return 0.
         """
+        # Real delivered spend (synced from the ad server) wins over any
+        # calendar-based estimate.
+        if media_buy.delivered_amount is not None:
+            return float(media_buy.delivered_amount)
+
         if not media_buy.budget or not media_buy.start_date:
             return 0.0
 
@@ -310,7 +326,7 @@ class DashboardService:
         metrics = self.get_dashboard_metrics()
         revenue_data = metrics["revenue_data"]
 
-        return {"labels": [d["date"] for d in revenue_data], "data": [d["revenue"] for d in revenue_data]}
+        return {"labels": [d["date"] for d in revenue_data], "data": [round(d["revenue"], 2) for d in revenue_data]}
 
     def get_revenue_trend(self, days: int) -> dict[str, Any]:
         """Daily revenue trend plus net totals for a custom window.
@@ -330,7 +346,7 @@ class DashboardService:
             net_prior = sum(d["revenue"] for d in prior)
             return {
                 "labels": [d["date"] for d in trend],
-                "values": [d["revenue"] for d in trend],
+                "values": [round(d["revenue"], 2) for d in trend],
                 "currency": self._primary_currency(session),
                 "net_revenue": round(float(net), 2),
                 "net_revenue_prior": round(float(net_prior), 2),
@@ -444,8 +460,8 @@ class DashboardService:
             "last_offer_at": last_offer_at,
             "last_brief_relative": self._format_relative_time(last_brief_at) if last_brief_at else None,
             "last_offer_relative": self._format_relative_time(last_offer_at) if last_offer_at else None,
-            "net_revenue_30d": float(net_30d),
-            "net_revenue_prior_30": float(net_prior_30),
+            "net_revenue_30d": round(float(net_30d), 2),
+            "net_revenue_prior_30": round(float(net_prior_30), 2),
             "revenue_delta_pct": round(delta_pct, 1),
             "today_label": now.strftime("%a, %b %-d"),
         }
@@ -643,7 +659,8 @@ class DashboardService:
     def _revenue_chart(self, session, repo: MediaBuyRepository, days: int = 30) -> list[dict[str, Any]]:
         """Per-day delivered revenue series. Falls back to flat-pace
         budget allocation for buys with no snapshot."""
-        return self._calculate_revenue_trend(session, days=days, repo=repo)
+        trend = self._calculate_revenue_trend(session, days=days, repo=repo)
+        return [{"date": d["date"], "revenue": round(d["revenue"], 2)} for d in trend]
 
     def _needs_attention(self, session, repo: MediaBuyRepository) -> list[dict[str, Any]]:
         """Bullet-list items for the right-rail attention panel.
