@@ -337,10 +337,15 @@ def _check_guaranteed_immutable(
 
     Returns ``None`` when the request is safe to proceed. Returns a
     prepared ``UpdateMediaBuyError`` (code ``guaranteed_line_item_immutable``)
-    when at least one package's product is configured as a guaranteed
-    GAM line item (``STANDARD`` or ``SPONSORSHIP``) and the request
-    touches any reservation field (``start_time``, ``end_time``,
-    ``budget``).
+    when the buy has already been approved/pushed to GAM, at least one
+    package's product is configured as a guaranteed GAM line item
+    (``STANDARD`` or ``SPONSORSHIP``), and the request touches any
+    reservation field (``start_time``, ``end_time``, ``budget``).
+
+    Default-allow when the buy has not yet been approved/pushed to GAM
+    (``approved_at`` unset and ``external_id`` unstamped) — GAM only locks
+    reservation fields after approval, so a draft / pending_approval buy
+    has no GAM Order or LineItem to reject.
 
     Default-allow on unknown ``line_item_type`` so this never blocks new
     GAM types Google introduces later.
@@ -353,9 +358,20 @@ def _check_guaranteed_immutable(
     if not requested:
         return None
 
+    assert uow.media_buys is not None
+
+    # GAM only locks reservation fields once the line item is approved and
+    # reserving inventory. Before that (draft / pending_approval) no GAM Order
+    # or LineItem exists — external_id is unstamped and approved_at is unset —
+    # so the fields are freely editable and there is nothing for GAM to reject.
+    # Scheduled / active / paused buys have been pushed to GAM (external_id set,
+    # approved_at set) and stay blocked.
+    buy = uow.media_buys.get_by_id(media_buy_id)
+    if buy is None or (buy.approved_at is None and not buy.external_id):
+        return None
+
     from src.core.database.models import Product as ModelProduct
 
-    assert uow.media_buys is not None
     packages = uow.media_buys.get_packages(media_buy_id)
     if not packages:
         return None
@@ -392,6 +408,104 @@ def _check_guaranteed_immutable(
                 ],
                 context=req.context,
             )
+
+    return None
+
+
+def _as_utc(dt: Any) -> datetime | None:
+    """Normalize a datetime to tz-aware UTC for comparison (naive → UTC).
+
+    Returns None for anything that isn't a real datetime (e.g. a None
+    start_time/end_time — both columns are nullable), so callers can safely
+    skip range checks when a bound is unknown.
+    """
+    if not isinstance(dt, datetime):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _resolve_request_start(start_value: Any, now: datetime) -> tuple[datetime | None, bool]:
+    """Return (resolved_datetime, is_asap) for a StartTiming / str / datetime.
+
+    Malformed strings are already rejected at the Pydantic schema layer, so
+    by this point the value is a valid datetime, an ISO string, or 'asap'.
+    """
+    inner = start_value.root if hasattr(start_value, "root") else start_value
+    if isinstance(inner, str):
+        if inner == "asap":
+            return now, True
+        return _as_utc(datetime.fromisoformat(inner.replace("Z", "+00:00"))), False
+    if isinstance(inner, datetime):
+        return _as_utc(inner), False
+    return None, False
+
+
+def _resolve_request_end(end_value: Any) -> datetime | None:
+    if isinstance(end_value, str):
+        return _as_utc(datetime.fromisoformat(end_value.replace("Z", "+00:00")))
+    if isinstance(end_value, datetime):
+        return _as_utc(end_value)
+    return None
+
+
+def _validate_update_submission(
+    req: UpdateMediaBuyRequest,
+    current_media_buy: Any,
+    now: datetime,
+    allow_past_start: bool = False,
+) -> UpdateMediaBuyError | None:
+    """Reject invalid update input at submission time.
+
+    These checks otherwise only ran on the apply path, which sits *after*
+    the manual-approval gate — so a bad update (negative budget, end<=start,
+    a past start_time) was accepted as a deferred ``requires_approval`` and
+    only failed later on approval replay. Validating up front rejects it
+    before deferral. The apply path keeps its own checks as a backstop.
+
+    ``allow_past_start`` skips the past-start check on the approval-replay
+    path: a start_time that was in the future at submission may have become
+    past by the time an operator approves, and that replay must still apply.
+    """
+
+    def _err(code: str, message: str) -> UpdateMediaBuyError:
+        return UpdateMediaBuyError(errors=[Error(code=code, message=message)], context=req.context)
+
+    # Budget must be positive (mirrors the apply-path invalid_budget check).
+    if req.budget is not None:
+        amount = float(req.budget) if isinstance(req.budget, int | float) else float(req.budget.total)
+        if amount <= 0:
+            return _err("invalid_budget", f"Invalid budget: {amount}. Budget must be positive.")
+
+    new_start_provided = req.start_time is not None
+    eff_start, is_asap = (
+        _resolve_request_start(req.start_time, now)
+        if new_start_provided
+        else (_as_utc(getattr(current_media_buy, "start_time", None)), False)
+    )
+    eff_end = (
+        _resolve_request_end(req.end_time)
+        if req.end_time is not None
+        else _as_utc(getattr(current_media_buy, "end_time", None))
+    )
+
+    # A newly-supplied concrete start in the past is rejected. 'asap' resolves
+    # to now and is always allowed; existing past starts on running buys are
+    # untouched because this only fires when start_time is supplied.
+    if not allow_past_start and new_start_provided and not is_asap and eff_start is not None and eff_start < now:
+        return _err(
+            "invalid_start_time",
+            f"Invalid start_time: {eff_start.isoformat()} is in the past. start_time must be 'asap' or a future time.",
+        )
+
+    # end_time must be after start_time (mirrors the apply-path check). Only
+    # enforced when a date is actually being changed — a pure budget/pause
+    # update must not be rejected for a buy's pre-existing date bounds.
+    dates_changing = new_start_provided or req.end_time is not None
+    if dates_changing and eff_start is not None and eff_end is not None and eff_end <= eff_start:
+        return _err(
+            "invalid_date_range",
+            f"Invalid date range: end_time ({eff_end.isoformat()}) must be after start_time ({eff_start.isoformat()}).",
+        )
 
     return None
 
@@ -607,7 +721,14 @@ def _update_media_buy_impl(
         # impl before the first commits both reach this point. Mirrors the
         # create-path pattern at media_buy_create.py:1471-1489. Skipped in
         # dry_run since dry_run never writes a workflow step to read back.
-        if not testing_ctx.dry_run and req.idempotency_key:
+        #
+        # Skipped on approval replay (bypass_manual_approval=True): the
+        # operator-approved replay reuses the deferred step's idempotency_key,
+        # whose cached response is a "requires_approval" deferral — not a
+        # terminal result. Replaying it would echo the deferral back and the
+        # approved update would never execute. The approval path must run the
+        # mutation for real, so the idempotency short-circuit is bypassed here.
+        if not testing_ctx.dry_run and req.idempotency_key and not bypass_manual_approval:
             from src.core.database.repositories.workflow import WorkflowRepository
 
             workflow_repo = WorkflowRepository(session, tenant["tenant_id"])
@@ -760,6 +881,21 @@ def _update_media_buy_impl(
                 error_message=err_msg,
             )
             return guaranteed_block
+
+        # Reject invalid input at submission, before the manual-approval gate
+        # below. Otherwise a bad update is accepted as a deferred
+        # ``requires_approval`` and only fails later on approval replay.
+        submission_error = _validate_update_submission(
+            req, current_media_buy, datetime.now(UTC), allow_past_start=bypass_manual_approval
+        )
+        if submission_error is not None:
+            ctx_manager.update_workflow_step(
+                step.step_id,
+                status="failed",
+                response_data=serialize_for_workflow_step(submission_error),
+                error_message=submission_error.errors[0].message,
+            )
+            return submission_error
 
         # Check if manual approval is required
         manual_approval_required = adapter.manual_approval_required
@@ -1192,6 +1328,18 @@ def _update_media_buy_impl(
                             error_message=error_message,
                         )
                         return response_data
+
+                    # Persist the new package budget to our DB. The adapter
+                    # call above only updates the ad server; without this the
+                    # local MediaPackage row stays stale and get_media_buys
+                    # reports the old budget (silent no-op). Mirrors the
+                    # media-buy-level budget persistence further below.
+                    existing_pkg = uow.media_buys.get_package(req.media_buy_id, pkg_update.package_id)
+                    if existing_pkg is not None:
+                        new_pkg_config = dict(existing_pkg.package_config or {})
+                        new_pkg_config["budget"] = {"total": budget_amount, "currency": currency}
+                        uow.media_buys.update_package_config(req.media_buy_id, pkg_update.package_id, new_pkg_config)
+                    uow.media_buys.update_package_fields(req.media_buy_id, pkg_update.package_id, budget=budget_amount)
 
                     # Track budget update in affected_packages
                     # At this point, pkg_update.package_id is guaranteed to be str (checked above)

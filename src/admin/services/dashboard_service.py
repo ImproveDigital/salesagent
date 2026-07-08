@@ -181,33 +181,50 @@ class DashboardService:
             return []
 
     def _calculate_revenue_trend(
-        self, db_session, days: int = 30, *, repo: MediaBuyRepository | None = None
+        self, db_session, days: int = 30, *, end_date: date | None = None, repo: MediaBuyRepository | None = None
     ) -> list[dict[str, Any]]:
-        """Calculate daily revenue for the last N days."""
+        """Calculate daily revenue for `days` days ending on `end_date` (default today).
+
+        Values are full precision — round at display time only, so that
+        window sums (net revenue headline) don't accumulate per-day
+        rounding error on small amounts.
+        """
         if repo is None:
             repo = MediaBuyRepository(db_session, self.tenant_id)
+        anchor = end_date or datetime.now(UTC).date()
         today = datetime.now(UTC).date()
         revenue_data = []
 
         for i in range(days):
-            day = today - timedelta(days=days - 1 - i)
+            day = anchor - timedelta(days=days - 1 - i)
 
             daily_buys = repo.list_in_flight_on_date(day, statuses=["active", "completed"])
 
             daily_revenue = 0.0
             for buy in daily_buys:
-                # Skip buys with no GAM delivery confirmation — budget alone is unreliable
-                # (order may not have been created, needs creative, line item missing, etc.)
-                if buy.delivered_amount is None:
-                    continue
                 start_date = type_cast(date | None, buy.start_date)
                 end_date = type_cast(date | None, buy.end_date)
-                if start_date and end_date:
-                    days_in_flight = (end_date - start_date).days + 1
-                    if days_in_flight > 0:
-                        daily_revenue += float(buy.budget or 0) / days_in_flight
+                if not (start_date and end_date):
+                    continue
+                days_in_flight = (end_date - start_date).days + 1
+                if days_in_flight <= 0:
+                    continue
+                if buy.delivered_amount is not None:
+                    # Actual delivered revenue: attribute across the *elapsed*
+                    # flight days only — money already earned can't belong to
+                    # future days. This keeps the window sum equal to the real
+                    # delivered amount for in-flight buys.
+                    elapsed_end = min(today, end_date)
+                    elapsed_days = (elapsed_end - start_date).days + 1
+                    if elapsed_days <= 0 or day > elapsed_end:
+                        continue
+                    daily_revenue += float(buy.delivered_amount) / elapsed_days
+                # else:
+                #     # No delivery snapshot yet (not polled, needs creative,
+                #     # etc.) — fall back to budget pro-rata over the flight.
+                #     daily_revenue += float(buy.budget or 0) / days_in_flight
 
-            revenue_data.append({"date": day.isoformat(), "revenue": round(daily_revenue, 2)})
+            revenue_data.append({"date": day.isoformat(), "revenue": daily_revenue})
 
         return revenue_data
 
@@ -225,12 +242,17 @@ class DashboardService:
         return 0.0
 
     def _calculate_estimated_spend(self, media_buy) -> float:
-        """Calculate estimated spend based on campaign progress.
+        """Spend for the dashboard table: real delivery snapshot when
+        available, calendar estimate otherwise.
 
-        For active campaigns, estimate based on days elapsed.
-        For completed campaigns, return full budget.
-        For pending/draft campaigns, return 0.
+        With no snapshot: active campaigns estimate budget × elapsed/total
+        days, completed campaigns return full budget, pending/draft return 0.
         """
+        # Real delivered spend (synced from the ad server) wins over any
+        # calendar-based estimate.
+        if media_buy.delivered_amount is not None:
+            return float(media_buy.delivered_amount)
+
         if not media_buy.budget or not media_buy.start_date:
             return 0.0
 
@@ -304,7 +326,31 @@ class DashboardService:
         metrics = self.get_dashboard_metrics()
         revenue_data = metrics["revenue_data"]
 
-        return {"labels": [d["date"] for d in revenue_data], "data": [d["revenue"] for d in revenue_data]}
+        return {"labels": [d["date"] for d in revenue_data], "data": [round(d["revenue"], 2) for d in revenue_data]}
+
+    def get_revenue_trend(self, days: int) -> dict[str, Any]:
+        """Daily revenue trend plus net totals for a custom window.
+
+        Drives the dashboard revenue chart's period filter (7D / 30D / 90D / YTD).
+        ``net_revenue`` is the sum of the plotted series and ``net_revenue_prior``
+        the sum of the preceding equal-length window, so the headline always
+        matches the chart.
+        """
+        with get_db_session() as session:
+            repo = MediaBuyRepository(session, self.tenant_id)
+            trend = self._calculate_revenue_trend(session, days=days, repo=repo)
+            prior = self._calculate_revenue_trend(
+                session, days=days, end_date=datetime.now(UTC).date() - timedelta(days=days), repo=repo
+            )
+            net = sum(d["revenue"] for d in trend)
+            net_prior = sum(d["revenue"] for d in prior)
+            return {
+                "labels": [d["date"] for d in trend],
+                "values": [round(d["revenue"], 2) for d in trend],
+                "currency": self._primary_currency(session),
+                "net_revenue": round(float(net), 2),
+                "net_revenue_prior": round(float(net_prior), 2),
+            }
 
     # ------------------------------------------------------------------
     # Ledger dashboard — Incoming / Running / Pipeline three-stage view.
@@ -392,8 +438,14 @@ class DashboardService:
         # to budget pro-rata (the legacy estimate) when the snapshot has
         # not been written yet (no delivery polls have happened).
         now = datetime.now(UTC)
-        net_30d = self._net_revenue_in_window(session, now - timedelta(days=30), now)
-        net_prior_30 = self._net_revenue_in_window(session, now - timedelta(days=60), now - timedelta(days=30))
+        # Headline mirrors the revenue chart (delivered, else budget) so the big
+        # number equals the sum of the plotted 30-day series. Prior window is the
+        # preceding 30 days, for the vs-prior delta.
+        net_30d = sum(d["revenue"] for d in self._calculate_revenue_trend(session, days=30))
+        net_prior_30 = sum(
+            d["revenue"]
+            for d in self._calculate_revenue_trend(session, days=30, end_date=now.date() - timedelta(days=30))
+        )
         delta_pct = 0.0
         if net_prior_30 > 0:
             delta_pct = ((net_30d - net_prior_30) / net_prior_30) * 100
@@ -408,37 +460,11 @@ class DashboardService:
             "last_offer_at": last_offer_at,
             "last_brief_relative": self._format_relative_time(last_brief_at) if last_brief_at else None,
             "last_offer_relative": self._format_relative_time(last_offer_at) if last_offer_at else None,
-            "net_revenue_30d": float(net_30d),
-            "net_revenue_prior_30": float(net_prior_30),
+            "net_revenue_30d": round(float(net_30d), 2),
+            "net_revenue_prior_30": round(float(net_prior_30), 2),
             "revenue_delta_pct": round(delta_pct, 1),
             "today_label": now.strftime("%a, %b %-d"),
         }
-
-    def _net_revenue_in_window(self, session, start: datetime, end: datetime) -> float:
-        """Net revenue for media buys approved in [start, end].
-
-        Only counts buys with confirmed GAM delivery data (delivered_amount IS NOT NULL).
-        Buys that never ran in GAM (needs creative, line item not created, etc.) have no
-        delivery snapshot and are excluded — budget alone is not a reliable revenue signal.
-        """
-        from sqlalchemy import select
-
-        stmt = (
-            select(MediaBuy.delivered_amount)            
-            .where(MediaBuy.tenant_id == self.tenant_id)
-            .where(MediaBuy.approved_at != None)  # noqa: E711
-            .where(MediaBuy.approved_at >= start)
-            .where(MediaBuy.approved_at < end)
-            .where(MediaBuy.delivered_amount != None)  # noqa: E711
-        )
-        # total = 0.0
-        # for budget, delivered in session.execute(stmt):
-        #     if delivered is not None:
-        #         total += float(delivered)
-        #     elif budget is not None:
-        #         total += float(budget)
-        # return total
-        return sum(float(row) for (row,) in session.execute(stmt))
 
     def _incoming(self, repo: MediaBuyRepository) -> dict[str, Any]:
         """Offers waiting on a yes / no / counter from the publisher."""
@@ -633,7 +659,8 @@ class DashboardService:
     def _revenue_chart(self, session, repo: MediaBuyRepository, days: int = 30) -> list[dict[str, Any]]:
         """Per-day delivered revenue series. Falls back to flat-pace
         budget allocation for buys with no snapshot."""
-        return self._calculate_revenue_trend(session, days=days, repo=repo)
+        trend = self._calculate_revenue_trend(session, days=days, repo=repo)
+        return [{"date": d["date"], "revenue": round(d["revenue"], 2)} for d in trend]
 
     def _needs_attention(self, session, repo: MediaBuyRepository) -> list[dict[str, Any]]:
         """Bullet-list items for the right-rail attention panel.

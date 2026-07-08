@@ -1204,12 +1204,16 @@ class GoogleAdManager(AdServerAdapter):
             range_type: str = "today"
         elif days_diff <= 31:
             range_type = "this_month"
-        else:
+        elif days_diff <= 365:
             range_type = "lifetime"
+        else:
+            # Spans over a year request GAM's full retention, aggregated
+            # server-side (no daily breakdown in the response).
+            range_type = "all_time"
 
         # Fetch delivery data scoped to this specific GAM order
         reporting_data = reporting_service.get_reporting_data(
-            date_range=cast("Literal['lifetime', 'this_month', 'today']", range_type),
+            date_range=cast("Literal['lifetime', 'this_month', 'today', 'all_time']", range_type),
             advertiser_id=self.advertiser_id,
             order_id=gam_order_id,
             requested_timezone="America/New_York",
