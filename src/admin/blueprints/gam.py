@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import UTC, datetime
 
-from flask import Blueprint, jsonify, render_template, request, session
+from flask import Blueprint, jsonify, render_template, request
 from googleads import ad_manager, oauth2
 from sqlalchemy import select
 
@@ -132,9 +132,6 @@ def validate_gam_config(data: dict) -> list | None:
 @require_tenant_access(role=("admin",))
 def detect_gam_network(tenant_id):
     """Auto-detect GAM network code from refresh token."""
-    if session.get("role") == "viewer":
-        return jsonify({"success": False, "error": "Access denied"}), 403
-
     try:
         # Use force=True and silent=True to handle empty/malformed requests gracefully
         data = request.get_json(force=True, silent=True)
@@ -345,9 +342,6 @@ def detect_gam_network(tenant_id):
 @require_tenant_access(role=("admin",))
 def configure_gam(tenant_id):
     """Save GAM configuration for a tenant."""
-    if session.get("role") == "viewer":
-        return jsonify({"success": False, "error": "Access denied"}), 403
-
     try:
         # Try to get JSON - use force=True to handle potential Content-Type issues
         data = request.get_json(force=True, silent=True)
@@ -717,9 +711,6 @@ def reset_stuck_sync(tenant_id):
     Marks any running inventory sync as failed and allows a new sync to start.
     Use this when a sync appears to be hanging or frozen.
     """
-    if session.get("role") == "viewer":
-        return jsonify({"success": False, "error": "Access denied"}), 403
-
     try:
         with get_db_session() as db_session:
             from src.core.database.models import SyncJob
@@ -769,9 +760,6 @@ def create_service_account(tenant_id):
     and stores them encrypted in the database. The partner then configures
     this service account email in their GAM.
     """
-    if session.get("role") == "viewer":
-        return jsonify({"success": False, "error": "Access denied"}), 403
-
     try:
         # Get GCP project ID from environment or configuration
         gcp_project_id = os.environ.get("GCP_PROJECT_ID")
@@ -854,9 +842,6 @@ def test_gam_connection(tenant_id):
 
     If no refresh_token is provided, tries to use service account credentials from tenant's adapter config.
     """
-    if session.get("role") == "viewer":
-        return jsonify({"success": False, "error": "Access denied"}), 403
-
     try:
         # Use force=True and silent=True to handle empty/malformed requests gracefully
         data = request.get_json(force=True, silent=True) or {}

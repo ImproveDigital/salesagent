@@ -234,7 +234,7 @@ def is_tenant_admin(email, tenant_id=None):
     # Check if user is a tenant admin in the database
     try:
         with get_db_session() as db_session:
-            stmt = select(User).filter_by(email=email.lower(), is_active=True, is_admin=True)
+            stmt = select(User).filter_by(email=email.lower(), is_active=True, role="admin")
 
             if tenant_id:
                 # Check for specific tenant

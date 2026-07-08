@@ -109,7 +109,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/blueprints/api.py", "get_tenant_products"),
     ("src/admin/blueprints/auth.py", "gam_authorize"),
     ("src/admin/blueprints/auth.py", "gam_callback"),
-    ("src/admin/blueprints/auth.py", "google_callback"),
+    ("src/admin/blueprints/auth.py", "_build_available_tenants"),
     ("src/admin/blueprints/auth.py", "login"),
     ("src/admin/blueprints/auth.py", "logout"),
     ("src/admin/blueprints/auth.py", "tenant_login"),

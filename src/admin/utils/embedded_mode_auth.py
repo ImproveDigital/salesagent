@@ -28,11 +28,11 @@ Failure modes match the published contract at
 - ``is_embedded=False`` + no headers → falls through to Google OAuth
 - ``external_org_id`` unset → embedded mode unavailable, always OAuth
 
-The role enum (``admin | member | viewer``) is parsed but not yet
-enforced for fine-grained authorization — sprint 4 hardening will scope
-nav and hide platform-config pages by role. Today any valid role grants
-the same level of access (UI sees the user as authenticated for that
-tenant).
+The role enum (``admin | member | viewer``) parsed from ``X-Identity-Role``
+is enforced the same way as OAuth-sourced roles: ``require_tenant_access``
+stamps it onto ``g.user["role"]`` via ``_set_user_role`` (see
+``src/admin/utils/helpers.py``), and mutation routes gate on it through
+``role=(...)`` same as any other identity source.
 """
 
 from __future__ import annotations

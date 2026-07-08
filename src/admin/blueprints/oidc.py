@@ -358,6 +358,7 @@ def callback():
             session["tenant_id"] = tenant_id
             session["authenticated"] = True
             session["auth_method"] = "oidc"
+            session.permanent = True
 
             # Update last login
             from datetime import UTC, datetime

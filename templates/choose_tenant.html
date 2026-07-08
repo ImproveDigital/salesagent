@@ -6,6 +6,23 @@
 <div class="card" style="max-width: 600px; margin: 4rem auto;">
     <h2>Select Account</h2>
 
+    {% if is_single_tenant and not tenants %}
+    <p style="margin-bottom: 2rem; color: #666;">
+        Your account doesn't have access to this sales agent. Contact the system
+        administrator to be added, or try a different account below.
+    </p>
+    <a href="{{ url_for('auth.logout') }}" class="btn btn-outline-secondary">
+        Log Out
+    </a>
+    {% else %}
+
+    {# Single-tenant mode auto-selects the only tenant before reaching this
+       page, so it only lands here with tenants=[] (handled above) — this
+       section is the multi-tenant flow, and it always shows both the
+       tenant list (or an empty-state note) AND the create-account option
+       together, rather than switching between two different page layouts
+       depending on whether the user already has any tenant access. #}
+
     {% if tenants %}
     <p style="margin-bottom: 2rem;">
         Select an account to continue:
@@ -23,29 +40,23 @@
 
         <button type="submit" class="btn btn-primary btn-lg w-100" style="margin-bottom: 1rem;">Continue to Selected Account</button>
     </form>
-
-    {% if not is_single_tenant %}
-    <div style="text-align: center; padding-top: 1rem; border-top: 1px solid #ddd;">
-        <p style="margin-bottom: 0.75rem; color: #666; font-size: 0.9rem;">Don't see your account?</p>
-        <a href="{{ url_for('public.signup_onboarding') }}" class="btn btn-outline-secondary">
-            Create New Account
-        </a>
-    </div>
-    {% endif %}
-    {% else %}
-    {% if is_single_tenant %}
-    <p style="margin-bottom: 2rem; color: #666;">
-        No account is configured. Please contact the system administrator.
-    </p>
     {% else %}
     <p style="margin-bottom: 2rem; color: #666;">
         You don't have access to any accounts yet.
     </p>
-
-    <a href="{{ url_for('public.signup_onboarding') }}" class="btn btn-primary btn-lg w-100">
-        Create New Account
-    </a>
     {% endif %}
+
+    {% if not is_single_tenant %}
+    <div style="text-align: center; padding-top: 1rem; border-top: 1px solid #ddd;">
+        <p style="margin-bottom: 0.75rem; color: #666; font-size: 0.9rem;">
+            {% if tenants %}Don't see your account?{% else %}Setting up a new sales agent?{% endif %}
+        </p>
+        <a href="{{ url_for('public.signup_onboarding') }}" class="btn {% if tenants %}btn-outline-secondary{% else %}btn-primary btn-lg w-100{% endif %}">
+            Create New Account
+        </a>
+    </div>
+    {% endif %}
+
     {% endif %}
 </div>
 
