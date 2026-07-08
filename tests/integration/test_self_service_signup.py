@@ -348,7 +348,12 @@ class TestSelfServiceSignupFlow:
                 with test_client.session_transaction() as sess:
                     assert sess.get("user") == "newuser@example.com"
                     assert sess.get("user_name") == "New User"
-                    assert sess.get("signup_flow") is True
+                    # signup_flow is popped once the callback makes its
+                    # routing decision (onboarding vs. tenant selector) —
+                    # left set, a stale True would leak into a later,
+                    # unrelated /auth/google visit via google_auth()'s
+                    # session.clear()-preserve logic.
+                    assert "signup_flow" not in sess
 
     def test_session_cleanup_after_provisioning(self, integration_db, client):
         """Test that signup session flags are cleared after provisioning."""

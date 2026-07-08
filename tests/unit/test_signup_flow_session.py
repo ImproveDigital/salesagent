@@ -154,3 +154,131 @@ class TestOnboardingReachableFromEitherDoor:
 
         assert response.status_code == 302
         assert "/signup" in response.location
+
+
+class TestSignupFlowShowsExistingTenants:
+    """Regression: a user who clicked "Get Started with Google" (signup_flow)
+    was unconditionally funneled into "create new tenant", even if their
+    email/domain already had access to one or more existing tenants — they
+    never saw those tenants and could end up creating a duplicate. The
+    signup and login doors must agree: show what the user already has
+    access to, alongside the option to create a new one.
+    """
+
+    def test_signup_flow_with_existing_tenant_access_shows_selector(self):
+        """A signup-flow user with existing tenant access lands on the
+        selector (list + create together), not straight on onboarding."""
+        with patch.dict(
+            "os.environ",
+            {"GOOGLE_CLIENT_ID": "test-client-id", "GOOGLE_CLIENT_SECRET": "test-client-secret"},
+        ):
+            from src.admin.app import create_app
+
+            app = create_app({"TESTING": True, "SECRET_KEY": "test-secret"})
+
+            with app.test_client() as client:
+                with client.session_transaction() as sess:
+                    sess["signup_flow"] = True
+
+                # Two tenants so this exercises the selector regardless of
+                # single/multi-tenant mode — auto-select only kicks in for
+                # a list of exactly one.
+                canned_tenants = [
+                    {
+                        "tenant_id": "azerion_gaming",
+                        "name": "Azerion Gaming",
+                        "subdomain": "azerion-gaming",
+                        "is_admin": True,
+                    },
+                    {"tenant_id": "azerion_ads", "name": "Azerion Ads", "subdomain": "azerion-ads", "is_admin": True},
+                ]
+                with (
+                    patch.object(app.oauth.google, "authorize_access_token", return_value={"access_token": "tok"}),
+                    patch(
+                        "src.admin.blueprints.auth.extract_user_info",
+                        return_value={"email": "user@azerion.com", "name": "Azerion User"},
+                    ),
+                    patch(
+                        "src.admin.blueprints.auth._build_available_tenants",
+                        return_value=canned_tenants,
+                    ),
+                ):
+                    response = client.get("/auth/google/callback")
+
+                assert response.status_code == 302
+                assert response.location.endswith("/auth/select-tenant")
+                with client.session_transaction() as sess:
+                    assert sess["available_tenants"] == canned_tenants
+                    assert "signup_flow" not in sess
+
+    def test_signup_flow_with_no_tenant_access_skips_straight_to_onboarding(self):
+        """A genuinely new signup-flow user with zero tenant access still
+        skips the selector (which would just show an empty list + create
+        button) and goes straight to onboarding — no regression on the
+        one-less-click case for brand-new users."""
+        with patch.dict(
+            "os.environ",
+            {"GOOGLE_CLIENT_ID": "test-client-id", "GOOGLE_CLIENT_SECRET": "test-client-secret"},
+        ):
+            from src.admin.app import create_app
+
+            app = create_app({"TESTING": True, "SECRET_KEY": "test-secret"})
+
+            with app.test_client() as client:
+                with client.session_transaction() as sess:
+                    sess["signup_flow"] = True
+
+                with (
+                    patch.object(app.oauth.google, "authorize_access_token", return_value={"access_token": "tok"}),
+                    patch(
+                        "src.admin.blueprints.auth.extract_user_info",
+                        return_value={"email": "newuser@example.com", "name": "New User"},
+                    ),
+                    patch(
+                        "src.admin.blueprints.auth._build_available_tenants",
+                        return_value=[],
+                    ),
+                ):
+                    response = client.get("/auth/google/callback")
+
+                assert response.status_code == 302
+                assert "/signup/onboarding" in response.location
+
+
+class TestGoogleCallbackSetsAuthenticatedFlag:
+    """Regression: base.html's identity/logout block is gated on
+    session.authenticated (and reads session.email). test_auth() and the
+    per-tenant OIDC callback both set these, but google_callback() — the
+    route used by every real (non-test-mode) OAuth login — never did. A
+    user who logged in via real Google OAuth was fully authenticated
+    (require_auth/require_tenant_access check session["user"], not
+    "authenticated") but saw no logout button or identity display at all.
+    """
+
+    def test_google_callback_sets_authenticated_and_email(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "GOOGLE_CLIENT_ID": "test-client-id",
+                "GOOGLE_CLIENT_SECRET": "test-client-secret",
+                "SUPER_ADMIN_DOMAINS": "example.com",
+            },
+        ):
+            from src.admin.app import create_app
+
+            app = create_app({"TESTING": True, "SECRET_KEY": "test-secret"})
+
+            with app.test_client() as client:
+                with (
+                    patch.object(app.oauth.google, "authorize_access_token", return_value={"access_token": "tok"}),
+                    patch(
+                        "src.admin.blueprints.auth.extract_user_info",
+                        return_value={"email": "admin@example.com", "name": "Admin"},
+                    ),
+                ):
+                    response = client.get("/auth/google/callback")
+
+                assert response.status_code == 302
+                with client.session_transaction() as sess:
+                    assert sess.get("authenticated") is True
+                    assert sess.get("email") == "admin@example.com"
