@@ -630,6 +630,14 @@ def google_callback():
         session["user"] = email
         session["user_name"] = user.get("name", email)
         session["user_picture"] = user.get("picture", "")
+        # base.html's identity/logout block gates on session.authenticated
+        # and reads session.email — test_auth() and the per-tenant OIDC
+        # callback both set these, but this route never did, so a user who
+        # logged in via real Google OAuth (the actual path in any
+        # non-test-mode deployment) saw no logout button or identity
+        # display at all, despite being fully authenticated.
+        session["authenticated"] = True
+        session["email"] = email
         session.permanent = True
 
         # Mark session as modified to ensure it's saved
@@ -656,16 +664,24 @@ def google_callback():
             next_url = _safe_redirect(session.pop("login_next_url", None), fallback=url_for("core.index"))
             return redirect(next_url)
 
-        # Check if this is a signup flow (only for non-super-admin users)
-        if session.get("signup_flow"):
-            # Redirect to onboarding wizard for new tenant signup
+        # Unified flow: build tenant access BEFORE deciding where to send the
+        # user, regardless of which door they came through. Arriving via
+        # /signup (signup_flow=True) used to unconditionally skip straight
+        # to "create new tenant" — even for a user whose email/domain
+        # already had access to one or more tenants, who'd never see them
+        # and could end up creating a duplicate. Now both doors agree: show
+        # what the user already has access to, alongside the option to
+        # create a new one.
+        was_signup_flow = session.pop("signup_flow", False)
+        session.pop("signup_step", None)
+        session["available_tenants"] = _build_available_tenants(email)
+
+        if was_signup_flow and not session["available_tenants"]:
+            # Genuinely new user with no existing tenant access — skip the
+            # selector (it would just show an empty list + create button)
+            # and go straight to onboarding, saving a click.
             flash(f"Welcome {user.get('name', email)}!", "success")
             return redirect(url_for("public.signup_onboarding"))
-
-        # Unified flow: Always show tenant selector (with option to create new tenant)
-        # No distinction between signup and login - keeps UX simple and consistent
-        # (empty list is fine - user can create new tenant)
-        session["available_tenants"] = _build_available_tenants(email)
 
         # In single-tenant mode, auto-select the tenant (skip selection screen)
         from src.core.config_loader import is_single_tenant_mode
