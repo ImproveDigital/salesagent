@@ -938,28 +938,8 @@ def add_product(tenant_id):
                             # Redirect to form instead of re-rendering to avoid missing context
                             return _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_data)
 
-                        # Validate ad unit IDs exist in inventory
-                        from src.core.database.models import GAMInventory
-
-                        existing_ad_units = db_session.scalars(
-                            select(GAMInventory).filter(
-                                GAMInventory.tenant_id == tenant_id,
-                                GAMInventory.inventory_type == "ad_unit",
-                                GAMInventory.inventory_id.in_(id_list),
-                            )
-                        ).all()
-
-                        existing_ids = {unit.inventory_id for unit in existing_ad_units}
-                        missing_ids = set(id_list) - existing_ids
-
-                        if missing_ids:
-                            flash(
-                                f"Ad unit IDs not found in synced inventory: {', '.join(missing_ids)}. "
-                                f"Please sync inventory first or use existing ad unit IDs.",
-                                "warning",
-                            )
-                            # Continue anyway - they might be valid in GAM but not synced yet
-
+                        # Existence/consistency against synced inventory is enforced by
+                        # validate_product_gam_inventory() once the full config is built.
                         validated_ad_unit_ids = id_list
                         base_config["targeted_ad_unit_ids"] = id_list
 
@@ -968,28 +948,8 @@ def add_product(tenant_id):
                     if placement_ids:
                         id_list = [id.strip() for id in placement_ids.split(",") if id.strip()]
 
-                        # Validate placement IDs exist in inventory
-                        from src.core.database.models import GAMInventory
-
-                        existing_placements = db_session.scalars(
-                            select(GAMInventory).filter(
-                                GAMInventory.tenant_id == tenant_id,
-                                GAMInventory.inventory_type == "placement",
-                                GAMInventory.inventory_id.in_(id_list),
-                            )
-                        ).all()
-
-                        existing_ids = {p.inventory_id for p in existing_placements}
-                        missing_ids = set(id_list) - existing_ids
-
-                        if missing_ids:
-                            flash(
-                                f"Placement IDs not found in synced inventory: {', '.join(missing_ids)}. "
-                                f"Please sync inventory first or use existing placement IDs.",
-                                "warning",
-                            )
-                            # Continue anyway - they might be valid in GAM but not synced yet
-
+                        # Existence/consistency against synced inventory is enforced by
+                        # validate_product_gam_inventory() once the full config is built.
                         validated_placement_ids = id_list
                         base_config["targeted_placement_ids"] = id_list
 
@@ -1062,6 +1022,17 @@ def add_product(tenant_id):
                         product_kwargs["inventory_profile_id"] = profile_id
                     except (ValueError, TypeError):
                         flash("Invalid inventory profile ID", "error")
+                        return _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_data)
+
+                # Reject inconsistent GAM inventory configuration. Only applies to direct
+                # targeting — profile-based products derive their inventory from the profile.
+                if adapter_type == "google_ad_manager" and not inventory_profile_id:
+                    from src.services.gam_inventory_validation import validate_product_gam_inventory
+
+                    inventory_errors = validate_product_gam_inventory(db_session, tenant_id, implementation_config)
+                    if inventory_errors:
+                        for err in inventory_errors:
+                            flash(err, "error")
                         return _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_data)
 
                 # Only add countries if explicitly set
@@ -1805,6 +1776,19 @@ def edit_product(tenant_id, product_id):
 
                     # Store targeting_template in product
                     product.targeting_template = targeting_template
+
+                    # Reject inconsistent GAM inventory configuration. Only applies to direct
+                    # targeting — profile-based products derive their inventory from the profile.
+                    if not inventory_profile_id:
+                        from src.services.gam_inventory_validation import validate_product_gam_inventory
+
+                        inventory_errors = validate_product_gam_inventory(db_session, tenant_id, base_config)
+                        if inventory_errors:
+                            for err in inventory_errors:
+                                flash(err, "error")
+                            return redirect(
+                                url_for("products.edit_product", tenant_id=tenant_id, product_id=product_id)
+                            )
 
                     product.implementation_config = base_config
                     from sqlalchemy.orm import attributes
