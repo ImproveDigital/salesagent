@@ -39,11 +39,20 @@
 
     {% if not test_mode and not oauth_configured %}
     <div style="margin: 2rem 0; padding: 1.5rem; background: #fff3cd; border-radius: 4px;">
+        {% if test_mode_env_enabled %}
+        <p style="margin: 0; color: #856404;">
+            <strong>Test login is disabled for this tenant.</strong><br>
+            <code>ADCP_AUTH_TEST_MODE</code> is on for this deployment, but this tenant's
+            test-access flag has been turned off — re-enable it in Settings &rarr; Users &
+            Access, or configure SSO (OAuth/OIDC) below.
+        </p>
+        {% else %}
         <p style="margin: 0; color: #856404;">
             <strong>Authentication not configured.</strong><br>
             Set <code>ADCP_AUTH_TEST_MODE=true</code> for test access, or configure OAuth credentials
             (<code>GOOGLE_CLIENT_ID</code>/<code>GOOGLE_CLIENT_SECRET</code> or generic OIDC).
         </p>
+        {% endif %}
     </div>
     <p style="color: #666; font-size: 13px; margin-top: 1rem;">
         <a href="https://github.com/prebid/salesagent/blob/main/docs/deployment/environment-variables.md#authentication" target="_blank" style="color: #0066cc;">

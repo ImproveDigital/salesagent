@@ -120,3 +120,37 @@ class TestSignupFlowSessionPreservation:
                     assert "signup_flow" not in sess
                     assert "signup_step" not in sess
                     assert "some_data" not in sess
+
+
+class TestOnboardingReachableFromEitherDoor:
+    """Regression: /signup/onboarding used to require session["signup_flow"],
+    which is only set by /signup/start. A user arriving via the tenant
+    selector's "Create New Account" link (login path, not signup path) hit
+    "Invalid signup session" even though they were fully authenticated —
+    the same button worked from one entry door and not the other.
+
+    Authentication is the only requirement that actually matters here:
+    signup_flow was never a security boundary (anyone authenticated could
+    already load this URL directly), just an incidental gate that happened
+    to diverge between the two doors.
+    """
+
+    def test_onboarding_renders_for_authenticated_user_without_signup_flow(self, admin_app):
+        with admin_app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user"] = "user@example.com"
+                sess["user_name"] = "Example User"
+                # Deliberately no "signup_flow" — simulates arriving via the
+                # tenant selector's "Create New Account" link, not /signup/start.
+
+            response = client.get("/signup/onboarding")
+
+        assert response.status_code == 200
+        assert b"Invalid signup session" not in response.data
+
+    def test_onboarding_still_requires_authentication(self, admin_app):
+        with admin_app.test_client() as client:
+            response = client.get("/signup/onboarding")
+
+        assert response.status_code == 302
+        assert "/signup" in response.location

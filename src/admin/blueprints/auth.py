@@ -173,6 +173,33 @@ def init_oauth(app):
         return None
 
 
+def _test_auth_env_enabled() -> bool:
+    """True when the deployment-level test-auth switch is on.
+
+    Split out from ``_test_auth_allowed`` so the login page can tell "no
+    tenant is in setup mode" (a tenant-admin action, fixable from Settings
+    -> Users & Access) apart from "this deployment never turned on test
+    auth at all" (an operator/env-var concern) — the two need different
+    guidance in the "not configured" notice.
+    """
+    return not is_admin_production() and os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+
+
+def _test_auth_allowed(tenant) -> bool:
+    """True when POST /test/auth would accept a login for this tenant.
+
+    Mirrors the test_auth() gate (F-02): production mode always blocks,
+    and BOTH the global ADCP_AUTH_TEST_MODE env var AND the tenant's
+    auth_setup_mode must be enabled. The login pages use this so the
+    test-login UI is only rendered when the endpoint would actually
+    accept the POST — otherwise the button leads to a deliberate 404.
+    Keep in sync with test_auth().
+    """
+    if not _test_auth_env_enabled():
+        return False
+    return bool(tenant is not None and getattr(tenant, "auth_setup_mode", False))
+
+
 @auth_bp.route("/login")
 def login():
     """Show login page or redirect to OAuth provider.
@@ -198,9 +225,11 @@ def login():
     client_id, client_secret, discovery_url, _ = get_oauth_config()
     oauth_configured = bool(client_id and client_secret and discovery_url)
 
-    # Determine test_mode from env var only
-    # tenant.auth_setup_mode is only used when NO global OAuth is configured
-    test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+    # Test-login UI is shown only when /test/auth would accept the POST
+    # (F-02: env var AND tenant setup mode, never in production). Without a
+    # resolved tenant the endpoint rejects, so this stays False until a
+    # tenant is detected below.
+    test_mode = False
 
     from src.core.config_loader import is_single_tenant_mode
 
@@ -221,9 +250,7 @@ def login():
             if tenant:
                 tenant_context = tenant.tenant_id
                 tenant_name = tenant.name
-                # Only use auth_setup_mode if no global OAuth configured
-                if not oauth_configured and hasattr(tenant, "auth_setup_mode") and tenant.auth_setup_mode:
-                    test_mode = True
+                test_mode = _test_auth_allowed(tenant)
                 logger.info(
                     f"Detected tenant context from Approximated headers: {approximated_host} -> {tenant_context}"
                 )
@@ -240,30 +267,23 @@ def login():
                 if tenant:
                     tenant_context = tenant.tenant_id
                     tenant_name = tenant.name
-                    # Only use auth_setup_mode if no global OAuth configured
-                    if not oauth_configured and hasattr(tenant, "auth_setup_mode") and tenant.auth_setup_mode:
-                        test_mode = True
+                    test_mode = _test_auth_allowed(tenant)
                     logger.info(f"Detected tenant context from Host header: {tenant_subdomain} -> {tenant_context}")
 
-    # Embedded instances skip OIDC entirely — the blueprint isn't
-    # registered (see ``src/admin/app.py``), so any ``url_for("oidc.login", ...)``
-    # would BuildError → 500. Identity on embedded comes from
-    # X-Identity-* headers; per-tenant OIDC is for open instances.
-    # Sprint 7 Phase 4c.
-    from src.admin.utils.embedded_mode_auth import is_managed_instance
-
-    oidc_disabled_by_managed_instance = is_managed_instance()
+    # Single source of truth for "is OIDC actually usable for this tenant" —
+    # shared with tenant_login() below. Checking a raw TenantAuthConfig
+    # field here (e.g. just oidc_client_id truthiness) would drift from
+    # that check and let this route redirect into OIDC that tenant_login()
+    # (correctly) considers unconfigured — that drift previously sent
+    # /login into a broken Google OAuth redirect while
+    # /tenant/<id>/login on the very same tenant reported "not configured".
+    from src.services.auth_config_service import get_oidc_config_for_auth
 
     # Check for tenant-specific OIDC configuration (multi-tenant or single-tenant)
     if tenant_context:
-        # For detected tenant, check if it has OIDC configured
-        from src.core.database.models import TenantAuthConfig
-
-        with get_db_session() as db_session:
-            config = db_session.scalars(select(TenantAuthConfig).filter_by(tenant_id=tenant_context)).first()
-            if config and config.oidc_client_id and not oidc_disabled_by_managed_instance:
-                oidc_configured = True
-                oidc_enabled = config.oidc_enabled
+        oidc_config = get_oidc_config_for_auth(tenant_context)
+        oidc_configured = bool(oidc_config)
+        oidc_enabled = oidc_configured
 
         # If tenant has OIDC enabled, redirect to tenant OIDC login
         if oidc_enabled and not test_mode and not just_logged_out:
@@ -275,17 +295,13 @@ def login():
 
     elif is_single_tenant_mode():
         # Single-tenant mode: check default tenant's OIDC config
-        from src.core.database.models import TenantAuthConfig
-
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id="default")).first()
-            config = db_session.scalars(select(TenantAuthConfig).filter_by(tenant_id="default")).first()
-            if config and config.oidc_client_id and not oidc_disabled_by_managed_instance:
-                oidc_configured = True
-                oidc_enabled = config.oidc_enabled
-            # Only use auth_setup_mode in single-tenant mode if no global OAuth
-            if not oauth_configured and tenant and hasattr(tenant, "auth_setup_mode") and tenant.auth_setup_mode:
-                test_mode = True
+            test_mode = _test_auth_allowed(tenant)
+
+        oidc_config = get_oidc_config_for_auth("default")
+        oidc_configured = bool(oidc_config)
+        oidc_enabled = oidc_configured
 
         if oidc_enabled and not test_mode and not just_logged_out:
             return redirect(url_for("oidc.login", tenant_id="default"))
@@ -300,6 +316,7 @@ def login():
     return render_template(
         "login.html",
         test_mode=test_mode,
+        test_mode_env_enabled=_test_auth_env_enabled(),
         oauth_configured=oauth_configured,
         oidc_enabled=oidc_configured,  # Show SSO button if configured (not just enabled)
         tenant_context=tenant_context,
@@ -331,14 +348,9 @@ def tenant_login(tenant_id):
             abort(404)
         tenant_name = tenant.name
 
-        # Determine test_mode:
-        # - ADCP_AUTH_TEST_MODE env var enables test mode globally
-        # - tenant.auth_setup_mode enables test mode for this tenant ONLY if no global OAuth
-        #   (for multi-tenant with global OAuth, tenants use global OAuth, not setup mode)
-        test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
-        if not test_mode and not oauth_configured:
-            # No global OAuth - use tenant's auth_setup_mode (for single-tenant SSO setup)
-            test_mode = tenant.auth_setup_mode if hasattr(tenant, "auth_setup_mode") else True
+        # Test-login UI is shown only when /test/auth would accept the POST
+        # (F-02: env var AND tenant setup mode, never in production).
+        test_mode = _test_auth_allowed(tenant)
 
         # Check if tenant-specific OIDC is configured and enabled
         from src.services.auth_config_service import get_oidc_config_for_auth
@@ -362,6 +374,7 @@ def tenant_login(tenant_id):
         tenant_id=tenant_id,
         tenant_name=tenant_name,
         test_mode=test_mode,
+        test_mode_env_enabled=_test_auth_env_enabled(),
         oauth_configured=oauth_configured,
         oidc_enabled=oidc_enabled,
         single_tenant_mode=is_single_tenant_mode(),
@@ -494,6 +507,78 @@ def tenant_google_auth(tenant_id):
     return response
 
 
+def _build_available_tenants(email: str) -> list[dict]:
+    """Build the tenant-selector list for ``email`` from scratch.
+
+    Single source of truth for ``session["available_tenants"]`` — used by
+    the OAuth callback on first login AND by ``select_tenant()`` to
+    recover if that session key is ever missing (e.g. after it was
+    consumed by a prior selection). Recomputing here instead of bouncing
+    back to ``/login`` avoids re-running the OAuth dance just to reselect
+    a tenant the user already has access to.
+    """
+    from src.admin.domain_access import get_user_tenant_access
+
+    tenant_access = get_user_tenant_access(email)
+
+    # Use a dict to track tenants by tenant_id to avoid duplicates
+    tenant_dict: dict[str, dict] = {}
+
+    # Process user_tenants first (primary authorization method via User records)
+    for tenant in tenant_access.get("user_tenants", []):
+        with get_db_session() as db_session:
+            from sqlalchemy import select
+
+            from src.core.database.models import User
+
+            stmt = select(User).filter_by(email=email, tenant_id=tenant.tenant_id)
+            existing_user = db_session.scalars(stmt).first()
+            is_admin = existing_user.role == "admin" if existing_user else False
+
+        tenant_dict[tenant.tenant_id] = {
+            "tenant_id": tenant.tenant_id,
+            "name": tenant.name,
+            "subdomain": tenant.subdomain,
+            "is_admin": is_admin,
+        }
+
+    # Process domain_tenant (bulk org access)
+    if tenant_access["domain_tenant"]:
+        domain_tenant = tenant_access["domain_tenant"]
+        if domain_tenant.tenant_id not in tenant_dict:
+            tenant_dict[domain_tenant.tenant_id] = {
+                "tenant_id": domain_tenant.tenant_id,
+                "name": domain_tenant.name,
+                "subdomain": domain_tenant.subdomain,
+                "is_admin": True,  # Domain users get admin access
+            }
+
+    # Process email_tenants (legacy backwards compatibility)
+    for tenant in tenant_access["email_tenants"]:
+        # Skip if already added via user record or domain access
+        if tenant.tenant_id in tenant_dict:
+            continue
+
+        # Check existing user record for role, default to admin
+        with get_db_session() as db_session:
+            from sqlalchemy import select
+
+            from src.core.database.models import User
+
+            stmt = select(User).filter_by(email=email, tenant_id=tenant.tenant_id)
+            existing_user = db_session.scalars(stmt).first()
+            is_admin = existing_user.role == "admin" if existing_user else True
+
+        tenant_dict[tenant.tenant_id] = {
+            "tenant_id": tenant.tenant_id,
+            "name": tenant.name,
+            "subdomain": tenant.subdomain,
+            "is_admin": is_admin,
+        }
+
+    return list(tenant_dict.values())
+
+
 @auth_bp.route("/auth/google/callback")
 def google_callback():
     """Handle Google OAuth callback - simplified version."""
@@ -545,6 +630,7 @@ def google_callback():
         session["user"] = email
         session["user_name"] = user.get("name", email)
         session["user_picture"] = user.get("picture", "")
+        session.permanent = True
 
         # Mark session as modified to ensure it's saved
         session.modified = True
@@ -578,69 +664,8 @@ def google_callback():
 
         # Unified flow: Always show tenant selector (with option to create new tenant)
         # No distinction between signup and login - keeps UX simple and consistent
-        from src.admin.domain_access import get_user_tenant_access
-
-        # Get all accessible tenants
-        tenant_access = get_user_tenant_access(email)
-
-        # Build tenant list for selector (empty list is fine - user can create new tenant)
-        # Use a dict to track tenants by tenant_id to avoid duplicates
-        tenant_dict = {}
-
-        # Process user_tenants first (primary authorization method via User records)
-        for tenant in tenant_access.get("user_tenants", []):
-            with get_db_session() as db_session:
-                from sqlalchemy import select
-
-                from src.core.database.models import User
-
-                stmt = select(User).filter_by(email=email, tenant_id=tenant.tenant_id)
-                existing_user = db_session.scalars(stmt).first()
-                is_admin = existing_user.role == "admin" if existing_user else False
-
-            tenant_dict[tenant.tenant_id] = {
-                "tenant_id": tenant.tenant_id,
-                "name": tenant.name,
-                "subdomain": tenant.subdomain,
-                "is_admin": is_admin,
-            }
-
-        # Process domain_tenant (bulk org access)
-        if tenant_access["domain_tenant"]:
-            domain_tenant = tenant_access["domain_tenant"]
-            if domain_tenant.tenant_id not in tenant_dict:
-                tenant_dict[domain_tenant.tenant_id] = {
-                    "tenant_id": domain_tenant.tenant_id,
-                    "name": domain_tenant.name,
-                    "subdomain": domain_tenant.subdomain,
-                    "is_admin": True,  # Domain users get admin access
-                }
-
-        # Process email_tenants (legacy backwards compatibility)
-        for tenant in tenant_access["email_tenants"]:
-            # Skip if already added via user record or domain access
-            if tenant.tenant_id in tenant_dict:
-                continue
-
-            # Check existing user record for role, default to admin
-            with get_db_session() as db_session:
-                from sqlalchemy import select
-
-                from src.core.database.models import User
-
-                stmt = select(User).filter_by(email=email, tenant_id=tenant.tenant_id)
-                existing_user = db_session.scalars(stmt).first()
-                is_admin = existing_user.role == "admin" if existing_user else True
-
-            tenant_dict[tenant.tenant_id] = {
-                "tenant_id": tenant.tenant_id,
-                "name": tenant.name,
-                "subdomain": tenant.subdomain,
-                "is_admin": is_admin,
-            }
-
-        # Convert dict to list for session
-        session["available_tenants"] = list(tenant_dict.values())
+        # (empty list is fine - user can create new tenant)
+        session["available_tenants"] = _build_available_tenants(email)
 
         # In single-tenant mode, auto-select the tenant (skip selection screen)
         from src.core.config_loader import is_single_tenant_mode
@@ -698,9 +723,18 @@ def select_tenant():
     """Allow user to select a tenant when they have access to multiple."""
     logger.debug("select_tenant hit, has_user=%s, has_tenants=%s", "user" in session, "available_tenants" in session)
 
-    if "user" not in session or "available_tenants" not in session:
-        logger.debug("redirecting to login (missing session data)")
+    if "user" not in session:
+        logger.debug("redirecting to login (no authenticated user)")
         return redirect(url_for("auth.login"))
+
+    if "available_tenants" not in session:
+        # available_tenants is popped once a tenant is chosen (or
+        # auto-selected) — a subsequent visit here (e.g. via admin_index()
+        # when the user's tenant_id session key was cleared) would
+        # otherwise bounce straight to /login and force a needless re-auth
+        # even though the user is already authenticated. Recompute instead.
+        logger.debug("available_tenants missing — recomputing for %s", session["user"])
+        session["available_tenants"] = _build_available_tenants(session["user"])
 
     if request.method == "POST":
         tenant_id = request.form.get("tenant_id")
@@ -766,8 +800,20 @@ def logout():
 
     # If IdP logout URL is configured, redirect there
     if idp_logout_url:
-        # The IdP logout URL should redirect back to our login page after logout
-        # Some IdPs support a post_logout_redirect_uri parameter
+        # Tell the IdP where to send the browser back to, with logged_out=1
+        # so login() doesn't auto-redirect straight back into SSO (which
+        # would make "log out" instantly log the user back in). This is
+        # the OIDC RP-Initiated Logout 1.0 standard parameter name — most
+        # providers honor it; a few (e.g. some Auth0 setups) additionally
+        # require it to be pre-registered as an allowed logout URL.
+        from urllib.parse import urlencode, urlparse, urlunparse
+
+        return_to = url_for("auth.login", logged_out=1, _external=True)
+        parsed = urlparse(idp_logout_url)
+        existing_query = parsed.query
+        new_query = urlencode({"post_logout_redirect_uri": return_to})
+        combined_query = f"{existing_query}&{new_query}" if existing_query else new_query
+        idp_logout_url = urlunparse(parsed._replace(query=combined_query))
         return redirect(idp_logout_url)
 
     flash("You have been logged out", "info")
@@ -860,6 +906,7 @@ def test_auth():
         session["role"] = user_info["role"]
         session["authenticated"] = True
         session["email"] = email
+        session.permanent = True
 
         if user_info["role"] == "super_admin":
             session["is_super_admin"] = True
