@@ -19,6 +19,10 @@ Routing decision (in order):
   a 401 (bearer auth wraps every non-admin path), which generates log
   spam from well-behaved crawlers and confuses tools that key off the
   status code.
+* ``/admin/signup`` (and any ``/admin/signup/*`` sub-path) → 302 redirect
+  to the same path with ``/admin`` stripped. Both forms reach the same
+  Flask view; this keeps the public signup funnel canonically off the
+  ``/admin`` namespace, which should mean "authenticated admin surface".
 * ``/mcp/*`` → MCP (claimed by ``serve(transport="both")``'s inner
   dispatcher before this middleware decides anything)
 * ``/admin/*``, ``/static/*``, ``/auth/*``, ``/login``, ``/logout``,
@@ -137,6 +141,22 @@ class AdminWSGIMount:
             if path == "/" and self._is_apex_host(scope):
                 qs = scope.get("query_string", b"") or b""
                 location = "/signup"
+                if qs:
+                    location = location + "?" + qs.decode("latin-1")
+                await self._send_redirect(send, location)
+                return
+
+            # Canonicalize the self-service signup funnel to its bare
+            # (non-``/admin``) URL. Both forms reach the same public.py
+            # view via the generic ``/admin`` strip-prefix below — Flask
+            # doesn't care which one is used — but ``/admin/*`` should
+            # consistently mean "authenticated admin surface", and a
+            # public marketing/signup page living there is confusing
+            # (and duplicate-content if ever crawled). Checked before the
+            # prefix loop so it wins over the ``/admin`` strip-prefix.
+            if path == "/admin/signup" or path.startswith("/admin/signup/"):
+                qs = scope.get("query_string", b"") or b""
+                location = path[len("/admin") :]
                 if qs:
                     location = location + "?" + qs.decode("latin-1")
                 await self._send_redirect(send, location)

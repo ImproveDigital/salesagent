@@ -389,45 +389,32 @@ def google_auth():
         flash("OAuth not configured", "error")
         return redirect(url_for("auth.login"))
 
-    # Get redirect URI - must match what's configured in Google OAuth credentials
-    # Note: In production with nginx, the path is /admin/auth/google/callback
-    # but Flask only knows about /auth/google/callback
-
-    # Debug: Log request context
-    logger.info(f"OAuth initiation - Request URL: {request.url}")
-    logger.info(f"OAuth initiation - Request host: {request.host}")
-    logger.info(f"OAuth initiation - Request scheme: {request.scheme}")
-
-    # Debug: Log session cookie configuration
-    logger.debug(
-        "session config: SECURE=%s, SAMESITE=%s",
-        current_app.config.get("SESSION_COOKIE_SECURE"),
-        current_app.config.get("SESSION_COOKIE_SAMESITE"),
-    )
-
-    redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
+    # Get redirect URI - must match what's configured in Google OAuth credentials.
+    #
+    # This route is reachable through two different URL doors — bare
+    # /auth/google (e.g. from /signup/start) and /admin/auth/google (e.g.
+    # from /admin/login's auto-redirect) — and url_for(_external=True)
+    # would build a different callback URL for each (bare vs /admin-
+    # prefixed), because it reflects whichever door the current request
+    # came through. Google only accepts an exact, pre-registered URI, so
+    # a per-door callback means only ONE door's URI can ever be
+    # registered and the other 404s with redirect_uri_mismatch — exactly
+    # the bug reported: /signup failed while /admin/auth/select-tenant
+    # worked, purely because of which door was used to reach this view.
+    #
+    # get_oauth_redirect_uri() sidesteps this entirely: it computes the
+    # one canonical, always-/admin-prefixed callback URL from
+    # SALES_AGENT_DOMAIN (or GOOGLE_OAUTH_REDIRECT_URI, if set)
+    # independent of the current request's door — the same approach
+    # tenant_google_auth() already uses. Falls back to the old
+    # request-relative build only when no sales-agent domain is
+    # configured (pure local dev), where there's no multi-door ambiguity.
+    redirect_uri = get_oauth_redirect_uri()
     if redirect_uri:
-        logger.info(f"Using GOOGLE_OAUTH_REDIRECT_URI from env: {redirect_uri}")
+        logger.info(f"Using canonical OAuth redirect URI: {redirect_uri}")
     else:
-        # Build the URL
-        base_url = url_for("auth.google_callback", _external=True)
-        logger.info(f"Generated base URL: {base_url}")
-
-        # Only add /admin prefix in production mode with nginx (not in Docker standalone)
-        # SKIP_NGINX=true indicates Docker standalone mode without nginx reverse proxy
-        skip_nginx = os.environ.get("SKIP_NGINX", "false").lower() == "true"
-        production = os.environ.get("PRODUCTION", "").lower() == "true"
-
-        if not skip_nginx and production and "/admin/" not in base_url:
-            # Production with nginx: add /admin prefix for nginx routing
-            redirect_uri = base_url.replace("/auth/google/callback", "/admin/auth/google/callback")
-            logger.info(f"Added /admin prefix for nginx, final URI: {redirect_uri}")
-        else:
-            # Docker standalone or development: use the base URL as-is
-            redirect_uri = base_url
-            logger.info(f"Using base URL without /admin prefix: {redirect_uri}")
-
-    logger.debug("OAuth redirect URI: %s", redirect_uri)
+        redirect_uri = url_for("auth.google_callback", _external=True)
+        logger.info(f"No SALES_AGENT_DOMAIN configured; using request-relative URI: {redirect_uri}")
 
     # Clear any existing session to start fresh for OAuth
     # This ensures we don't have conflicting session state
@@ -443,8 +430,14 @@ def google_auth():
     if signup_step:
         session["signup_step"] = signup_step
 
-    # Simple OAuth flow - no tenant context preservation needed
-    response = oauth.google.authorize_redirect(redirect_uri)
+    # Simple OAuth flow - no tenant context preservation needed.
+    # prompt=select_account forces Google's account chooser on every
+    # login instead of silently reusing the browser's existing Google
+    # session — without it, logging out of this app doesn't feel like
+    # logging out at all: /login auto-redirects back into Google, which
+    # silently re-authenticates via the still-active Google session and
+    # lands the user right back in, with no visible prompt.
+    response = oauth.google.authorize_redirect(redirect_uri, prompt="select_account")
 
     # Log what's in the session after Authlib stores the state
     logger.debug("session keys after authorize_redirect: %s", list(session.keys()))
@@ -475,13 +468,9 @@ def tenant_google_auth(tenant_id):
 
     host = request.headers.get("Host", "")
 
-    # Always use the registered OAuth redirect URI for Google (no modifications allowed)
-    if os.environ.get("PRODUCTION") == "true":
-        # For production, always use the exact registered redirect URI
-        redirect_uri = get_oauth_redirect_uri()
-    else:
-        # Development fallback
-        redirect_uri = url_for("auth.google_callback", _external=True)
+    # Same canonical-URI approach as google_auth() above — see that
+    # docstring for why this can't be request-relative.
+    redirect_uri = get_oauth_redirect_uri() or url_for("auth.google_callback", _external=True)
 
     # Store originating host and tenant context in session for OAuth callback
     session["oauth_originating_host"] = host
@@ -496,8 +485,9 @@ def tenant_google_auth(tenant_id):
 
     session["oauth_tenant_context"] = tenant_id
 
-    # Let Authlib manage the state parameter for CSRF protection
-    response = oauth.google.authorize_redirect(redirect_uri)
+    # Let Authlib manage the state parameter for CSRF protection.
+    # prompt=select_account — see the comment in google_auth() above.
+    response = oauth.google.authorize_redirect(redirect_uri, prompt="select_account")
 
     # CRITICAL FIX: Explicitly save session to response (same fix as google_auth)
     # Authlib's authorize_redirect() bypasses Flask's normal session-saving mechanism
@@ -630,6 +620,14 @@ def google_callback():
         session["user"] = email
         session["user_name"] = user.get("name", email)
         session["user_picture"] = user.get("picture", "")
+        # base.html's identity/logout block gates on session.authenticated
+        # and reads session.email — test_auth() and the per-tenant OIDC
+        # callback both set these, but this route never did, so a user who
+        # logged in via real Google OAuth (the actual path in any
+        # non-test-mode deployment) saw no logout button or identity
+        # display at all, despite being fully authenticated.
+        session["authenticated"] = True
+        session["email"] = email
         session.permanent = True
 
         # Mark session as modified to ensure it's saved
@@ -656,16 +654,24 @@ def google_callback():
             next_url = _safe_redirect(session.pop("login_next_url", None), fallback=url_for("core.index"))
             return redirect(next_url)
 
-        # Check if this is a signup flow (only for non-super-admin users)
-        if session.get("signup_flow"):
-            # Redirect to onboarding wizard for new tenant signup
+        # Unified flow: build tenant access BEFORE deciding where to send the
+        # user, regardless of which door they came through. Arriving via
+        # /signup (signup_flow=True) used to unconditionally skip straight
+        # to "create new tenant" — even for a user whose email/domain
+        # already had access to one or more tenants, who'd never see them
+        # and could end up creating a duplicate. Now both doors agree: show
+        # what the user already has access to, alongside the option to
+        # create a new one.
+        was_signup_flow = session.pop("signup_flow", False)
+        session.pop("signup_step", None)
+        session["available_tenants"] = _build_available_tenants(email)
+
+        if was_signup_flow and not session["available_tenants"]:
+            # Genuinely new user with no existing tenant access — skip the
+            # selector (it would just show an empty list + create button)
+            # and go straight to onboarding, saving a click.
             flash(f"Welcome {user.get('name', email)}!", "success")
             return redirect(url_for("public.signup_onboarding"))
-
-        # Unified flow: Always show tenant selector (with option to create new tenant)
-        # No distinction between signup and login - keeps UX simple and consistent
-        # (empty list is fine - user can create new tenant)
-        session["available_tenants"] = _build_available_tenants(email)
 
         # In single-tenant mode, auto-select the tenant (skip selection screen)
         from src.core.config_loader import is_single_tenant_mode
@@ -798,17 +804,42 @@ def logout():
 
     session.clear()
 
+    # Prefer landing on the public signup page over the login page after
+    # logout — but public.landing() itself refuses to render on a
+    # tenant-shaped host (a sales-agent subdomain, or a tenant's custom
+    # virtual_host) and bounces to auth.login() instead. That bounce
+    # doesn't set logged_out=1, so if the tenant has SSO configured,
+    # login() would auto-redirect straight back into it — undoing the
+    # logout. Deliberately host-shape-only (no DB lookup, to keep
+    # /logout cheap and independent of DB availability) — this is a UX
+    # nicety, not a security boundary, so a conservative false negative
+    # here just means landing on /login instead of /signup.
+    from src.core.domain_config import get_sales_agent_domain, is_admin_domain
+
+    sales_domain = get_sales_agent_domain()
+    if not sales_domain:
+        # No multi-tenant domain configured (single-tenant / local dev) —
+        # there's no custom-virtual-host concept to worry about.
+        signup_reachable = True
+    else:
+        host = request.headers.get("Apx-Incoming-Host") or request.headers.get("Host", "")
+        is_apex = bool(host) and host.split(":", 1)[0].lower() == sales_domain.lower()
+        signup_reachable = bool(host) and (is_admin_domain(host) or is_apex)
+
+    if signup_reachable:
+        post_logout_endpoint, post_logout_kwargs = "public.landing", {}
+    else:
+        post_logout_endpoint, post_logout_kwargs = "auth.login", {"logged_out": 1}
+
     # If IdP logout URL is configured, redirect there
     if idp_logout_url:
-        # Tell the IdP where to send the browser back to, with logged_out=1
-        # so login() doesn't auto-redirect straight back into SSO (which
-        # would make "log out" instantly log the user back in). This is
-        # the OIDC RP-Initiated Logout 1.0 standard parameter name — most
-        # providers honor it; a few (e.g. some Auth0 setups) additionally
-        # require it to be pre-registered as an allowed logout URL.
+        # Tell the IdP where to send the browser back to. This is the OIDC
+        # RP-Initiated Logout 1.0 standard parameter name — most providers
+        # honor it; a few (e.g. some Auth0 setups) additionally require it
+        # to be pre-registered as an allowed logout URL.
         from urllib.parse import urlencode, urlparse, urlunparse
 
-        return_to = url_for("auth.login", logged_out=1, _external=True)
+        return_to = url_for(post_logout_endpoint, _external=True, **post_logout_kwargs)
         parsed = urlparse(idp_logout_url)
         existing_query = parsed.query
         new_query = urlencode({"post_logout_redirect_uri": return_to})
@@ -817,8 +848,7 @@ def logout():
         return redirect(idp_logout_url)
 
     flash("You have been logged out", "info")
-    # Add logged_out param to prevent auto-redirect to SSO
-    return redirect(url_for("auth.login", logged_out=1))
+    return redirect(url_for(post_logout_endpoint, **post_logout_kwargs))
 
 
 # Test authentication endpoints (only enabled in test mode)
