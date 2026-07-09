@@ -389,45 +389,32 @@ def google_auth():
         flash("OAuth not configured", "error")
         return redirect(url_for("auth.login"))
 
-    # Get redirect URI - must match what's configured in Google OAuth credentials
-    # Note: In production with nginx, the path is /admin/auth/google/callback
-    # but Flask only knows about /auth/google/callback
-
-    # Debug: Log request context
-    logger.info(f"OAuth initiation - Request URL: {request.url}")
-    logger.info(f"OAuth initiation - Request host: {request.host}")
-    logger.info(f"OAuth initiation - Request scheme: {request.scheme}")
-
-    # Debug: Log session cookie configuration
-    logger.debug(
-        "session config: SECURE=%s, SAMESITE=%s",
-        current_app.config.get("SESSION_COOKIE_SECURE"),
-        current_app.config.get("SESSION_COOKIE_SAMESITE"),
-    )
-
-    redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
+    # Get redirect URI - must match what's configured in Google OAuth credentials.
+    #
+    # This route is reachable through two different URL doors — bare
+    # /auth/google (e.g. from /signup/start) and /admin/auth/google (e.g.
+    # from /admin/login's auto-redirect) — and url_for(_external=True)
+    # would build a different callback URL for each (bare vs /admin-
+    # prefixed), because it reflects whichever door the current request
+    # came through. Google only accepts an exact, pre-registered URI, so
+    # a per-door callback means only ONE door's URI can ever be
+    # registered and the other 404s with redirect_uri_mismatch — exactly
+    # the bug reported: /signup failed while /admin/auth/select-tenant
+    # worked, purely because of which door was used to reach this view.
+    #
+    # get_oauth_redirect_uri() sidesteps this entirely: it computes the
+    # one canonical, always-/admin-prefixed callback URL from
+    # SALES_AGENT_DOMAIN (or GOOGLE_OAUTH_REDIRECT_URI, if set)
+    # independent of the current request's door — the same approach
+    # tenant_google_auth() already uses. Falls back to the old
+    # request-relative build only when no sales-agent domain is
+    # configured (pure local dev), where there's no multi-door ambiguity.
+    redirect_uri = get_oauth_redirect_uri()
     if redirect_uri:
-        logger.info(f"Using GOOGLE_OAUTH_REDIRECT_URI from env: {redirect_uri}")
+        logger.info(f"Using canonical OAuth redirect URI: {redirect_uri}")
     else:
-        # Build the URL
-        base_url = url_for("auth.google_callback", _external=True)
-        logger.info(f"Generated base URL: {base_url}")
-
-        # Only add /admin prefix in production mode with nginx (not in Docker standalone)
-        # SKIP_NGINX=true indicates Docker standalone mode without nginx reverse proxy
-        skip_nginx = os.environ.get("SKIP_NGINX", "false").lower() == "true"
-        production = os.environ.get("PRODUCTION", "").lower() == "true"
-
-        if not skip_nginx and production and "/admin/" not in base_url:
-            # Production with nginx: add /admin prefix for nginx routing
-            redirect_uri = base_url.replace("/auth/google/callback", "/admin/auth/google/callback")
-            logger.info(f"Added /admin prefix for nginx, final URI: {redirect_uri}")
-        else:
-            # Docker standalone or development: use the base URL as-is
-            redirect_uri = base_url
-            logger.info(f"Using base URL without /admin prefix: {redirect_uri}")
-
-    logger.debug("OAuth redirect URI: %s", redirect_uri)
+        redirect_uri = url_for("auth.google_callback", _external=True)
+        logger.info(f"No SALES_AGENT_DOMAIN configured; using request-relative URI: {redirect_uri}")
 
     # Clear any existing session to start fresh for OAuth
     # This ensures we don't have conflicting session state
@@ -481,13 +468,9 @@ def tenant_google_auth(tenant_id):
 
     host = request.headers.get("Host", "")
 
-    # Always use the registered OAuth redirect URI for Google (no modifications allowed)
-    if os.environ.get("PRODUCTION") == "true":
-        # For production, always use the exact registered redirect URI
-        redirect_uri = get_oauth_redirect_uri()
-    else:
-        # Development fallback
-        redirect_uri = url_for("auth.google_callback", _external=True)
+    # Same canonical-URI approach as google_auth() above — see that
+    # docstring for why this can't be request-relative.
+    redirect_uri = get_oauth_redirect_uri() or url_for("auth.google_callback", _external=True)
 
     # Store originating host and tenant context in session for OAuth callback
     session["oauth_originating_host"] = host
