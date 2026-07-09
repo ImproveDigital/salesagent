@@ -1610,6 +1610,10 @@ class MediaPackage(SalesAgentBaseModel):
     package_id: str
     name: str
     delivery_type: Literal["guaranteed", "non_guaranteed"]
+    # Booked goal-unit count derived from budget and pricing at creation
+    # time (budget/rate×1000 for CPM/VCPM, budget/rate for CPC) — becomes
+    # the ad server's primary-goal delivery cap. NOT a measured delivery
+    # number. See media_buy_create._goal_units_from_budget.
     impressions: int
     # Accept library FormatId (not our extended FormatId) to avoid validation errors
     # when Product from library returns LibraryFormatId instances

@@ -1247,9 +1247,14 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         logger.error(f"[APPROVAL] {error_msg}")
                         return False, error_msg
 
-                    # Calculate CPM and impressions (convert Decimal to float for math operations)
-                    cpm = float(pricing_option_inner.rate) if pricing_option_inner.rate else 0.0
-                    impressions = int(total_budget / cpm * 1000) if cpm > 0 else 0
+                    # Convert this package's budget into goal units for its
+                    # pricing model (impressions for CPM/VCPM, clicks for CPC).
+                    rate_value = float(pricing_option_inner.rate) if pricing_option_inner.rate else None
+                    impressions = _goal_units_from_budget(
+                        total_budget,
+                        str(getattr(pricing_option_inner, "pricing_model", "") or ""),
+                        rate_value,
+                    )
 
                     # Reconstruct package_pricing_info from package_config if available
                     # This includes the bid_price for auction pricing
@@ -1348,7 +1353,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
                     logger.info(
                         f"[APPROVAL] Reconstructed MediaPackage {package_id}: "
-                        f"name={media_package.name}, rate={cpm}, impressions={impressions}"
+                        f"name={media_package.name}, rate={rate_value}, impressions={impressions}"
                     )
 
                 except ValidationError as ve:
@@ -1463,9 +1468,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                 buy_row = uow_ext.media_buys.get_by_id(media_buy_id)
                 if buy_row and not buy_row.external_id:
                     buy_row.external_id = response.media_buy_id
-                    logger.info(
-                        f"[APPROVAL] Stamped external_id={response.media_buy_id!r} on media buy {media_buy_id}"
-                    )
+                    logger.info(f"[APPROVAL] Stamped external_id={response.media_buy_id!r} on media buy {media_buy_id}")
 
         # Persist platform_line_item_ids from adapter response (same as auto-approval path)
         # Adapters (GAM, Broadstreet) attach _platform_line_item_ids to the response object
@@ -2073,6 +2076,31 @@ def _validate_pricing_model_selection(
         "is_fixed": selected_option.is_fixed,
         "bid_price": float(package.bid_price) if package.bid_price else None,
     }
+
+
+def _goal_units_from_budget(budget: float, pricing_model: str | None, rate: float | None) -> int:
+    """Convert a package budget into its line-item primary-goal unit count.
+
+    GAM line items have no budget field — the only delivery cap is
+    ``primaryGoal.units`` — so the buyer's budget must be expressed as a
+    unit count at booking time. The unit follows the pricing model:
+
+    - cpc: the rate buys a *single click* → units = budget / rate
+    - cpm / vcpm (and any other mille-priced model): the rate buys
+      1,000 (viewable) impressions → units = budget / rate × 1000
+    - flat_rate lands in the mille branch, but the value is unused:
+      GAM books flat-rate sponsorships as a 100% share-of-voice goal
+      (see gam/managers/orders.py), not a unit count.
+
+    Floors the result so we never book more volume than the budget
+    covers. Returns 0 when no positive rate is available.
+    """
+    if not rate or float(rate) <= 0:
+        return 0
+    rate_f = float(rate)
+    if (pricing_model or "").lower() == "cpc":
+        return int(budget / rate_f)
+    return int(budget / rate_f * 1000)
 
 
 def _collect_package_pricing_info_by_index(
@@ -3876,15 +3904,13 @@ async def _create_media_buy_impl(
                 else:
                     format_ids_to_use = []
 
-            # Get CPM from pricing_options
-            cpm = 10.0  # Default
-            if pkg_product.pricing_options and len(pkg_product.pricing_options) > 0:
-                first_option = pkg_product.pricing_options[0]
-                # adcp 2.14.0+ uses RootModel wrapper - access via .root
-                inner_option = getattr(first_option, "root", first_option)
-                rate = getattr(inner_option, "rate", None)
-                if rate:
-                    cpm = float(rate)
+            # Pricing for this package was validated earlier by
+            # _collect_package_pricing_info_by_index (keyed by 0-based request
+            # index; this loop enumerates from 1). Auction packages carry
+            # their working rate in bid_price instead of a fixed rate.
+            pkg_pricing = package_pricing_info_by_index.get(idx - 1) or {}
+            pkg_rate = pkg_pricing.get("rate") or pkg_pricing.get("bid_price")
+            pkg_pricing_model = pkg_pricing.get("pricing_model")
 
             # Generate permanent package ID (not product_id)
             import secrets
@@ -3921,7 +3947,15 @@ async def _create_media_buy_impl(
                     package_id=package_id,
                     name=pkg_product.name,
                     delivery_type=delivery_type_value,
-                    impressions=int(total_budget / cpm * 1000),
+                    # Goal units for THIS package's budget and pricing model
+                    # (previously used the whole buy's total_budget and a
+                    # first-option/default CPM — wrong for multi-package buys
+                    # and for CPC pricing).
+                    impressions=_goal_units_from_budget(
+                        float(package_budget_value or 0.0),
+                        str(pkg_pricing_model) if pkg_pricing_model else None,
+                        float(pkg_rate) if pkg_rate else None,
+                    ),
                     format_ids=cast(list[Any], format_ids_to_use),
                     targeting_overlay=cast(
                         "Targeting | None",

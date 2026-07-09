@@ -707,7 +707,11 @@ class GAMOrdersManager:
             elif not creative_placeholders:
                 log("  [yellow]No creatives and no format_ids - line item will have no creative placeholders[/yellow]")
 
-            # Determine goal type and units
+            # Determine goal type and units. package.impressions carries the
+            # budget-derived goal in the pricing model's unit — impressions
+            # for CPM, clicks for CPC, viewable impressions for VCPM (see
+            # media_buy_create._goal_units_from_budget); goal_unit_type is
+            # aligned to the pricing model further below.
             goal_type = impl_config.get("primary_goal_type", "LIFETIME")
             goal_unit_type = impl_config.get("primary_goal_unit_type", "IMPRESSIONS")
 
