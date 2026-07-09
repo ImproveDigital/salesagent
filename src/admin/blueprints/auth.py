@@ -443,8 +443,14 @@ def google_auth():
     if signup_step:
         session["signup_step"] = signup_step
 
-    # Simple OAuth flow - no tenant context preservation needed
-    response = oauth.google.authorize_redirect(redirect_uri)
+    # Simple OAuth flow - no tenant context preservation needed.
+    # prompt=select_account forces Google's account chooser on every
+    # login instead of silently reusing the browser's existing Google
+    # session — without it, logging out of this app doesn't feel like
+    # logging out at all: /login auto-redirects back into Google, which
+    # silently re-authenticates via the still-active Google session and
+    # lands the user right back in, with no visible prompt.
+    response = oauth.google.authorize_redirect(redirect_uri, prompt="select_account")
 
     # Log what's in the session after Authlib stores the state
     logger.debug("session keys after authorize_redirect: %s", list(session.keys()))
@@ -496,8 +502,9 @@ def tenant_google_auth(tenant_id):
 
     session["oauth_tenant_context"] = tenant_id
 
-    # Let Authlib manage the state parameter for CSRF protection
-    response = oauth.google.authorize_redirect(redirect_uri)
+    # Let Authlib manage the state parameter for CSRF protection.
+    # prompt=select_account — see the comment in google_auth() above.
+    response = oauth.google.authorize_redirect(redirect_uri, prompt="select_account")
 
     # CRITICAL FIX: Explicitly save session to response (same fix as google_auth)
     # Authlib's authorize_redirect() bypasses Flask's normal session-saving mechanism
