@@ -814,17 +814,42 @@ def logout():
 
     session.clear()
 
+    # Prefer landing on the public signup page over the login page after
+    # logout — but public.landing() itself refuses to render on a
+    # tenant-shaped host (a sales-agent subdomain, or a tenant's custom
+    # virtual_host) and bounces to auth.login() instead. That bounce
+    # doesn't set logged_out=1, so if the tenant has SSO configured,
+    # login() would auto-redirect straight back into it — undoing the
+    # logout. Deliberately host-shape-only (no DB lookup, to keep
+    # /logout cheap and independent of DB availability) — this is a UX
+    # nicety, not a security boundary, so a conservative false negative
+    # here just means landing on /login instead of /signup.
+    from src.core.domain_config import get_sales_agent_domain, is_admin_domain
+
+    sales_domain = get_sales_agent_domain()
+    if not sales_domain:
+        # No multi-tenant domain configured (single-tenant / local dev) —
+        # there's no custom-virtual-host concept to worry about.
+        signup_reachable = True
+    else:
+        host = request.headers.get("Apx-Incoming-Host") or request.headers.get("Host", "")
+        is_apex = bool(host) and host.split(":", 1)[0].lower() == sales_domain.lower()
+        signup_reachable = bool(host) and (is_admin_domain(host) or is_apex)
+
+    if signup_reachable:
+        post_logout_endpoint, post_logout_kwargs = "public.landing", {}
+    else:
+        post_logout_endpoint, post_logout_kwargs = "auth.login", {"logged_out": 1}
+
     # If IdP logout URL is configured, redirect there
     if idp_logout_url:
-        # Tell the IdP where to send the browser back to, with logged_out=1
-        # so login() doesn't auto-redirect straight back into SSO (which
-        # would make "log out" instantly log the user back in). This is
-        # the OIDC RP-Initiated Logout 1.0 standard parameter name — most
-        # providers honor it; a few (e.g. some Auth0 setups) additionally
-        # require it to be pre-registered as an allowed logout URL.
+        # Tell the IdP where to send the browser back to. This is the OIDC
+        # RP-Initiated Logout 1.0 standard parameter name — most providers
+        # honor it; a few (e.g. some Auth0 setups) additionally require it
+        # to be pre-registered as an allowed logout URL.
         from urllib.parse import urlencode, urlparse, urlunparse
 
-        return_to = url_for("auth.login", logged_out=1, _external=True)
+        return_to = url_for(post_logout_endpoint, _external=True, **post_logout_kwargs)
         parsed = urlparse(idp_logout_url)
         existing_query = parsed.query
         new_query = urlencode({"post_logout_redirect_uri": return_to})
@@ -833,8 +858,7 @@ def logout():
         return redirect(idp_logout_url)
 
     flash("You have been logged out", "info")
-    # Add logged_out param to prevent auto-redirect to SSO
-    return redirect(url_for("auth.login", logged_out=1))
+    return redirect(url_for(post_logout_endpoint, **post_logout_kwargs))
 
 
 # Test authentication endpoints (only enabled in test mode)

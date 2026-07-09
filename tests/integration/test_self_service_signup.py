@@ -30,7 +30,7 @@ class TestSelfServiceSignupFlow:
         response = client.get("/signup")
         assert response.status_code == 200
         assert b"Connect Your Ad Inventory to AI Buyers" in response.data
-        assert b"Get Started with Google" in response.data
+        assert b"Continue with Google" in response.data
 
     def test_root_redirects_to_landing_when_not_authenticated(self, integration_db, client):
         """Test that root URL redirects to landing page for unauthenticated users in multi-tenant mode."""
