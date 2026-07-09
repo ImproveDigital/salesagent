@@ -4,10 +4,10 @@ import json
 import logging
 import time
 
-from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import String, func, or_, select
 
-from src.admin.utils import execute_limited, get_tenant_config_from_db, require_auth, require_tenant_access
+from src.admin.utils import execute_limited, get_tenant_config_from_db, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.admin.utils.embedded_capabilities import publisher_owns
 from src.admin.utils.embedded_mode_auth import is_embedded_view
@@ -657,13 +657,9 @@ def save_inventory_capabilities(tenant_id: str, inventory_type: str, inventory_i
 
 
 @inventory_bp.route("/tenant/<tenant_id>/orders")
-@require_auth()
+@require_tenant_access()
 def orders_browser(tenant_id):
     """Display GAM orders browser page."""
-    # Check access
-    if session.get("role") != "super_admin" and session.get("tenant_id") != tenant_id:
-        return "Access denied", 403
-
     with get_db_session() as db_session:
         tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
         if not tenant:
@@ -829,13 +825,9 @@ def get_order_details(tenant_id, order_id):
 
 
 @inventory_bp.route("/tenant/<tenant_id>/check-inventory-sync")
-@require_auth()
+@require_tenant_access(api_mode=True)
 def check_inventory_sync(tenant_id):
     """Check if GAM inventory has been synced for this tenant."""
-    # Check access
-    if session.get("role") != "super_admin" and session.get("tenant_id") != tenant_id:
-        return jsonify({"error": "Access denied"}), 403
-
     try:
         with get_db_session() as db_session:
             # Count inventory items
@@ -871,16 +863,9 @@ def check_inventory_sync(tenant_id):
 
 
 @inventory_bp.route("/tenant/<tenant_id>/analyze-ad-server")
-@require_auth()
+@require_tenant_access(api_mode=True, role=("admin", "member"))
 def analyze_ad_server_inventory(tenant_id):
     """Analyze ad server to discover audiences, formats, and placements."""
-    # Check access
-    if session.get("role") == "viewer":
-        return jsonify({"error": "Access denied"}), 403
-
-    if session.get("role") == "tenant_admin" and session.get("tenant_id") != tenant_id:
-        return jsonify({"error": "Access denied"}), 403
-
     try:
         # Get tenant config to determine adapter
         config = get_tenant_config_from_db(tenant_id)

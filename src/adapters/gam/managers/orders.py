@@ -6,6 +6,7 @@ for Google Ad Manager orders.
 """
 
 import logging
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -461,7 +462,11 @@ class GAMOrdersManager:
             line_item_name_template = "{product_name}"
 
         created_line_item_ids: list[str] = []
-        flight_duration_days = (end_time - start_time).days
+        # Calendar days covered by the flight. ceil() because flights end at
+        # 23:59:59 — a 10-day flight is 9.99… days and must count as 10, not
+        # the 9 that timedelta.days truncation would give (it inflated DAILY
+        # goals by a full day's worth).
+        flight_duration_days = math.ceil((end_time - start_time).total_seconds() / 86400)
 
         for package_index, package in enumerate(packages, start=1):
             # Get product-specific configuration
@@ -707,7 +712,11 @@ class GAMOrdersManager:
             elif not creative_placeholders:
                 log("  [yellow]No creatives and no format_ids - line item will have no creative placeholders[/yellow]")
 
-            # Determine goal type and units
+            # Determine goal type and units. package.impressions carries the
+            # budget-derived goal in the pricing model's unit — impressions
+            # for CPM, clicks for CPC, viewable impressions for VCPM (see
+            # media_buy_create._goal_units_from_budget); goal_unit_type is
+            # aligned to the pricing model further below.
             goal_type = impl_config.get("primary_goal_type", "LIFETIME")
             goal_unit_type = impl_config.get("primary_goal_unit_type", "IMPRESSIONS")
 
@@ -848,6 +857,11 @@ class GAMOrdersManager:
                 elif line_item_type == "STANDARD":
                     # STANDARD line items use LIFETIME goals for guaranteed delivery
                     goal_type = "LIFETIME"
+                    # If impl_config requested a DAILY goal, goal_units was
+                    # sized per-day above; a LIFETIME goal must cover the whole
+                    # flight or GAM stops after one day's worth of delivery
+                    # (observed: 10-day €1/€1-CPM buy booked 111 instead of 1000).
+                    goal_units = package.impressions
                 else:
                     # PRICE_PRIORITY, BULK, HOUSE can use configured goal type or default to LIFETIME
                     pass  # Keep goal_type from impl_config (set earlier)

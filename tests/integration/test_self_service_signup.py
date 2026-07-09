@@ -30,7 +30,7 @@ class TestSelfServiceSignupFlow:
         response = client.get("/signup")
         assert response.status_code == 200
         assert b"Connect Your Ad Inventory to AI Buyers" in response.data
-        assert b"Get Started with Google" in response.data
+        assert b"Continue with Google" in response.data
 
     def test_root_redirects_to_landing_when_not_authenticated(self, integration_db, client):
         """Test that root URL redirects to landing page for unauthenticated users in multi-tenant mode."""
@@ -348,7 +348,12 @@ class TestSelfServiceSignupFlow:
                 with test_client.session_transaction() as sess:
                     assert sess.get("user") == "newuser@example.com"
                     assert sess.get("user_name") == "New User"
-                    assert sess.get("signup_flow") is True
+                    # signup_flow is popped once the callback makes its
+                    # routing decision (onboarding vs. tenant selector) —
+                    # left set, a stale True would leak into a later,
+                    # unrelated /auth/google visit via google_auth()'s
+                    # session.clear()-preserve logic.
+                    assert "signup_flow" not in sess
 
     def test_session_cleanup_after_provisioning(self, integration_db, client):
         """Test that signup session flags are cleared after provisioning."""

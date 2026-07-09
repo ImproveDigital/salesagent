@@ -274,17 +274,18 @@ def index():
         # Super admin - show all active tenants with configuration and activity status
         return render_super_admin_index()
 
-    elif session.get("role") in ["tenant_admin", "tenant_user"]:
-        # Tenant admin/user - redirect to their tenant dashboard
-        tenant_id = session.get("tenant_id")
-        if tenant_id:
-            return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
-        else:
-            return "No tenant associated with your account", 403
+    # Regular tenant user — route by tenant context, same as admin_index().
+    # NOTE: this used to branch on session.get("role") in ["tenant_admin",
+    # "tenant_user"], but nothing ever writes those values to the session
+    # (the canonical roles are admin/member/viewer, stamped on g.user by
+    # require_tenant_access, not on the session). That made this branch
+    # permanently dead and sent every regular logged-in user to the "Access
+    # denied" 403 below regardless of their real tenant access.
+    tenant_id = session.get("tenant_id")
+    if tenant_id:
+        return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
 
-    else:
-        # Unknown role
-        return "Access denied", 403
+    return redirect(url_for("auth.select_tenant"))
 
 
 @core_bp.route("/admin/")

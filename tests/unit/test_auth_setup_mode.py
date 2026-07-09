@@ -263,38 +263,64 @@ class TestEnableSetupModeEndpoint:
 class TestTenantLoginEndpoint:
     """Endpoint-level tests for GET /tenant/<id>/login respecting setup mode.
 
-    Replaces three SUSPECT tests that copied the tenant_login() conditional
-    expression into the test body. Each test calls the real Flask route and
-    asserts on the rendered HTML so a regression in auth.py causes a real failure.
+    The test-login UI must be rendered if and only if POST /test/auth would
+    accept the login (F-02 gate: ADCP_AUTH_TEST_MODE=true AND the tenant's
+    auth_setup_mode=True, never in production mode). Anything looser renders
+    a button that leads to the endpoint's deliberate 404.
 
     The 'Setup Mode' banner (templates/login.html) is the HTML marker: it is
     rendered when test_mode=True, absent when test_mode=False.
     """
 
-    def test_login_shows_test_banner_when_setup_mode_enabled(self, make_auth_test_client):
-        """GET /login renders the Setup Mode banner when auth_setup_mode=True."""
+    def test_login_shows_test_banner_when_both_enabled(self, make_auth_test_client):
+        """GET /login renders the Setup Mode banner when env var and setup mode are both on."""
         with make_auth_test_client(auth_setup_mode=True) as (client, _):
             with (
                 patch("src.admin.blueprints.auth.get_oauth_config", return_value=("", "", "", "")),
                 patch("src.services.auth_config_service.get_oidc_config_for_auth", return_value=None),
-                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}),
+                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true", "PRODUCTION": "", "ENVIRONMENT": ""}),
             ):
                 response = client.get("/tenant/default/login")
         assert response.status_code == 200
         assert b"Setup Mode" in response.data
 
-    def test_login_env_var_enables_test_banner_regardless_of_setup_mode(self, make_auth_test_client):
-        """GET /login renders the Setup Mode banner when ADCP_AUTH_TEST_MODE=true,
-        even if the tenant has disabled auth_setup_mode."""
+    def test_login_hides_test_banner_when_env_var_only(self, make_auth_test_client):
+        """GET /login omits the Setup Mode banner when ADCP_AUTH_TEST_MODE=true but
+        the tenant has disabled auth_setup_mode.
+
+        Regression: the page previously rendered the test-login button in this
+        state while POST /test/auth 404'd it (F-02) — a dead button.
+
+        The notice text is the tenant-specific variant ("Test login is
+        disabled for this tenant"), not the generic "Authentication not
+        configured" — the env var IS on, so telling the operator to set it
+        would be misleading; the actionable fix here is re-enabling Setup
+        Mode or configuring SSO for this tenant specifically.
+        """
         with make_auth_test_client(auth_setup_mode=False) as (client, _):
             with (
                 patch("src.admin.blueprints.auth.get_oauth_config", return_value=("", "", "", "")),
                 patch("src.services.auth_config_service.get_oidc_config_for_auth", return_value=None),
-                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true"}),
+                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true", "PRODUCTION": "", "ENVIRONMENT": ""}),
             ):
                 response = client.get("/tenant/default/login")
         assert response.status_code == 200
-        assert b"Setup Mode" in response.data
+        assert b"Setup Mode" not in response.data
+        assert b"Test login is disabled for this tenant" in response.data
+        assert b"Authentication not configured" not in response.data
+
+    def test_login_hides_test_banner_when_setup_mode_only(self, make_auth_test_client):
+        """GET /login omits the Setup Mode banner when auth_setup_mode=True but the
+        env var is not set — /test/auth would reject the POST (F-02)."""
+        with make_auth_test_client(auth_setup_mode=True) as (client, _):
+            with (
+                patch("src.admin.blueprints.auth.get_oauth_config", return_value=("", "", "", "")),
+                patch("src.services.auth_config_service.get_oidc_config_for_auth", return_value=None),
+                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "", "PRODUCTION": "", "ENVIRONMENT": ""}),
+            ):
+                response = client.get("/tenant/default/login")
+        assert response.status_code == 200
+        assert b"Setup Mode" not in response.data
 
     def test_login_hides_test_banner_when_setup_mode_disabled(self, make_auth_test_client):
         """GET /login omits the Setup Mode banner when auth_setup_mode=False and no env override."""
@@ -302,7 +328,20 @@ class TestTenantLoginEndpoint:
             with (
                 patch("src.admin.blueprints.auth.get_oauth_config", return_value=("", "", "", "")),
                 patch("src.services.auth_config_service.get_oidc_config_for_auth", return_value=None),
-                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": ""}),
+                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "", "PRODUCTION": "", "ENVIRONMENT": ""}),
+            ):
+                response = client.get("/tenant/default/login")
+        assert response.status_code == 200
+        assert b"Setup Mode" not in response.data
+
+    def test_login_hides_test_banner_in_production_mode(self, make_auth_test_client):
+        """GET /login omits the Setup Mode banner in production mode even when both
+        flags are enabled — mirrors the endpoint's unconditional production block."""
+        with make_auth_test_client(auth_setup_mode=True) as (client, _):
+            with (
+                patch("src.admin.blueprints.auth.get_oauth_config", return_value=("", "", "", "")),
+                patch("src.services.auth_config_service.get_oidc_config_for_auth", return_value=None),
+                patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true", "PRODUCTION": "", "ENVIRONMENT": "production"}),
             ):
                 response = client.get("/tenant/default/login")
         assert response.status_code == 200

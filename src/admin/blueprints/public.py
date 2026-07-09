@@ -60,7 +60,7 @@ def landing():
                     flash("Signup is only available at the main site.", "info")
                     return redirect(url_for("auth.login"))
 
-    # If user is already authenticated, redirect to their dashboard
+    # If user is already authenticated, redirect away from signup
     if "user" in session:
         # Check if they already have a tenant
         if session.get("tenant_id"):
@@ -68,6 +68,11 @@ def landing():
         # Super admin - redirect to main index
         if session.get("is_super_admin"):
             return redirect(url_for("core.index"))
+        # Authenticated but no tenant selected yet (multi-tenant login,
+        # mid-selection) — send to the tenant selector, which recomputes
+        # available tenants and offers "Create New Account" (via
+        # /signup/onboarding, so no redirect loop back here).
+        return redirect(url_for("auth.select_tenant"))
 
     return render_template("landing.html")
 
@@ -88,13 +93,18 @@ def signup_start():
 
 @public_bp.route("/signup/onboarding")
 def signup_onboarding():
-    """Onboarding wizard after Google OAuth (authenticated)."""
-    if not signups_enabled():
-        return redirect(url_for("public.landing"))
+    """Onboarding wizard for creating a new tenant (authenticated).
 
-    # Verify signup flow is active
-    if not session.get("signup_flow"):
-        flash("Invalid signup session. Please start again.", "error")
+    Reachable from two doors that used to disagree: the /signup marketing
+    funnel (which sets signup_flow via /signup/start before redirecting
+    here) and the tenant selector's "Create New Account" link for a
+    logged-in user with no tenant access yet. Both need only "the user is
+    authenticated" — signup_flow is not a security boundary (anyone
+    authenticated could already reach this URL directly), it was just an
+    incidental gate that broke the tenant-selector door. Authentication is
+    the real (and now the only) requirement.
+    """
+    if not signups_enabled():
         return redirect(url_for("public.landing"))
 
     # Verify user is authenticated
@@ -116,13 +126,12 @@ def signup_onboarding():
 
 @public_bp.route("/signup/provision", methods=["POST"])
 def provision_tenant():
-    """Provision new tenant from signup form."""
-    if not signups_enabled():
-        return redirect(url_for("public.landing"))
+    """Provision new tenant from signup form.
 
-    # Verify signup flow is active
-    if not session.get("signup_flow"):
-        flash("Invalid signup session. Please start again.", "error")
+    Gate is "authenticated", same as signup_onboarding() above and for the
+    same reason — signup_flow is not a security boundary here.
+    """
+    if not signups_enabled():
         return redirect(url_for("public.landing"))
 
     # Verify user is authenticated

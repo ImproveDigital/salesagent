@@ -47,9 +47,6 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/blueprints/api.py", "get_tenant_products"),
     ("src/admin/blueprints/api.py", "get_product_suggestions"),
     ("src/admin/blueprints/core.py", "reactivate_tenant"),
-    ("src/admin/blueprints/inventory.py", "orders_browser"),
-    ("src/admin/blueprints/inventory.py", "check_inventory_sync"),
-    ("src/admin/blueprints/inventory.py", "analyze_ad_server_inventory"),
 }
 
 BLUEPRINTS_DIR = Path(__file__).parent.parent.parent / "src" / "admin" / "blueprints"

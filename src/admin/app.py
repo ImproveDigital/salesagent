@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+from datetime import timedelta
 
 import markdown
 from flask import Flask, g, jsonify, request, session
@@ -42,6 +43,7 @@ from src.admin.blueprints.signals_agents import signals_agents_bp
 from src.admin.blueprints.tenants import tenants_bp
 from src.admin.blueprints.users import users_bp
 from src.admin.blueprints.workflows import workflows_bp
+from src.admin.utils import is_admin_production
 from src.core.config_loader import is_single_tenant_mode
 from src.core.domain_config import (
     get_session_cookie_domain,
@@ -178,8 +180,30 @@ def create_app(config=None):
     app = Flask(__name__, template_folder="../../templates", static_folder="../../static")
 
     # Configuration
-    app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
+    flask_secret_key = os.environ.get("FLASK_SECRET_KEY")
+    if not flask_secret_key:
+        if is_admin_production():
+            raise RuntimeError(
+                "FLASK_SECRET_KEY is required in production. A missing key falls back to a "
+                "random value generated per process, which silently invalidates every admin "
+                "session on restart and (with multiple workers) causes random mid-session logouts."
+            )
+        app.logger.warning(
+            "FLASK_SECRET_KEY is not set — using a random per-process key. "
+            "All admin sessions will be invalidated on the next restart. Set FLASK_SECRET_KEY "
+            "for persistent sessions across restarts."
+        )
+        flask_secret_key = secrets.token_hex(32)
+    app.secret_key = flask_secret_key
     app.logger.setLevel(logging.INFO)
+
+    # Sessions expire on a sliding window so an active user stays logged in
+    # while an idle one is signed out after SESSION_LIFETIME_HOURS (default
+    # 12h). Without this, sessions are non-permanent browser-session cookies
+    # with no idle timeout at all — see tests/unit/test_session_lifetime.py.
+    session_lifetime_hours = float(os.environ.get("SESSION_LIFETIME_HOURS", "12"))
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=session_lifetime_hours)
+    app.config["SESSION_REFRESH_EACH_REQUEST"] = True
 
     # Configure session cookies for EventSource compatibility
     if os.environ.get("PRODUCTION") == "true":

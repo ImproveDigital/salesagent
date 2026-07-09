@@ -338,6 +338,93 @@ class TestAdminWSGIMountApexRedirect:
 
 
 @pytest.mark.asyncio
+class TestAdminWSGIMountSignupRedirect:
+    """``/admin/signup`` (and sub-paths) → 302 to the bare ``/signup`` URL.
+
+    Both forms reach the same Flask view, but ``/admin/*`` should
+    consistently mean "authenticated admin surface" — the public signup
+    funnel is canonically at the bare URL.
+    """
+
+    async def test_admin_signup_redirects_to_bare_signup(self):
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="localhost", path="/admin/signup")
+        send = AsyncMock()
+
+        await mount(scope, AsyncMock(), send)
+
+        assert send.call_count == 2
+        start_msg = send.call_args_list[0].args[0]
+        assert start_msg["type"] == "http.response.start"
+        assert start_msg["status"] == 302
+        location = dict(start_msg["headers"]).get(b"location")
+        assert location == b"/signup"
+        wsgi_app.assert_not_called()
+        inner_app.assert_not_called()
+
+    async def test_admin_signup_subpath_redirects(self):
+        """``/admin/signup/start`` → ``/signup/start`` — the whole sub-flow
+        (start/onboarding/provision/complete) is covered, not just the
+        landing page."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="localhost", path="/admin/signup/start")
+        send = AsyncMock()
+
+        await mount(scope, AsyncMock(), send)
+
+        location = dict(send.call_args_list[0].args[0]["headers"]).get(b"location")
+        assert location == b"/signup/start"
+
+    async def test_admin_signup_redirect_preserves_query_string(self):
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(
+            host="localhost",
+            path="/admin/signup",
+            query_string=b"utm_source=google",
+        )
+        send = AsyncMock()
+
+        await mount(scope, AsyncMock(), send)
+
+        location = dict(send.call_args_list[0].args[0]["headers"]).get(b"location")
+        assert location == b"/signup?utm_source=google"
+
+    async def test_bare_signup_is_not_redirected(self):
+        """The canonical bare URL dispatches straight to Flask — no bounce."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="localhost", path="/signup")
+        send = AsyncMock()
+
+        await mount(scope, AsyncMock(), send)
+
+        send.assert_not_called()
+        wsgi_app.assert_called_once()
+        inner_app.assert_not_called()
+
+    async def test_unrelated_admin_path_is_not_redirected(self):
+        """``/admin/signup-something-else`` must not match — the check is a
+        path-segment prefix, not a bare string prefix."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="localhost", path="/admin/signup-extended")
+        send = AsyncMock()
+
+        await mount(scope, AsyncMock(), send)
+
+        send.assert_not_called()
+        wsgi_app.assert_called_once()
+
+
+@pytest.mark.asyncio
 class TestAdminWSGIMountRobotsTxt:
     """``/robots.txt`` is served as a public ``Disallow: /`` response.
 
