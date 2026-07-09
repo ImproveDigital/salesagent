@@ -6,6 +6,8 @@ through the OAuth flow, fixing the bug where session.clear() wiped signup state.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestSignupFlowSessionPreservation:
     """Test that signup flow state survives OAuth redirect."""
@@ -243,6 +245,72 @@ class TestSignupFlowShowsExistingTenants:
 
                 assert response.status_code == 302
                 assert "/signup/onboarding" in response.location
+
+
+class TestSignupLandingRedirectsAuthenticatedUsers:
+    """Regression: /signup only redirected an authenticated user away when the
+    session had tenant_id or is_super_admin. A logged-in user who hadn't
+    selected a tenant yet (multi-tenant mode: session has "user" but no
+    "tenant_id") fell through and was shown the public signup landing page.
+    Any authenticated user must be redirected — the no-tenant case goes to
+    the tenant selector, which already offers "Create New Account".
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mock_public_db(self):
+        """Patch the DB session where public.landing() actually binds it.
+
+        landing() opens a DB session for its tenant-subdomain check before
+        the auth redirect. public.py imports get_db_session at module level,
+        so the conftest-wide patch of src.core.database.database_session
+        never reaches it — any leaked ADCP_TESTING from another test makes
+        the real get_db_session() raise and turn every /signup into a 500.
+        """
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=None)
+        mock_session.scalars.return_value.first.return_value = None  # no tenant match
+        with patch("src.admin.blueprints.public.get_db_session", return_value=mock_session):
+            yield
+
+    def test_authenticated_user_without_tenant_redirects_to_selector(self, admin_app):
+        with admin_app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user"] = "user@example.com"
+                # No tenant_id, not super admin — mid-login state after OAuth
+                # but before tenant selection.
+
+            response = client.get("/signup", follow_redirects=False)
+
+        assert response.status_code == 302
+        assert response.location.endswith("/auth/select-tenant")
+
+    def test_authenticated_user_with_tenant_redirects_to_dashboard(self, admin_app):
+        with admin_app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user"] = "user@example.com"
+                sess["tenant_id"] = "tenant_1"
+
+            response = client.get("/signup", follow_redirects=False)
+
+        assert response.status_code == 302
+        assert "/tenant/tenant_1" in response.location
+
+    def test_super_admin_redirects_to_index(self, admin_app):
+        with admin_app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user"] = "admin@example.com"
+                sess["is_super_admin"] = True
+
+            response = client.get("/signup", follow_redirects=False)
+
+        assert response.status_code == 302
+
+    def test_anonymous_user_still_sees_landing_page(self, admin_app):
+        with admin_app.test_client() as client:
+            response = client.get("/signup", follow_redirects=False)
+
+        assert response.status_code == 200
 
 
 class TestGoogleCallbackSetsAuthenticatedFlag:

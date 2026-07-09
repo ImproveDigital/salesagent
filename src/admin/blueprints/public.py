@@ -60,7 +60,7 @@ def landing():
                     flash("Signup is only available at the main site.", "info")
                     return redirect(url_for("auth.login"))
 
-    # If user is already authenticated, redirect to their dashboard
+    # If user is already authenticated, redirect away from signup
     if "user" in session:
         # Check if they already have a tenant
         if session.get("tenant_id"):
@@ -68,6 +68,11 @@ def landing():
         # Super admin - redirect to main index
         if session.get("is_super_admin"):
             return redirect(url_for("core.index"))
+        # Authenticated but no tenant selected yet (multi-tenant login,
+        # mid-selection) — send to the tenant selector, which recomputes
+        # available tenants and offers "Create New Account" (via
+        # /signup/onboarding, so no redirect loop back here).
+        return redirect(url_for("auth.select_tenant"))
 
     return render_template("landing.html")
 
