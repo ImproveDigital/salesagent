@@ -109,7 +109,7 @@ def reporting(tenant_id):
     from flask import render_template
 
     from src.core.database.database_session import get_db_session
-    from src.core.database.models import AdapterConfig, CurrencyLimit, Tenant
+    from src.core.database.models import AdapterConfig, CurrencyLimit, GAMLineItem, GAMOrder, Tenant
 
     with get_db_session() as db_session:
         tenant_obj = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -154,7 +154,40 @@ def reporting(tenant_id):
             if currency_limit:
                 currency = str(currency_limit.currency_code)
 
-        return render_template("gam_reporting.html", tenant=tenant, currency=currency)
+        # GAM reports expose only ORDER_ID/ORDER_NAME — not GAM's
+        # externalOrderId. Resolve {order_id: external_order_id} (and the
+        # line-item equivalent) from our synced GAM tables so the report can
+        # label rows with the external id the buyer recognizes. Only non-empty
+        # external ids are included; the page falls back to the GAM id when a
+        # mapping is absent.
+        order_external_ids = {
+            str(order_id): str(ext_id)
+            for order_id, ext_id in db_session.execute(
+                select(GAMOrder.order_id, GAMOrder.external_order_id).where(
+                    GAMOrder.tenant_id == tenant_id,
+                    GAMOrder.external_order_id.isnot(None),
+                    GAMOrder.external_order_id != "",
+                )
+            ).all()
+        }
+        line_item_external_ids = {
+            str(line_item_id): str(ext_id)
+            for line_item_id, ext_id in db_session.execute(
+                select(GAMLineItem.line_item_id, GAMLineItem.external_id).where(
+                    GAMLineItem.tenant_id == tenant_id,
+                    GAMLineItem.external_id.isnot(None),
+                    GAMLineItem.external_id != "",
+                )
+            ).all()
+        }
+
+        return render_template(
+            "gam_reporting.html",
+            tenant=tenant,
+            currency=currency,
+            order_external_ids=order_external_ids,
+            line_item_external_ids=line_item_external_ids,
+        )
 
 
 @operations_bp.route("/media-buy/<media_buy_id>", methods=["GET"])
