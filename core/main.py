@@ -30,6 +30,7 @@ For development without DNS::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -673,6 +674,13 @@ async def _start_schedulers() -> None:
     await start_adapter_inventory_guidance_sync_scheduler()
     await start_gam_pricing_availability_scheduler()
     await start_gam_signal_coverage_scheduler()
+
+    # Order status watchers are daemon threads, not asyncio schedulers — a
+    # restart kills them while their SyncJob rows stay 'running'. Respawn them
+    # so buys in 'pending_ad_server_approval' still activate on GAM approval.
+    from src.services.order_approval_service import resume_order_status_watchers
+
+    await asyncio.to_thread(resume_order_status_watchers)
 
 
 async def _stop_schedulers() -> None:

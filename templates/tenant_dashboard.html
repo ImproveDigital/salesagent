@@ -1095,7 +1095,7 @@
                 <td class="col-object" style="text-align: left;">{{ buy.media_buy_id or '—' }}</td>
                 <td>
                     {% set state = buy.readiness_state %}
-                    {% if state in ['needs_creatives', 'needs_approval', 'failed'] %}
+                    {% if state in ['needs_creatives', 'needs_approval', 'pending_ad_server_approval', 'failed'] %}
                         <span class="sa-chip sa-chip--warning">
                             <i class="fas fa-exclamation-triangle" style="font-size: 9px;"></i>
                             {{ state|replace('_', ' ') }}

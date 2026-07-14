@@ -6,10 +6,11 @@ when approval completes or fails.
 """
 
 import logging
+import os
 import threading
 import time
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -175,7 +176,13 @@ def _run_approval_thread(
                 success = orders_manager.approve_order(order_id, max_retries=1)
 
                 if success:
-                    # Approval succeeded
+                    # Approval succeeded — move the buy out of
+                    # ``pending_ad_server_approval``. Retry the lookup: the
+                    # media buy row (auto path) or its external_id stamp
+                    # (manual path) is committed by the create flow shortly
+                    # after this thread starts, so the first attempts can race
+                    # it.
+                    _activate_media_buy_with_retry(media_buy_id, order_id, tenant_id)
                     _mark_approval_complete(
                         approval_id,
                         {
@@ -202,6 +209,7 @@ def _run_approval_thread(
                     # Max attempts reached
                     error_msg = f"Order approval failed after {max_attempts} attempts (2 minutes). GAM forecasting may still be in progress."
                     _mark_approval_failed(approval_id, error_msg, webhook_url, tenant_id, principal_id, media_buy_id)
+                    _start_watcher_fallback(order_id, media_buy_id, tenant_id, principal_id, webhook_url)
                     return
 
             except Exception as e:
@@ -234,6 +242,7 @@ def _run_approval_thread(
                         principal_id,
                         media_buy_id,
                     )
+                    _start_watcher_fallback(order_id, media_buy_id, tenant_id, principal_id, webhook_url)
                     return
 
     except Exception as e:
@@ -244,6 +253,51 @@ def _run_approval_thread(
         # Remove from active approvals
         with _approval_lock:
             _active_approvals.pop(approval_id, None)
+
+
+def _activate_media_buy_with_retry(
+    media_buy_id: str,
+    order_id: str,
+    tenant_id: str,
+    attempts: int = 12,
+    delay_seconds: int = 10,
+) -> bool:
+    """Retry :func:`_activate_media_buy` until the media buy row is findable."""
+    for attempt in range(1, attempts + 1):
+        if _activate_media_buy(media_buy_id, order_id, tenant_id):
+            return True
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+    logger.error(f"Gave up activating media buy for order {order_id} after {attempts} attempts")
+    return False
+
+
+def _start_watcher_fallback(
+    order_id: str,
+    media_buy_id: str,
+    tenant_id: str,
+    principal_id: str,
+    webhook_url: str | None,
+) -> None:
+    """Hand a buy stuck in ``pending_ad_server_approval`` to the status watcher.
+
+    Called when the short approval-retry job exhausts its attempts: the order
+    may still get approved later (forecasting finishes, or a human approves in
+    the GAM UI), and the watcher polls for that until the buy's end date.
+    """
+    try:
+        watcher_id = start_order_status_polling(
+            order_id=order_id,
+            media_buy_id=media_buy_id,
+            tenant_id=tenant_id,
+            principal_id=principal_id,
+            webhook_url=webhook_url,
+        )
+        logger.info(f"Started status watcher fallback {watcher_id} for order {order_id}")
+    except ValueError:
+        logger.info(f"Status watcher already running for order {order_id}")
+    except Exception as e:
+        logger.error(f"Failed to start status watcher fallback for order {order_id}: {e}")
 
 
 def _update_approval_progress(approval_id: str, progress_data: dict[str, Any]):
@@ -340,11 +394,17 @@ def _mark_approval_failed(
 # ---------------------------------------------------------------------------
 # Status polling — for tenants whose service account lacks approval permission.
 # Polls get_order_status() (read-only) until GAM shows APPROVED, then activates
-# the media buy.  Intended as a long-running watcher (poll every 30 s, up to 24 h).
+# the media buy.  Long-running watcher: polls every
+# GAM_ORDER_STATUS_POLL_INTERVAL_SECONDS (default 30 s) until the media buy's
+# end date. The media buy stays in ``pending_ad_server_approval`` the whole
+# time; if the flight window closes unapproved, the watcher stops and leaves
+# the status for manual review.
 # ---------------------------------------------------------------------------
 
-_STATUS_POLL_INTERVAL_SECONDS = 30
-_STATUS_POLL_MAX_ATTEMPTS = 2880  # 30 s × 2880 = 24 h
+_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("GAM_ORDER_STATUS_POLL_INTERVAL_SECONDS") or "30")
+# Fallback watch window when the media buy row (and thus its end date) can't
+# be resolved — e.g. the row was deleted while the watcher was running.
+_STATUS_POLL_FALLBACK_WINDOW = timedelta(hours=24)
 
 
 def start_order_status_polling(
@@ -353,15 +413,16 @@ def start_order_status_polling(
     tenant_id: str,
     principal_id: str,
     webhook_url: str | None = None,
-    poll_interval_seconds: int = _STATUS_POLL_INTERVAL_SECONDS,
-    max_attempts: int = _STATUS_POLL_MAX_ATTEMPTS,
+    poll_interval_seconds: int | None = None,
 ) -> str:
     """Start a background thread that polls the GAM order status.
 
     Unlike :func:`start_order_approval_background`, this function never tries
     to call ``performOrderAction``.  It simply reads the order status every
-    ``poll_interval_seconds`` seconds and activates the media buy as soon as
-    GAM reports ``APPROVED``.  Use this when the service account lacks the
+    ``poll_interval_seconds`` seconds (default from
+    ``GAM_ORDER_STATUS_POLL_INTERVAL_SECONDS``, 30 s) and activates the media
+    buy as soon as GAM reports ``APPROVED``. Polling continues until the media
+    buy's end date. Use this when the service account lacks the
     ``ORDER_APPROVAL`` permission.
 
     Returns:
@@ -370,6 +431,8 @@ def start_order_status_polling(
     Raises:
         ValueError: If status polling is already running for this order.
     """
+    if poll_interval_seconds is None:
+        poll_interval_seconds = _STATUS_POLL_INTERVAL_SECONDS
     with get_db_session() as db:
         stmt = select(SyncJob).where(
             SyncJob.sync_type == "order_status_watch",
@@ -395,13 +458,36 @@ def start_order_status_polling(
                 "principal_id": principal_id,
                 "webhook_url": webhook_url,
                 "attempts": 0,
-                "max_attempts": max_attempts,
+                "poll_interval_seconds": poll_interval_seconds,
                 "phase": "Waiting for external order approval",
             },
         )
         db.add(job)
         db.commit()
 
+    _spawn_status_watch_thread(
+        approval_id=approval_id,
+        order_id=order_id,
+        media_buy_id=media_buy_id,
+        tenant_id=tenant_id,
+        principal_id=principal_id,
+        webhook_url=webhook_url,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    return approval_id
+
+
+def _spawn_status_watch_thread(
+    *,
+    approval_id: str,
+    order_id: str,
+    media_buy_id: str,
+    tenant_id: str,
+    principal_id: str,
+    webhook_url: str | None,
+    poll_interval_seconds: int,
+) -> None:
+    """Register and start the daemon thread for one order status watch."""
     thread = threading.Thread(
         target=_run_status_watch_thread,
         args=(
@@ -411,7 +497,6 @@ def start_order_status_polling(
             tenant_id,
             principal_id,
             webhook_url,
-            max_attempts,
             poll_interval_seconds,
         ),
         daemon=True,
@@ -421,7 +506,34 @@ def start_order_status_polling(
         _active_approvals[approval_id] = thread
     thread.start()
     logger.info(f"Started background status watch thread: {approval_id}")
-    return approval_id
+
+
+def _watch_deadline(media_buy_id: str, order_id: str, tenant_id: str, started_at: datetime) -> datetime:
+    """Return the moment the status watch should give up: the buy's end datetime.
+
+    Resolved fresh on every call so a flight-date update mid-watch is honored.
+    Falls back to ``started_at + 24h`` when the media buy row can't be found
+    (e.g. deleted mid-watch, or a data problem).
+    """
+    from src.core.database.models import MediaBuy
+
+    try:
+        with get_db_session() as db:
+            stmt = select(MediaBuy).where(
+                MediaBuy.tenant_id == tenant_id,
+                (MediaBuy.media_buy_id == media_buy_id) | (MediaBuy.external_id == order_id),
+            )
+            buy = db.scalars(stmt).first()
+            if buy is not None:
+                if buy.end_time is not None:
+                    end = buy.end_time
+                    return end if end.tzinfo else end.replace(tzinfo=UTC)
+                if buy.end_date is not None:
+                    # end_date is inclusive — watch through the end of that day.
+                    return datetime.combine(cast(date, buy.end_date), datetime.max.time(), tzinfo=UTC)
+    except Exception as e:
+        logger.warning(f"Could not resolve watch deadline for media buy {media_buy_id}: {e}")
+    return started_at + _STATUS_POLL_FALLBACK_WINDOW
 
 
 def _run_status_watch_thread(
@@ -431,7 +543,6 @@ def _run_status_watch_thread(
     tenant_id: str,
     principal_id: str,
     webhook_url: str | None,
-    max_attempts: int,
     poll_interval_seconds: int,
 ):
     """Poll GAM order status until APPROVED, then activate the media buy."""
@@ -464,10 +575,13 @@ def _run_status_watch_thread(
         # races the stamp commit and loses.
         time.sleep(min(poll_interval_seconds, 15))
 
-        for attempt in range(1, max_attempts + 1):
+        started_at = datetime.now(UTC)
+        attempt = 0
+        while True:
+            attempt += 1
             _update_approval_progress(
                 approval_id,
-                {"attempts": attempt, "phase": f"Status check {attempt}/{max_attempts}"},
+                {"attempts": attempt, "phase": f"Status check {attempt}"},
             )
 
             try:
@@ -500,17 +614,23 @@ def _run_status_watch_thread(
             except Exception as e:
                 logger.warning(f"[{approval_id}] Status check error: {e}")
 
-            if attempt < max_attempts:
-                time.sleep(poll_interval_seconds)
-            else:
+            # Watch until the buy's flight window closes. Deadline is
+            # re-resolved every poll so flight-date updates are honored.
+            if datetime.now(UTC) >= _watch_deadline(media_buy_id, order_id, tenant_id, started_at):
+                # Leave the media buy in ``pending_ad_server_approval`` for
+                # manual review — the flight ended without GAM approval.
                 _mark_approval_failed(
                     approval_id,
-                    f"Order {order_id} was not approved within {max_attempts * poll_interval_seconds}s.",
+                    f"Order {order_id} was not approved before the media buy's end date; "
+                    f"stopped polling after {attempt} checks.",
                     webhook_url,
                     tenant_id,
                     principal_id,
                     media_buy_id,
                 )
+                return
+
+            time.sleep(poll_interval_seconds)
 
     except Exception as e:
         logger.error(f"[{approval_id}] Status watch failed: {e}", exc_info=True)
@@ -520,38 +640,69 @@ def _run_status_watch_thread(
             _active_approvals.pop(approval_id, None)
 
 
-def _activate_media_buy(media_buy_id: str, order_id: str, tenant_id: str) -> None:
-    """Set the media buy status to 'active' and sync the GAM order status after external approval."""
+def _post_approval_status(buy: Any, now: datetime | None = None) -> str:
+    """Status a buy moves to once the GAM order is approved, based on flight dates."""
+    if now is None:
+        now = datetime.now(UTC)
+
+    start = buy.start_time
+    if start is None and buy.start_date is not None:
+        start = datetime.combine(buy.start_date, datetime.min.time(), tzinfo=UTC)
+    elif start is not None and start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+
+    end = buy.end_time
+    if end is None and buy.end_date is not None:
+        end = datetime.combine(buy.end_date, datetime.max.time(), tzinfo=UTC)
+    elif end is not None and end.tzinfo is None:
+        end = end.replace(tzinfo=UTC)
+
+    if start is not None and now < start:
+        return "scheduled"
+    if end is not None and now > end:
+        return "completed"
+    return "active"
+
+
+def _activate_media_buy(media_buy_id: str, order_id: str, tenant_id: str) -> bool:
+    """Move the media buy out of ``pending_ad_server_approval`` after GAM approval.
+
+    Sets 'scheduled' or 'active' depending on the flight window, and syncs the
+    GAM order status. Returns True when a media buy row was found and updated.
+    """
     activated_id: str | None = None
+    target_status = "active"
     try:
         from src.core.database.repositories import MediaBuyUoW
 
         with MediaBuyUoW(tenant_id) as uow:
             assert uow.media_buys is not None
             # Try by DB primary key first (works when media_buy_id is already the PK).
-            updated = uow.media_buys.update_status(media_buy_id, "active")
-            if updated is None:
+            buy = uow.media_buys.get_by_id(media_buy_id)
+            if buy is None:
                 # media_buy_id was the GAM order ID, not the DB PK.
                 # Native AdCP buys store the GAM order ID in external_id (stamped
                 # by execute_approved_media_buy after adapter creation succeeds).
                 buy = uow.media_buys.get_by_external_id(order_id)
-                if buy is not None:
-                    updated = uow.media_buys.update_status(buy.media_buy_id, "active")
-            # Capture the PK string before the session closes (avoid detached-instance access).
-            if updated is not None:
-                activated_id = updated.media_buy_id
+            if buy is not None:
+                target_status = _post_approval_status(buy)
+                updated = uow.media_buys.update_status(buy.media_buy_id, target_status)
+                # Capture the PK string before the session closes (avoid detached-instance access).
+                if updated is not None:
+                    activated_id = updated.media_buy_id
 
     except Exception as e:
         logger.error(f"Failed to activate media buy {media_buy_id} after order approval: {e}", exc_info=True)
-        return
+        return False
 
     if activated_id is not None:
-        logger.info(f"Media buy {activated_id} activated after external GAM order approval")
+        logger.info(f"Media buy {activated_id} set to '{target_status}' after external GAM order approval")
     else:
         logger.error(
             f"Could not find media buy for order {order_id} "
             f"(tried media_buy_id={media_buy_id!r}, external_id={order_id!r}) — status not updated"
         )
+        return False
 
     try:
         from src.core.database.models import GAMOrder
@@ -564,6 +715,8 @@ def _activate_media_buy(media_buy_id: str, order_id: str, tenant_id: str) -> Non
                 logger.info(f"GAM order {order_id} status updated to APPROVED in gam_orders table")
     except Exception as e:
         logger.error(f"Failed to update gam_orders status for order {order_id}: {e}", exc_info=True)
+
+    return True
 
 
 def _send_approval_webhook(
@@ -665,6 +818,61 @@ def _send_approval_webhook(
 
     except Exception as e:
         logger.error(f"Error sending approval webhook: {e}", exc_info=True)
+
+
+def resume_order_status_watchers() -> int:
+    """Restart status-watch threads for jobs left 'running' by a previous process.
+
+    The watchers are in-process daemon threads, so a restart/deploy kills them
+    while their SyncJob rows stay ``running``. Called from server startup so
+    buys parked in ``pending_ad_server_approval`` are still activated when GAM
+    approves their order. Returns the number of watchers resumed.
+    """
+    with get_db_session() as db:
+        stmt = select(SyncJob).where(
+            SyncJob.sync_type == "order_status_watch",
+            SyncJob.status == "running",
+        )
+        jobs: list[dict[str, Any]] = [
+            {
+                "sync_id": job.sync_id,
+                "tenant_id": job.tenant_id,
+                "progress": dict(job.progress or {}),
+            }
+            for job in db.scalars(stmt).all()
+        ]
+
+    resumed = 0
+    for job in jobs:
+        sync_id = job["sync_id"]
+        progress = job["progress"]
+        order_id = progress.get("order_id")
+        media_buy_id = progress.get("media_buy_id")
+
+        with _approval_lock:
+            already_running = sync_id in _active_approvals
+        if already_running:
+            continue
+
+        if not order_id or not media_buy_id:
+            logger.warning(f"Cannot resume status watch {sync_id}: progress lacks order_id/media_buy_id")
+            continue
+
+        _spawn_status_watch_thread(
+            approval_id=sync_id,
+            order_id=order_id,
+            media_buy_id=media_buy_id,
+            tenant_id=job["tenant_id"],
+            principal_id=progress.get("principal_id") or "unknown",
+            webhook_url=progress.get("webhook_url"),
+            poll_interval_seconds=int(progress.get("poll_interval_seconds") or _STATUS_POLL_INTERVAL_SECONDS),
+        )
+        resumed += 1
+        logger.info(f"Resumed order status watch {sync_id} (order {order_id})")
+
+    if resumed:
+        logger.info(f"Resumed {resumed} GAM order status watcher(s) after restart")
+    return resumed
 
 
 def get_active_approvals() -> list[str]:

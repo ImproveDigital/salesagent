@@ -126,6 +126,7 @@ For GAM adapter integration:
 |----------|---------|-------------|
 | `GAM_OAUTH_CLIENT_ID` | - | GAM OAuth client ID (separate from admin OAuth) |
 | `GAM_OAUTH_CLIENT_SECRET` | - | GAM OAuth client secret |
+| `GAM_ORDER_STATUS_POLL_INTERVAL_SECONDS` | `30` | Seconds between GAM order status checks while a media buy is in `pending_ad_server_approval`; polling runs until the buy's end date |
 | `GCP_PROJECT_ID` | - | GCP project ID for service account management |
 | `GOOGLE_APPLICATION_CREDENTIALS` | - | Path to GCP service account JSON file |
 | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | - | GCP service account credentials as JSON string |
