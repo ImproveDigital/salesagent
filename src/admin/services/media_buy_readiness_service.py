@@ -248,11 +248,12 @@ class MediaBuyReadinessService:
         1. failed - Media buy creation failed
         2. paused - Explicitly paused
         3. needs_approval - Media buy itself awaiting manual approval (NOT creative approval)
-        4. completed - Flight ended
-        5. live - Currently serving (in flight, all creatives approved, no blockers)
-        6. scheduled - Ready and waiting for start date
-        7. needs_creatives - Creatives need action (missing, pending approval, or rejected)
-        8. draft - Initial state, not configured
+        4. pending_ad_server_approval - Approved on our side, GAM order not yet approved
+        5. completed - Flight ended
+        6. live - Currently serving (in flight, all creatives approved, no blockers)
+        7. scheduled - Ready and waiting for start date
+        8. needs_creatives - Creatives need action (missing, pending approval, or rejected)
+        9. draft - Initial state, not configured
         """
         # Check explicit status first
         if media_buy.status == "failed":
@@ -264,6 +265,12 @@ class MediaBuyReadinessService:
         # Check if awaiting manual approval (highest priority - bypasses creative checks)
         if media_buy.status == "pending_approval":
             return "needs_approval"
+
+        # Approved on our side but the ad-server (GAM) order isn't approved
+        # yet — nothing is delivering, so never derive live/scheduled from
+        # flight dates. The background poller clears this status.
+        if media_buy.status == "pending_ad_server_approval":
+            return "pending_ad_server_approval"
 
         # Check flight timing - ensure timezone-aware datetimes
         # Note: SQLAlchemy's DateTime and Date map to Python's datetime and date at runtime
@@ -349,6 +356,7 @@ class MediaBuyReadinessService:
                 "scheduled": 0,
                 "needs_creatives": 0,
                 "needs_approval": 0,
+                "pending_ad_server_approval": 0,
                 "paused": 0,
                 "completed": 0,
                 "failed": 0,

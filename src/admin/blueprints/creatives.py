@@ -653,8 +653,12 @@ def approve_creative(tenant_id, creative_id, **kwargs):
                     assert uow2.media_buys is not None
                     mb = uow2.media_buys.get_by_id(action["media_buy_id"])
                     if mb:
-                        new_status = _compute_media_buy_status_from_flight_dates(mb)
-                        mb.status = new_status
+                        # Keep 'pending_ad_server_approval' — the GAM order is
+                        # still awaiting ad-server approval; the background
+                        # poller owns the transition to scheduled/active.
+                        if mb.status != "pending_ad_server_approval":
+                            new_status = _compute_media_buy_status_from_flight_dates(mb)
+                            mb.status = new_status
                         approved_at = datetime.now(UTC)
                         mb.approved_at = approved_at
                         if mb.confirmed_at is None:
