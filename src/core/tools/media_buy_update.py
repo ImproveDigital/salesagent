@@ -314,7 +314,6 @@ class _MaterializationAuditCtx:
 from src.core.tools.financial_validation import (
     validate_max_campaign_budget,
     validate_max_daily_package_spend,
-    validate_min_package_budget,
 )
 
 # GAM enforces immutability of reservation-affecting fields on guaranteed
@@ -1288,25 +1287,26 @@ def _update_media_buy_impl(
                         budget_amount = float(pkg_update.budget.total)
                         currency = str(pkg_update.budget.currency) if pkg_update.budget.currency else "USD"
 
-                    assert uow.currency_limits is not None
-                    _cl = uow.currency_limits.get_for_currency(currency)
-                    if _cl and _cl.min_package_budget:
-                        package_min_budget_error: str | None = validate_min_package_budget(
-                            package_budget=Decimal(str(budget_amount)),
-                            min_package_budget=Decimal(str(_cl.min_package_budget)),
-                            currency=currency,
-                        )
-                        if package_min_budget_error:
-                            response_data = UpdateMediaBuyError(
-                                errors=[Error(code="budget_below_minimum", message=package_min_budget_error)],
-                                context=req.context,
-                            )
-                            ctx_manager.update_workflow_step(
-                                step.step_id,
-                                status="failed",
-                                error_message=package_min_budget_error,
-                            )
-                            return response_data
+                    # NOTE: minimum package budget validation temporarily disabled.
+                    # assert uow.currency_limits is not None
+                    # _cl = uow.currency_limits.get_for_currency(currency)
+                    # if _cl and _cl.min_package_budget:
+                    #     package_min_budget_error: str | None = validate_min_package_budget(
+                    #         package_budget=Decimal(str(budget_amount)),
+                    #         min_package_budget=Decimal(str(_cl.min_package_budget)),
+                    #         currency=currency,
+                    #     )
+                    #     if package_min_budget_error:
+                    #         response_data = UpdateMediaBuyError(
+                    #             errors=[Error(code="budget_below_minimum", message=package_min_budget_error)],
+                    #             context=req.context,
+                    #         )
+                    #         ctx_manager.update_workflow_step(
+                    #             step.step_id,
+                    #             status="failed",
+                    #             error_message=package_min_budget_error,
+                    #         )
+                    #         return response_data
 
                     result = adapter.update_media_buy(
                         media_buy_id=req.media_buy_id,

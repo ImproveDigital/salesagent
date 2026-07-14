@@ -276,7 +276,7 @@ from src.core.schemas import (
     url as make_url,
 )
 from src.core.testing_hooks import AdCPTestContext, TestingContext, apply_testing_hooks
-from src.core.tools.financial_validation import validate_max_daily_package_spend, validate_min_package_budget
+from src.core.tools.financial_validation import validate_max_daily_package_spend
 from src.core.tools.workflow_serialization import serialize_for_workflow_step
 
 # Import get_product_catalog from main (after refactor)
@@ -2830,99 +2830,100 @@ async def _create_media_buy_impl(
                     raise ValueError(error_msg)
 
             # Validate minimum product spend (legacy + new pricing_options)
-            if not sandbox_mode.active and currency_limit.min_package_budget:
-                # Build map of product_id -> minimum spend
-                product_min_spends = {}
-                for product in products:
-                    # Use product pricing_options min_spend if set, otherwise use currency limit minimum
-                    min_spend = currency_limit.min_package_budget
-                    if product.pricing_options and len(product.pricing_options) > 0:
-                        # Find pricing option matching the request currency (not just first option)
-                        matching_option = next(
-                            (po for po in product.pricing_options if po.currency == request_currency), None
-                        )
-                        if matching_option and matching_option.min_spend_per_package is not None:
-                            min_spend = matching_option.min_spend_per_package
-                    if min_spend is not None:
-                        product_min_spends[product.product_id] = Decimal(str(min_spend))
-
-                # Validate budget against minimum spend requirements
-                if product_min_spends:
-                    # Check if we're in legacy mode (packages without budgets)
-                    is_legacy_mode = req.packages and all(not pkg.budget for pkg in req.packages)
-
-                    # For packages with budgets, validate each package's budget
-                    if req.packages and not is_legacy_mode:
-                        for package in req.packages:
-                            # Skip packages without budgets (shouldn't happen in v2.4 format)
-                            if not package.budget:
-                                continue
-
-                            # Package.budget is now always float | None (per AdCP spec)
-                            package_budget = Decimal(str(package.budget))
-
-                            # Package currency is always request_currency (single currency per media buy)
-                            package_currency = request_currency
-
-                            # Get the product for this package
-                            package_product_ids = [package.product_id] if package.product_id else []
-
-                            if not package_product_ids:
-                                continue
-
-                            # Look up minimum spend for this package's currency
-                            for product_id in package_product_ids:
-                                if product_id not in product_map:
-                                    continue
-
-                                product = product_map[product_id]
-
-                                # Find minimum spend for this package's currency
-                                package_min_spend: Decimal | None = None
-
-                                # First check if product has pricing option for this currency
-                                if product.pricing_options:
-                                    matching_option = next(
-                                        (po for po in product.pricing_options if po.currency == package_currency), None
-                                    )
-                                    if matching_option and matching_option.min_spend_per_package is not None:
-                                        package_min_spend = Decimal(str(matching_option.min_spend_per_package))
-
-                                # If no product override, check currency limit
-                                if package_min_spend is None:
-                                    # Use the already-fetched currency_limit
-                                    if currency_limit.min_package_budget:
-                                        package_min_spend = Decimal(str(currency_limit.min_package_budget))
-
-                                # Validate if minimum spend is set
-                                min_budget_error: str | None = (
-                                    validate_min_package_budget(
-                                        package_budget=package_budget,
-                                        min_package_budget=package_min_spend,
-                                        currency=package_currency,
-                                        context="for products in this package",
-                                    )
-                                    if package_min_spend
-                                    else None
-                                )
-                                if min_budget_error:
-                                    raise ValueError(min_budget_error)
-                    else:
-                        # Legacy mode: single total_budget for all products
-                        applicable_min_spends = list(product_min_spends.values())
-                        if applicable_min_spends:
-                            required_min_spend = max(applicable_min_spends)
-                            budget_decimal = Decimal(str(total_budget))
-
-                            legacy_min_budget_error: str | None = validate_min_package_budget(
-                                package_budget=budget_decimal,
-                                min_package_budget=required_min_spend,
-                                currency=request_currency,
-                                subject="Total",
-                                context="for the selected products",
-                            )
-                            if legacy_min_budget_error:
-                                raise ValueError(legacy_min_budget_error)
+            # NOTE: minimum package budget validation temporarily disabled.
+            # if not sandbox_mode.active and currency_limit.min_package_budget:
+            #     # Build map of product_id -> minimum spend
+            #     product_min_spends = {}
+            #     for product in products:
+            #         # Use product pricing_options min_spend if set, otherwise use currency limit minimum
+            #         min_spend = currency_limit.min_package_budget
+            #         if product.pricing_options and len(product.pricing_options) > 0:
+            #             # Find pricing option matching the request currency (not just first option)
+            #             matching_option = next(
+            #                 (po for po in product.pricing_options if po.currency == request_currency), None
+            #             )
+            #             if matching_option and matching_option.min_spend_per_package is not None:
+            #                 min_spend = matching_option.min_spend_per_package
+            #         if min_spend is not None:
+            #             product_min_spends[product.product_id] = Decimal(str(min_spend))
+            #
+            #     # Validate budget against minimum spend requirements
+            #     if product_min_spends:
+            #         # Check if we're in legacy mode (packages without budgets)
+            #         is_legacy_mode = req.packages and all(not pkg.budget for pkg in req.packages)
+            #
+            #         # For packages with budgets, validate each package's budget
+            #         if req.packages and not is_legacy_mode:
+            #             for package in req.packages:
+            #                 # Skip packages without budgets (shouldn't happen in v2.4 format)
+            #                 if not package.budget:
+            #                     continue
+            #
+            #                 # Package.budget is now always float | None (per AdCP spec)
+            #                 package_budget = Decimal(str(package.budget))
+            #
+            #                 # Package currency is always request_currency (single currency per media buy)
+            #                 package_currency = request_currency
+            #
+            #                 # Get the product for this package
+            #                 package_product_ids = [package.product_id] if package.product_id else []
+            #
+            #                 if not package_product_ids:
+            #                     continue
+            #
+            #                 # Look up minimum spend for this package's currency
+            #                 for product_id in package_product_ids:
+            #                     if product_id not in product_map:
+            #                         continue
+            #
+            #                     product = product_map[product_id]
+            #
+            #                     # Find minimum spend for this package's currency
+            #                     package_min_spend: Decimal | None = None
+            #
+            #                     # First check if product has pricing option for this currency
+            #                     if product.pricing_options:
+            #                         matching_option = next(
+            #                             (po for po in product.pricing_options if po.currency == package_currency), None
+            #                         )
+            #                         if matching_option and matching_option.min_spend_per_package is not None:
+            #                             package_min_spend = Decimal(str(matching_option.min_spend_per_package))
+            #
+            #                     # If no product override, check currency limit
+            #                     if package_min_spend is None:
+            #                         # Use the already-fetched currency_limit
+            #                         if currency_limit.min_package_budget:
+            #                             package_min_spend = Decimal(str(currency_limit.min_package_budget))
+            #
+            #                     # Validate if minimum spend is set
+            #                     min_budget_error: str | None = (
+            #                         validate_min_package_budget(
+            #                             package_budget=package_budget,
+            #                             min_package_budget=package_min_spend,
+            #                             currency=package_currency,
+            #                             context="for products in this package",
+            #                         )
+            #                         if package_min_spend
+            #                         else None
+            #                     )
+            #                     if min_budget_error:
+            #                         raise ValueError(min_budget_error)
+            #         else:
+            #             # Legacy mode: single total_budget for all products
+            #             applicable_min_spends = list(product_min_spends.values())
+            #             if applicable_min_spends:
+            #                 required_min_spend = max(applicable_min_spends)
+            #                 budget_decimal = Decimal(str(total_budget))
+            #
+            #                 legacy_min_budget_error: str | None = validate_min_package_budget(
+            #                     package_budget=budget_decimal,
+            #                     min_package_budget=required_min_spend,
+            #                     currency=request_currency,
+            #                     subject="Total",
+            #                     context="for the selected products",
+            #                 )
+            #                 if legacy_min_budget_error:
+            #                     raise ValueError(legacy_min_budget_error)
 
             # Validate maximum daily spend per package (if set)
             # This is per-package to prevent buyers from splitting large budgets across many packages
