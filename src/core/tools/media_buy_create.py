@@ -1083,6 +1083,56 @@ def _apply_account_advertiser_mapping(
     return account_advertiser_id
 
 
+def _mark_pending_ad_server_approval(media_buy_id: str, tenant_id: str) -> None:
+    """Persist the internal-only ``pending_ad_server_approval`` status.
+
+    Set after our-side approval while the GAM order is still awaiting approval
+    on the ad server. Never sent on the wire — buyers see the date-derived spec
+    status (same treatment as ``pending_approval``). The background pollers in
+    ``order_approval_service`` move the buy to scheduled/active once GAM
+    reports APPROVED.
+    """
+    from src.core.database.repositories import MediaBuyUoW
+
+    with MediaBuyUoW(tenant_id) as uow:
+        assert uow.media_buys is not None
+        uow.media_buys.update_status(media_buy_id, "pending_ad_server_approval")
+    logger.info(f"[APPROVAL] Media buy {media_buy_id} set to 'pending_ad_server_approval'")
+
+
+def _ensure_order_status_watcher(
+    *,
+    order_id: str,
+    media_buy_id: str,
+    tenant_id: str,
+    principal_id: str,
+    request: Any,
+) -> None:
+    """Start the long-running GAM order status watcher if none is running.
+
+    Safety net for buys parked in ``pending_ad_server_approval``: the short
+    approval-retry job started during adapter creation may have already
+    exhausted its attempts by the time creative upload finishes, leaving
+    nothing to activate the buy. The watcher polls until the buy's end date.
+    """
+    from src.services.order_approval_service import start_order_status_polling
+
+    push_config = getattr(request, "push_notification_config", None)
+    webhook_url = push_config.get("url") if isinstance(push_config, dict) else getattr(push_config, "url", None)
+
+    try:
+        watcher_id = start_order_status_polling(
+            order_id=order_id,
+            media_buy_id=media_buy_id,
+            tenant_id=tenant_id,
+            principal_id=principal_id,
+            webhook_url=webhook_url,
+        )
+        logger.info(f"[APPROVAL] Started order status watcher {watcher_id} for order {order_id}")
+    except ValueError:
+        logger.info(f"[APPROVAL] Order status watcher already running for order {order_id}")
+
+
 def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool, str | None]:
     """Execute adapter creation for a manually approved media buy.
 
@@ -1683,14 +1733,23 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     if approval_success:
                         logger.info(f"[APPROVAL] Successfully approved GAM order {response.media_buy_id}")
                     else:
-                        # GAM approval failed - return failure so status can be updated
-                        error_msg = (
-                            f"Failed to approve order {response.media_buy_id}, "
-                            f"it will remain in DRAFT status. This may be due to missing creatives or "
-                            f"GAM still processing inventory forecasts."
+                        # GAM approval not ready yet (e.g. inventory forecasting in
+                        # progress). Park the buy in the internal-only
+                        # ``pending_ad_server_approval`` status; the background
+                        # pollers flip it to scheduled/active once GAM approves.
+                        logger.warning(
+                            f"[APPROVAL] Order {response.media_buy_id} not yet approved in GAM — "
+                            f"setting media buy {media_buy_id} to 'pending_ad_server_approval'"
                         )
-                        logger.warning(f"[APPROVAL] {error_msg}")
-                        return False, error_msg
+                        _mark_pending_ad_server_approval(media_buy_id, tenant_id)
+                        _ensure_order_status_watcher(
+                            order_id=response.media_buy_id,
+                            media_buy_id=media_buy_id,
+                            tenant_id=tenant_id,
+                            principal_id=principal.principal_id,
+                            request=request,
+                        )
+                        return True, None
                 else:
                     logger.info("[APPROVAL] Adapter does not support order approval, skipping")
             except GAMOrderApprovalPermissionDenied:
@@ -1702,6 +1761,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     f"order will remain in DRAFT until approved externally. "
                     f"Background status polling is running."
                 )
+                _mark_pending_ad_server_approval(media_buy_id, tenant_id)
                 # Skip setting media buy to 'active' — the background poller handles that.
                 return True, None
             except Exception as approval_error:
@@ -4127,6 +4187,25 @@ async def _create_media_buy_impl(
         )
         confirmed_at = _confirmed_at_for_create_status(media_buy_status, now)
 
+        # GAM order not yet APPROVED on the ad server (forecasting pending or
+        # external approval required) — persist the internal-only
+        # ``pending_ad_server_approval`` status so the buy isn't reported as
+        # delivering. The background poller flips it to scheduled/active once
+        # GAM approves. ``media_buy_status`` keeps the spec value for the wire
+        # response (internal statuses are DB/Admin-UI only, like
+        # ``pending_approval``). Blocker statuses (pending_creatives) and
+        # terminal ones (completed) still win.
+        persisted_status = media_buy_status
+        if getattr(response, "_gam_approval_pending", False) and media_buy_status in (
+            MediaBuyStatus.active.value,
+            MediaBuyStatus.pending_start.value,
+        ):
+            persisted_status = "pending_ad_server_approval"
+            logger.info(
+                f"[STATUS] Media buy {response.media_buy_id}: GAM order awaiting ad-server approval — "
+                f"persisting status=pending_ad_server_approval (wire status stays {media_buy_status})"
+            )
+
         # Store the media buy in database (context_id is NULL for synchronous operations)
         # Repository handles raw_request serialization at the DB boundary.
         # Build package_id_map from the adapter's response so the serialised
@@ -4168,7 +4247,7 @@ async def _create_media_buy_impl(
                     currency=request_currency,
                     start_time=start_time,
                     end_time=end_time,
-                    status=media_buy_status,
+                    status=persisted_status,
                     campaign_objective=getattr(req, "campaign_objective", "") or "",
                     kpi_goal=getattr(req, "kpi_goal", "") or "",
                     package_id_map=auto_package_id_map or None,

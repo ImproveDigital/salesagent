@@ -125,7 +125,7 @@
                             <td>
                                 <span class="badge bg-{{
                                     'success' if item.readiness_state == 'live'
-                                    else 'warning' if item.readiness_state in ['needs_creatives', 'needs_approval']
+                                    else 'warning' if item.readiness_state in ['needs_creatives', 'needs_approval', 'pending_ad_server_approval']
                                     else 'info' if item.readiness_state == 'ready'
                                     else 'secondary'
                                 }}">

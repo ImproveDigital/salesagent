@@ -333,8 +333,14 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                         flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
                         return jsonify({"success": False, "error": error_msg}), 500
 
-                    # Update media buy status
-                    media_buy.status = "scheduled"
+                    # Update media buy status. execute_approved_media_buy wrote
+                    # through its own session — refresh so we don't clobber
+                    # 'pending_ad_server_approval' (GAM order still awaiting
+                    # ad-server approval; the background poller owns the
+                    # transition to scheduled/active).
+                    db.refresh(media_buy)
+                    if media_buy.status != "pending_ad_server_approval":
+                        media_buy.status = "scheduled"
                     approved_at = datetime.now(UTC)
                     media_buy.approved_at = approved_at
                     if media_buy.confirmed_at is None:

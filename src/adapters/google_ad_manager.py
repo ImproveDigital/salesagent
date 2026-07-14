@@ -783,6 +783,11 @@ class GoogleAdManager(AdServerAdapter):
                 )
             principal_id = self.principal.principal_id if hasattr(self.principal, "principal_id") else "unknown"
 
+            # True while the GAM order is not yet APPROVED and a background
+            # poller is responsible for confirming it. media_buy_create.py
+            # persists the buy as ``pending_ad_server_approval`` when set.
+            order_approval_pending = False
+
             try:
                 from src.adapters.gam.managers.orders import GAMOrderApprovalPermissionDenied
 
@@ -791,6 +796,7 @@ class GoogleAdManager(AdServerAdapter):
                     self.log(f"✓ Approved GAM Order {order_id}")
                 else:
                     # Approval failed (likely NO_FORECAST_YET) - start background approval polling
+                    order_approval_pending = True
                     self.log(
                         f"[yellow]Order {order_id} forecasting not ready - starting background approval task[/yellow]"
                     )
@@ -808,10 +814,12 @@ class GoogleAdManager(AdServerAdapter):
                         )
                         self.log(f"✓ Started background approval polling (job: {approval_id})")
                     except ValueError as e:
+                        # Already running — approval is still pending either way.
                         self.log(f"[red]Failed to start background approval: {e}[/red]")
             except GAMOrderApprovalPermissionDenied:
                 # Expected: service account has no approval permission.
                 # Start status polling so the media buy activates when a human approves in GAM.
+                order_approval_pending = True
                 self.log(
                     f"[yellow]Service account cannot approve order {order_id} — "
                     f"starting background status polling for external approval[/yellow]"
@@ -828,6 +836,7 @@ class GoogleAdManager(AdServerAdapter):
                     )
                     self.log(f"✓ Started background status polling (job: {approval_id})")
                 except ValueError as e:
+                    # Already running — approval is still pending either way.
                     self.log(f"[red]Failed to start status polling: {e}[/red]")
             except Exception as approval_error:
                 # Non-fatal error - order and line items were created successfully
@@ -872,6 +881,7 @@ class GoogleAdManager(AdServerAdapter):
 
             # Attach to response object (bypass Pydantic validation)
             object.__setattr__(response, "_platform_line_item_ids", platform_line_item_ids)
+            object.__setattr__(response, "_gam_approval_pending", order_approval_pending)
             self.log("[DEBUG] Attached _platform_line_item_ids to response object")
             self.log(f"[DEBUG] Verify attribute exists: {hasattr(response, '_platform_line_item_ids')}")
 
@@ -897,6 +907,7 @@ class GoogleAdManager(AdServerAdapter):
 
         # Attach to response object (bypass Pydantic validation)
         object.__setattr__(response, "_platform_line_item_ids", platform_line_item_ids)
+        object.__setattr__(response, "_gam_approval_pending", order_approval_pending)
         self.log("[DEBUG] Attached _platform_line_item_ids to response object")
         self.log(f"[DEBUG] Verify attribute exists: {hasattr(response, '_platform_line_item_ids')}")
 
