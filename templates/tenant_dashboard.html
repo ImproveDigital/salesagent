@@ -1501,13 +1501,17 @@ if (revenueCanvas) {
                 borderWidth: 1.4,
                 fill: true,
                 tension: 0.25,
-                pointRadius: 0,
-                pointHoverRadius: 3,
+                pointRadius: 0.5,
+                pointHoverRadius: 4,
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            // Snap the tooltip to the nearest day on hover instead of requiring
+            // the cursor to land exactly on a point — otherwise sparse ranges
+            // (7D/30D) rarely trigger it while dense ranges (90D/YTD) do.
+            interaction: { mode: 'index', intersect: false },
             plugins: {
                 legend: { display: false },
                 tooltip: { callbacks: { label: ctx => formatMoney(ctx.parsed.y) } },

@@ -317,13 +317,16 @@ async function updateReports() {
 }
 
 function updateSummaryCards(data) {
+    // Sum revenue in full-precision micros, not the per-row 2-dp spend, so
+    // the total and CPM aren't inflated by compounded rounding.
     const totals = data.reduce((acc, row) => {
         acc.impressions += row.impressions || 0;
-        acc.spend += row.spend || 0;
+        acc.revenueMicros += row.revenue_micros || 0;
         acc.clicks += row.clicks || 0;
         // Countries not available in simplified data
         return acc;
-    }, { impressions: 0, spend: 0, clicks: 0 });
+    }, { impressions: 0, revenueMicros: 0, clicks: 0 });
+    totals.spend = totals.revenueMicros / 1000000;
 
     const avgCpm = totals.impressions > 0 ? (totals.spend / totals.impressions * 1000) : 0;
 
@@ -486,11 +489,11 @@ function aggregateData(data, by) {
                 break;
             case 'order':
                 key = row.order_id || 'Unknown';
-                name = row.order_name || key;
+                name = key || row.order_name;
                 break;
             case 'line_item':
                 key = row.line_item_id || 'Unknown';
-                name = row.line_item_name || key;
+                name = key || row.line_item_name;
                 break;
             default:
                 key = 'Unknown';
@@ -502,7 +505,7 @@ function aggregateData(data, by) {
                 name: name,
                 impressions: 0,
                 clicks: 0,
-                spend: 0,
+                revenueMicros: 0,
                 count: 0
             };
         } else if (name && name !== key && !name.startsWith('Advertiser ')) {
@@ -512,16 +515,22 @@ function aggregateData(data, by) {
 
         aggregated[key].impressions += row.impressions || 0;
         aggregated[key].clicks += row.clicks || 0;
-        aggregated[key].spend += row.spend || 0;
+        // Accumulate exact micros, not the per-row rounded spend, so summed
+        // spend and derived CPM stay accurate (no compounded 2-dp rounding).
+        aggregated[key].revenueMicros += row.revenue_micros || 0;
         aggregated[key].count += 1;
     });
 
-    // Calculate derived metrics
-    return Object.values(aggregated).map(item => ({
-        ...item,
-        ctr: item.impressions > 0 ? (item.clicks / item.impressions * 100) : 0,
-        cpm: item.impressions > 0 ? (item.spend / item.impressions * 1000) : 0
-    })).sort((a, b) => b.spend - a.spend);
+    // Calculate derived metrics from exact micros (round only at display).
+    return Object.values(aggregated).map(item => {
+        const spend = item.revenueMicros / 1000000;
+        return {
+            ...item,
+            spend: spend,
+            ctr: item.impressions > 0 ? (item.clicks / item.impressions * 100) : 0,
+            cpm: item.impressions > 0 ? (spend / item.impressions * 1000) : 0
+        };
+    }).sort((a, b) => b.spend - a.spend);
 }
 
 function updateTimeChart(aggregation) {
@@ -533,12 +542,13 @@ function updateTimeChart(aggregation) {
         // All-time data is aggregated server-side and has no timestamps
         const date = row.timestamp ? row.timestamp.split('T')[0] : 'All Time';
         if (!timeData[date]) {
-            timeData[date] = { impressions: 0, spend: 0, clicks: 0 };
+            timeData[date] = { impressions: 0, revenueMicros: 0, clicks: 0 };
         }
         timeData[date].impressions += row.impressions || 0;
-        timeData[date].spend += row.spend || 0;
+        timeData[date].revenueMicros += row.revenue_micros || 0;
         timeData[date].clicks += row.clicks || 0;
     });
+    Object.values(timeData).forEach(d => { d.spend = d.revenueMicros / 1000000; });
 
     const labels = Object.keys(timeData).sort();
     const impressions = labels.map(date => timeData[date].impressions);

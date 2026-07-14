@@ -2,7 +2,7 @@
   "mcpServers": {
     "local": {
       "type": "http",
-      "url": "http://0.0.0.0:8080/mcp/",
+      "url": "https://azerion-gaming.sales-agent.yieldpro.improvedigital.com/mcp",
       "headers": {
         "Authorization": "Bearer tok_TsDB5qiLETTMCZab_UAHmUES1cI3tInHt69sxf14TWE"
       }

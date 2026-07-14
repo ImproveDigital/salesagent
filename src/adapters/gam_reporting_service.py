@@ -645,6 +645,11 @@ class GAMReportingService:
                 "clicks": clicks,
                 "ctr": round(ctr, 4),
                 "spend": round(spend, 2),
+                # Full-precision revenue so clients that re-aggregate rows
+                # (e.g. the reporting UI's Aggregate By) can sum exactly and
+                # derive spend/CPM without compounding the per-row 2-dp
+                # rounding — that inflated CPM on low-impression rows.
+                "revenue_micros": agg_data["revenue_micros"],
                 "cpm": round(cpm, 2),  # Changed from ecpm to cpm for clarity
                 "video_completions": agg_data.get("video_completions", 0),
                 "aggregated_rows": agg_data["row_count"],  # Useful for debugging
