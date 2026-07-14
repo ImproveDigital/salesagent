@@ -241,11 +241,6 @@
 <script>
 // Tenant reporting currency (GAM network currency), resolved server-side
 const CURRENCY = '{{ currency_symbol(currency) }}';
-// {gam_order_id: externalOrderId} resolved from our synced GAM tables — GAM
-// reports don't expose the external id. Used to label the Order / Line Item
-// breakdowns; falls back to the GAM id when no external id is mapped.
-const ORDER_EXTERNAL_IDS = {{ order_external_ids | default({}) | tojson }};
-const LINE_ITEM_EXTERNAL_IDS = {{ line_item_external_ids | default({}) | tojson }};
 let currentData = null;
 let timeChart = null;
 let adUnitChart = null;
@@ -494,13 +489,11 @@ function aggregateData(data, by) {
                 break;
             case 'order':
                 key = row.order_id || 'Unknown';
-                // Show GAM's externalOrderId (resolved from our DB) rather than
-                // the order name; fall back to the GAM order id when unmapped.
-                name = ORDER_EXTERNAL_IDS[key] || key;
+                name = key || row.order_name;
                 break;
             case 'line_item':
                 key = row.line_item_id || 'Unknown';
-                name = LINE_ITEM_EXTERNAL_IDS[key] || key;
+                name = key || row.line_item_name;
                 break;
             default:
                 key = 'Unknown';
