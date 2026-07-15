@@ -1299,7 +1299,15 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
                     # Convert this package's budget into goal units for its
                     # pricing model (impressions for CPM/VCPM, clicks for CPC).
+                    # Auction packages carry their working price in bid_price,
+                    # not rate, so fall back to the stored bid_price (mirrors the
+                    # auto-create path); otherwise auction buys book a 0-unit goal
+                    # and GAM rejects the line item (primaryGoal.units TOO_SMALL).
+                    pricing_info_from_config = package_config.get("pricing_info")
                     rate_value = float(pricing_option_inner.rate) if pricing_option_inner.rate else None
+                    if rate_value is None and pricing_info_from_config:
+                        bid_price = pricing_info_from_config.get("bid_price")
+                        rate_value = float(bid_price) if bid_price else None
                     impressions = _goal_units_from_budget(
                         total_budget,
                         str(getattr(pricing_option_inner, "pricing_model", "") or ""),
@@ -1308,7 +1316,6 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
                     # Reconstruct package_pricing_info from package_config if available
                     # This includes the bid_price for auction pricing
-                    pricing_info_from_config = package_config.get("pricing_info")
                     if pricing_info_from_config and package_id:
                         # Use the stored pricing_info which has the correct bid_price
                         package_pricing_info[package_id] = pricing_info_from_config
