@@ -98,6 +98,7 @@ class DashboardService:
                 needs_attention = (
                     readiness_summary.get("needs_creatives", 0)
                     + readiness_summary.get("needs_approval", 0)
+                    + readiness_summary.get("pending_ad_server_approval", 0)
                     + readiness_summary.get("failed", 0)
                     + (pending_creatives_count or 0)
                 )
@@ -370,8 +371,8 @@ class DashboardService:
         if adapter and adapter.gam_network_currency:
             return str(adapter.gam_network_currency)
 
-        stmt = select(CurrencyLimit).filter_by(tenant_id=self.tenant_id).order_by(CurrencyLimit.currency_code)
-        limit = session.scalars(stmt).first()
+        limit_stmt = select(CurrencyLimit).filter_by(tenant_id=self.tenant_id).order_by(CurrencyLimit.currency_code)
+        limit = session.scalars(limit_stmt).first()
         if limit:
             return str(limit.currency_code)
 
