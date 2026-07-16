@@ -12,6 +12,7 @@ from sqlalchemy import select
 from src.admin.utils import require_tenant_access
 from src.core.database.database_session import get_db_session
 from src.core.database.models import AuditLog
+from src.core.utils.time_format import relative_time_ago
 
 logger = logging.getLogger(__name__)
 
@@ -24,92 +25,87 @@ connection_counts: dict[str, int] = defaultdict(int)
 connection_timestamps: dict[str, list[float]] = defaultdict(list)
 
 
-def format_activity_from_audit_log(audit_log: AuditLog) -> dict:
-    """Convert AuditLog database record to activity feed format with rich details."""
-    # Parse operation to extract method name
-    operation_parts = audit_log.operation.split(".", 1)
-    adapter_name = operation_parts[0] if len(operation_parts) > 1 else "system"
-    method = operation_parts[1] if len(operation_parts) > 1 else audit_log.operation
+def _classify_activity(method: str, success: bool) -> str:
+    """Map an operation's method name (and outcome) to an activity-feed type."""
+    method_lower = method.lower()
+    if "media_buy" in method_lower:
+        return "media-buy"
+    if "creative" in method_lower:
+        return "creative"
+    if "error" in method_lower or not success:
+        return "error"
+    if "get_products" in method_lower:
+        return "product-query"
+    if "human" in method_lower or "approval" in method_lower:
+        return "human-task"
+    return "api-call"
 
-    # Determine activity type based on operation
-    if "media_buy" in method.lower():
-        activity_type = "media-buy"
-    elif "creative" in method.lower():
-        activity_type = "creative"
-    elif "error" in method.lower() or not audit_log.success:
-        activity_type = "error"
-    elif "get_products" in method.lower():
-        activity_type = "product-query"
-    elif "human" in method.lower() or "approval" in method.lower():
-        activity_type = "human-task"
-    else:
-        activity_type = "api-call"
 
-    # Build rich activity details based on operation type
-    details = {}
-    full_details = {}
+def _parse_audit_details(audit_log: AuditLog) -> dict:
+    """Return audit_log.details as a dict (JSONType gives a dict; legacy rows may hold a JSON string)."""
+    if not audit_log.details:
+        return {}
+    if isinstance(audit_log.details, dict):
+        return audit_log.details
+    try:
+        return json.loads(audit_log.details)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _quoted_excerpt(label: str, text: str, max_len: int) -> str:
+    """Render `label: "text"` truncating the text with an ellipsis beyond max_len."""
+    if len(text) > max_len:
+        return f'{label}: "{text[:max_len]}..."'
+    return f'{label}: "{text}"'
+
+
+def _build_detail_sections(
+    audit_log: AuditLog, method: str, adapter_name: str, parsed: dict
+) -> tuple[dict, dict, bool]:
+    """Build (details, full_details, action_required) for one audit entry by operation type."""
+    details: dict = {}
+    full_details: dict = {}
     action_required = False
+    method_lower = method.lower()
 
-    # Parse the details JSON if available
-    parsed_details = {}
-    if audit_log.details:
-        try:
-            # details is already a dict from JSONType, not a string
-            if isinstance(audit_log.details, dict):
-                parsed_details = audit_log.details
-            else:
-                parsed_details = json.loads(audit_log.details)
-        except (json.JSONDecodeError, TypeError):
-            parsed_details = {}
+    if "get_products" in method_lower:
+        details["primary"] = f"Found {parsed.get('product_count', 0)} products"
+        if parsed.get("brief"):
+            details["secondary"] = _quoted_excerpt("Brief", parsed["brief"], 50)
+        if parsed.get("products"):
+            full_details["products"] = parsed["products"]
+            full_details["promoted"] = parsed.get("promoted_product", "No specific promotion")
 
-    # Format based on operation type
-    if "get_products" in method.lower():
-        details["primary"] = f"Found {parsed_details.get('product_count', 0)} products"
-        if parsed_details.get("brief"):
-            details["secondary"] = (
-                f'Brief: "{parsed_details["brief"][:50]}..."'
-                if len(parsed_details.get("brief", "")) > 50
-                else f'Brief: "{parsed_details.get("brief")}"'
-            )
-        if parsed_details.get("products"):
-            full_details["products"] = parsed_details["products"]
-            full_details["promoted"] = parsed_details.get("promoted_product", "No specific promotion")
+    elif "create_media_buy" in method_lower:
+        if parsed.get("budget"):
+            details["primary"] = f"Budget: ${parsed['budget']:,.0f}"
+        if parsed.get("duration_days"):
+            details["secondary"] = f"Duration: {parsed['duration_days']} days"
+        if parsed.get("targeting"):
+            full_details["targeting"] = parsed["targeting"]
+        full_details["media_buy_id"] = parsed.get("media_buy_id", "N/A")
 
-    elif "create_media_buy" in method.lower():
-        if parsed_details.get("budget"):
-            details["primary"] = f"Budget: ${parsed_details['budget']:,.0f}"
-        if parsed_details.get("duration_days"):
-            details["secondary"] = f"Duration: {parsed_details['duration_days']} days"
-        if parsed_details.get("targeting"):
-            full_details["targeting"] = parsed_details["targeting"]
-        full_details["media_buy_id"] = parsed_details.get("media_buy_id", "N/A")
+    elif "upload_creative" in method_lower:
+        details["primary"] = f"Format: {parsed.get('format', 'Unknown')}"
+        if parsed.get("file_size"):
+            details["secondary"] = f"Size: {parsed['file_size']}"
+        full_details["creative_id"] = parsed.get("creative_id", "N/A")
+        full_details["status"] = parsed.get("status", "pending")
 
-    elif "upload_creative" in method.lower():
-        details["primary"] = f"Format: {parsed_details.get('format', 'Unknown')}"
-        if parsed_details.get("file_size"):
-            details["secondary"] = f"Size: {parsed_details['file_size']}"
-        full_details["creative_id"] = parsed_details.get("creative_id", "N/A")
-        full_details["status"] = parsed_details.get("status", "pending")
-
-    elif "human" in method.lower() or "approval" in method.lower():
+    elif "human" in method_lower or "approval" in method_lower:
         details["primary"] = "⚠️ Human approval required"
-        details["secondary"] = parsed_details.get("task_type", "Review required")
-        full_details["task_id"] = parsed_details.get("task_id")
-        full_details["task_details"] = parsed_details.get("details", {})
+        details["secondary"] = parsed.get("task_type", "Review required")
+        full_details["task_id"] = parsed.get("task_id")
+        full_details["task_details"] = parsed.get("details", {})
         action_required = True
 
     elif adapter_name == "A2A" or audit_log.operation.startswith("A2A."):
-        # Handle A2A operations with rich details
         details["primary"] = "🔄 A2A Protocol"
-        if parsed_details.get("query"):
-            details["secondary"] = (
-                f'Query: "{parsed_details["query"][:60]}..."'
-                if len(parsed_details.get("query", "")) > 60
-                else f'Query: "{parsed_details.get("query")}"'
-            )
-
-        # Include all A2A details for expansion
-        full_details = parsed_details.copy()  # Show all A2A details when expanded
+        if parsed.get("query"):
+            details["secondary"] = _quoted_excerpt("Query", parsed["query"], 60)
+        # Show all A2A details when expanded
+        full_details = parsed.copy()
 
     elif not audit_log.success:
         details["primary"] = "❌ Failed"
@@ -118,46 +114,41 @@ def format_activity_from_audit_log(audit_log: AuditLog) -> dict:
                 audit_log.error_message[:75] + "..." if len(audit_log.error_message) > 75 else audit_log.error_message
             )
         full_details["error_details"] = audit_log.error_message
-    else:
-        # Default success case
-        details["primary"] = "✅ Success"
-        if parsed_details:
-            # Show first interesting field from details
-            for key in ["message", "result", "count", "status"]:
-                if key in parsed_details:
-                    details["secondary"] = str(parsed_details[key])[:75]
-                    break
 
-    # Calculate relative time
+    else:
+        details["primary"] = "✅ Success"
+        # Show first interesting field from details
+        for key in ["message", "result", "count", "status"]:
+            if key in parsed:
+                details["secondary"] = str(parsed[key])[:75]
+                break
+
+    return details, full_details, action_required
+
+
+def format_activity_from_audit_log(audit_log: AuditLog) -> dict:
+    """Convert AuditLog database record to activity feed format with rich details."""
     from typing import cast
 
-    now = datetime.now(UTC)
-    timestamp = cast(datetime, audit_log.timestamp)
-    if timestamp.tzinfo is None:
-        # Handle naive datetime (assume UTC)
-        audit_timestamp = timestamp.replace(tzinfo=UTC)
-    else:
-        audit_timestamp = timestamp
+    # Operation is "<adapter>.<method>"; bare operations count as system methods
+    operation_parts = audit_log.operation.split(".", 1)
+    adapter_name = operation_parts[0] if len(operation_parts) > 1 else "system"
+    method = operation_parts[1] if len(operation_parts) > 1 else audit_log.operation
 
-    delta = now - audit_timestamp
-    if delta.days > 0:
-        time_relative = f"{delta.days}d ago"
-    elif delta.seconds > 3600:
-        time_relative = f"{delta.seconds // 3600}h ago"
-    elif delta.seconds > 60:
-        time_relative = f"{delta.seconds // 60}m ago"
-    else:
-        time_relative = "Just now"
+    parsed_details = _parse_audit_details(audit_log)
+    details, full_details, action_required = _build_detail_sections(audit_log, method, adapter_name, parsed_details)
+
+    timestamp = cast(datetime, audit_log.timestamp)
 
     return {
         "id": audit_log.log_id,
-        "type": activity_type,
+        "type": _classify_activity(method, audit_log.success),
         "principal_name": audit_log.principal_name or "System",
         "action": f"Called {method}",
         "details": details,
         "full_details": full_details,
         "timestamp": timestamp.isoformat(),
-        "time_relative": time_relative,
+        "time_relative": relative_time_ago(timestamp),
         "action_required": action_required,
         "operation": audit_log.operation,
         "success": audit_log.success,

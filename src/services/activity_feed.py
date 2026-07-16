@@ -8,6 +8,8 @@ from collections import deque
 from datetime import UTC, datetime
 from typing import Any
 
+from src.core.utils.time_format import relative_time_ago
+
 logger = logging.getLogger(__name__)
 
 
@@ -188,17 +190,7 @@ class ActivityFeed:
                 dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             else:
                 dt = timestamp
-
-            now = datetime.now(UTC)
-            delta = now - dt
-
-            if delta.days > 0:
-                return f"{delta.days}d ago"
-            if delta.seconds > 3600:
-                return f"{delta.seconds // 3600}h ago"
-            if delta.seconds > 60:
-                return f"{delta.seconds // 60}m ago"
-            return "Just now"
+            return relative_time_ago(dt)
         except Exception:
             logger.debug("Failed to format time_ago", exc_info=True)
             return "Unknown"
