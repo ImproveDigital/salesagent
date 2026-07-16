@@ -17,10 +17,12 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from src.app import app
 from starlette.testclient import TestClient
 
+from core.main import build_app
 from src.core.resolved_identity import ResolvedIdentity
+
+app = build_app()
 
 _MOCK_IDENTITY = ResolvedIdentity(
     principal_id="test-principal",

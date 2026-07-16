@@ -9,9 +9,11 @@ Validates that:
 beads: salesagent-b61l.16
 """
 
-from src.app import app
 from starlette.testclient import TestClient
 
+from core.main import build_app
+
+app = build_app()
 client = TestClient(app)
 
 

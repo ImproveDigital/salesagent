@@ -43,11 +43,7 @@ from src.core.schemas import (
     ReportingPeriod,
 )
 from src.core.testing_hooks import AdCPTestContext
-from src.core.tools.media_buy_delivery import (
-    _get_media_buy_delivery_impl,
-    get_media_buy_delivery,
-    get_media_buy_delivery_raw,
-)
+from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 from src.services.webhook_delivery_service import CircuitBreaker, CircuitState, WebhookDeliveryService
 from tests.harness.delivery_poll_unit import DeliveryPollEnv
 
@@ -791,50 +787,10 @@ class TestDeliveryStatusFilter:
                 )
                 assert isinstance(response, GetMediaBuyDeliveryResponse)
 
-    async def test_valid_status_enum_values_accepted_mcp(self):
-        """UC-004-FILT-07: valid status values accepted via MCP wrapper.
-
-        Covers: UC-004-ALT-STATUS-FILTERED-DELIVERY-07
-
-        Route: mcp -- MCP wrapper accepts each MediaBuyStatus enum value.
-        """
-        from unittest.mock import AsyncMock
-
-        from fastmcp.server.context import Context
-
-        for status in MediaBuyStatus:
-            with DeliveryPollEnv() as env:
-                env.add_buy(media_buy_id="mb_mcp")
-                env.set_adapter_response("mb_mcp", impressions=100)
-
-                mock_ctx = AsyncMock(spec=Context)
-                mock_ctx.get_state.return_value = env.identity
-
-                result = await get_media_buy_delivery(
-                    media_buy_ids=["mb_mcp"],
-                    status_filter=status,
-                    ctx=mock_ctx,
-                )
-                assert result.structured_content is not None
-
-    def test_valid_status_enum_values_accepted_a2a(self):
-        """UC-004-FILT-07: valid status values accepted via A2A wrapper.
-
-        Covers: UC-004-ALT-STATUS-FILTERED-DELIVERY-07
-
-        Route: a2a -- A2A raw function accepts each MediaBuyStatus enum value.
-        """
-        for status in MediaBuyStatus:
-            with DeliveryPollEnv() as env:
-                env.add_buy(media_buy_id="mb_a2a")
-                env.set_adapter_response("mb_a2a", impressions=100)
-
-                response = get_media_buy_delivery_raw(
-                    media_buy_ids=["mb_a2a"],
-                    status_filter=status,
-                    identity=env.identity,
-                )
-                assert isinstance(response, GetMediaBuyDeliveryResponse)
+    # NOTE: the flat-param MCP/A2A wrapper variants of UC-004-FILT-07 were
+    # removed with the wrappers themselves ("Sales Agent 2.0", 7fbd30ea8):
+    # transport dispatch is exercised via core/platforms/_delegate.py and the
+    # cross-transport harness, not per-tool wrapper functions.
 
 
 # ===========================================================================

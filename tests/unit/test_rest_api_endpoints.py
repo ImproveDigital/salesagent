@@ -10,11 +10,12 @@ beads: salesagent-b61l.15
 
 from unittest.mock import MagicMock, patch
 
-from src.app import app
 from starlette.testclient import TestClient
 
+from core.main import build_app
 from src.core.resolved_identity import ResolvedIdentity
 
+app = build_app()
 client = TestClient(app)
 
 _MOCK_IDENTITY = ResolvedIdentity(
