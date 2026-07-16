@@ -196,10 +196,20 @@ class DashboardService:
         today = datetime.now(UTC).date()
         revenue_data = []
 
+        # One windowed query for the whole trend, bucketed per day in Python —
+        # replaces a query per day (30 on the dashboard, 365 for YTD).
+        window_start = anchor - timedelta(days=days - 1)
+        window_buys = [
+            (buy, buy_start, buy_end)
+            for buy in repo.list_in_flight_between(window_start, anchor, statuses=["active", "completed"])
+            if (buy_start := type_cast(date | None, buy.start_date)) is not None
+            and (buy_end := type_cast(date | None, buy.end_date)) is not None
+        ]
+
         for i in range(days):
             day = anchor - timedelta(days=days - 1 - i)
 
-            daily_buys = repo.list_in_flight_on_date(day, statuses=["active", "completed"])
+            daily_buys = [buy for buy, buy_start, buy_end in window_buys if buy_start <= day <= buy_end]
 
             daily_revenue = 0.0
             for buy in daily_buys:

@@ -369,10 +369,22 @@ class MediaBuyRepository:
 
         Useful for revenue trend calculations.
         """
+        return self.list_in_flight_between(target_date, target_date, statuses=statuses)
+
+    def list_in_flight_between(
+        self,
+        window_start: datetime.date,
+        window_end: datetime.date,
+        statuses: list[str] | None = None,
+    ) -> list[MediaBuy]:
+        """Get media buys whose flight period overlaps [window_start, window_end].
+
+        One windowed query replaces per-day lookups in trend calculations.
+        """
         stmt = select(MediaBuy).where(
             MediaBuy.tenant_id == self._tenant_id,
-            MediaBuy.start_date <= target_date,
-            MediaBuy.end_date >= target_date,
+            MediaBuy.start_date <= window_end,
+            MediaBuy.end_date >= window_start,
         )
         if statuses:
             stmt = stmt.where(MediaBuy.status.in_(statuses))

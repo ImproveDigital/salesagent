@@ -187,8 +187,10 @@ def get_product_suggestions(tenant_id):
 
         # Sort suggestions by relevance
         # Prioritize: 1) Industry-specific, 2) Lower CPM, 3) More formats
+        default_product_ids = {p["product_id"] for p in get_default_products()}
+
         def sort_key(product):
-            is_industry_specific = product["product_id"] not in [p["product_id"] for p in get_default_products()]
+            is_industry_specific = product["product_id"] not in default_product_ids
             avg_cpm = (
                 product.get("cpm", 0)
                 or (product.get("price_guidance", {}).get("min", 0) + product.get("price_guidance", {}).get("max", 0))
@@ -207,9 +209,7 @@ def get_product_suggestions(tenant_id):
         # Add metadata to suggestions
         for suggestion in filtered_suggestions:
             suggestion["already_exists"] = suggestion["product_id"] in existing_ids
-            suggestion["is_industry_specific"] = suggestion["product_id"] not in [
-                p["product_id"] for p in get_default_products()
-            ]
+            suggestion["is_industry_specific"] = suggestion["product_id"] not in default_product_ids
 
             # Calculate match score (0-100)
             score = 100
