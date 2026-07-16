@@ -606,6 +606,7 @@ def _run_sync_thread(
         try:
             from src.services.gam_advertisers_sync import _build_gam_client_for_tenant
             from src.services.gam_orders_service import GAMOrdersService
+
             with _sync_session() as db:
                 GAMOrdersService(db).sync_tenant_orders(tenant_id, _build_gam_client_for_tenant(tenant_id))
         except Exception as _oe:

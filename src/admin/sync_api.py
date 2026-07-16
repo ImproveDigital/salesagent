@@ -493,10 +493,9 @@ def sync_tenant_orders(tenant_id: str) -> tuple[Response, int]:
 
         try:
             # Initialize GAM client
-            from src.services.gam_orders_service import GAMOrdersService
-
             from src.adapters.google_ad_manager import GoogleAdManager
             from src.core.schemas import Principal
+            from src.services.gam_orders_service import GAMOrdersService
 
             # Create dummy principal for sync (no advertiser needed for order discovery)
             principal = Principal(

@@ -465,7 +465,6 @@ class TestMCPWrapperIdentityResolution:
         from unittest.mock import AsyncMock
 
         from fastmcp.server.context import Context
-
         from src.core.tools.properties import list_authorized_properties
 
         mock_ctx = MagicMock(spec=Context)
@@ -498,7 +497,6 @@ class TestMCPWrapperIdentityResolution:
     async def test_wrapper_returns_tool_result(self):
         """H7: MCP wrapper returns a ToolResult with structured_content."""
         from fastmcp.tools.tool import ToolResult
-
         from src.core.tools.properties import list_authorized_properties
 
         with patch("src.core.tools.properties._list_authorized_properties_impl") as mock_impl:
@@ -537,7 +535,6 @@ class TestMCPWrapperContextEcho:
         from unittest.mock import AsyncMock
 
         from fastmcp.server.context import Context
-
         from src.core.tools.properties import list_authorized_properties
 
         test_context = ContextObject(e2e="list_authorized_properties", session="test-456")
@@ -570,7 +567,6 @@ class TestMCPWrapperContextEcho:
         from unittest.mock import AsyncMock
 
         from fastmcp.server.context import Context
-
         from src.core.tools.properties import list_authorized_properties
 
         # req has no context, but wrapper receives context as separate param

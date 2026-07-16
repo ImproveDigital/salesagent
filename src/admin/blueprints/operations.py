@@ -155,7 +155,7 @@ def reporting(tenant_id):
                 currency = str(currency_limit.currency_code)
 
         return render_template("gam_reporting.html", tenant=tenant, currency=currency)
-    
+
 
 @operations_bp.route("/media-buy/<media_buy_id>", methods=["GET"])
 @require_tenant_access()

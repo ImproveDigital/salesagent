@@ -32,9 +32,8 @@ class TestAsyncReceiveCallable:
         # Import the middleware and inspect its internals
         # We test this by running the middleware with a numeric messageId
         # and verifying the request reconstruction works.
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         client = TestClient(app)
 
@@ -65,9 +64,8 @@ class TestAsyncReceiveCallable:
 
     def test_numeric_jsonrpc_id_converted_to_string(self):
         """Numeric JSON-RPC id values must be converted to strings."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         client = TestClient(app)
 
@@ -97,9 +95,8 @@ class TestCORSConfiguration:
         Before fix: allow_origins=["*"] + allow_credentials=True — browsers ignore.
         After fix: allow_origins from ALLOWED_ORIGINS env var.
         """
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         client = TestClient(app)
 
@@ -119,9 +116,8 @@ class TestCORSConfiguration:
 
     def test_allowed_origin_gets_cors_header(self):
         """An origin listed in ALLOWED_ORIGINS should get CORS response header."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         client = TestClient(app)
 
@@ -186,9 +182,8 @@ class TestHostnameValidation:
 
     def test_agent_card_ignores_invalid_header(self):
         """Agent card falls back to Host header when Apx-Incoming-Host is invalid."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         client = TestClient(app)
 
@@ -208,9 +203,8 @@ class TestHostnameValidation:
 
     def test_agent_card_ignores_invalid_host_header(self):
         """Agent card falls back to default URL when Host header is invalid (salesagent-4r0m)."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         client = TestClient(app)
 
@@ -239,7 +233,6 @@ class TestDebugEndpointGate:
     def test_require_testing_mode_blocks_in_production(self):
         """require_testing_mode raises 404 when ADCP_TESTING is not set."""
         from fastapi import HTTPException
-
         from src.routes.health import require_testing_mode
 
         with patch.dict(os.environ, {}, clear=True):
@@ -272,9 +265,8 @@ class TestDebugEndpointGate:
 
     def test_debug_db_state_returns_404_without_testing(self):
         """GET /debug/db-state returns 404 in production mode."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         client = TestClient(app)
 
@@ -329,9 +321,8 @@ class TestAdminCompatibilityMount:
     """Admin UI should be reachable through both /admin and the root fallback mount."""
 
     def test_fastapi_mounts_admin_at_admin_and_root(self):
-        from starlette.routing import Mount
-
         from src.app import _install_admin_mounts, app
+        from starlette.routing import Mount
 
         _install_admin_mounts()
         admin_mounts = [
@@ -350,9 +341,8 @@ class TestAdminCompatibilityMount:
         assert "/test" not in admin_mounts
 
     def test_root_login_path_is_exposed_by_root_fallback_mount(self):
-        from starlette.testclient import TestClient
-
         from src.app import _install_admin_mounts, app
+        from starlette.testclient import TestClient
 
         _install_admin_mounts()
         client = TestClient(app)
@@ -360,9 +350,8 @@ class TestAdminCompatibilityMount:
         assert response.status_code != 404
 
     def test_admin_login_path_remains_available(self):
-        from starlette.testclient import TestClient
-
         from src.app import _install_admin_mounts, app
+        from starlette.testclient import TestClient
 
         _install_admin_mounts()
         client = TestClient(app)
@@ -390,9 +379,8 @@ class TestA2ATrailingSlashCompatibility:
     """A2A trailing-slash requests should stay on the FastAPI surface."""
 
     def test_a2a_trailing_slash_redirects_to_canonical_path(self):
-        from starlette.testclient import TestClient
-
         from src.app import _install_admin_mounts, app
+        from starlette.testclient import TestClient
 
         _install_admin_mounts()
         client = TestClient(app)

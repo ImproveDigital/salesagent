@@ -19,7 +19,7 @@ def get_ad_manager_client_for_tenant(tenant_id: str) -> ad_manager.AdManagerClie
     Supports both OAuth (refresh token) and service account authentication,
     determined by the tenant's adapter config (gam_auth_method field).
 
-    
+
     Args:
         tenant_id: The tenant ID to get the client for
 
