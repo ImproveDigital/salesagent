@@ -12,7 +12,6 @@
     "src.admin.blueprints.products,src.core.creative_agent_registry",
     "src.admin.blueprints.products,src.core.database.product_pricing",
     "src.admin.blueprints.products,src.core.format_resolver",
-    "src.core.auth,src.core.testing_hooks",
     "src.core.creative_agent_registry,src.core.format_resolver",
     "src.core.creative_agent_registry,src.core.signals_agent_registry",
     "src.core.schemas._base,src.core.schemas.account",
