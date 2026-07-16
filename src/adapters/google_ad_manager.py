@@ -14,7 +14,7 @@ __all__ = [
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import sqlalchemy.exc
@@ -429,6 +429,37 @@ class GoogleAdManager(AdServerAdapter):
             CreateMediaBuyResponse with GAM order details
         """
         self.log("[bold]GoogleAdManager.create_media_buy[/bold] - Creating GAM order")
+
+        # Time-bound validation at the moment of booking. Request-time
+        # validation is not enough: manual approval can run hours/days after
+        # the request, and 'asap' starts resolve to the request instant — by
+        # the time this adapter call happens, GAM would reject the dates with
+        # START_DATE_TIME_IS_IN_PAST / END_DATE_TIME_IS_IN_PAST as a generic
+        # failed buy. Fail the elapsed case with a clear message; clamp a
+        # past start forward (the buyer's intent — start as soon as possible).
+        now = datetime.now(UTC)
+        # Naive datetimes are treated as UTC for the comparison — the same
+        # convention as request-time validation in media_buy_create.
+        end_cmp = end_time if end_time.tzinfo else end_time.replace(tzinfo=UTC)
+        start_cmp = start_time if start_time.tzinfo else start_time.replace(tzinfo=UTC)
+        if end_cmp <= now:
+            error_msg = (
+                f"Flight window already elapsed: end time {end_time.isoformat()} is in the past. "
+                f"The media buy was likely approved after its scheduled flight ended; "
+                f"rebook with a future flight window."
+            )
+            self.log(f"[red]Error: {error_msg}[/red]")
+            return CreateMediaBuyError(
+                errors=[Error(code="flight_window_elapsed", message=error_msg, details=None)],
+            )
+        if start_cmp < now:
+            adjusted_start = now + timedelta(minutes=1)
+            self.log(
+                f"[yellow]Start time {start_time.isoformat()} is in the past "
+                f"(booking ran after the scheduled start); adjusting to {adjusted_start.isoformat()} "
+                f"so GAM does not reject the line items.[/yellow]"
+            )
+            start_time = adjusted_start
 
         # Validate pricing models - check GAM compatibility
         if package_pricing_info:
