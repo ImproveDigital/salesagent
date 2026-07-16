@@ -123,26 +123,23 @@
     <div class="detail-rows">
         <div class="detail-row">
             <span class="label">Impressions:</span>
-            <span class="value">{{ "{:,}".format(delivery_metrics.impressions|int) }}</span>
+            <span class="value" id="dm-impressions">{{ "{:,}".format(delivery_metrics.impressions|int) }}</span>
         </div>
         <div class="detail-row">
             <span class="label">Spend:</span>
-            <span class="value">{{ delivery_metrics.currency }} {{ "{:,.2f}".format(delivery_metrics.spend) }}</span>
+            <span class="value" id="dm-spend">{{ delivery_metrics.currency }} {{ "{:,.2f}".format(delivery_metrics.spend) }}</span>
         </div>
-        {% if delivery_metrics.clicks %}
-        <div class="detail-row">
+        <div class="detail-row" id="dm-clicks-row" {% if not delivery_metrics.clicks %}hidden{% endif %}>
             <span class="label">Clicks:</span>
-            <span class="value">{{ "{:,}".format(delivery_metrics.clicks|int) }}</span>
+            <span class="value" id="dm-clicks">{% if delivery_metrics.clicks %}{{ "{:,}".format(delivery_metrics.clicks|int) }}{% endif %}</span>
         </div>
-        {% endif %}
-        {% if delivery_metrics.ctr %}
-        <div class="detail-row">
+        <div class="detail-row" id="dm-ctr-row" {% if not delivery_metrics.ctr %}hidden{% endif %}>
             <span class="label">CTR:</span>
-            <span class="value">{{ "{:.2f}".format(delivery_metrics.ctr) }}%</span>
+            <span class="value" id="dm-ctr">{% if delivery_metrics.ctr %}{{ "{:.2f}".format(delivery_metrics.ctr) }}%{% endif %}</span>
         </div>
-        {% endif %}
     </div>
 
+    <div id="dm-by-package">
     {% if delivery_metrics.by_package %}
     <div style="margin-top: 1rem;">
         <h3 style="font-size: 0.9rem; color: #666; margin-bottom: 0.5rem;">By Package</h3>
@@ -171,11 +168,75 @@
         </div>
     </div>
     {% endif %}
+    </div>
 
     <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0; font-size: 0.85rem; color: #666;">
-        <em>Metrics fetched from {{ media_buy.adapter_type|default('ad server') }} in real-time</em>
+        <em id="dm-status">
+            {%- if delivery_metrics.pending_live -%}
+                Snapshot{% if delivery_metrics.synced_at %} from {{ delivery_metrics.synced_at }}{% endif %} — refreshing live metrics…
+            {%- else -%}
+                Metrics fetched from {{ media_buy.adapter_type|default('ad server') }} in real-time
+            {%- endif -%}
+        </em>
     </div>
 </div>
+{% if delivery_metrics.pending_live %}
+<script>
+(function () {
+    const url = "{{ url_for('operations.media_buy_delivery_metrics', tenant_id=tenant_id, media_buy_id=media_buy.media_buy_id) }}";
+    const fmtInt = (n) => Math.round(n || 0).toLocaleString();
+    const status = document.getElementById('dm-status');
+
+    fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then((resp) => {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.json();
+        })
+        .then((data) => {
+            const m = data.delivery_metrics;
+            if (!m) { status.textContent = 'Live metrics not available for this media buy.'; return; }
+            document.getElementById('dm-impressions').textContent = fmtInt(m.impressions);
+            document.getElementById('dm-spend').textContent =
+                (m.currency || '') + ' ' + (m.spend || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (m.clicks) {
+                document.getElementById('dm-clicks').textContent = fmtInt(m.clicks);
+                document.getElementById('dm-clicks-row').hidden = false;
+            }
+            if (m.ctr) {
+                document.getElementById('dm-ctr').textContent = m.ctr.toFixed(2) + '%';
+                document.getElementById('dm-ctr-row').hidden = false;
+            }
+            if (Array.isArray(m.by_package) && m.by_package.length) {
+                const rows = m.by_package.map((pkg) => {
+                    const clicks = pkg.clicks
+                        ? '<div><span style="color:#666;">Clicks:</span> <strong>' + fmtInt(pkg.clicks) + '</strong></div>'
+                        : '';
+                    return (
+                        '<div style="border:1px solid #e0e0e0;border-radius:4px;padding:0.75rem;background:#f9f9f9;">' +
+                        '<div style="font-weight:500;margin-bottom:0.5rem;"></div>' +
+                        '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem;font-size:0.85rem;">' +
+                        '<div><span style="color:#666;">Impressions:</span> <strong>' + fmtInt(pkg.impressions) + '</strong></div>' +
+                        '<div><span style="color:#666;">Spend:</span> <strong>' + (pkg.spend || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</strong></div>' +
+                        clicks + '</div></div>'
+                    );
+                });
+                const container = document.getElementById('dm-by-package');
+                container.innerHTML =
+                    '<div style="margin-top:1rem;"><h3 style="font-size:0.9rem;color:#666;margin-bottom:0.5rem;">By Package</h3>' +
+                    '<div style="display:grid;gap:0.5rem;">' + rows.join('') + '</div></div>';
+                // package_id set via textContent to avoid injecting adapter-provided strings as HTML
+                container.querySelectorAll('div[style*="font-weight:500"]').forEach((el, i) => {
+                    el.textContent = m.by_package[i].package_id || '';
+                });
+            }
+            status.textContent = 'Live from ad server (updated ' + new Date(m.synced_at).toLocaleString() + ')';
+        })
+        .catch(() => {
+            status.textContent = 'Live refresh unavailable — showing last saved snapshot.';
+        });
+})();
+</script>
+{% endif %}
 {% elif media_buy.status in ['active', 'approved', 'completed'] %}
 <div class="custom-card">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
