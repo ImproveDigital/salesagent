@@ -10,7 +10,7 @@ Handles media buy updates including:
 
 import logging
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -834,7 +834,7 @@ def _update_media_buy_impl(
             return response_data
 
         adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
-        today = req.today or date.today()
+        today = req.today or datetime.now(UTC).date()
 
         # Dry-run mode: Return simulated response without any database writes
         # Validation has passed (principal verified, media buy exists), so we return what WOULD be updated

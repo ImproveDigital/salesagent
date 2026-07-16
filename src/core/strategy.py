@@ -335,7 +335,7 @@ class SimulationContext:
         try:
             from datetime import datetime
 
-            target_date = datetime.strptime(event, "%Y-%m-%d")
+            target_date = datetime.strptime(event, "%Y-%m-%d").replace(tzinfo=UTC)
             old_time = self.current_time
             self.current_time = target_date
             self.events_triggered.append(
