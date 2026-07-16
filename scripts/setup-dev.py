@@ -430,12 +430,11 @@ def wait_for_migrations() -> StepResult:
                                         ok=True,
                                         message="Database migrations completed",
                                     )
-                                else:
-                                    return StepResult(
-                                        name="migrations",
-                                        ok=False,
-                                        message=f"db-init exited with code {iparts[1]}",
-                                    )
+                                return StepResult(
+                                    name="migrations",
+                                    ok=False,
+                                    message=f"db-init exited with code {iparts[1]}",
+                                )
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
         time.sleep(3)

@@ -153,12 +153,11 @@ def _run_approval_polling_thread(
                     # Send webhook notification
                     _send_approval_webhook(tenant_id, order_id, workflow_step_id, "completed")
                     break
-                else:
-                    # Still not ready - continue polling
-                    logger.info(
-                        f"[{workflow_step_id}] Order {order_id} forecasting not ready yet, "
-                        f"will retry in {polling_interval_seconds}s"
-                    )
+                # Still not ready - continue polling
+                logger.info(
+                    f"[{workflow_step_id}] Order {order_id} forecasting not ready yet, "
+                    f"will retry in {polling_interval_seconds}s"
+                )
 
             except Exception as e:
                 logger.warning(f"[{workflow_step_id}] Approval attempt {attempt} failed: {e}")

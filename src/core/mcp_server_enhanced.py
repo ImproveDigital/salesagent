@@ -50,8 +50,7 @@ class EnhancedMCPServer(FastMCP):
 
         if func is None:
             return decorator
-        else:
-            return decorator(func)
+        return decorator(func)
 
     async def _handle_tool_call(self, tool_name: str, arguments: dict, context: FastMCPContext) -> Any:
         """Handle tool calls and inject context_id into responses.

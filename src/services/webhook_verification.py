@@ -14,8 +14,6 @@ from typing import Any
 class WebhookVerificationError(Exception):
     """Raised when webhook verification fails."""
 
-    pass
-
 
 class WebhookVerifier:
     """Verifies AdCP webhook signatures and timestamps."""

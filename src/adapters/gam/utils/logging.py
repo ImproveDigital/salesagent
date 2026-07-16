@@ -107,7 +107,7 @@ class GAMLogContext:
         """Create a summary of response data for logging."""
         if isinstance(data, dict):
             return {"id": data.get("id"), "name": data.get("name"), "status": data.get("status")}
-        elif isinstance(data, list):
+        if isinstance(data, list):
             return {"count": len(data), "first_id": data[0].get("id") if data else None}
         return {"type": str(type(data))}
 

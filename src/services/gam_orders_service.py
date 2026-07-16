@@ -297,9 +297,12 @@ class GAMOrdersService:
             order_dict = self._order_to_dict(order)
             if filters and "has_line_items" in filters:
                 filter_value = filters["has_line_items"]
-                if filter_value == "true" and not order_dict["has_line_items"]:
-                    continue
-                elif filter_value == "false" and order_dict["has_line_items"]:
+                if (
+                    filter_value == "true"
+                    and not order_dict["has_line_items"]
+                    or filter_value == "false"
+                    and order_dict["has_line_items"]
+                ):
                     continue
             result.append(order_dict)
 
@@ -448,15 +451,15 @@ class GAMOrdersService:
         # Priority order: check for active delivery first
         if "DELIVERING" in statuses:
             return "DELIVERING"
-        elif "READY" in statuses:
+        if "READY" in statuses:
             return "READY"
-        elif all(s == "COMPLETED" for s in statuses):
+        if all(s == "COMPLETED" for s in statuses):
             return "COMPLETED"
-        elif all(s == "PAUSED" for s in statuses):
+        if all(s == "PAUSED" for s in statuses):
             return "PAUSED"
-        elif all(s == "DRAFT" for s in statuses):
+        if all(s == "DRAFT" for s in statuses):
             return "DRAFT"
-        elif "APPROVED" in statuses:
+        if "APPROVED" in statuses:
             # APPROVED could mean various things, check dates
             now = datetime.now(UTC)
             for li in line_items:
@@ -481,17 +484,16 @@ class GAMOrdersService:
 
                         if start_dt <= now <= end_dt:
                             return "DELIVERING"
-                        elif now < start_dt:
+                        if now < start_dt:
                             return "READY"
-                        elif now > end_dt:
+                        if now > end_dt:
                             return "COMPLETED"
             return "APPROVED"
-        else:
-            # Return most common status
-            from collections import Counter
+        # Return most common status
+        from collections import Counter
 
-            status_counts = Counter(statuses)
-            return status_counts.most_common(1)[0][0] if status_counts else "UNKNOWN"
+        status_counts = Counter(statuses)
+        return status_counts.most_common(1)[0][0] if status_counts else "UNKNOWN"
 
     def _calculate_delivery_metrics(self, line_items: list[GAMLineItem]) -> dict[str, Any]:
         """

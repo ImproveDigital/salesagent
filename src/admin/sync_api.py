@@ -91,7 +91,7 @@ def trigger_sync(tenant_id: str) -> tuple[Response, int]:
             if recent_sync:
                 if recent_sync.status == "running":
                     return jsonify({"message": "Sync already in progress", "sync_id": recent_sync.sync_id}), 409
-                elif recent_sync.completed_at:
+                if recent_sync.completed_at:
                     return (
                         jsonify(
                             {

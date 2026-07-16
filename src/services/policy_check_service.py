@@ -144,11 +144,10 @@ class PolicyCheckService:
                 restrictions=analysis.restrictions,
                 warnings=analysis.warnings,
             )
-        else:
-            # Fallback if no AI is available - allow with warning
-            return PolicyCheckResult(
-                status=PolicyStatus.ALLOWED, warnings=["Policy check unavailable - AI service not configured"]
-            )
+        # Fallback if no AI is available - allow with warning
+        return PolicyCheckResult(
+            status=PolicyStatus.ALLOWED, warnings=["Policy check unavailable - AI service not configured"]
+        )
 
     def _check_basic_rules(self, text: str) -> PolicyCheckResult:
         """Apply basic policy rules (deprecated - kept for compatibility).

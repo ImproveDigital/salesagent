@@ -105,8 +105,7 @@ def get_oauth_config():
         if provider_url:
             logger.info(f"Using {provider} OAuth provider")
             return client_id, client_secret, provider_url, scopes
-        else:
-            logger.warning(f"Provider '{provider}' requires OAUTH_DISCOVERY_URL to be set")
+        logger.warning(f"Provider '{provider}' requires OAUTH_DISCOVERY_URL to be set")
 
     # Option 3: Google-specific environment variables (backwards compatible)
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
@@ -164,13 +163,12 @@ def init_oauth(app):
         app.oauth_provider = get_oauth_provider_name()
         logger.info(f"OAuth initialized with provider: {app.oauth_provider}")
         return oauth
-    else:
-        logger.warning(
-            "OAuth not configured - authentication will not work. "
-            "Set OAUTH_DISCOVERY_URL + OAUTH_CLIENT_ID + OAUTH_CLIENT_SECRET for generic OIDC, "
-            "or GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET for Google OAuth."
-        )
-        return None
+    logger.warning(
+        "OAuth not configured - authentication will not work. "
+        "Set OAUTH_DISCOVERY_URL + OAUTH_CLIENT_ID + OAUTH_CLIENT_SECRET for generic OIDC, "
+        "or GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET for Google OAuth."
+    )
+    return None
 
 
 def _test_auth_env_enabled() -> bool:
@@ -949,9 +947,8 @@ def test_auth():
                 fallback=url_for("tenants.dashboard", tenant_id=tenant_id),
             )
             return redirect(next_url)
-        else:
-            next_url = _safe_redirect(session.pop("login_next_url", None), fallback=url_for("core.index"))
-            return redirect(next_url)
+        next_url = _safe_redirect(session.pop("login_next_url", None), fallback=url_for("core.index"))
+        return redirect(next_url)
 
     flash("Invalid test credentials", "error")
     return redirect(request.referrer or url_for("auth.login"))
@@ -1166,10 +1163,9 @@ def gam_callback():
         # Redirect back to tenant settings
         if external_domain and os.environ.get("PRODUCTION") == "true":
             return redirect(f"https://{external_domain}/admin/tenant/{tenant_id}/settings")
-        elif originating_host and os.environ.get("PRODUCTION") == "true":
+        if originating_host and os.environ.get("PRODUCTION") == "true":
             return redirect(f"https://{originating_host}/admin/tenant/{tenant_id}/settings")
-        else:
-            return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))
+        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id))
 
     except Exception as e:
         logger.error(f"Error in GAM OAuth callback: {e}", exc_info=True)

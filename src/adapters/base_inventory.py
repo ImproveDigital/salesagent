@@ -63,7 +63,6 @@ class BaseInventoryManager(ABC):
         Returns:
             List of inventory items (platform-specific type)
         """
-        pass
 
     @abstractmethod
     def validate_inventory_ids(self, inventory_ids: list[str]) -> tuple[list[str], list[str]]:
@@ -75,7 +74,6 @@ class BaseInventoryManager(ABC):
         Returns:
             Tuple of (valid_ids, invalid_ids)
         """
-        pass
 
     @abstractmethod
     def build_inventory_response(self) -> dict[str, Any]:
@@ -84,7 +82,6 @@ class BaseInventoryManager(ABC):
         Returns:
             Dictionary with inventory details in platform-agnostic format
         """
-        pass
 
     @abstractmethod
     def suggest_products(self) -> list[dict[str, Any]]:
@@ -96,7 +93,6 @@ class BaseInventoryManager(ABC):
         Returns:
             List of suggested product configurations
         """
-        pass
 
     def clear_cache(self) -> None:
         """Clear the inventory cache."""

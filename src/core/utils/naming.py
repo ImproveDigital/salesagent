@@ -31,10 +31,9 @@ def format_date_range(start_time: datetime, end_time: datetime) -> str:
     """
     if start_time.year != end_time.year:
         return f"{start_time.strftime('%b %d, %Y')} - {end_time.strftime('%b %d, %Y')}"
-    elif start_time.month != end_time.month:
+    if start_time.month != end_time.month:
         return f"{start_time.strftime('%b %d')} - {end_time.strftime('%b %d, %Y')}"
-    else:
-        return f"{start_time.strftime('%b %d')}-{end_time.strftime('%d, %Y')}"
+    return f"{start_time.strftime('%b %d')}-{end_time.strftime('%d, %Y')}"
 
 
 def format_month_year(start_time: datetime) -> str:
@@ -53,7 +52,7 @@ def _extract_brand_name(request) -> str | None:
     brand = request.brand
     if hasattr(brand, "domain"):
         return brand.domain
-    elif isinstance(brand, dict):
+    if isinstance(brand, dict):
         return brand.get("domain")
     return None
 

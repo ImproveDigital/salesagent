@@ -105,7 +105,7 @@ def extract_product_property_ids(
         if inner.selection_type == "all":
             # Product covers ALL properties for this domain
             return None
-        elif inner.selection_type == "by_id":
+        if inner.selection_type == "by_id":
             for pid in inner.property_ids:
                 property_ids.add(pid.root)
         # by_tag: we don't resolve tags to IDs here; tags are excluded from matching
@@ -267,7 +267,7 @@ async def _get_products_impl(
     # Enforce policy-based validation
     if brand_manifest_policy == "require_brand" and not offering:
         raise AdCPAuthorizationError("Brand manifest required by tenant policy", recovery="correctable")
-    elif brand_manifest_policy == "require_auth" and not principal_id:
+    if brand_manifest_policy == "require_auth" and not principal_id:
         raise AdCPAuthenticationError("Authentication required by tenant policy")
     # public policy allows all requests (no brand_manifest or auth required)
 

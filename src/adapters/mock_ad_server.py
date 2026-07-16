@@ -334,10 +334,9 @@ class MockAdServer(AdServerAdapter):
 
         if approved:
             return True, None
-        else:
-            # Pick a random rejection reason
-            reason = random.choice(self.rejection_reasons)
-            return False, reason
+        # Pick a random rejection reason
+        reason = random.choice(self.rejection_reasons)
+        return False, reason
 
     def _schedule_async_completion(self, step_id: str, delay_ms: int):
         """Schedule automatic completion of an async task (for testing)."""
@@ -566,7 +565,7 @@ class MockAdServer(AdServerAdapter):
 
         if operation_mode == "async":
             return self._create_media_buy_async(request, packages, start_time, end_time)
-        elif operation_mode == "sync":
+        if operation_mode == "sync":
             return self._create_media_buy_sync_with_delay(request, packages, start_time, end_time, package_pricing_info)
 
         # Continue with immediate processing (default behavior)
@@ -710,8 +709,8 @@ class MockAdServer(AdServerAdapter):
             auto_naming_enabled=auto_naming_enabled,
             tenant_id=tenant_id,
         )
-        print(
-            f"[NAMING DEBUG] template={repr(order_name_template)}, has_promoted_offering={('promoted_offering' in context)}"
+        logger.debug(
+            f"[NAMING] template={order_name_template!r}, has_promoted_offering={'promoted_offering' in context}"
         )
         order_name = apply_naming_template(order_name_template, context)
 
@@ -864,7 +863,7 @@ class MockAdServer(AdServerAdapter):
 
         if operation_mode == "async":
             return self._add_creative_assets_async(media_buy_id, assets, today)
-        elif operation_mode == "sync":
+        if operation_mode == "sync":
             return self._add_creative_assets_sync_with_delay(media_buy_id, assets, today)
 
         # Continue with immediate processing (default behavior)
@@ -959,7 +958,7 @@ class MockAdServer(AdServerAdapter):
             # All rejected
             reasons = [reason if reason else "unknown" for _, reason in rejected_assets]
             raise Exception(f"All creatives rejected: {', '.join(reasons)}")
-        elif rejected_assets:
+        if rejected_assets:
             # Some rejected - log warnings but continue with approved ones
             for asset, reason in rejected_assets:
                 self.log(f"⚠️ Creative {asset['id']} rejected: {reason}")
@@ -1034,7 +1033,7 @@ class MockAdServer(AdServerAdapter):
                         self.log(f"   ❓ Asking for field in creative '{creative_name}' - {reason}")
                         results.append(AssetStatus(creative_id=asset["id"], status="pending"))
                         continue
-                    elif action_type == "approve":
+                    if action_type == "approve":
                         self.log(f"   ✅ Approving creative '{creative_name}'")
                         results.append(AssetStatus(creative_id=asset["id"], status="approved"))
                         continue
@@ -1087,7 +1086,7 @@ class MockAdServer(AdServerAdapter):
             if self.strategy_context.force_error == "platform_error":
                 self.log("[red]Simulating platform error[/red]")
                 raise Exception("Platform connectivity error (simulated)")
-            elif self.strategy_context.force_error == "budget_exceeded":
+            if self.strategy_context.force_error == "budget_exceeded":
                 self.log("[yellow]Simulating budget exceeded scenario[/yellow]")
             elif self.strategy_context.force_error == "low_delivery":
                 self.log("[yellow]Simulating low delivery scenario[/yellow]")
@@ -1517,32 +1516,30 @@ class MockAdServer(AdServerAdapter):
             # Slow ramp: 10% day 1, 30% day 3, linear to 100% at end
             if current_day <= 1:
                 return 0.1
-            elif current_day <= 3:
+            if current_day <= 3:
                 return 0.3
-            else:
-                # Linear from 30% to 100% over remaining days
-                days_after_3 = current_day - 3
-                remaining_days = total_days - 3
-                if remaining_days <= 0:
-                    return 1.0
-                return 0.3 + (days_after_3 / remaining_days) * 0.7
+            # Linear from 30% to 100% over remaining days
+            days_after_3 = current_day - 3
+            remaining_days = total_days - 3
+            if remaining_days <= 0:
+                return 1.0
+            return 0.3 + (days_after_3 / remaining_days) * 0.7
 
-        elif profile == "fast":
+        if profile == "fast":
             # Fast delivery: 50% day 1, 100% day 2
             if current_day <= 1:
                 return 0.5
-            else:
-                return 1.0
+            return 1.0
 
-        elif profile == "uneven":
+        if profile == "uneven":
             # Uneven with random spikes
             base_progress = current_day / total_days
             spike = random.uniform(-0.1, 0.2)  # Random variance
             return min(1.0, max(0.0, base_progress + spike))
 
-        else:  # "normal" or unknown
-            # Linear pacing
-            return min(1.0, current_day / total_days)
+        # "normal" or unknown
+        # Linear pacing
+        return min(1.0, current_day / total_days)
 
     def _start_delivery_simulation(
         self,

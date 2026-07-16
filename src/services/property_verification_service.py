@@ -115,11 +115,10 @@ class PropertyVerificationService:
                     logger.info("✅ Agent verification successful!")
                     self._update_verification_status(session, property_obj, "verified", None)
                     return True, None
-                else:
-                    error_msg = f"Agent {agent_url} not authorized for this property"
-                    logger.error(f"❌ {error_msg}")
-                    self._update_verification_status(session, property_obj, "failed", error_msg)
-                    return False, error_msg
+                error_msg = f"Agent {agent_url} not authorized for this property"
+                logger.error(f"❌ {error_msg}")
+                self._update_verification_status(session, property_obj, "failed", error_msg)
+                return False, error_msg
 
         except Exception as e:
             logger.error(f"Error verifying property {property_id}: {e}")

@@ -220,9 +220,7 @@ class NextEventCalculator:
         if not current_event:
             if progress == 0.0:
                 current_event = CampaignEvent.CAMPAIGN_CREATION
-            elif progress < 0.1:
-                current_event = CampaignEvent.CAMPAIGN_START
-            elif progress < 0.5:
+            elif progress < 0.1 or progress < 0.5:
                 current_event = CampaignEvent.CAMPAIGN_START
             elif progress < 0.75:
                 current_event = CampaignEvent.CAMPAIGN_MIDPOINT
@@ -241,9 +239,9 @@ class NextEventCalculator:
             # Return appropriate next event based on progress
             if progress < 0.5:
                 return CampaignEvent.CAMPAIGN_MIDPOINT
-            elif progress < 0.75:
+            if progress < 0.75:
                 return CampaignEvent.CAMPAIGN_75_PERCENT
-            elif progress < 1.0:
+            if progress < 1.0:
                 return CampaignEvent.CAMPAIGN_COMPLETE
 
         return None

@@ -60,10 +60,9 @@ def main():
         print("Alternative: Use Service Account authentication via Admin UI")
         print("(No OAuth setup required)\n")
         return 1
-    else:
-        print("All GAM OAuth prerequisites configured!")
-        print("You can now use OAuth authentication with GAM.\n")
-        return 0
+    print("All GAM OAuth prerequisites configured!")
+    print("You can now use OAuth authentication with GAM.\n")
+    return 0
 
 
 if __name__ == "__main__":

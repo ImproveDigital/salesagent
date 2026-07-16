@@ -36,13 +36,9 @@ logger = logging.getLogger(__name__)
 class MCPConnectionError(Exception):
     """Raised when MCP client connection fails after all retries."""
 
-    pass
-
 
 class MCPCompatibilityError(Exception):
     """Raised when MCP SDK version compatibility issue detected."""
-
-    pass
 
 
 def _build_auth_headers(auth: dict[str, Any] | None, auth_header: str | None = None) -> dict[str, str]:

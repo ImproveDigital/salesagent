@@ -532,16 +532,15 @@ def _find_func_line(locations: dict[tuple[str | None, str], int], key: str) -> i
     if "::" in key:
         class_name, func_name = key.split("::", 1)
         return locations.get((class_name, func_name))
-    else:
-        # Search all classes for this function name
-        matches = [(k, v) for k, v in locations.items() if k[1] == key]
-        if len(matches) == 1:
-            return matches[0][1]
-        elif len(matches) > 1:
-            # Multiple matches — return None (caller should use ClassName:: prefix)
-            print(f"  AMBIGUOUS: {key} found in {[m[0][0] for m in matches]}")
-            return None
+    # Search all classes for this function name
+    matches = [(k, v) for k, v in locations.items() if k[1] == key]
+    if len(matches) == 1:
+        return matches[0][1]
+    if len(matches) > 1:
+        # Multiple matches — return None (caller should use ClassName:: prefix)
+        print(f"  AMBIGUOUS: {key} found in {[m[0][0] for m in matches]}")
         return None
+    return None
 
 
 def _find_docstring_info(lines: list[str], func_line: int) -> tuple[int, int, bool] | None:

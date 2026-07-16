@@ -328,8 +328,7 @@ class CreateMediaBuyError(AdCPCreateMediaBuyError):
         """Return human-readable summary message for protocol envelope."""
         if self.errors:
             return f"Media buy creation encountered {len(self.errors)} error(s)."
-        else:
-            return "Media buy creation failed."
+        return "Media buy creation failed."
 
 
 class CreateMediaBuySubmitted(AdCPCreateMediaBuySubmitted):
@@ -514,8 +513,7 @@ class UpdateMediaBuyError(AdCPUpdateMediaBuyError):
         """Return human-readable summary message for protocol envelope."""
         if self.errors:
             return f"Media buy update encountered {len(self.errors)} error(s)."
-        else:
-            return "Media buy update failed."
+        return "Media buy update failed."
 
 
 # Union type for update_media_buy operation
@@ -1173,13 +1171,12 @@ def extract_budget_amount(budget: "Budget | float | dict | None", default_curren
     """
     if budget is None:
         return (0.0, default_currency)
-    elif isinstance(budget, dict):
+    if isinstance(budget, dict):
         return (budget.get("total", 0.0), budget.get("currency", default_currency))
-    elif isinstance(budget, int | float):
+    if isinstance(budget, int | float):
         return (float(budget), default_currency)
-    else:
-        # Budget object with .total and .currency attributes
-        return (budget.total, budget.currency)
+    # Budget object with .total and .currency attributes
+    return (budget.total, budget.currency)
 
 
 # AdCP Compliance Models
@@ -1189,7 +1186,7 @@ class Measurement(LibraryMeasurement):
     Extends library type - all fields inherited from AdCP spec.
     """
 
-    pass  # All fields inherited from library
+    # All fields inherited from library
 
 
 class AIReviewPolicy(SalesAgentBaseModel):
@@ -2101,7 +2098,7 @@ class SignalFilters(LibrarySignalFilters):
     Extends library type - all fields inherited.
     """
 
-    pass  # All fields inherited from library
+    # All fields inherited from library
 
 
 # Re-export the library type; callers use .signal_spec, .filters, .max_results directly.
@@ -2124,7 +2121,7 @@ class GetSignalsResponse(NestedModelSerializerMixin, LibraryGetSignalsResponse):
         count = len(self.signals or [])
         if count == 0:
             return "No signals found matching your criteria."
-        elif count == 1:
+        if count == 1:
             return "Found 1 signal."
         return f"Found {count} signals."
 
@@ -2353,10 +2350,9 @@ class ListAuthorizedPropertiesResponse(NestedModelSerializerMixin, SalesAgentBas
         count = len(self.publisher_domains)
         if count == 0:
             return "No authorized publisher domains found."
-        elif count == 1:
+        if count == 1:
             return "Found 1 authorized publisher domain."
-        else:
-            return f"Found {count} authorized publisher domains."
+        return f"Found {count} authorized publisher domains."
 
 
 # --- Get Media Buys Types ---

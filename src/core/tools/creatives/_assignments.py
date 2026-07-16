@@ -92,9 +92,8 @@ def _process_assignments(
                         # Skip if in lenient mode, error if strict
                         if validation_mode == "strict":
                             raise AdCPNotFoundError(error_msg, recovery="correctable")
-                        else:
-                            logger.warning(f"Package not found during assignment: {package_id}, skipping")
-                            continue
+                        logger.warning(f"Package not found during assignment: {package_id}, skipping")
+                        continue
 
                     # Validate creative format against package product formats
                     db_creative_result = assignment_repo.get_creative_by_id(creative_id)
@@ -168,9 +167,8 @@ def _process_assignments(
 
                                 if validation_mode == "strict":
                                     raise AdCPValidationError(error_msg)
-                                else:
-                                    logger.warning(f"Creative format mismatch during assignment, skipping: {error_msg}")
-                                    continue
+                                logger.warning(f"Creative format mismatch during assignment, skipping: {error_msg}")
+                                continue
 
                     # Check if assignment already exists (idempotent operation)
                     # actual_package_id is always set when media_buy_id is set (guard above)

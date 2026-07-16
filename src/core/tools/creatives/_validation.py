@@ -145,7 +145,7 @@ def _validate_creative_input(
                 f"is unreachable or returned an error. Please verify the agent URL is correct "
                 f"and the agent is running. Error: {str(validation_error)}"
             )
-        elif not format_spec:
+        if not format_spec:
             # Format not found (agent is reachable but format doesn't exist)
             raise ValueError(
                 f"Unknown format '{format_id}' from agent {agent_url}. "

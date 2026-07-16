@@ -115,7 +115,7 @@ async def interactive_mode(client: Client):
 
             if command == "quit":
                 break
-            elif command == "get_products":
+            if command == "get_products":
                 result = await client.call_tool("get_products", {})
                 if result and hasattr(result, "products"):
                     for product in result.products[:5]:

@@ -172,7 +172,7 @@ def get_product_suggestions(tenant_id):
             if max_cpm:
                 if product.get("cpm") and product["cpm"] > max_cpm:
                     continue
-                elif product.get("price_guidance"):
+                if product.get("price_guidance"):
                     if product["price_guidance"]["min"] > max_cpm:
                         continue
 

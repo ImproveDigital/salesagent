@@ -304,13 +304,12 @@ class DashboardService:
         if delta.days > 0:
             if delta.days == 1:
                 return "1 day ago"
-            elif delta.days < 7:
+            if delta.days < 7:
                 return f"{delta.days} days ago"
-            elif delta.days < 30:
+            if delta.days < 30:
                 weeks = delta.days // 7
                 return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-            else:
-                return timestamp.strftime("%Y-%m-%d")
+            return timestamp.strftime("%Y-%m-%d")
 
         hours = delta.seconds // 3600
         if hours > 0:

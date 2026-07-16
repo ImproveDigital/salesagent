@@ -390,7 +390,7 @@ def customize_name(
     # Fallback: use activation key
     if activation_key.get("type") == "key_value":
         return f"{template_name} - {activation_key['key']}={activation_key['value']}"
-    elif activation_key.get("type") == "segment_id":
+    if activation_key.get("type") == "segment_id":
         return f"{template_name} - Segment {activation_key['segment_id']}"
 
     return template_name

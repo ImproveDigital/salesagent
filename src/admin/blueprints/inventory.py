@@ -1399,48 +1399,46 @@ def get_inventory_tree(tenant_id):
                     }
                 )
 
-            else:
-                # --- Mode 1: Root nodes only (lazy loading) ---
-                # Roots: parent_id is null or missing in JSONB metadata.
-                # PostgreSQL ->> returns NULL for both cases (null value and missing key).
-                root_stmt = (
-                    select(GAMInventory)
-                    .where(
-                        *base_where,
-                        GAMInventory.inventory_metadata["parent_id"].as_string().is_(None),
-                    )
-                    .order_by(GAMInventory.name)
+            # --- Mode 1: Root nodes only (lazy loading) ---
+            # Roots: parent_id is null or missing in JSONB metadata.
+            # PostgreSQL ->> returns NULL for both cases (null value and missing key).
+            root_stmt = (
+                select(GAMInventory)
+                .where(
+                    *base_where,
+                    GAMInventory.inventory_metadata["parent_id"].as_string().is_(None),
                 )
-                roots, truncated = execute_limited(db_session, root_stmt, _TREE_LIMIT)
+                .order_by(GAMInventory.name)
+            )
+            roots, truncated = execute_limited(db_session, root_stmt, _TREE_LIMIT)
 
-                root_units = [_unit_to_dict(u) for u in roots]
-                logger.info(
-                    f"Returning {len(root_units)} root units "
-                    f"(total active: {total_active_count}, truncated: {truncated})"
-                )
+            root_units = [_unit_to_dict(u) for u in roots]
+            logger.info(
+                f"Returning {len(root_units)} root units (total active: {total_active_count}, truncated: {truncated})"
+            )
 
-                stats = _get_inventory_stats(db_session, tenant_id)
+            stats = _get_inventory_stats(db_session, tenant_id)
 
-                result = jsonify(
-                    {
-                        "root_units": root_units,
-                        "total_units": len(root_units),
-                        "total_active_count": total_active_count,
-                        "truncated": truncated,
-                        "root_count": len(root_units),
-                        "search_active": False,
-                        "matching_count": 0,
-                        **stats,
-                    }
-                )
+            result = jsonify(
+                {
+                    "root_units": root_units,
+                    "total_units": len(root_units),
+                    "total_active_count": total_active_count,
+                    "truncated": truncated,
+                    "root_count": len(root_units),
+                    "search_active": False,
+                    "matching_count": 0,
+                    **stats,
+                }
+            )
 
-                if cache:
-                    import time
+            if cache:
+                import time
 
-                    cache.set(cache_key, result, timeout=300)
-                    cache.set(cache_time_key, time.time(), timeout=300)
+                cache.set(cache_key, result, timeout=300)
+                cache.set(cache_time_key, time.time(), timeout=300)
 
-                return result
+            return result
 
     except Exception as e:
         logger.error(f"Error building inventory tree for tenant {tenant_id}: {e}", exc_info=True)

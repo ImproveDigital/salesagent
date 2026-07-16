@@ -73,7 +73,7 @@ class SignalsAgentRegistry:
 
     def __init__(self):
         """Initialize registry."""
-        pass  # No cache needed - adcp library handles connection pooling
+        # No cache needed - adcp library handles connection pooling
 
     def _get_tenant_agents(self, tenant_id: str) -> list[SignalsAgent]:
         """Get list of signals agents for a tenant.
@@ -192,7 +192,7 @@ class SignalsAgentRegistry:
                         result_signals.append(signal.model_dump(mode="json"))
                 return result_signals
 
-            elif result.status == "submitted":
+            if result.status == "submitted":
                 # Asynchronous completion - webhook registered
                 total_duration = time.time() - start_time
                 if result.submitted is None:
@@ -204,8 +204,7 @@ class SignalsAgentRegistry:
                 # For now, return empty list (webhook will deliver results later)
                 return []
 
-            else:
-                raise AdCPAdapterError(f"Unexpected result status from {agent.name}: {result.status}")
+            raise AdCPAdapterError(f"Unexpected result status from {agent.name}: {result.status}")
 
         except ADCPAuthenticationError as e:
             logger.error(f"Authentication failed for {agent.name}: {e.message}")

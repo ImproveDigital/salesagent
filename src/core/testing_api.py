@@ -98,31 +98,30 @@ def handle_testing_control(req: TestingControlRequest, context: Context) -> Test
                 data={"session_id": session_id, "created_at": session["created_at"].isoformat()},
             )
 
-        elif req.action == "cleanup_session":
+        if req.action == "cleanup_session":
             if not req.session_id:
                 return TestingControlResponse(success=False, message="session_id required for cleanup")
             session_manager.cleanup_session(req.session_id)
             return TestingControlResponse(success=True, message=f"Session {req.session_id} cleaned up")
 
-        elif req.action == "list_sessions":
+        if req.action == "list_sessions":
             sessions = session_manager.list_sessions()
             return TestingControlResponse(
                 success=True, message=f"Found {len(sessions)} active sessions", data={"sessions": sessions}
             )
 
-        elif req.action == "get_capabilities":
+        if req.action == "get_capabilities":
             capabilities = get_testing_capabilities()
             return TestingControlResponse(
                 success=True, message="Testing capabilities retrieved", data=capabilities.model_dump()
             )
 
-        elif req.action == "inspect_context":
+        if req.action == "inspect_context":
             return TestingControlResponse(
                 success=True, message="Current testing context", data=testing_ctx.model_dump()
             )
 
-        else:
-            return TestingControlResponse(success=False, message=f"Unknown action: {req.action}")
+        return TestingControlResponse(success=False, message=f"Unknown action: {req.action}")
 
     except Exception as e:
         return TestingControlResponse(success=False, message=f"Error: {str(e)}")

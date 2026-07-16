@@ -409,8 +409,7 @@ class GAMInventoryDiscovery:
             if "argument should be integer or bytes-like object" in str(e):
                 logger.info("No labels found in GAM account (or empty result set)")
                 return []
-            else:
-                raise
+            raise
 
         logger.info(f"Discovered {len(discovered_labels)} labels")
         return discovered_labels

@@ -255,24 +255,23 @@ class BaseWorkflowManager:
                 "description": "Manual mode activated - human intervention needed",
                 "color": "#FF9500",  # Orange
             }
-        elif "approval" in automation_mode.lower() or "activate" in action_type.lower():
+        if "approval" in automation_mode.lower() or "activate" in action_type.lower():
             return {
                 "title": f"{self.platform_name} Approval Required",
                 "description": "Approval needed for operation",
                 "color": "#FFD700",  # Gold
             }
-        elif "background" in automation_mode.lower() or "working" in action_details.get("status", ""):
+        if "background" in automation_mode.lower() or "working" in action_details.get("status", ""):
             return {
                 "title": f"{self.platform_name} Background Task Started",
                 "description": "Background processing in progress",
                 "color": "#36A2EB",  # Blue
             }
-        else:
-            return {
-                "title": "Workflow Step Requires Attention",
-                "description": f"Workflow step {step_id} needs human intervention",
-                "color": "#36A2EB",  # Blue
-            }
+        return {
+            "title": "Workflow Step Requires Attention",
+            "description": f"Workflow step {step_id} needs human intervention",
+            "color": "#36A2EB",  # Blue
+        }
 
     def build_packages_summary(self, packages: list[MediaPackage]) -> list[dict[str, Any]]:
         """Build a summary of packages for workflow action details.

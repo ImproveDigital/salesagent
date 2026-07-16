@@ -161,13 +161,12 @@ class BroadstreetAdapter(AdServerAdapter):
 
         if media_buy_id.startswith("bs_"):
             return media_buy_id[3:]  # Remove "bs_" prefix
-        elif media_buy_id.startswith("mb_"):
+        if media_buy_id.startswith("mb_"):
             # Legacy format or dry-run generated ID
             return media_buy_id[3:]
-        else:
-            # Assume it's already a raw campaign ID
-            logger.warning(f"Unexpected media_buy_id format: {media_buy_id}, using as-is")
-            return media_buy_id
+        # Assume it's already a raw campaign ID
+        logger.warning(f"Unexpected media_buy_id format: {media_buy_id}, using as-is")
+        return media_buy_id
 
     def _persist_advertisement_ids(self, media_buy_id: str, advertisement_ids: list[str]) -> None:
         """Persist Broadstreet advertisement IDs to package_config in the database.

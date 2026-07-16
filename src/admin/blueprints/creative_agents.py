@@ -284,16 +284,15 @@ def test_creative_agent(tenant_id, agent_id):
                             "sample_formats": [f.name for f in formats[:5]],
                         }
                     )
-                else:
-                    return (
-                        jsonify(
-                            {
-                                "success": False,
-                                "error": "Agent returned no formats",
-                            }
-                        ),
-                        400,
-                    )
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": "Agent returned no formats",
+                        }
+                    ),
+                    400,
+                )
             finally:
                 loop.close()
 

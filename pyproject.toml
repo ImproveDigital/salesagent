@@ -166,6 +166,12 @@ select = [
     "C90",    # mccabe complexity
     "PLR",    # pylint refactor
     "TID251", # banned-api — enforce prohibited function usage
+    "RET501", # unnecessary explicit `return None`
+    "RET505", # superfluous else after return
+    "RET506", # superfluous else after raise
+    "RET507", # superfluous else after continue
+    "RET508", # superfluous else after break
+    "PIE790", # unnecessary pass/ellipsis placeholder
 ]
 ignore = [
     # Justified suppressions — each must explain WHY it's ignored, not just WHAT it is.
@@ -190,7 +196,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # F841/E741 in tests: 154 unused vars (fixture side effects, arrange-only
 # bindings) predate enforcement; shrink over time, never grow.
-"tests/*" = ["E722", "F821", "F841", "E741"]
+# RET5/PIE790: src/ and scripts/ were cleaned to zero and are enforced;
+# tests keep pre-existing occurrences until cleaned separately.
+"tests/*" = ["E722", "F821", "F841", "E741", "RET5", "PIE790"]
 "admin_ui.py" = ["E402", "E722"]
 
 # ─── Coverage configuration ──────────────────────────────────────

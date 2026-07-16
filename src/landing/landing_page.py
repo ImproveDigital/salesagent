@@ -72,7 +72,7 @@ def _extract_tenant_subdomain(tenant: dict, virtual_host: str | None = None) -> 
         subdomain = extract_subdomain_from_host(virtual_host)
         if subdomain:
             return subdomain
-        elif "." in virtual_host:
+        if "." in virtual_host:
             # Generic virtual host, use first part
             return virtual_host.split(".")[0]
 

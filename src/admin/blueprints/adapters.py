@@ -330,8 +330,7 @@ def get_adapter_capabilities(adapter_type, tenant_id, **kwargs):
 
     if schemas.capabilities:
         return jsonify(asdict(schemas.capabilities))
-    else:
-        return jsonify({})
+    return jsonify({})
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/<adapter_type>/check-permissions", methods=["POST"])
@@ -826,8 +825,7 @@ def test_broadstreet_connection(tenant_id, **kwargs):
                     "network_id": network_id,
                 }
             )
-        else:
-            return jsonify({"success": False, "error": "Could not retrieve network information"})
+        return jsonify({"success": False, "error": "Could not retrieve network information"})
 
     except Exception as e:
         logger.error(f"Broadstreet connection test failed: {e}", exc_info=True)

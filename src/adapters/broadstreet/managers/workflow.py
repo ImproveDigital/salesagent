@@ -194,18 +194,17 @@ class BroadstreetWorkflowManager(BaseWorkflowManager):
                 "description": "Manual mode activated - human intervention needed to create campaign",
                 "color": "#FF9500",  # Orange
             }
-        elif action_type == "activate_broadstreet_campaign":
+        if action_type == "activate_broadstreet_campaign":
             return {
                 "title": "Broadstreet Campaign Activation Approval Required",
                 "description": "Campaign created successfully - approval needed for activation",
                 "color": "#FFD700",  # Gold
             }
-        elif action_type == "creative_approval":
+        if action_type == "creative_approval":
             return {
                 "title": "Broadstreet Creative Approval Required",
                 "description": "Creatives uploaded - approval needed before activation",
                 "color": "#9B59B6",  # Purple
             }
-        else:
-            # Fall back to base class behavior
-            return super()._get_notification_details(step_id, action_details)
+        # Fall back to base class behavior
+        return super()._get_notification_details(step_id, action_details)

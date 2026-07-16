@@ -126,12 +126,11 @@ def is_async_operation(operation_name: str) -> bool:
 
     if operation_name in async_operations:
         return True
-    elif operation_name in sync_operations:
+    if operation_name in sync_operations:
         return False
-    else:
-        # Default: if it starts with "create", "update", "delete", it's probably async
-        prefixes = ["create", "update", "delete", "submit", "process", "generate"]
-        return any(operation_name.startswith(prefix) for prefix in prefixes)
+    # Default: if it starts with "create", "update", "delete", it's probably async
+    prefixes = ["create", "update", "delete", "submit", "process", "generate"]
+    return any(operation_name.startswith(prefix) for prefix in prefixes)
 
 
 # Specific async task types for our domain

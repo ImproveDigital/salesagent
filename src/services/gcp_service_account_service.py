@@ -300,10 +300,9 @@ class GCPServiceAccountService:
             if "404" in str(e) or "NOT_FOUND" in str(e):
                 logger.info(f"Service account {service_account_email} does not exist yet")
                 return None
-            else:
-                # Some other error - log it but don't fail
-                logger.warning(f"Error checking if service account exists: {e}")
-                return None
+            # Some other error - log it but don't fail
+            logger.warning(f"Error checking if service account exists: {e}")
+            return None
 
     def _verify_service_account_exists(self, service_account_email: str) -> bool:
         """Verify that a service account exists in GCP.

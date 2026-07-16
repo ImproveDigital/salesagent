@@ -21,13 +21,9 @@ from src.core.database.models import StrategyState
 class StrategyError(Exception):
     """Base exception for strategy-related errors."""
 
-    pass
-
 
 class SimulationError(StrategyError):
     """Errors related to simulation control."""
-
-    pass
 
 
 class JumpEvent(str, Enum):
@@ -105,8 +101,7 @@ class StrategyManager:
 
         if is_simulation:
             return self._create_simulation_strategy(strategy_id)
-        else:
-            return self._create_production_strategy(strategy_id)
+        return self._create_production_strategy(strategy_id)
 
     def _create_production_strategy(self, strategy_id: str) -> StrategyModel:
         """Create a production strategy."""
@@ -234,15 +229,14 @@ class StrategyManager:
             if not target:
                 raise SimulationError("jump_to requires either 'event' or 'target_date' parameter")
             return sim_context.jump_to_event(target)
-        elif action == "reset":
+        if action == "reset":
             return sim_context.reset()
-        elif action == "set_scenario":
+        if action == "set_scenario":
             scenario = parameters.get("scenario")
             if not isinstance(scenario, str):
                 raise SimulationError("set_scenario requires 'scenario' parameter to be a string")
             return sim_context.set_scenario(scenario)
-        else:
-            raise SimulationError(f"Unknown simulation action: {action}")
+        raise SimulationError(f"Unknown simulation action: {action}")
 
     def _get_simulation_context(self, strategy_id: str, strategy: "StrategyContext") -> "SimulationContext":
         """Get or create simulation context."""
@@ -334,34 +328,33 @@ class SimulationContext:
         if event.startswith("+"):
             # Relative time jump: "+1d", "+6h", etc.
             return self._advance_time(event[1:])
-        elif event in [e.value for e in JumpEvent]:
+        if event in [e.value for e in JumpEvent]:
             # Jump to predefined event
             return self._trigger_event(event)
-        else:
-            # Try to parse as an absolute date (e.g., "2025-09-15")
-            try:
-                from datetime import datetime
+        # Try to parse as an absolute date (e.g., "2025-09-15")
+        try:
+            from datetime import datetime
 
-                target_date = datetime.strptime(event, "%Y-%m-%d")
-                old_time = self.current_time
-                self.current_time = target_date
-                self.events_triggered.append(
-                    {
-                        "event": "time_jumped",
-                        "old_time": old_time.isoformat(),
-                        "new_time": self.current_time.isoformat(),
-                        "target": event,
-                        "triggered_at": datetime.now(UTC).isoformat(),
-                    }
-                )
-                self._save_state()
-                return {
-                    "status": "ok",
-                    "message": f"Jumped to {event}",
-                    "current_time": self.current_time.isoformat(),
+            target_date = datetime.strptime(event, "%Y-%m-%d")
+            old_time = self.current_time
+            self.current_time = target_date
+            self.events_triggered.append(
+                {
+                    "event": "time_jumped",
+                    "old_time": old_time.isoformat(),
+                    "new_time": self.current_time.isoformat(),
+                    "target": event,
+                    "triggered_at": datetime.now(UTC).isoformat(),
                 }
-            except ValueError as e:
-                raise SimulationError(f"Unknown jump event: {event}") from e
+            )
+            self._save_state()
+            return {
+                "status": "ok",
+                "message": f"Jumped to {event}",
+                "current_time": self.current_time.isoformat(),
+            }
+        except ValueError as e:
+            raise SimulationError(f"Unknown jump event: {event}") from e
 
     def _advance_time(self, duration_str: str) -> dict[str, Any]:
         """Advance simulation time by duration."""
@@ -470,14 +463,13 @@ class SimulationContext:
         """Parse duration string into timedelta."""
         if duration_str.endswith("d"):
             return timedelta(days=int(duration_str[:-1]))
-        elif duration_str.endswith("h"):
+        if duration_str.endswith("h"):
             return timedelta(hours=int(duration_str[:-1]))
-        elif duration_str.endswith("m"):
+        if duration_str.endswith("m"):
             return timedelta(minutes=int(duration_str[:-1]))
-        elif duration_str.endswith("s"):
+        if duration_str.endswith("s"):
             return timedelta(seconds=int(duration_str[:-1]))
-        else:
-            raise SimulationError(f"Invalid duration format: {duration_str}")
+        raise SimulationError(f"Invalid duration format: {duration_str}")
 
     def register_media_buy(self, media_buy_id: str, initial_state: dict[str, Any]):
         """Register a media buy in this simulation."""

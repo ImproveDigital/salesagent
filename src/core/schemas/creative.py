@@ -673,10 +673,9 @@ class ListCreativeFormatsResponse(NestedModelSerializerMixin, LibraryListCreativ
         count = len(self.formats)
         if count == 0:
             return "No creative formats are currently supported."
-        elif count == 1:
+        if count == 1:
             return "Found 1 creative format."
-        else:
-            return f"Found {count} creative formats."
+        return f"Found {count} creative formats."
 
 
 class ListCreativesRequest(LibraryListCreativesRequest):
@@ -716,7 +715,7 @@ class Pagination(LibraryResponsePagination):
     This is the appropriate type for list endpoints like list_creatives.
     """
 
-    pass  # Inherits all fields from library: cursor, has_more, total_count
+    # Inherits all fields from library: cursor, has_more, total_count
 
 
 class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResponse):
@@ -743,8 +742,7 @@ class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResp
         total = self.query_summary.total_matching
         if count == total:
             return f"Found {count} creative{'s' if count != 1 else ''}."
-        else:
-            return f"Showing {count} of {total} creatives."
+        return f"Showing {count} of {total} creatives."
 
 
 class CheckCreativeStatusRequest(SalesAgentBaseModel):

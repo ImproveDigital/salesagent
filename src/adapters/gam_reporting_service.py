@@ -443,7 +443,7 @@ class GAMReportingService:
                 status = self.report_service.getReportJobStatus(report_job_id)
                 if status == "COMPLETED":
                     break
-                elif status == "FAILED":
+                if status == "FAILED":
                     raise Exception("GAM report job failed")
 
                 # Log progress for long-running reports

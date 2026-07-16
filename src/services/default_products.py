@@ -6,10 +6,13 @@ created for new tenants to make onboarding easier.
 """
 
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from src.core.canonical_formats import CANONICAL_DISPLAY_FORMAT_IDS, canonical_format_ref
+
+logger = logging.getLogger(__name__)
 
 
 def _display_format_refs(*sizes: tuple[int, int]) -> list[dict[str, Any]]:
@@ -218,7 +221,7 @@ def create_default_products_for_tenant(conn, tenant_id: str, industry: str = Non
             created_products.append(product_template["product_id"])
 
         except Exception as e:
-            print(f"Warning: Failed to create default product {product_template['product_id']}: {e}")
+            logger.warning(f"Failed to create default product {product_template['product_id']}: {e}")
             continue
 
     conn.commit()

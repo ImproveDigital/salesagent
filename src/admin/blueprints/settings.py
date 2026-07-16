@@ -1494,11 +1494,10 @@ def check_approximated_domain_status(tenant_id):
                     "target_address": domain_data.get("target_address"),
                 }
             )
-        elif response.status_code == 404:
+        if response.status_code == 404:
             return jsonify({"success": True, "registered": False})
-        else:
-            logger.error(f"Approximated API error: {response.status_code} - {response.text}")
-            return jsonify({"success": False, "error": f"API error: {response.status_code}"}), 500
+        logger.error(f"Approximated API error: {response.status_code} - {response.text}")
+        return jsonify({"success": False, "error": f"API error: {response.status_code}"}), 500
 
     except Exception as e:
         logger.error(f"Error checking domain status: {e}", exc_info=True)
@@ -1551,14 +1550,13 @@ def register_approximated_domain(tenant_id):
         if response.status_code in (200, 201):
             logger.info(f"✅ Registered domain with Approximated: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} registered successfully"})
-        elif response.status_code == 409:
+        if response.status_code == 409:
             # Already exists - that's OK
             logger.info(f"✅ Domain already registered: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} already registered"})
-        else:
-            error_msg = f"Approximated API error: {response.status_code} - {response.text}"
-            logger.error(error_msg)
-            return jsonify({"success": False, "error": error_msg}), response.status_code
+        error_msg = f"Approximated API error: {response.status_code} - {response.text}"
+        logger.error(error_msg)
+        return jsonify({"success": False, "error": error_msg}), response.status_code
 
     except Exception as e:
         logger.error(f"Error registering domain: {e}", exc_info=True)
@@ -1596,14 +1594,13 @@ def unregister_approximated_domain(tenant_id):
         if response.status_code in (200, 204):
             logger.info(f"✅ Unregistered domain from Approximated: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} unregistered successfully"})
-        elif response.status_code == 404:
+        if response.status_code == 404:
             # Already gone - that's OK
             logger.info(f"✅ Domain already unregistered: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} was not registered"})
-        else:
-            error_msg = f"Approximated API error: {response.status_code} - {response.text}"
-            logger.error(error_msg)
-            return jsonify({"success": False, "error": error_msg}), response.status_code
+        error_msg = f"Approximated API error: {response.status_code} - {response.text}"
+        logger.error(error_msg)
+        return jsonify({"success": False, "error": error_msg}), response.status_code
 
     except Exception as e:
         logger.error(f"Error unregistering domain: {e}", exc_info=True)
@@ -1643,9 +1640,8 @@ def get_approximated_token(tenant_id):
                 token_data = response.json()
                 logger.info(f"Approximated API response: {token_data}")
                 return jsonify({"success": True, "token": token_data.get("token"), "proxy_ip": approximated_proxy_ip})
-            else:
-                logger.error(f"Approximated API error: {response.status_code} - {response.text}")
-                return jsonify({"success": False, "error": f"API error: {response.status_code}"}), response.status_code
+            logger.error(f"Approximated API error: {response.status_code} - {response.text}")
+            return jsonify({"success": False, "error": f"API error: {response.status_code}"}), response.status_code
 
     except Exception as e:
         logger.error(f"Error generating Approximated token: {e}", exc_info=True)

@@ -146,8 +146,7 @@ def enable(tenant_id: str):
                 "oidc_enabled": actual_enabled,
             }
         )
-    else:
-        return jsonify({"error": "Cannot enable OIDC. Please test the configuration first."}), 400
+    return jsonify({"error": "Cannot enable OIDC. Please test the configuration first."}), 400
 
 
 @oidc_bp.route("/tenant/<tenant_id>/disable", methods=["POST"])

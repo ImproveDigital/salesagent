@@ -37,7 +37,7 @@ class DeliveryMeasurement(LibraryDeliveryMeasurement):
     The buyer accepts the declared provider as the source of truth for the buy.
     """
 
-    pass  # All fields inherited from library
+    # All fields inherited from library
 
 
 class DeliveryType(str, Enum):
@@ -238,7 +238,7 @@ class AggregatedTotals(LibraryAggregatedTotals):
     Extends library type - all fields inherited from AdCP spec.
     """
 
-    pass  # All fields inherited from library
+    # All fields inherited from library
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +288,7 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
         count = len(self.media_buy_deliveries)
         if count == 0:
             return "No delivery data found for the specified period."
-        elif count == 1:
+        if count == 1:
             return "Retrieved delivery data for 1 media buy."
         return f"Retrieved delivery data for {count} media buys."
 
@@ -428,7 +428,7 @@ class DeliveryMetrics(LibraryDeliveryMetrics):
     frequency, viewability, quartile_data, etc.
     """
 
-    pass  # All fields inherited from library
+    # All fields inherited from library
 
 
 class CreativeDeliveryData(SalesAgentBaseModel):
@@ -464,7 +464,7 @@ class GetCreativeDeliveryResponse(NestedModelSerializerMixin, LibraryGetCreative
         count = len(self.creatives)
         if count == 0:
             return "No creative delivery data found for the specified period."
-        elif count == 1:
+        if count == 1:
             return "Retrieved delivery data for 1 creative."
         return f"Retrieved delivery data for {count} creatives."
 

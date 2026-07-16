@@ -273,13 +273,12 @@ def get_principal_from_context(
                 f"The token may be expired, revoked, or associated with a different tenant.",
                 details={"error_code": "INVALID_AUTH_TOKEN"},
             )
-        else:
-            # For discovery endpoints, treat invalid token like missing token
-            logger.debug(
-                "Invalid token for tenant '%s' - continuing without auth (discovery endpoint)",
-                requested_tenant_id or "any",
-            )
-            return (None, tenant_context)
+        # For discovery endpoints, treat invalid token like missing token
+        logger.debug(
+            "Invalid token for tenant '%s' - continuing without auth (discovery endpoint)",
+            requested_tenant_id or "any",
+        )
+        return (None, tenant_context)
 
     # If tenant_context wasn't set by header detection, use tenant discovered from token
     if not tenant_context and token_tenant:

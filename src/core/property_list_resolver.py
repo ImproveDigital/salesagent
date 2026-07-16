@@ -68,8 +68,7 @@ async def resolve_property_list(ref: PropertyListReference) -> list[str]:
         if datetime.now(UTC) < expires_at:
             logger.debug("Cache hit for property list %s/%s", ref.agent_url, ref.list_id)
             return identifiers
-        else:
-            del _cache[cache_key]
+        del _cache[cache_key]
 
     # Build request
     url = agent_url_str.rstrip("/") + "/lists/" + ref.list_id

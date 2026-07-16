@@ -194,12 +194,11 @@ class ActivityFeed:
 
             if delta.days > 0:
                 return f"{delta.days}d ago"
-            elif delta.seconds > 3600:
+            if delta.seconds > 3600:
                 return f"{delta.seconds // 3600}h ago"
-            elif delta.seconds > 60:
+            if delta.seconds > 60:
                 return f"{delta.seconds // 60}m ago"
-            else:
-                return "Just now"
+            return "Just now"
         except Exception:
             logger.debug("Failed to format time_ago", exc_info=True)
             return "Unknown"

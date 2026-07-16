@@ -162,8 +162,7 @@ def _format_id_to_display_name(format_id: str) -> str:
     # Add dimensions back if found
     if size_match:
         return f"{base_name} ({size_match.group(0)})"
-    else:
-        return base_name
+    return base_name
 
 
 def _format_error_to_dict(error: Any) -> dict[str, Any]:
@@ -310,7 +309,7 @@ def parse_pricing_options_from_form(form_data: dict) -> list[dict]:
     # Find all pricing option indices by scanning form keys
     # This handles non-contiguous indices (e.g., 0 removed, only 1 exists)
     indices = set()
-    for key in form_data.keys():
+    for key in form_data:
         if key.startswith("pricing_model_"):
             try:
                 idx = int(key.replace("pricing_model_", ""))
@@ -774,21 +773,20 @@ def _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_d
                 principals=principals_list,
                 form_data=form_data,  # Preserve form data on error
             )
-        else:
-            # For Mock and other adapters - use unified template
-            formats = get_creative_formats(tenant_id=tenant_id)
-            return render_template(
-                "add_product.html",
-                tenant_id=tenant_id,
-                tenant=tenant,
-                adapter_type=adapter_type,
-                formats=formats,
-                authorized_properties=properties_list,
-                property_tags=property_tags,
-                currencies=currencies,
-                principals=principals_list,
-                form_data=form_data,  # Preserve form data on error
-            )
+        # For Mock and other adapters - use unified template
+        formats = get_creative_formats(tenant_id=tenant_id)
+        return render_template(
+            "add_product.html",
+            tenant_id=tenant_id,
+            tenant=tenant,
+            adapter_type=adapter_type,
+            formats=formats,
+            authorized_properties=properties_list,
+            property_tags=property_tags,
+            currencies=currencies,
+            principals=principals_list,
+            form_data=form_data,  # Preserve form data on error
+        )
 
 
 @products_bp.route("/add", methods=["GET", "POST"])
@@ -2209,21 +2207,20 @@ def edit_product(tenant_id, product_id):
                     authorized_properties=authorized_properties_list,
                     selected_publisher_properties=selected_publisher_properties,
                 )
-            else:
-                # For non-GAM adapters - use unified edit template
-                # Reload tenant for template context (measurement_providers, etc.)
-                tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-                return render_template(
-                    "edit_product.html",
-                    tenant_id=tenant_id,
-                    tenant=tenant,
-                    adapter_type=adapter_type,
-                    product=product_dict,
-                    currencies=currencies,
-                    principals=principals_list,
-                    authorized_properties=authorized_properties_list,
-                    selected_publisher_properties=selected_publisher_properties,
-                )
+            # For non-GAM adapters - use unified edit template
+            # Reload tenant for template context (measurement_providers, etc.)
+            tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            return render_template(
+                "edit_product.html",
+                tenant_id=tenant_id,
+                tenant=tenant,
+                adapter_type=adapter_type,
+                product=product_dict,
+                currencies=currencies,
+                principals=principals_list,
+                authorized_properties=authorized_properties_list,
+                selected_publisher_properties=selected_publisher_properties,
+            )
 
     except Exception as e:
         logger.error(f"Error editing product: {e}", exc_info=True)
@@ -2440,17 +2437,16 @@ def assign_inventory_to_product(tenant_id, product_id):
                         "inventory_name": inventory.name,
                     }
                 )
-            else:
-                return (
-                    jsonify(
-                        {
-                            "message": "Inventory assigned to product successfully",
-                            "mapping_id": mapping.id,
-                            "inventory_name": inventory.name,
-                        }
-                    ),
-                    201,
-                )
+            return (
+                jsonify(
+                    {
+                        "message": "Inventory assigned to product successfully",
+                        "mapping_id": mapping.id,
+                        "inventory_name": inventory.name,
+                    }
+                ),
+                201,
+            )
 
     except Exception as e:
         logger.error(f"Error assigning inventory to product: {e}", exc_info=True)

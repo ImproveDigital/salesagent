@@ -368,10 +368,10 @@ class CreativeAgentRegistry:
 
                 return formats
 
-            elif result.status == "submitted":
+            if result.status == "submitted":
                 raise AdCPAdapterError(f"Unexpected submitted status for list_creative_formats from {agent.name}")
 
-            elif result.status == "failed":
+            if result.status == "failed":
                 # Log detailed error information for debugging
                 # Use getattr for safe access in case response structure varies
                 error_msg = (
@@ -406,8 +406,7 @@ class CreativeAgentRegistry:
                     logger.debug(f"Debug info: {debug_info}")
                 raise AdCPAdapterError(f"Creative agent format fetch failed: {error_msg}")
 
-            else:
-                raise AdCPAdapterError(f"Unexpected result status from {agent.name}: {result.status}")
+            raise AdCPAdapterError(f"Unexpected result status from {agent.name}: {result.status}")
 
         except ADCPAuthenticationError as e:
             logger.error(f"Authentication failed for creative agent {agent.name}: {e.message}")

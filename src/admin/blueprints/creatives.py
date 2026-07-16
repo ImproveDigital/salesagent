@@ -1285,31 +1285,30 @@ def _ai_review_creative_impl_inner(
                 ai_review_total.labels(tenant_id=tenant_id, decision="approved", policy_triggered="auto_approve").inc()
                 ai_review_confidence.labels(tenant_id=tenant_id, decision="approved").observe(confidence_score)
                 return result_dict
-            else:
-                result_dict = {
-                    "status": "pending_review",
-                    "reason": f"AI recommended approval with {confidence_score:.0%} confidence (below {auto_approve_threshold:.0%} threshold). Human review recommended.",
-                    "confidence": confidence_str,
-                    "confidence_score": confidence_score,
-                    "policy_triggered": "low_confidence_approval",
-                    "ai_recommendation": "approve",
-                    "ai_reason": review_result.reason,
-                }
-                _create_review_record(
-                    db_session,
-                    creative_id,
-                    tenant_id,
-                    result_dict,
-                    principal_id=creative.principal_id,
-                )
-                # Record metrics
-                ai_review_total.labels(
-                    tenant_id=tenant_id, decision="pending_review", policy_triggered="low_confidence_approval"
-                ).inc()
-                ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
-                return result_dict
+            result_dict = {
+                "status": "pending_review",
+                "reason": f"AI recommended approval with {confidence_score:.0%} confidence (below {auto_approve_threshold:.0%} threshold). Human review recommended.",
+                "confidence": confidence_str,
+                "confidence_score": confidence_score,
+                "policy_triggered": "low_confidence_approval",
+                "ai_recommendation": "approve",
+                "ai_reason": review_result.reason,
+            }
+            _create_review_record(
+                db_session,
+                creative_id,
+                tenant_id,
+                result_dict,
+                principal_id=creative.principal_id,
+            )
+            # Record metrics
+            ai_review_total.labels(
+                tenant_id=tenant_id, decision="pending_review", policy_triggered="low_confidence_approval"
+            ).inc()
+            ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
+            return result_dict
 
-        elif "REJECT" in decision:
+        if "REJECT" in decision:
             # AI wants to reject - check confidence threshold
             if confidence_score >= auto_reject_threshold:
                 result_dict = {
@@ -1330,29 +1329,28 @@ def _ai_review_creative_impl_inner(
                 ai_review_total.labels(tenant_id=tenant_id, decision="rejected", policy_triggered="auto_reject").inc()
                 ai_review_confidence.labels(tenant_id=tenant_id, decision="rejected").observe(confidence_score)
                 return result_dict
-            else:
-                result_dict = {
-                    "status": "pending_review",
-                    "reason": f"AI recommended rejection with {confidence_score:.0%} confidence (below {auto_reject_threshold:.0%} threshold). Human review recommended.",
-                    "confidence": confidence_str,
-                    "confidence_score": confidence_score,
-                    "policy_triggered": "uncertain_rejection",
-                    "ai_recommendation": "reject",
-                    "ai_reason": review_result.reason,
-                }
-                _create_review_record(
-                    db_session,
-                    creative_id,
-                    tenant_id,
-                    result_dict,
-                    principal_id=creative.principal_id,
-                )
-                # Record metrics
-                ai_review_total.labels(
-                    tenant_id=tenant_id, decision="pending_review", policy_triggered="uncertain_rejection"
-                ).inc()
-                ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
-                return result_dict
+            result_dict = {
+                "status": "pending_review",
+                "reason": f"AI recommended rejection with {confidence_score:.0%} confidence (below {auto_reject_threshold:.0%} threshold). Human review recommended.",
+                "confidence": confidence_str,
+                "confidence_score": confidence_score,
+                "policy_triggered": "uncertain_rejection",
+                "ai_recommendation": "reject",
+                "ai_reason": review_result.reason,
+            }
+            _create_review_record(
+                db_session,
+                creative_id,
+                tenant_id,
+                result_dict,
+                principal_id=creative.principal_id,
+            )
+            # Record metrics
+            ai_review_total.labels(
+                tenant_id=tenant_id, decision="pending_review", policy_triggered="uncertain_rejection"
+            ).inc()
+            ai_review_confidence.labels(tenant_id=tenant_id, decision="pending_review").observe(confidence_score)
+            return result_dict
 
         # Default: uncertain or "REQUIRE HUMAN APPROVAL"
         result_dict = {

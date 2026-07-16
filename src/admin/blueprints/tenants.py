@@ -499,13 +499,10 @@ def test_slack(tenant_id):
 
             if response.status_code == 200:
                 return jsonify({"success": True, "message": "Test message sent successfully"})
-            else:
-                return (
-                    jsonify(
-                        {"success": False, "error": f"Slack returned status {response.status_code}: {response.text}"}
-                    ),
-                    400,
-                )
+            return (
+                jsonify({"success": False, "error": f"Slack returned status {response.status_code}: {response.text}"}),
+                400,
+            )
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Error testing Slack webhook: {e}")

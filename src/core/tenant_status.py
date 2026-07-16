@@ -67,19 +67,19 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
                     )
                 return has_auth
 
-            elif adapter_type == "mock":
+            if adapter_type == "mock":
                 # Mock adapter is NOT considered configured for production use
                 # Users should configure a real ad server (GAM, etc.)
                 return False
 
-            elif adapter_type in {"triton", "triton_digital"}:
+            if adapter_type in {"triton", "triton_digital"}:
                 config = adapter_config.config_json or {}
                 has_creds = bool(config.get("username") and config.get("password"))
                 if not has_creds:
                     logger.info(f"Tenant {tenant_id} Triton adapter missing publisher credentials")
                 return has_creds
 
-            elif adapter_type == "freewheel":
+            if adapter_type == "freewheel":
                 config = adapter_config.config_json or {}
                 has_password_grant = bool(config.get("username") and config.get("password"))
                 has_token = bool(config.get("api_token"))
@@ -91,10 +91,9 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
                     )
                 return has_creds
 
-            else:
-                # Unknown adapter type - consider it configured if it has a type
-                logger.warning(f"Unknown adapter type '{adapter_type}' for tenant {tenant_id}")
-                return True
+            # Unknown adapter type - consider it configured if it has a type
+            logger.warning(f"Unknown adapter type '{adapter_type}' for tenant {tenant_id}")
+            return True
 
     except Exception as e:
         logger.error(f"Error checking tenant {tenant_id} configuration: {e}", exc_info=True)
