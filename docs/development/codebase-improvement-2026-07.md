@@ -2,7 +2,28 @@
 
 Branch: `feature/refactor-all` (base `26fa253bf`). Ten commits, `10cff0b0a..31668d163`.
 
-## Continuation (same day): mypy strictness + refactor exemplar
+## Continuation 2 (same day): SOLID/KISS/DRY pass
+
+- **Correctness** (`b4f8fb143`): Broadstreet `delete_*` normalize empty 204 bodies to `{}`
+  (declared dict, returned None); `create_placement` now unwraps the response envelope like
+  its siblings; mock `_is_simulation` returns a real bool.
+- **SRP/KISS** (`5e971b5ad`): `get_principal_from_context` (C=41) decomposed with a
+  28-case golden master locking outputs, exceptions, AND dependency call order;
+  `parse_form_data_to_policy_updates` (C=43) and `parse_pricing_options_from_form` (C=31)
+  decomposed with empty golden diffs. Unit suite per-test set-diff: zero new failures.
+  Duplication ratchet tightened 18 → 17.
+- **Blocked by org monthly spend limit** (subagents terminated mid-run): the
+  `_get_media_buy_delivery_impl` (C=54) decomposition (partial edit reverted) and the
+  DRY triage table for the remaining baseline blocks. Resume both when the limit resets.
+- Honest scope statement: "whole-codebase SOLID" is a program, not a session. The macro
+  architecture already enforces DIP/OCP via adapters/repositories/AST guards; the tracked
+  gap is function-level SRP (55 functions still >C20 — worst: `_create_media_buy_impl`
+  C=239, `_update_media_buy_impl` C=126, `edit_product` C=87). The three refactors above
+  plus the earlier activity-formatter one establish the verified pattern (golden-master +
+  set-diff) to burn that list down; the C=239 media-buy monster should get a dedicated
+  effort with the Docker integration suite running.
+
+## Continuation 1 (same day): mypy strictness + refactor exemplar
 
 - **`warn_return_any = True` is now enforced** (mypy.ini roadmap step 1 executed): all 86
   `no-any-return` sites fixed across 43 files with typed intermediates/casts — no behavior
