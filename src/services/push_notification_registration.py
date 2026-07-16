@@ -197,7 +197,8 @@ def _config_to_dict(config: Any) -> dict[str, Any] | None:
     if isinstance(config, dict):
         return config
     if hasattr(config, "model_dump"):
-        return config.model_dump(mode="json", exclude_none=True)
+        dumped: dict[str, Any] = config.model_dump(mode="json", exclude_none=True)
+        return dumped
     return dict(config)
 
 

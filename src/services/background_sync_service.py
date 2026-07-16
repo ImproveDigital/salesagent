@@ -182,7 +182,7 @@ def start_inventory_sync_background(
                     f"start_inventory_sync_background called with pending_sync_id="
                     f"{pending_sync_id!r} but no SyncJob row matches"
                 )
-            sync_id = pending_row.sync_id
+            sync_id: str = pending_row.sync_id
             pending_row.status = "running"
             # Restamp ``started_at`` so the value reflects when the worker
             # actually picked up the row, not when /refresh queued it.

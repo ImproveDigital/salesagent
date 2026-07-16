@@ -75,7 +75,8 @@ def get_principal_from_token(token: str, tenant_id: str | None = None) -> tuple[
         return None, None
 
     try:
-        return execute_with_retry(_lookup_principal)
+        result: tuple[str | None, dict | None] = execute_with_retry(_lookup_principal)
+        return result
     except Exception as e:
         logger.error(f"[AUTH] Database error during principal lookup: {e}", exc_info=True)
         return None, None

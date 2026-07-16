@@ -2219,16 +2219,18 @@ def _derive_single_request_currency(package_pricing_info_by_index: dict[int, dic
 
 def _derive_legacy_request_currency(req: CreateMediaBuyRequest) -> str | None:
     """Best-effort currency extraction for deprecated request shapes."""
-    legacy_currency = getattr(req, "currency", None)
+    legacy_currency: str | None = getattr(req, "currency", None)
     if legacy_currency:
         return legacy_currency
 
     legacy_budget = getattr(req, "budget", None)
     if legacy_budget and hasattr(legacy_budget, "currency"):
-        return legacy_budget.currency
+        budget_currency: str | None = legacy_budget.currency
+        return budget_currency
 
     if req.packages and req.packages[0].budget and hasattr(req.packages[0].budget, "currency"):
-        return req.packages[0].budget.currency
+        package_currency: str | None = req.packages[0].budget.currency
+        return package_currency
 
     return None
 

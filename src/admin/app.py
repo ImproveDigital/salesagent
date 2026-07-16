@@ -95,7 +95,8 @@ def _sanitize_for_log(value, *, max_len: int = 200) -> str:
         value = str(value)
     if len(value) > max_len:
         value = value[:max_len] + "…"
-    return value.replace("\r", "\\r").replace("\n", "\\n").replace("\x00", "\\x00")
+    sanitized: str = value.replace("\r", "\\r").replace("\n", "\\n").replace("\x00", "\\x00")
+    return sanitized
 
 
 # Custom ProxyFix for handling X-Script-Name and fixing redirect URLs

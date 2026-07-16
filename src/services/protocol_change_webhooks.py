@@ -445,7 +445,7 @@ def _build_wholesale_feed_event(
             applies_to=applies_to,
         )
 
-    return WholesaleFeedEvent.model_validate(
+    event: dict[str, Any] = WholesaleFeedEvent.model_validate(
         {
             "event_id": event_id,
             "event_type": event_type,
@@ -455,6 +455,7 @@ def _build_wholesale_feed_event(
             "payload": payload,
         }
     ).model_dump(mode="json", exclude_none=True)
+    return event
 
 
 def _build_bulk_change_event(
@@ -467,7 +468,7 @@ def _build_bulk_change_event(
     applies_to: dict[str, Any],
 ) -> dict[str, Any]:
     affected_entity_type = "signal" if object_type == "signal" else "product"
-    return WholesaleFeedEvent.model_validate(
+    event: dict[str, Any] = WholesaleFeedEvent.model_validate(
         {
             "event_id": event_id,
             "event_type": "wholesale_feed.bulk_change",
@@ -483,6 +484,7 @@ def _build_bulk_change_event(
             },
         }
     ).model_dump(mode="json", exclude_none=True)
+    return event
 
 
 def _catalog_notification_type(object_type: str, action: str) -> str:

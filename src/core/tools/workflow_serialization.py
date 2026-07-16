@@ -12,4 +12,5 @@ def serialize_for_workflow_step(model: Any) -> dict[str, Any]:
     dump in one module-level helper keeps ``_impl`` functions free of direct
     serialization calls and centralizes the JSON mode.
     """
-    return model.model_dump(mode="json")
+    payload: dict[str, Any] = model.model_dump(mode="json")
+    return payload

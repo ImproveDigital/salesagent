@@ -23,5 +23,6 @@ def get_header_case_insensitive(headers: Mapping[str, Any], header_name: str) ->
     header_name_lower = header_name.lower()
     for key, value in headers.items():
         if key.lower() == header_name_lower:
-            return value
+            header_value: str | None = value
+            return header_value
     return None

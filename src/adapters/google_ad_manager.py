@@ -950,7 +950,8 @@ class GoogleAdManager(AdServerAdapter):
                 "[red]Error: GAM adapter not configured for order operations (missing advertiser_id or trafficker_id)[/red]"
             )
             return False
-        return self.orders_manager.archive_order(order_id)
+        archived: bool = self.orders_manager.archive_order(order_id)
+        return archived
 
     def get_advertisers(
         self, search_query: str | None = None, limit: int = 500, fetch_all: bool = False

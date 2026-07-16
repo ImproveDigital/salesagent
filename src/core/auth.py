@@ -357,7 +357,7 @@ def _try_resolve_embedded_buyer_identity(
         return principal.principal_id if principal else None
 
     with get_db_session() as session:
-        resolved_principal_id = _execute(session)
+        resolved_principal_id: str | None = _execute(session)
 
     if resolved_principal_id:
         if _VERBOSE_AUTH_LOG:

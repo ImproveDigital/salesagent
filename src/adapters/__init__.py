@@ -89,7 +89,8 @@ def get_adapter_default_channels(adapter_type: str) -> list[str]:
     """
     adapter_class = ADAPTER_REGISTRY.get(adapter_type)
     if adapter_class and hasattr(adapter_class, "default_channels"):
-        return adapter_class.default_channels
+        channels: list[str] = adapter_class.default_channels
+        return channels
     return []
 
 
@@ -108,5 +109,6 @@ def get_adapter_default_delivery_measurement(adapter_type: str) -> dict[str, str
     """
     adapter_class = ADAPTER_REGISTRY.get(adapter_type)
     if adapter_class and hasattr(adapter_class, "default_delivery_measurement"):
-        return adapter_class.default_delivery_measurement
+        measurement: dict[str, str] = adapter_class.default_delivery_measurement
+        return measurement
     return {"provider": "publisher"}

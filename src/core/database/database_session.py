@@ -226,7 +226,8 @@ def _create_db_session() -> Session:
     get_engine()
     if _session_factory is None:
         raise RuntimeError("Database session factory was not initialized")
-    return _session_factory()
+    session: Session = _session_factory()
+    return session
 
 
 @contextmanager

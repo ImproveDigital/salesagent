@@ -783,7 +783,7 @@ class GAMCreativesManager:
         if asset.get("media_data"):
             try:
                 # Decode base64 if needed
-                content = asset["media_data"]
+                content: str = asset["media_data"]
                 if content.startswith("data:"):
                     # Extract base64 part after comma
                     content = content.split(",", 1)[1]
@@ -823,7 +823,8 @@ class GAMCreativesManager:
         """Determine content type from asset."""
         # Check explicit mime type
         if asset.get("mime_type"):
-            return asset["mime_type"]
+            mime_type: str = asset["mime_type"]
+            return mime_type
 
         # Guess from URL extension
         url = asset.get("media_url") or asset.get("url", "")

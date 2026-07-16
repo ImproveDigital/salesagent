@@ -168,7 +168,7 @@ def _format_id_to_display_name(format_id: str) -> str:
 def _format_error_to_dict(error: Any) -> dict[str, Any]:
     """Serialize an AdCP error object for tenant-management/admin responses."""
     if hasattr(error, "model_dump"):
-        data = error.model_dump(mode="json", exclude_none=True)
+        data: dict[str, Any] = error.model_dump(mode="json", exclude_none=True)
     elif isinstance(error, dict):
         data = {key: value for key, value in error.items() if value is not None}
     else:

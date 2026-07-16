@@ -184,7 +184,8 @@ def _load_tenant_signals(
 
 def _dump_model(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", exclude_none=True)
+        dumped: dict[str, Any] = value.model_dump(mode="json", exclude_none=True)
+        return dumped
     if isinstance(value, dict):
         return value
     return {}

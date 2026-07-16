@@ -94,7 +94,7 @@ class MockAdServer(AdServerAdapter):
 
         # Store strategy context for simulation behavior
         self.strategy_context = strategy_context
-        self._current_simulation_time = None
+        self._current_simulation_time: datetime | None = None
 
         # Initialize HITL configuration from principal's platform_mappings
         self._initialize_hitl_config()
@@ -114,7 +114,8 @@ class MockAdServer(AdServerAdapter):
         if not self._is_simulation() or not self.strategy_context:
             return False
         if hasattr(self.strategy_context, "should_force_error"):
-            return self.strategy_context.should_force_error(error_type)
+            forced: bool = self.strategy_context.should_force_error(error_type)
+            return forced
         return False
 
     def _get_simulation_scenario(self) -> str:
@@ -122,7 +123,8 @@ class MockAdServer(AdServerAdapter):
         if not self._is_simulation() or not self.strategy_context:
             return "normal"
         if hasattr(self.strategy_context, "get_config_value"):
-            return self.strategy_context.get_config_value("scenario", "normal")
+            scenario: str = self.strategy_context.get_config_value("scenario", "normal")
+            return scenario
         return "normal"
 
     def _apply_strategy_multipliers(self, base_value: float, multiplier_key: str) -> float:
@@ -131,7 +133,7 @@ class MockAdServer(AdServerAdapter):
             return base_value
 
         if hasattr(self.strategy_context, "get_config_value"):
-            multiplier = self.strategy_context.get_config_value(multiplier_key, 1.0)
+            multiplier: float = self.strategy_context.get_config_value(multiplier_key, 1.0)
             return base_value * multiplier
         return base_value
 
@@ -219,7 +221,7 @@ class MockAdServer(AdServerAdapter):
 
         # Parse HITL settings with defaults
         self.hitl_enabled = self.hitl_config.get("enabled", False)
-        self.hitl_mode = self.hitl_config.get("mode", "sync")  # "sync" | "async" | "mixed"
+        self.hitl_mode: str = self.hitl_config.get("mode", "sync")  # "sync" | "async" | "mixed"
 
         # Sync mode settings
         sync_settings = self.hitl_config.get("sync_settings", {})
@@ -235,7 +237,7 @@ class MockAdServer(AdServerAdapter):
         self.webhook_on_complete = async_settings.get("webhook_on_complete", True)
 
         # Per-operation mode overrides
-        self.operation_modes = self.hitl_config.get("operation_modes", {})
+        self.operation_modes: dict[str, str] = self.hitl_config.get("operation_modes", {})
 
         # Approval simulation settings
         approval_sim = self.hitl_config.get("approval_simulation", {})

@@ -51,7 +51,8 @@ def _extract_brand_name(request) -> str | None:
 
     brand = request.brand
     if hasattr(brand, "domain"):
-        return brand.domain
+        domain: str | None = brand.domain
+        return domain
     if isinstance(brand, dict):
         return brand.get("domain")
     return None
@@ -158,7 +159,7 @@ def generate_auto_name(
         # Run async agent — handle both sync and async calling contexts
         from src.core.validation_helpers import run_async_in_sync_context
 
-        generated_name = run_async_in_sync_context(
+        generated_name: str = run_async_in_sync_context(
             generate_name_async(
                 agent=agent,
                 campaign_name=None,  # Not in AdCP spec

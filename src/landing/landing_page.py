@@ -78,7 +78,8 @@ def _extract_tenant_subdomain(tenant: dict, virtual_host: str | None = None) -> 
 
     # Fallback to tenant subdomain field
     if tenant.get("subdomain"):
-        return tenant["subdomain"]
+        tenant_subdomain: str = tenant["subdomain"]
+        return tenant_subdomain
 
     # Fallback to tenant_id
     return tenant.get("tenant_id")

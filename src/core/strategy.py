@@ -261,15 +261,18 @@ class StrategyContext:
         """Check if this strategy should force a specific error."""
         if not self.is_simulation:
             return False
-        return self.get_config_value(f"force_{error_type}", False)
+        forced: bool = self.get_config_value(f"force_{error_type}", False)
+        return forced
 
     def get_pacing_multiplier(self) -> float:
         """Get pacing rate multiplier."""
-        return self.get_config_value("pacing_rate", 1.0)
+        multiplier: float = self.get_config_value("pacing_rate", 1.0)
+        return multiplier
 
     def get_bid_adjustment(self) -> float:
         """Get bid adjustment multiplier."""
-        return self.get_config_value("bid_adjustment", 1.0)
+        adjustment: float = self.get_config_value("bid_adjustment", 1.0)
+        return adjustment
 
 
 class SimulationContext:

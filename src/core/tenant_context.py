@@ -168,6 +168,9 @@ class LazyTenantContext:
 
     __slots__ = ("_tenant_id", "_resolved")
 
+    _tenant_id: str
+    _resolved: TenantContext | None
+
     def __init__(self, tenant_id: str) -> None:
         object.__setattr__(self, "_tenant_id", tenant_id)
         object.__setattr__(self, "_resolved", None)

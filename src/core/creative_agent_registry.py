@@ -934,7 +934,8 @@ class CreativeAgentRegistry:
 
             # Use structured_content field for JSON response (MCP protocol update)
             if hasattr(result, "structured_content") and result.structured_content:
-                return result.structured_content
+                structured: dict[str, Any] = result.structured_content
+                return structured
 
             # Fallback: Parse result from content field (legacy)
             import json
@@ -943,7 +944,8 @@ class CreativeAgentRegistry:
                 preview_data = result.content[0].text if hasattr(result.content[0], "text") else result.content[0]
                 if isinstance(preview_data, str):
                     preview_data = json.loads(preview_data)
-                return preview_data
+                preview_payload: dict[str, Any] = preview_data
+                return preview_payload
 
             return {}
 
@@ -998,7 +1000,8 @@ class CreativeAgentRegistry:
 
             # Use structured_content field for JSON response (MCP protocol update)
             if hasattr(result, "structured_content") and result.structured_content:
-                return result.structured_content
+                structured: dict[str, Any] = result.structured_content
+                return structured
 
             # Fallback: Parse result from content field (legacy)
             import json
@@ -1007,7 +1010,8 @@ class CreativeAgentRegistry:
                 creative_data = result.content[0].text if hasattr(result.content[0], "text") else result.content[0]
                 if isinstance(creative_data, str):
                     creative_data = json.loads(creative_data)
-                return creative_data
+                creative_payload: dict[str, Any] = creative_data
+                return creative_payload
 
             return {}
 

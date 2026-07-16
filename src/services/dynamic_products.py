@@ -218,7 +218,7 @@ def extract_activation_key(signal: dict, our_agent_url: str | None = None) -> di
             if destination.get("agent_url") == our_agent_url:
                 # Found our deployment
                 if deployment.get("is_live") and deployment.get("activation_key"):
-                    activation_key = deployment["activation_key"]
+                    activation_key: dict = deployment["activation_key"]
 
                     # Validate activation key has required fields
                     key_type = activation_key.get("type")
@@ -458,7 +458,7 @@ def customize_description(
     # Default pattern: append signal description to product description
     if not template_description:
         # Generate description from signal if template has none
-        signal_desc = signal.get("description", "")
+        signal_desc: str = signal.get("description", "")
         if signal_desc:
             return signal_desc
         return None

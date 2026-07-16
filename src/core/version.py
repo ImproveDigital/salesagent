@@ -35,7 +35,8 @@ def get_version() -> str:
         if pyproject_path.exists():
             with open(pyproject_path, "rb") as f:
                 data = tomllib.load(f)
-                return data.get("project", {}).get("version", "0.0.0")
+                version_str: str = data.get("project", {}).get("version", "0.0.0")
+                return version_str
     except (FileNotFoundError, tomllib.TOMLDecodeError, KeyError) as e:
         logger.debug("Failed to read version from pyproject.toml: %s", e)
 

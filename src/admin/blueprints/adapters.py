@@ -22,7 +22,7 @@ adapters_bp = Blueprint("adapters", __name__)
 
 def _freewheel_auth_mode(config_data: dict) -> str | None:
     """Return the intended FreeWheel auth mode and remove UI-only metadata."""
-    explicit_mode = config_data.pop("auth_mode", None)
+    explicit_mode: str | None = config_data.pop("auth_mode", None)
     if explicit_mode in {"password_grant", "api_token", "client_credentials"}:
         return explicit_mode
     if config_data.get("client_id"):

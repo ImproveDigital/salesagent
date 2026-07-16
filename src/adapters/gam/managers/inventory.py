@@ -78,7 +78,8 @@ class GAMInventoryManager:
             return []
 
         discovery = self._get_discovery()
-        return discovery.discover_ad_units(parent_id, max_depth)
+        ad_units: list[AdUnit] = discovery.discover_ad_units(parent_id, max_depth)
+        return ad_units
 
     def discover_placements(self) -> list[Placement]:
         """Discover all placements in the GAM network.
@@ -93,7 +94,8 @@ class GAMInventoryManager:
             return []
 
         discovery = self._get_discovery()
-        return discovery.discover_placements()
+        placements: list[Placement] = discovery.discover_placements()
+        return placements
 
     def discover_custom_targeting(self) -> dict[str, Any]:
         """Discover all custom targeting keys and their values.
@@ -108,7 +110,8 @@ class GAMInventoryManager:
             return {"keys": [], "total_values": 0}
 
         discovery = self._get_discovery()
-        return discovery.discover_custom_targeting()
+        custom_targeting: dict[str, Any] = discovery.discover_custom_targeting()
+        return custom_targeting
 
     def discover_audience_segments(self) -> list[AudienceSegment]:
         """Discover audience segments (first-party and third-party).
@@ -123,7 +126,8 @@ class GAMInventoryManager:
             return []
 
         discovery = self._get_discovery()
-        return discovery.discover_audience_segments()
+        segments: list[AudienceSegment] = discovery.discover_audience_segments()
+        return segments
 
     def discover_labels(self) -> list[Label]:
         """Discover all labels (for competitive exclusion, etc.).
@@ -138,7 +142,8 @@ class GAMInventoryManager:
             return []
 
         discovery = self._get_discovery()
-        return discovery.discover_labels()
+        labels: list[Label] = discovery.discover_labels()
+        return labels
 
     def sync_all_inventory(self, custom_targeting_limit: int = 1000, fetch_values: bool = False) -> dict[str, Any]:
         """Perform full inventory sync from GAM.

@@ -234,8 +234,8 @@ class DashboardService:
         if len(revenue_data) < 14:
             return 0.0
 
-        last_week_revenue = sum(d["revenue"] for d in revenue_data[-7:])
-        previous_week_revenue = sum(d["revenue"] for d in revenue_data[-14:-7])
+        last_week_revenue: float = sum(d["revenue"] for d in revenue_data[-7:])
+        previous_week_revenue: float = sum(d["revenue"] for d in revenue_data[-14:-7])
 
         if previous_week_revenue > 0:
             return ((last_week_revenue - previous_week_revenue) / previous_week_revenue) * 100
@@ -280,8 +280,8 @@ class DashboardService:
                 return budget
 
             # Calculate spend based on elapsed days
-            total_days = (media_buy.end_date - media_buy.start_date).days + 1
-            elapsed_days = (today - media_buy.start_date).days + 1
+            total_days: int = (media_buy.end_date - media_buy.start_date).days + 1
+            elapsed_days: int = (today - media_buy.start_date).days + 1
 
             if total_days > 0:
                 return budget * (elapsed_days / total_days)
@@ -309,7 +309,7 @@ class DashboardService:
             if delta.days < 30:
                 weeks = delta.days // 7
                 return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-            return timestamp.strftime("%Y-%m-%d")
+            return type_cast(str, timestamp.strftime("%Y-%m-%d"))
 
         hours = delta.seconds // 3600
         if hours > 0:
@@ -408,7 +408,8 @@ class DashboardService:
         from sqlalchemy import select
 
         stmt = select(Tenant).filter_by(tenant_id=self.tenant_id)
-        return session.scalars(stmt).first()
+        tenant: Tenant | None = session.scalars(stmt).first()
+        return tenant
 
     def _masthead(self, session, tenant: Tenant | None) -> dict[str, Any]:
         from sqlalchemy import func, select

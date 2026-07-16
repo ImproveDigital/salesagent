@@ -85,8 +85,8 @@ class ProtocolWebhookService:
     - None: No authentication
     """
 
-    def __init__(self):
-        self._session = requests.Session()
+    def __init__(self) -> None:
+        self._session: requests.Session = requests.Session()
 
     async def send_notification(
         self,

@@ -243,7 +243,10 @@ class BroadstreetClient:
 
     def delete_campaign(self, advertiser_id: str, campaign_id: str) -> dict[str, Any]:
         """Delete a campaign."""
-        return self.delete(f"/networks/{self.network_id}/advertisers/{advertiser_id}/campaigns/{campaign_id}")
+        result: dict[str, Any] = self.delete(
+            f"/networks/{self.network_id}/advertisers/{advertiser_id}/campaigns/{campaign_id}"
+        )
+        return result
 
     # =========================================================================
     # Advertisement Operations
@@ -324,7 +327,10 @@ class BroadstreetClient:
 
     def delete_advertisement(self, advertiser_id: str, advertisement_id: str) -> dict[str, Any]:
         """Delete an advertisement."""
-        return self.delete(f"/networks/{self.network_id}/advertisers/{advertiser_id}/advertisements/{advertisement_id}")
+        result: dict[str, Any] = self.delete(
+            f"/networks/{self.network_id}/advertisers/{advertiser_id}/advertisements/{advertisement_id}"
+        )
+        return result
 
     def get_advertisement_report(
         self,
@@ -382,10 +388,11 @@ class BroadstreetClient:
             "zone_id": zone_id,
             "advertisement_id": advertisement_id,
         }
-        return self.post(
+        result: dict[str, Any] = self.post(
             f"/networks/{self.network_id}/advertisers/{advertiser_id}/campaigns/{campaign_id}/placements",
             data,
         )
+        return result
 
     # =========================================================================
     # Zone Operations
@@ -422,4 +429,5 @@ class BroadstreetClient:
 
     def delete_zone(self, zone_id: str) -> dict[str, Any]:
         """Delete a zone."""
-        return self.delete(f"/networks/{self.network_id}/zones/{zone_id}")
+        result: dict[str, Any] = self.delete(f"/networks/{self.network_id}/zones/{zone_id}")
+        return result

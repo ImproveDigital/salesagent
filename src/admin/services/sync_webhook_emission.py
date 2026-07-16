@@ -566,7 +566,8 @@ def _iso(value: Any) -> str | None:
     """Render a ``datetime`` as ISO-8601 with timezone, or ``None``."""
     if value is None:
         return None
-    return value.isoformat()
+    rendered: str = value.isoformat()
+    return rendered
 
 
 def _public_error_message(raw: str | None) -> str | None:

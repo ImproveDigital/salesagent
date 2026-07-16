@@ -158,7 +158,7 @@ def ensure_network_timezone(tenant_id: str) -> str:
         logger.info(f"Fetching network timezone from GAM for tenant {tenant_id}...")
         try:
             network_info = get_gam_network_info(tenant_id)
-            timezone = network_info.get("timezone", "America/New_York")
+            timezone: str = network_info.get("timezone", "America/New_York")
             logger.info(f"Got network timezone for tenant {tenant_id}: {timezone}")
             return timezone
         except Exception as e:
