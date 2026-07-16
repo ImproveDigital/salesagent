@@ -101,7 +101,7 @@ class MockAdServer(AdServerAdapter):
 
     def _is_simulation(self) -> bool:
         """Check if we're running in simulation mode."""
-        return (
+        return bool(
             self.strategy_context
             and hasattr(self.strategy_context, "is_simulation")
             and hasattr(self.strategy_context, "strategy_id")
