@@ -469,7 +469,7 @@ class GoogleAdManager(AdServerAdapter):
                 # Check if pricing model is supported by GAM adapter at all
                 try:
                     gam_cost_type = PricingCompatibility.get_gam_cost_type(pricing_model)
-                except ValueError as e:
+                except ValueError:
                     error_msg = (
                         f"Google Ad Manager adapter does not support '{pricing_model}' pricing. "
                         f"Supported pricing models: CPM, VCPM, CPC, FLAT_RATE. "
@@ -1659,7 +1659,6 @@ class GoogleAdManager(AdServerAdapter):
 
             # Determine if we're pausing or resuming
             is_pause = action.startswith("pause_")
-            new_status = "PAUSED" if is_pause else "READY"
             action_verb = "Pausing" if is_pause else "Resuming"
 
             # Package-level actions

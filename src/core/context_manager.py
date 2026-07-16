@@ -636,7 +636,6 @@ class ContextManager(DatabaseManager):
                 return
 
             tenant_id = context.tenant_id
-            principal_id = context.principal_id
 
             # Workflow callbacks are request-scoped. Durable catalog-change
             # subscriptions live in push_notification_configs with a separate

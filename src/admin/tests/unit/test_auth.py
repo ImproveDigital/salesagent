@@ -159,23 +159,11 @@ class TestAuthUtilities:
         assert not is_tenant_admin("user@tenant.com", "tenant_123")
 
         # Test 3: User is inactive
-        mock_user_inactive = Mock()
-        mock_user_inactive.is_admin = True
-        mock_user_inactive.is_active = False
+        # When is_active=False, the filter_by chain returns no results (None)
+        mock_scalars_inactive = Mock()
+        mock_scalars_inactive.first.return_value = None
+        mock_session.scalars.return_value = mock_scalars_inactive
 
-        mock_user_query_inactive = MagicMock()
-        # When is_active=False, the filter_by chain should return no results (None)
-        mock_user_query_inactive.filter_by.return_value.filter_by.return_value.first.return_value = None
-
-        def query_side_effect_inactive(model):
-            if hasattr(model, "__name__"):
-                if model.__name__ == "TenantManagementConfig":
-                    return mock_superadmin_query
-                elif model.__name__ == "User":
-                    return mock_user_query_inactive
-            return mock_user_query_inactive
-
-        mock_session.query.side_effect = query_side_effect_inactive
         assert not is_tenant_admin("admin@tenant.com", "tenant_123")
 
 

@@ -241,10 +241,6 @@ def _get_product_format_override(
             return None
 
         # Get base format from creative agent registry (WITHOUT product_id to avoid recursion)
-        from src.core.creative_agent_registry import get_creative_agent_registry
-
-        registry = get_creative_agent_registry()
-
         try:
             # format_id is a string key in format_overrides dict
             # Pass agent_url to find the base format from the correct creative agent

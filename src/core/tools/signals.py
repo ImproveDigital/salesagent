@@ -8,7 +8,6 @@ import hashlib
 import json
 import logging
 import re
-import time
 import uuid
 from typing import Any
 
@@ -36,7 +35,6 @@ from adcp.types.generated_poc.core.vendor_pricing_option import VendorPricingOpt
 from adcp.types.generated_poc.signals.get_signals_response import Range
 from pydantic import ValidationError
 
-from src.core.auth import get_principal_object
 from src.core.database.models import TenantSignal
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
@@ -47,7 +45,6 @@ from src.core.schemas import (
     SignalDeployment,
 )
 from src.core.signal_ids import adcp_safe_signal_id
-from src.core.testing_hooks import AdCPTestContext
 
 
 def _cpm_pricing_option(cpm: float, currency: str = "USD") -> list[VendorPricingOption]:
@@ -559,8 +556,6 @@ async def _activate_signal_impl(
     Returns:
         ActivateSignalResponse with activation status
     """
-    start_time = time.time()
-
     # Authentication required for signal activation
     principal_id = identity.principal_id if identity else None
 
@@ -568,17 +563,8 @@ async def _activate_signal_impl(
     if not identity or not identity.tenant:
         raise AdCPAuthenticationError("No tenant context available")
 
-    # Get the Principal object with ad server mappings
     if not principal_id:
         raise AdCPAuthenticationError("Authentication required for signal activation")
-    principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
-
-    # Apply testing hooks
-    if not identity:
-        raise AdCPValidationError("Context required for signal activation", recovery="terminal")
-    testing_ctx = identity.testing_context if identity else AdCPTestContext()
-    campaign_info = {"endpoint": "activate_signal", "signal_id": signal_agent_segment_id}
-    # Note: apply_testing_hooks modifies response data dict, not called here as no response yet
 
     try:
         from src.core.database.repositories.uow import TenantSignalUoW

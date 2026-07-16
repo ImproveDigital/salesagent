@@ -1,6 +1,5 @@
 """Inventory and orders management blueprint."""
 
-import json
 import logging
 import time
 
@@ -877,7 +876,6 @@ def analyze_ad_server_inventory(tenant_id):
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
 
             adapter_type = None
-            adapter_config = {}
 
             # Check database for adapter configuration
             if tenant and tenant.ad_server:
@@ -914,21 +912,6 @@ def analyze_ad_server_inventory(tenant_id):
 
             if not principal_obj:
                 return jsonify({"error": "No principal found for tenant"}), 404
-
-            # Create principal object
-            from src.core.schemas import Principal as PrincipalSchema
-
-            # Handle both string (SQLite) and dict (PostgreSQL JSONB) formats
-            mappings = principal_obj.platform_mappings
-            if mappings and isinstance(mappings, str):
-                mappings = json.loads(mappings)
-            elif not mappings:
-                mappings = {}
-            principal = PrincipalSchema(
-                principal_id=principal_obj.principal_id,
-                name=principal_obj.name,
-                platform_mappings=mappings,
-            )
 
         # TODO: Get adapter instance and call actual discovery methods
         # For now, return mock analysis data

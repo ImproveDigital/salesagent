@@ -1150,7 +1150,6 @@ class MockAdServer(AdServerAdapter):
                 impressions = int(spend / 0.01)  # $10 CPM
             else:
                 # Campaign in progress - calculate based on pacing
-                progress_ratio = elapsed_duration / campaign_duration
                 daily_budget = total_budget / campaign_duration
 
                 # Apply AI test scenario delivery profile if present

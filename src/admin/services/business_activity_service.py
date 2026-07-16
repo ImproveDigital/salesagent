@@ -82,16 +82,12 @@ def get_business_activities(tenant_id: str, limit: int = 50) -> list[dict]:
                 operation = log.operation or "unknown"
                 if operation.startswith("A2A."):
                     activity_type = "a2a"
-                    icon = "📡"
                 elif operation.startswith("AdCP."):
                     activity_type = "adcp"
-                    icon = "🔌"
                 elif operation.startswith("MCP."):
                     activity_type = "mcp"
-                    icon = "🔗"
                 else:
                     activity_type = "system"
-                    icon = "⚙️"
 
                 # Build title from operation
                 operation_clean = operation.replace("AdCP.", "").replace("A2A.", "").replace("MCP.", "")
@@ -176,10 +172,8 @@ def get_business_activities(tenant_id: str, limit: int = 50) -> list[dict]:
                 # Build description
                 if log.success:
                     status_text = "✓ Success"
-                    badge_type = "success"
                 else:
                     status_text = f"✗ Failed: {log.error_message or 'Unknown error'}"
-                    badge_type = "error"
 
                 # Extract key details for description
                 description_parts = [status_text]

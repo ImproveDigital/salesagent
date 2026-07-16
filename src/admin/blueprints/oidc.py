@@ -99,7 +99,7 @@ def save_config(tenant_id: str):
         return jsonify({"error": "client_secret is required for new configuration"}), 400
 
     try:
-        config = save_oidc_config(
+        save_oidc_config(
             tenant_id=tenant_id,
             provider=provider,
             client_id=client_id,

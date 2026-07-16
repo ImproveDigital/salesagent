@@ -1708,7 +1708,9 @@ def edit_product(tenant_id, product_id):
                     # Otherwise, preserve existing config structure
                     if line_item_type:
                         gam_config_service = GAMProductConfigService()
-                        default_config = gam_config_service.generate_default_config(product.delivery_type, formats)
+                        default_config = gam_config_service.generate_default_config(
+                            product.delivery_type, product.format_ids
+                        )
                         # Merge default config into base_config (preserving other fields)
                         base_config.update(default_config)
 
@@ -2524,8 +2526,6 @@ def unassign_inventory_from_product(tenant_id, product_id, mapping_id):
 
             # Store details for logging
             inventory_name = f"{mapping.inventory_type}:{mapping.inventory_id}"
-            inventory_id_to_remove = mapping.inventory_id
-            inventory_type_to_remove = mapping.inventory_type
 
             # Delete the mapping
             db_session.delete(mapping)

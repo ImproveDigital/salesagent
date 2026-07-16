@@ -1054,11 +1054,8 @@ def _execute_adapter_media_buy_creation(
         else:
             logger.info(f"[ADAPTER] create_media_buy submitted async task: {response.task_id}")
         return response
-    except Exception as adapter_error:
-        import traceback
-
-        error_traceback = traceback.format_exc()
-        logger.error(f"[ADAPTER] create_media_buy failed:\n{error_traceback}")
+    except Exception:
+        logger.exception("[ADAPTER] create_media_buy failed")
         raise
 
 
@@ -4143,12 +4140,9 @@ async def _create_media_buy_impl(
         # Call adapter using shared creation logic
         # Note: start_time variable already resolved from 'asap' to actual datetime if needed
         # This uses the same function as manual approval to ensure consistency across adapters
-        try:
-            response = _execute_adapter_media_buy_creation(
-                req, packages, start_time, end_time, package_pricing_info, principal, testing_ctx, tenant=tenant
-            )
-        except Exception as adapter_error:
-            raise
+        response = _execute_adapter_media_buy_creation(
+            req, packages, start_time, end_time, package_pricing_info, principal, testing_ctx, tenant=tenant
+        )
 
         # Check if adapter returned an error response FIRST (before accessing any fields)
         # With oneOf pattern, response can be CreateMediaBuySuccess or CreateMediaBuyError

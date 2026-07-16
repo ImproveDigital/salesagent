@@ -5,7 +5,6 @@ implementation pattern from CLAUDE.md.
 """
 
 import logging
-import time
 
 from adcp.types import Format as AdcpFormat
 from adcp.utils.format_assets import get_format_assets
@@ -48,8 +47,6 @@ def _list_creative_formats_impl(
     Uses CreativeAgentRegistry for dynamic format discovery with caching.
     Supports optional filtering by type, standard_only, category, and format_ids.
     """
-    start_time = time.time()
-
     # Use default request if none provided
     # All ListCreativeFormatsRequest fields have defaults (None) per AdCP spec
     if req is None:

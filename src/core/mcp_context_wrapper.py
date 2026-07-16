@@ -276,11 +276,9 @@ class MCPContextWrapper:
         """Replace FastMCP Context with ToolContext in arguments."""
         # Replace in kwargs: set on whichever key carried the FastMCP context (supports 'ctx' or others)
         new_kwargs = {}
-        replaced = False
         for k, v in kwargs.items():
             if isinstance(v, FastMCPContext):
                 new_kwargs[k] = tool_context
-                replaced = True
             else:
                 new_kwargs[k] = v
         kwargs = new_kwargs

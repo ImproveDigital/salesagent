@@ -378,9 +378,6 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
             # Get and update the workflow step via repository (tenant-scoped)
             workflow_repo = WorkflowRepository(db, tenant_id)
 
-            user_info = session.get("user", {})
-            user_email = user_info.get("email", "system") if isinstance(user_info, dict) else str(user_info)
-
             step = workflow_repo.update_status(
                 step_id,
                 status="rejected",
