@@ -1,6 +1,28 @@
 # Codebase Improvement Session — 2026-07-16
 
-Branch: `feature/refactor-all` (base `26fa253bf`). Eight commits, `10cff0b0a..f300cc2cd`.
+Branch: `feature/refactor-all` (base `26fa253bf`). Ten commits, `10cff0b0a..31668d163`.
+
+## Continuation (same day): mypy strictness + refactor exemplar
+
+- **`warn_return_any = True` is now enforced** (mypy.ini roadmap step 1 executed): all 86
+  `no-any-return` sites fixed across 43 files with typed intermediates/casts — no behavior
+  change, verified by a cold `--no-incremental` mypy run (398 files green) and byte-identical
+  unit-suite totals (307/5962/24). One wrong annotation corrected
+  (`json_type.process_bind_param` omitted its deliberate `BaseModel` passthrough).
+  Remaining roadmap: `check_untyped_defs` (~203 errors), `disallow_incomplete_defs` (~273).
+- **Complexity exemplar**: `format_activity_from_audit_log` (C=30) decomposed into
+  `_classify_activity` / `_parse_audit_details` / `_build_detail_sections` / shared
+  `relative_time_ago` — behavior locked byte-identical across 90 golden cases. The extraction
+  exposed the relative-time bucketing copied in three modules
+  (activity_stream, activity_feed, business_activity_service); all three now delegate to
+  `src/core/utils/time_format.relative_time_ago`. Duplication ratchet back to 18 blocks
+  via real dedup, not baseline growth.
+- **New latent-bug suspects logged by the sweep** (annotation-only fixes applied, semantics
+  untouched — each needs a small deliberate fix): Broadstreet `delete_*` methods return
+  `None` on empty 204 bodies where `dict` is declared; Broadstreet `create_placement` skips
+  the response-envelope unwrap all sibling methods do; mock adapter `_is_simulation` returns
+  `None` instead of `False`; `from adcp import WholesaleFeedEvent` types as `Any` despite
+  the adcp mypy plugin (upstream re-export gap).
 
 ## Verified end state (honest exit codes, no caches)
 
