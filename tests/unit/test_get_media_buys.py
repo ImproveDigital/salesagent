@@ -223,6 +223,46 @@ class TestComputeStatusPersistedPrecedence:
         assert _compute_status(buy_none, self.TODAY) == MediaBuyStatus.pending_start
 
 
+class TestComputeStatusApprovalPending:
+    """Approval-pending buys must never be reported as ``active``.
+
+    Regression: a buy persisted as ``pending_approval`` (manual approval) or
+    ``pending_ad_server_approval`` (GAM order approval) has nothing delivering,
+    but ``_compute_status`` fell through to date math and reported ``active``
+    once the flight window opened. The wire enum has no approval state, so
+    both map to ``pending_start`` — mirroring
+    ``_media_buy_status_for_create_replay``.
+    """
+
+    TODAY = date(2025, 6, 15)
+
+    def test_pending_approval_in_flight_is_not_active(self):
+        buy = make_media_buy(
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
+            status="pending_approval",
+        )
+        assert _compute_status(buy, self.TODAY) == MediaBuyStatus.pending_start
+
+    def test_pending_ad_server_approval_in_flight_is_not_active(self):
+        buy = make_media_buy(
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
+            status="pending_ad_server_approval",
+        )
+        assert _compute_status(buy, self.TODAY) == MediaBuyStatus.pending_start
+
+    def test_pending_approval_past_end_is_not_completed(self):
+        """A buy that was never approved didn't deliver — ``completed`` would
+        imply it ran. The approval blocker wins over the clock entirely."""
+        buy = make_media_buy(
+            start_date=date(2020, 1, 1),
+            end_date=date(2020, 12, 31),
+            status="pending_approval",
+        )
+        assert _compute_status(buy, self.TODAY) == MediaBuyStatus.pending_start
+
+
 class TestToWireStatus:
     """``_to_wire_status`` coerces arbitrary input to a wire-valid string (#374).
 

@@ -77,10 +77,15 @@ class TestWireMapping:
         )
         assert _media_buy_status_for_create_replay(existing).value == "pending_start"
 
-    def test_get_media_buys_falls_back_to_date_math(self):
-        # Same external behavior as pending_approval: the persisted status is
-        # not a wire blocker, so listing derives from flight dates.
+    def test_get_media_buys_maps_to_pending_start(self):
+        # Same external behavior as pending_approval: nothing is delivering
+        # while the approval blocker is persisted, so listing reports
+        # pending_start even mid-flight — never date-derived active.
         buy = _media_buy("pending_ad_server_approval", start_offset_days=3, end_offset_days=10)
+        assert _compute_status(buy, NOW.date()).value == "pending_start"
+
+    def test_get_media_buys_mid_flight_is_not_active(self):
+        buy = _media_buy("pending_ad_server_approval", start_offset_days=-2, end_offset_days=5)
         assert _compute_status(buy, NOW.date()).value == "pending_start"
 
 
