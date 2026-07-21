@@ -39,9 +39,11 @@ Then in your template, add browse buttons:
             <button type="button" id="picker-clear-btn" onclick="window.inventoryPicker.clearSearch()" class="btn btn-secondary" style="padding: 0.5rem 1rem; display: none;">Clear</button>
         </div>
 
-        <!-- List -->
+        <!-- List: one sub-container per picker type so the ad unit tree and the
+             placement list never overwrite each other's DOM -->
         <div id="inventory-picker-list" style="flex: 1; overflow-y: auto; min-height: 200px;">
-            <!-- Items loaded dynamically -->
+            <div id="picker-adunit-container" style="display: none;"></div>
+            <div id="picker-placement-container" style="display: none;"></div>
         </div>
 
         <!-- Footer -->
@@ -147,7 +149,15 @@ Then in your template, add browse buttons:
         currentPickerType = null;
     }
 
+    function showListContainer(type) {
+        const adUnitContainer = document.getElementById('picker-adunit-container');
+        const placementContainer = document.getElementById('picker-placement-container');
+        if (adUnitContainer) adUnitContainer.style.display = type === 'ad_unit' ? '' : 'none';
+        if (placementContainer) placementContainer.style.display = type === 'placement' ? '' : 'none';
+    }
+
     function loadInventory(type, search = '') {
+        showListContainer(type);
         if (type === 'ad_unit') {
             // Get current selections from hidden field
             const field = document.getElementById(config.adUnitFieldId);
@@ -156,7 +166,7 @@ Then in your template, add browse buttons:
             if (!adUnitTree) {
                 adUnitTree = initInventoryTree({
                     apiUrl: treeApiUrl,
-                    containerId: 'inventory-picker-list',
+                    containerId: 'picker-adunit-container',
                     showCheckboxes: true,
                     selectedIds: selectedIds,
                     onSelect: (nodeId, nodeData) => {
@@ -176,7 +186,7 @@ Then in your template, add browse buttons:
     }
 
     function loadPlacementsList(search = '') {
-        const list = document.getElementById('inventory-picker-list');
+        const list = document.getElementById('picker-placement-container');
         const url = `${config.scriptRoot}/api/tenant/${config.tenantId}/inventory-list?type=placement${search ? '&search=' + encodeURIComponent(search) : ''}`;
 
         fetch(url, { credentials: 'same-origin' })
@@ -251,7 +261,7 @@ Then in your template, add browse buttons:
     function applyInventorySelection() {
         const selectedIds = (currentPickerType === 'ad_unit' && adUnitTree)
             ? Array.from(adUnitTree.getSelectedIds())
-            : Array.from(document.getElementById('inventory-picker-list')
+            : Array.from(document.getElementById('picker-placement-container')
                 .querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
 
         if (currentPickerType === 'ad_unit') {
