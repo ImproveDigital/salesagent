@@ -591,6 +591,59 @@ if (appendCheckbox) {
     width: 16px;
     height: 16px;
 }
+
+/* Selected inventory chips (ad units / placements) */
+.selected-item {
+    position: relative;
+    display: inline-block;
+    vertical-align: top;
+    background: #e7f3ff;
+    border: 1px solid #b8d8f5;
+    border-radius: 6px;
+    padding: 0.5rem 1.75rem 0.5rem 0.75rem;
+    margin: 0.25rem;
+    max-width: 100%;
+}
+
+.selected-item-name {
+    display: block;
+    font-weight: 600;
+    word-break: break-word;
+}
+
+.selected-item-meta {
+    display: block;
+    color: var(--sa-text-muted);
+    font-size: 0.8rem;
+    margin-top: 0.1rem;
+}
+
+.selected-item-sizes {
+    display: block;
+    color: #28a745;
+    font-size: 0.8rem;
+    font-weight: 500;
+    margin-top: 0.1rem;
+}
+
+.selected-item-remove {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.25rem;
+    border: none;
+    background: none;
+    color: var(--sa-text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.1rem 0.3rem;
+    border-radius: 4px;
+}
+
+.selected-item-remove:hover {
+    color: #dc3545;
+    background: rgba(220, 53, 69, 0.1);
+}
 </style>
 
 <script>
@@ -853,34 +906,34 @@ function updateSelectedDisplay(containerId, names, ids) {
     } else {
         container.innerHTML = names.map((name, idx) => {
             const id = ids[idx];
-            let sizesText = '';
+            let detailText = '';
 
             // Show sizes inline for ad units
             if (isAdUnit) {
                 const item = inventoryCache.adUnits.get(id);
-                console.log('[DEBUG] updateSelectedDisplay: id=', id, 'item=', item);
-                console.log('[DEBUG] inventoryCache.adUnits size:', inventoryCache.adUnits.size);
                 // Check both item.sizes (raw API format) and item.metadata.sizes (normalized format)
                 const itemSizes = item && (item.sizes || (item.metadata && item.metadata.sizes)) || [];
                 if (itemSizes.length > 0) {
                     const sizeStrings = itemSizes
                         .map(s => `${s.width}×${s.height}`)
                         .join(', ');
-                    sizesText = ` <small style="color: #28a745; font-weight: 500;">(${sizeStrings})</small>`;
+                    detailText = `<small class="selected-item-sizes">${sizeStrings}</small>`;
                 }
             } else {
                 // Show ad unit count for placements
                 const item = inventoryCache.placements.get(id);
                 if (item && item.metadata && item.metadata.ad_unit_ids) {
                     const count = item.metadata.ad_unit_ids.length;
-                    sizesText = ` <small style="color: var(--sa-text-muted);">(${count} ad ${count === 1 ? 'unit' : 'units'})</small>`;
+                    detailText = `<small class="selected-item-meta">${count} ad ${count === 1 ? 'unit' : 'units'}</small>`;
                 }
             }
 
             return `
-                <span class="selected-item" style="display: inline-block; background: #e7f3ff; color: #000; padding: 0.25rem 0.5rem; margin: 0.25rem; border-radius: 4px;">
-                    ${name} <small style="color: var(--sa-text-muted);">(${id})</small>${sizesText}
-                    <button type="button" onclick="removeSelectedItem('${containerId}', '${id}')" style="border: none; background: none; color: var(--sa-text-muted); cursor: pointer; margin-left: 0.25rem;">×</button>
+                <span class="selected-item">
+                    <button type="button" class="selected-item-remove" title="Remove" aria-label="Remove ${name}" onclick="removeSelectedItem('${containerId}', '${id}')">×</button>
+                    <span class="selected-item-name">${name}</span>
+                    <small class="selected-item-meta">ID: ${id}</small>
+                    ${detailText}
                 </span>
             `;
         }).join('');
