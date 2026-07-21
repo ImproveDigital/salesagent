@@ -64,9 +64,8 @@ Expected context variables:
         {% endif %}
 
         <div class="form-group">
-            <label for="ad-unit-search">Ad Units</label>
+            <label>Ad Units</label>
             <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
-                <input type="text" id="ad-unit-search" placeholder="Search ad units..." style="flex: 1;" class="form-control">
                 <button type="button" onclick="window.inventoryPicker && window.inventoryPicker.open('ad_unit')" class="btn btn-secondary" {% if not inventory_synced %}disabled{% endif %}>
                     Browse Ad Units
                 </button>
@@ -78,9 +77,8 @@ Expected context variables:
         </div>
 
         <div class="form-group">
-            <label for="placement-search">Placements</label>
+            <label>Placements</label>
             <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
-                <input type="text" id="placement-search" placeholder="Search placements..." style="flex: 1;" class="form-control">
                 <button type="button" onclick="window.inventoryPicker && window.inventoryPicker.open('placement')" class="btn btn-secondary" {% if not inventory_synced %}disabled{% endif %}>
                     Browse Placements
                 </button>

@@ -36,11 +36,14 @@ Then in your template, add browse buttons:
         <div style="padding: 1rem; border-bottom: 1px solid var(--sa-border); display: flex; gap: 0.5rem;">
             <input type="text" id="picker-search" placeholder="Search..." style="flex: 1; padding: 0.5rem; border: 1px solid var(--sa-border); border-radius: 4px;">
             <button type="button" onclick="window.inventoryPicker.triggerSearch()" class="btn btn-primary" style="padding: 0.5rem 1rem;">Search</button>
+            <button type="button" id="picker-clear-btn" onclick="window.inventoryPicker.clearSearch()" class="btn btn-secondary" style="padding: 0.5rem 1rem; display: none;">Clear</button>
         </div>
 
-        <!-- List -->
+        <!-- List: one sub-container per picker type so the ad unit tree and the
+             placement list never overwrite each other's DOM -->
         <div id="inventory-picker-list" style="flex: 1; overflow-y: auto; min-height: 200px;">
-            <!-- Items loaded dynamically -->
+            <div id="picker-adunit-container" style="display: none;"></div>
+            <div id="picker-placement-container" style="display: none;"></div>
         </div>
 
         <!-- Footer -->
@@ -77,6 +80,7 @@ Then in your template, add browse buttons:
     // State
     let currentPickerType = null;
     let adUnitTree = null;
+    let adUnitTreeSearch = '';  // last search term applied to the (reused) tree
     let inventoryPickerCache = {
         adUnits: new Map(),
         placements: new Map()
@@ -91,6 +95,7 @@ Then in your template, add browse buttons:
         close: closeInventoryPicker,
         apply: applyInventorySelection,
         triggerSearch: triggerSearch,
+        clearSearch: clearSearch,
         expandAll: () => adUnitTree && adUnitTree.expandAll(),
         collapseAll: () => adUnitTree && adUnitTree.collapseAll(),
         setOnApplyCallback: (callback) => { onApplyCallback = callback; },
@@ -127,6 +132,7 @@ Then in your template, add browse buttons:
 
         // Load inventory with initial search if provided
         loadInventory(type, initialSearch);
+        updateClearButton(initialSearch);
 
         // Show modal
         modal.style.display = 'flex';
@@ -143,7 +149,15 @@ Then in your template, add browse buttons:
         currentPickerType = null;
     }
 
+    function showListContainer(type) {
+        const adUnitContainer = document.getElementById('picker-adunit-container');
+        const placementContainer = document.getElementById('picker-placement-container');
+        if (adUnitContainer) adUnitContainer.style.display = type === 'ad_unit' ? '' : 'none';
+        if (placementContainer) placementContainer.style.display = type === 'placement' ? '' : 'none';
+    }
+
     function loadInventory(type, search = '') {
+        showListContainer(type);
         if (type === 'ad_unit') {
             // Get current selections from hidden field
             const field = document.getElementById(config.adUnitFieldId);
@@ -152,7 +166,7 @@ Then in your template, add browse buttons:
             if (!adUnitTree) {
                 adUnitTree = initInventoryTree({
                     apiUrl: treeApiUrl,
-                    containerId: 'inventory-picker-list',
+                    containerId: 'picker-adunit-container',
                     showCheckboxes: true,
                     selectedIds: selectedIds,
                     onSelect: (nodeId, nodeData) => {
@@ -162,14 +176,17 @@ Then in your template, add browse buttons:
             } else {
                 adUnitTree.setSelectedIds(selectedIds);
             }
-            if (search) adUnitTree.search(search);
+            if (search !== adUnitTreeSearch) {
+                adUnitTree.search(search);  // empty term resets the tree to the root list
+                adUnitTreeSearch = search;
+            }
         } else {
             loadPlacementsList(search);
         }
     }
 
     function loadPlacementsList(search = '') {
-        const list = document.getElementById('inventory-picker-list');
+        const list = document.getElementById('picker-placement-container');
         const url = `${config.scriptRoot}/api/tenant/${config.tenantId}/inventory-list?type=placement${search ? '&search=' + encodeURIComponent(search) : ''}`;
 
         fetch(url, { credentials: 'same-origin' })
@@ -224,14 +241,27 @@ Then in your template, add browse buttons:
     }
 
     function triggerSearch() {
-        const searchValue = document.getElementById('picker-search').value;
+        const searchValue = document.getElementById('picker-search').value.trim();
         loadInventory(currentPickerType, searchValue);
+        updateClearButton(searchValue);
+    }
+
+    function clearSearch() {
+        document.getElementById('picker-search').value = '';
+        triggerSearch();
+    }
+
+    function updateClearButton(term) {
+        const clearBtn = document.getElementById('picker-clear-btn');
+        if (clearBtn) {
+            clearBtn.style.display = term ? '' : 'none';
+        }
     }
 
     function applyInventorySelection() {
         const selectedIds = (currentPickerType === 'ad_unit' && adUnitTree)
             ? Array.from(adUnitTree.getSelectedIds())
-            : Array.from(document.getElementById('inventory-picker-list')
+            : Array.from(document.getElementById('picker-placement-container')
                 .querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
 
         if (currentPickerType === 'ad_unit') {
@@ -244,14 +274,17 @@ Then in your template, add browse buttons:
             // Update display
             const display = document.getElementById(config.adUnitDisplayId);
             if (display) {
-                if (selectedIds.length === 0) {
+                // Get names from tree cache or picker cache
+                const names = selectedIds.map(id => {
+                    const item = (adUnitTree && adUnitTree.getNodeData(id)) || inventoryPickerCache.adUnits.get(id);
+                    return item ? item.name : id;
+                });
+                if (typeof updateSelectedDisplay === 'function') {
+                    // Host page renderer — chips with ID, sizes, and remove button
+                    updateSelectedDisplay(config.adUnitDisplayId, names, selectedIds);
+                } else if (selectedIds.length === 0) {
                     display.innerHTML = '<span class="text-muted">No ad units selected</span>';
                 } else {
-                    // Get names from tree cache or picker cache
-                    const names = selectedIds.map(id => {
-                        const item = (adUnitTree && adUnitTree.getNodeData(id)) || inventoryPickerCache.adUnits.get(id);
-                        return item ? item.name : id;
-                    });
                     display.innerHTML = names.map((name, idx) =>
                         `<span class="badge bg-primary me-1 mb-1" title="${selectedIds[idx]}">${name}</span>`
                     ).join('');
@@ -267,14 +300,17 @@ Then in your template, add browse buttons:
             // Update display
             const display = document.getElementById(config.placementDisplayId);
             if (display) {
-                if (selectedIds.length === 0) {
+                // Get names from cache
+                const names = selectedIds.map(id => {
+                    const item = inventoryPickerCache.placements.get(id);
+                    return item ? item.name : id;
+                });
+                if (typeof updateSelectedDisplay === 'function') {
+                    // Host page renderer — chips with ID, sizes, and remove button
+                    updateSelectedDisplay(config.placementDisplayId, names, selectedIds);
+                } else if (selectedIds.length === 0) {
                     display.innerHTML = '<span class="text-muted">No placements selected</span>';
                 } else {
-                    // Get names from cache
-                    const names = selectedIds.map(id => {
-                        const item = inventoryPickerCache.placements.get(id);
-                        return item ? item.name : id;
-                    });
                     display.innerHTML = names.map((name, idx) =>
                         `<span class="badge bg-success me-1 mb-1" title="${selectedIds[idx]}">${name}</span>`
                     ).join('');
