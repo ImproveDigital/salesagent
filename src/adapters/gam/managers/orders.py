@@ -880,6 +880,30 @@ class GAMOrdersManager:
                         # CPM: use impressions (already set above)
                         pass
 
+                # Booking invariant — no quiet failures on money: the shipped
+                # goal must be positive and, for LIFETIME unit-priced goals,
+                # reconcile with the package budget (goal × unit price ≈ budget,
+                # within one unit of floor-rounding). Catches any future goal
+                # arithmetic bug before it books a wrong contract in GAM.
+                if not sandbox_trafficking and pricing_model != "flat_rate":
+                    if goal_units is None or goal_units <= 0:
+                        raise ValueError(
+                            f"Package '{package.package_id}' computed a non-positive primary goal "
+                            f"({goal_units} {goal_unit_type}) from its budget; refusing to book."
+                        )
+                    if goal_type == "LIFETIME" and package.budget:
+                        unit_price = float(rate) / 1000 if pricing_model in ("cpm", "vcpm") else float(rate)
+                        booked_value = goal_units * unit_price
+                        budget_value = float(package.budget)
+                        if abs(booked_value - budget_value) > unit_price + 0.01:
+                            raise ValueError(
+                                f"Package '{package.package_id}' booking mismatch: a goal of "
+                                f"{goal_units} {goal_unit_type} at {rate} {pricing_model.upper()} is worth "
+                                f"{booked_value:.4f} {currency}, but the package budget is "
+                                f"{budget_value:.2f} {currency}. Refusing to ship a goal that does not "
+                                f"match the contracted budget."
+                            )
+
                 log(
                     f"  Package pricing: {pricing_model.upper()} @ ${rate:,.2f} {currency} "
                     f"→ GAM {cost_type} @ ${rate:,.2f}, line_item_type={line_item_type}, priority={priority}"

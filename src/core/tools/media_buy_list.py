@@ -434,6 +434,18 @@ _BLOCKER_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+# Internal-only approval blockers (manual approval and GAM order approval).
+# Nothing is delivering while these are persisted, so date math must never
+# resolve them to ``active``/``completed``. The wire enum has no approval
+# state — they surface as ``pending_start``, mirroring
+# ``_media_buy_status_for_create_replay``.
+_APPROVAL_PENDING_STATUSES: frozenset[str] = frozenset(
+    {
+        "pending_approval",
+        "pending_ad_server_approval",
+    }
+)
+
 
 def _to_wire_status(value: Any) -> str | None:
     """Coerce arbitrary status input to a wire-valid ``MediaBuyStatus`` string.
@@ -474,7 +486,11 @@ def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatu
     2. Persisted blocker / terminal statuses (``pending_creatives``, ``paused``,
        ``rejected``, ``canceled``) win over date math — no clock can resolve a
        missing creative or an explicit operator action.
-    3. Otherwise derive from flight dates: ``pending_start`` / ``active`` /
+    3. Internal approval blockers (``pending_approval``,
+       ``pending_ad_server_approval``) also win over date math — nothing is
+       delivering until approval lands. They map to ``pending_start`` since
+       the wire enum has no approval state.
+    4. Otherwise derive from flight dates: ``pending_start`` / ``active`` /
        ``completed``.
     """
     if isinstance(buy, _MediaBuyData) and buy.projected_status is not None:
@@ -483,6 +499,8 @@ def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatu
     persisted = (buy.status or "").lower()
     if persisted in _BLOCKER_STATUSES:
         return MediaBuyStatus(persisted)
+    if persisted in _APPROVAL_PENDING_STATUSES:
+        return MediaBuyStatus.pending_start
 
     start = buy.start_time.date() if buy.start_time else cast(date, buy.start_date)
     end = buy.end_time.date() if buy.end_time else cast(date, buy.end_date)

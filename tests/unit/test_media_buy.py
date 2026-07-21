@@ -2164,8 +2164,12 @@ class TestUpdateMediaBuyTiming:
         req = UpdateMediaBuyRequest(
             **required_request_kwargs(),
             media_buy_id="mb_1",
-            start_time="2026-04-15T00:00:00+00:00",
-            end_time="2026-04-01T00:00:00+00:00",  # end before start
+            # Far-future dates: a start_time in the past trips the
+            # invalid_start_time check first and masks the date-range check
+            # under test (this originally used 2026 dates and began failing
+            # once the real clock passed them).
+            start_time="2099-04-15T00:00:00+00:00",
+            end_time="2099-04-01T00:00:00+00:00",  # end before start
         )
         identity = _make_identity()
 
