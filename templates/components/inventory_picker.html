@@ -36,6 +36,7 @@ Then in your template, add browse buttons:
         <div style="padding: 1rem; border-bottom: 1px solid var(--sa-border); display: flex; gap: 0.5rem;">
             <input type="text" id="picker-search" placeholder="Search..." style="flex: 1; padding: 0.5rem; border: 1px solid var(--sa-border); border-radius: 4px;">
             <button type="button" onclick="window.inventoryPicker.triggerSearch()" class="btn btn-primary" style="padding: 0.5rem 1rem;">Search</button>
+            <button type="button" id="picker-clear-btn" onclick="window.inventoryPicker.clearSearch()" class="btn btn-secondary" style="padding: 0.5rem 1rem; display: none;">Clear</button>
         </div>
 
         <!-- List -->
@@ -77,6 +78,7 @@ Then in your template, add browse buttons:
     // State
     let currentPickerType = null;
     let adUnitTree = null;
+    let adUnitTreeSearch = '';  // last search term applied to the (reused) tree
     let inventoryPickerCache = {
         adUnits: new Map(),
         placements: new Map()
@@ -91,6 +93,7 @@ Then in your template, add browse buttons:
         close: closeInventoryPicker,
         apply: applyInventorySelection,
         triggerSearch: triggerSearch,
+        clearSearch: clearSearch,
         expandAll: () => adUnitTree && adUnitTree.expandAll(),
         collapseAll: () => adUnitTree && adUnitTree.collapseAll(),
         setOnApplyCallback: (callback) => { onApplyCallback = callback; },
@@ -127,6 +130,7 @@ Then in your template, add browse buttons:
 
         // Load inventory with initial search if provided
         loadInventory(type, initialSearch);
+        updateClearButton(initialSearch);
 
         // Show modal
         modal.style.display = 'flex';
@@ -162,7 +166,10 @@ Then in your template, add browse buttons:
             } else {
                 adUnitTree.setSelectedIds(selectedIds);
             }
-            if (search) adUnitTree.search(search);
+            if (search !== adUnitTreeSearch) {
+                adUnitTree.search(search);  // empty term resets the tree to the root list
+                adUnitTreeSearch = search;
+            }
         } else {
             loadPlacementsList(search);
         }
@@ -224,8 +231,21 @@ Then in your template, add browse buttons:
     }
 
     function triggerSearch() {
-        const searchValue = document.getElementById('picker-search').value;
+        const searchValue = document.getElementById('picker-search').value.trim();
         loadInventory(currentPickerType, searchValue);
+        updateClearButton(searchValue);
+    }
+
+    function clearSearch() {
+        document.getElementById('picker-search').value = '';
+        triggerSearch();
+    }
+
+    function updateClearButton(term) {
+        const clearBtn = document.getElementById('picker-clear-btn');
+        if (clearBtn) {
+            clearBtn.style.display = term ? '' : 'none';
+        }
     }
 
     function applyInventorySelection() {
