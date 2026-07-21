@@ -1614,36 +1614,20 @@ function filterGAMFormats() {
         const adUnitIds = config.targeted_ad_unit_ids;
         document.getElementById('targeted_ad_unit_ids').value = adUnitIds.join(',');
 
-        // Fetch TREE data (not flat list) to get hierarchical structure with children
-        // This is critical for size extraction from child ad units
-        fetch(`{{ url_for('inventory.get_inventory_tree', tenant_id=tenant_id) }}`, { credentials: 'same-origin' })
+        // Fetch specific ad unit names by ID — the tree API is lazy-loaded (root nodes
+        // only), so units deeper in the hierarchy would never resolve to a name
+        const adUnitIdsParam = adUnitIds.join(',');
+        fetch(`{{ url_for('inventory.get_inventory_list', tenant_id=tenant_id) }}?type=ad_unit&ids=${encodeURIComponent(adUnitIdsParam)}`, { credentials: 'same-origin' })
             .then(response => response.json())
             .then(data => {
-                console.log('[DEBUG] Tree API returned', data.root_units ? data.root_units.length : 0, 'root units');
-                console.log('[DEBUG] Looking for ad unit IDs:', adUnitIds);
+                if (data.items) {
+                    // Cache ad unit data for inline size display in the chips
+                    data.items.forEach(item => {
+                        inventoryCache.adUnits.set(item.id, item);
+                    });
 
-                if (data.root_units) {
-                    // Process tree to cache all units with their children
-                    const cacheTreeUnits = (units) => {
-                        units.forEach(unit => {
-                            inventoryCache.adUnits.set(unit.id, {
-                                id: unit.id,
-                                name: unit.name,
-                                path: unit.path,
-                                metadata: { sizes: unit.sizes || [] },
-                                children: unit.children || []
-                            });
-                            if (unit.children && unit.children.length > 0) {
-                                cacheTreeUnits(unit.children);
-                            }
-                        });
-                    };
-                    cacheTreeUnits(data.root_units);
-
-                    const names = config.targeted_ad_unit_ids.map(id => {
-                        const item = inventoryCache.adUnits.get(id);
-                        console.log(`[DEBUG] Looking for ID "${id}": ${item ? `FOUND name="${item.name}"` : 'NOT FOUND'}`);
-
+                    const names = adUnitIds.map(id => {
+                        const item = data.items.find(i => i.id === id);
                         return item ? item.name : id;
                     });
                     updateSelectedDisplay('selected-ad-units', names, adUnitIds);
@@ -1654,7 +1638,7 @@ function filterGAMFormats() {
                 }
             })
             .catch(error => {
-                console.error('Failed to fetch ad unit tree:', error);
+                console.error('Failed to fetch ad unit names:', error);
                 // Fallback to IDs
                 updateSelectedDisplay('selected-ad-units', adUnitIds, adUnitIds);
             });
