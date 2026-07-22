@@ -81,6 +81,89 @@ def _validate_media_buy_approval(media_buy, assignments, creatives, now: datetim
     return None
 
 
+# Media buy statuses eligible for a delivery-metrics sync from the ad server.
+_DELIVERY_SYNC_STATUSES = ("active", "approved", "completed")
+
+
+def _sync_delivery_metrics(db_session, tenant_id: str, media_buy, principal) -> dict | None:
+    """Fetch delivery metrics from the ad server adapter and persist the snapshot.
+
+    Updates ``delivered_amount`` / ``delivered_impressions`` /
+    ``delivery_synced_at`` on the media buy so dashboards and reports read
+    real delivery data from the database. Returns the metrics dict for
+    rendering, or ``None`` when the buy is not eligible (status/principal)
+    or the adapter call fails — a sync failure must never break the page.
+    """
+    if media_buy.status not in _DELIVERY_SYNC_STATUSES or principal is None:
+        return None
+
+    try:
+        from datetime import timedelta
+
+        from src.core.config_loader import set_current_tenant
+        from src.core.database.models import Tenant
+        from src.core.helpers.adapter_helpers import get_adapter
+        from src.core.schemas import Principal as PrincipalSchema
+        from src.core.schemas import ReportingPeriod
+
+        # Set tenant context before calling get_adapter (required for adapter initialization)
+        tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+        if tenant:
+            set_current_tenant(
+                {
+                    "tenant_id": tenant_id,
+                    "ad_server": tenant.ad_server or "mock",
+                }
+            )
+
+        # Convert SQLAlchemy model to Pydantic schema (get_adapter expects schema)
+        principal_schema = PrincipalSchema(
+            principal_id=principal.principal_id,
+            name=principal.name,
+            platform_mappings=principal.platform_mappings or {},
+        )
+        adapter = get_adapter(principal_schema, dry_run=False)
+
+        # Request all-time delivery, independent of the buy's
+        # flight/schedule dates. A span over a year makes the
+        # GAM adapter classify the request as "all_time" (full
+        # GAM data retention, aggregated); shorter spans
+        # collapse to "today"/"this_month"/"lifetime" and drop
+        # delivery from earlier periods.
+        end_date = datetime.now(UTC)
+        start_date = end_date - timedelta(days=3 * 365)
+
+        reporting_period = ReportingPeriod(start=start_date, end=end_date)
+
+        # Fetch delivery metrics from adapter
+        delivery_response = adapter.get_media_buy_delivery(
+            media_buy_id=media_buy.media_buy_id, date_range=reporting_period, today=datetime.now(UTC)
+        )
+
+        delivery_metrics = {
+            "impressions": delivery_response.totals.impressions,
+            "spend": delivery_response.totals.spend,
+            "clicks": delivery_response.totals.clicks,
+            "ctr": delivery_response.totals.ctr,
+            "currency": delivery_response.currency,
+            "by_package": delivery_response.by_package,
+        }
+
+        # Persist delivered_amount so the dashboard Running
+        # column and pacing bars reflect real GAM data.
+        from decimal import Decimal as _Decimal
+
+        media_buy.delivered_amount = _Decimal(str(round(delivery_response.totals.spend, 2)))
+        media_buy.delivered_impressions = int(delivery_response.totals.impressions or 0)
+        media_buy.delivery_synced_at = datetime.now(UTC)
+        db_session.commit()
+        return delivery_metrics
+    except Exception as e:
+        logger.warning(f"Could not fetch delivery metrics for {media_buy.media_buy_id}: {e}")
+        # Continue without metrics - don't fail the whole page
+        return None
+
+
 # @operations_bp.route("/targeting", methods=["GET"])
 # @require_tenant_access()
 # def targeting(tenant_id, **kwargs):
@@ -155,7 +238,7 @@ def reporting(tenant_id):
                 currency = str(currency_limit.currency_code)
 
         return render_template("gam_reporting.html", tenant=tenant, currency=currency)
-    
+
 
 @operations_bp.route("/media-buy/<media_buy_id>", methods=["GET"])
 @require_tenant_access()
@@ -280,73 +363,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                 }
 
             # Fetch delivery metrics if media buy is active or completed
-            delivery_metrics = None
-            if media_buy.status in ["active", "approved", "completed"]:
-                try:
-                    from datetime import UTC, datetime, timedelta
-
-                    from src.core.config_loader import set_current_tenant
-                    from src.core.database.models import Tenant
-                    from src.core.helpers.adapter_helpers import get_adapter
-                    from src.core.schemas import Principal as PrincipalSchema
-                    from src.core.schemas import ReportingPeriod
-
-                    # Get adapter for this principal
-                    if principal:
-                        # Set tenant context before calling get_adapter (required for adapter initialization)
-                        tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-                        if tenant:
-                            set_current_tenant(
-                                {
-                                    "tenant_id": tenant_id,
-                                    "ad_server": tenant.ad_server or "mock",
-                                }
-                            )
-
-                        # Convert SQLAlchemy model to Pydantic schema (get_adapter expects schema)
-                        principal_schema = PrincipalSchema(
-                            principal_id=principal.principal_id,
-                            name=principal.name,
-                            platform_mappings=principal.platform_mappings or {},
-                        )
-                        adapter = get_adapter(principal_schema, dry_run=False)
-
-                        # Request all-time delivery, independent of the buy's
-                        # flight/schedule dates. A span over a year makes the
-                        # GAM adapter classify the request as "all_time" (full
-                        # GAM data retention, aggregated); shorter spans
-                        # collapse to "today"/"this_month"/"lifetime" and drop
-                        # delivery from earlier periods.
-                        end_date = datetime.now(UTC)
-                        start_date = end_date - timedelta(days=3 * 365)
-
-                        reporting_period = ReportingPeriod(start=start_date, end=end_date)
-
-                        # Fetch delivery metrics from adapter
-                        delivery_response = adapter.get_media_buy_delivery(
-                            media_buy_id=media_buy_id, date_range=reporting_period, today=datetime.now(UTC)
-                        )
-
-                        delivery_metrics = {
-                            "impressions": delivery_response.totals.impressions,
-                            "spend": delivery_response.totals.spend,
-                            "clicks": delivery_response.totals.clicks,
-                            "ctr": delivery_response.totals.ctr,
-                            "currency": delivery_response.currency,
-                            "by_package": delivery_response.by_package,
-                        }
-
-                        # Persist delivered_amount so the dashboard Running
-                        # column and pacing bars reflect real GAM data.
-                        from decimal import Decimal as _Decimal
-
-                        media_buy.delivered_amount = _Decimal(str(round(delivery_response.totals.spend, 2)))
-                        media_buy.delivered_impressions = int(delivery_response.totals.impressions or 0)
-                        media_buy.delivery_synced_at = datetime.now(UTC)
-                        db_session.commit()
-                except Exception as e:
-                    logger.warning(f"Could not fetch delivery metrics for {media_buy_id}: {e}")
-                    # Continue without metrics - don't fail the whole page
+            delivery_metrics = _sync_delivery_metrics(db_session, tenant_id, media_buy, principal)
 
             # #101 — webhook delivery activity for the per-buy admin tab.
             # Operator-scoped: shows deliveries from any principal that
