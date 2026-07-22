@@ -1079,9 +1079,21 @@ function exportData() {
     document.body.removeChild(a);
 }
 
+// Fire-and-forget: an all_time fetch makes the server persist each media
+// buy's delivered spend/impressions to the database (partial ranges like
+// today/this_month are not trustworthy for that), without blocking the
+// visible charts.
+function syncDeliveryMetrics() {
+    const timezone = document.getElementById('timezone').value;
+    fetch(`{{ script_name }}/api/tenant/{{ tenant.tenant_id }}/gam/reporting?date_range=all_time&timezone=${timezone}`, {
+        credentials: 'same-origin'
+    }).catch(error => console.error('Delivery metrics sync failed:', error));
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     updateReports();
+    syncDeliveryMetrics();
     populateAllFilters();
 
     // Handle tab changes to reinitialize map when shown
