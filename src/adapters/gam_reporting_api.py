@@ -110,6 +110,58 @@ def get_tenant_access(tenant_id: str) -> bool:
     return False
 
 
+# Media buy statuses eligible for a delivery-metrics snapshot update.
+_DELIVERY_SYNC_STATUSES = ("active", "approved", "completed")
+
+
+def _persist_media_buy_delivery_snapshots(tenant_id: str, rows: list[dict]) -> None:
+    """Persist all-time delivery totals onto media buys matched by GAM order ID.
+
+    Aggregates report rows per order and updates ``delivered_amount`` /
+    ``delivered_impressions`` / ``delivery_synced_at`` so dashboards read
+    fresh delivery data without a visit to each media buy detail page.
+    Only call this with all-time rows — partial ranges would understate
+    lifetime delivery.
+    """
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from src.core.database.repositories.media_buy import MediaBuyRepository
+
+    totals: dict[str, dict[str, float]] = {}
+    for row in rows:
+        order_id = str(row.get("order_id") or "").strip()
+        if not order_id:
+            continue
+        agg = totals.setdefault(order_id, {"impressions": 0, "revenue_micros": 0.0})
+        agg["impressions"] += int(row.get("impressions") or 0)
+        # Sum full-precision micros so per-row 2-dp rounding of "spend"
+        # doesn't compound across line items.
+        revenue_micros = row.get("revenue_micros")
+        if revenue_micros is not None:
+            agg["revenue_micros"] += float(revenue_micros)
+        else:
+            agg["revenue_micros"] += float(row.get("spend") or 0) * 1_000_000
+
+    if not totals:
+        return
+
+    synced_at = datetime.now(UTC)
+    with get_db_session() as db_session:
+        repo = MediaBuyRepository(db_session, tenant_id)
+        for order_id, agg in totals.items():
+            media_buy = repo.get_by_external_id(order_id)
+            if not media_buy or media_buy.status not in _DELIVERY_SYNC_STATUSES:
+                continue
+            repo.update_fields(
+                media_buy.media_buy_id,
+                delivered_amount=Decimal(str(round(agg["revenue_micros"] / 1_000_000, 2))),
+                delivered_impressions=int(agg["impressions"]),
+                delivery_synced_at=synced_at,
+            )
+        db_session.commit()
+
+
 @gam_reporting_api.route("/api/tenant/<tenant_id>/gam/reporting", methods=["GET"])
 @require_auth
 def get_gam_reporting(tenant_id: str):
@@ -194,6 +246,16 @@ def get_gam_reporting(tenant_id: str):
             line_item_id=line_item_id,
             requested_timezone=timezone,
         )
+
+        # Update media buy delivery fields from the fetched rows. Only
+        # all_time rows cover the full delivery window (today/this_month/
+        # lifetime are partial and would understate delivered totals).
+        # Best-effort: a persistence failure must not break the report.
+        if date_range_literal == "all_time":
+            try:
+                _persist_media_buy_delivery_snapshots(tenant_id, report_data.data)
+            except Exception as persist_err:
+                logger.warning(f"Failed to persist delivery snapshots for tenant {tenant_id}: {persist_err}")
 
         # Convert to JSON-serializable format
         response = {
