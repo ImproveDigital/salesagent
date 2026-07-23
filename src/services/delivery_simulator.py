@@ -311,10 +311,6 @@ class DeliverySimulator:
                 # Calculate impressions (assume $10 CPM)
                 impressions = int(spend / 0.01)
 
-                # Calculate elapsed hours for webhook
-                elapsed_hours = elapsed_simulated_seconds / 3600
-                total_hours = campaign_duration / 3600
-
                 # Determine status
                 if progress_ratio >= 1.0:
                     status = "completed"

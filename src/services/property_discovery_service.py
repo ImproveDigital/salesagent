@@ -193,9 +193,7 @@ def _filter_properties_by_domain(
     for prop in properties:
         identifiers = prop.get("identifiers", [])
         domain_identifiers = [ident.get("value", "") for ident in identifiers if ident.get("type") == "domain"]
-        if not domain_identifiers:
-            filtered.append(prop)
-        elif _domains_match(domain, domain_identifiers):
+        if not domain_identifiers or _domains_match(domain, domain_identifiers):
             filtered.append(prop)
         else:
             logger.debug(
@@ -425,23 +423,22 @@ class PropertyDiscoveryService:
             existing.updated_at = datetime.now(UTC)
             logger.debug(f"Updated property: {property_id}")
             return False
-        else:
-            new_property = AuthorizedProperty(
-                tenant_id=tenant_id,
-                property_id=property_id,
-                name=property_name,
-                property_type=property_type,
-                publisher_domain=publisher_domain,
-                identifiers=identifiers,
-                tags=property_tags,
-                verification_status="verified",
-                verification_checked_at=datetime.now(UTC),
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
-            )
-            session.add(new_property)
-            logger.debug(f"Created property: {property_id}")
-            return True
+        new_property = AuthorizedProperty(
+            tenant_id=tenant_id,
+            property_id=property_id,
+            name=property_name,
+            property_type=property_type,
+            publisher_domain=publisher_domain,
+            identifiers=identifiers,
+            tags=property_tags,
+            verification_status="verified",
+            verification_checked_at=datetime.now(UTC),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        session.add(new_property)
+        logger.debug(f"Created property: {property_id}")
+        return True
 
     def _create_or_update_tag(
         self, session: Any, tenant_id: str, tag_id: str, existing_tags: dict[str, PropertyTag]

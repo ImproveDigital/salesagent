@@ -307,7 +307,8 @@ class LineItem:
         if obj is None:
             return None
         try:
-            return serialize_object(obj)
+            serialized: dict[str, Any] = serialize_object(obj)
+            return serialized
         except Exception as e:
             logger.warning(f"Failed to serialize {field_name} for line item {line_item_id}: {e}")
             return None

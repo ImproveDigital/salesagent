@@ -308,16 +308,15 @@ def test_signals_agent(tenant_id, agent_id):
                         "signal_count": result.get("signal_count", 0),
                     }
                 )
-            else:
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "error": result.get("error", "Connection failed"),
-                        }
-                    ),
-                    400,
-                )
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": result.get("error", "Connection failed"),
+                    }
+                ),
+                400,
+            )
 
     except Exception as e:
         logger.error(f"Error testing signals agent: {e}", exc_info=True)

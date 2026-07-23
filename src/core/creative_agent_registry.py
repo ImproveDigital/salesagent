@@ -368,10 +368,10 @@ class CreativeAgentRegistry:
 
                 return formats
 
-            elif result.status == "submitted":
+            if result.status == "submitted":
                 raise AdCPAdapterError(f"Unexpected submitted status for list_creative_formats from {agent.name}")
 
-            elif result.status == "failed":
+            if result.status == "failed":
                 # Log detailed error information for debugging
                 # Use getattr for safe access in case response structure varies
                 error_msg = (
@@ -406,8 +406,7 @@ class CreativeAgentRegistry:
                     logger.debug(f"Debug info: {debug_info}")
                 raise AdCPAdapterError(f"Creative agent format fetch failed: {error_msg}")
 
-            else:
-                raise AdCPAdapterError(f"Unexpected result status from {agent.name}: {result.status}")
+            raise AdCPAdapterError(f"Unexpected result status from {agent.name}: {result.status}")
 
         except ADCPAuthenticationError as e:
             logger.error(f"Authentication failed for creative agent {agent.name}: {e.message}")
@@ -935,7 +934,8 @@ class CreativeAgentRegistry:
 
             # Use structured_content field for JSON response (MCP protocol update)
             if hasattr(result, "structured_content") and result.structured_content:
-                return result.structured_content
+                structured: dict[str, Any] = result.structured_content
+                return structured
 
             # Fallback: Parse result from content field (legacy)
             import json
@@ -944,7 +944,8 @@ class CreativeAgentRegistry:
                 preview_data = result.content[0].text if hasattr(result.content[0], "text") else result.content[0]
                 if isinstance(preview_data, str):
                     preview_data = json.loads(preview_data)
-                return preview_data
+                preview_payload: dict[str, Any] = preview_data
+                return preview_payload
 
             return {}
 
@@ -999,7 +1000,8 @@ class CreativeAgentRegistry:
 
             # Use structured_content field for JSON response (MCP protocol update)
             if hasattr(result, "structured_content") and result.structured_content:
-                return result.structured_content
+                structured: dict[str, Any] = result.structured_content
+                return structured
 
             # Fallback: Parse result from content field (legacy)
             import json
@@ -1008,7 +1010,8 @@ class CreativeAgentRegistry:
                 creative_data = result.content[0].text if hasattr(result.content[0], "text") else result.content[0]
                 if isinstance(creative_data, str):
                     creative_data = json.loads(creative_data)
-                return creative_data
+                creative_payload: dict[str, Any] = creative_data
+                return creative_payload
 
             return {}
 

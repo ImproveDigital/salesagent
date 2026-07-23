@@ -196,10 +196,20 @@ class DashboardService:
         today = datetime.now(UTC).date()
         revenue_data = []
 
+        # One windowed query for the whole trend, bucketed per day in Python —
+        # replaces a query per day (30 on the dashboard, 365 for YTD).
+        window_start = anchor - timedelta(days=days - 1)
+        window_buys = [
+            (buy, buy_start, buy_end)
+            for buy in repo.list_in_flight_between(window_start, anchor, statuses=["active", "completed"])
+            if (buy_start := type_cast(date | None, buy.start_date)) is not None
+            and (buy_end := type_cast(date | None, buy.end_date)) is not None
+        ]
+
         for i in range(days):
             day = anchor - timedelta(days=days - 1 - i)
 
-            daily_buys = repo.list_in_flight_on_date(day, statuses=["active", "completed"])
+            daily_buys = [buy for buy, buy_start, buy_end in window_buys if buy_start <= day <= buy_end]
 
             daily_revenue = 0.0
             for buy in daily_buys:
@@ -234,8 +244,8 @@ class DashboardService:
         if len(revenue_data) < 14:
             return 0.0
 
-        last_week_revenue = sum(d["revenue"] for d in revenue_data[-7:])
-        previous_week_revenue = sum(d["revenue"] for d in revenue_data[-14:-7])
+        last_week_revenue: float = sum(d["revenue"] for d in revenue_data[-7:])
+        previous_week_revenue: float = sum(d["revenue"] for d in revenue_data[-14:-7])
 
         if previous_week_revenue > 0:
             return ((last_week_revenue - previous_week_revenue) / previous_week_revenue) * 100
@@ -280,8 +290,8 @@ class DashboardService:
                 return budget
 
             # Calculate spend based on elapsed days
-            total_days = (media_buy.end_date - media_buy.start_date).days + 1
-            elapsed_days = (today - media_buy.start_date).days + 1
+            total_days: int = (media_buy.end_date - media_buy.start_date).days + 1
+            elapsed_days: int = (today - media_buy.start_date).days + 1
 
             if total_days > 0:
                 return budget * (elapsed_days / total_days)
@@ -304,13 +314,12 @@ class DashboardService:
         if delta.days > 0:
             if delta.days == 1:
                 return "1 day ago"
-            elif delta.days < 7:
+            if delta.days < 7:
                 return f"{delta.days} days ago"
-            elif delta.days < 30:
+            if delta.days < 30:
                 weeks = delta.days // 7
                 return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-            else:
-                return timestamp.strftime("%Y-%m-%d")
+            return type_cast(str, timestamp.strftime("%Y-%m-%d"))
 
         hours = delta.seconds // 3600
         if hours > 0:
@@ -409,7 +418,8 @@ class DashboardService:
         from sqlalchemy import select
 
         stmt = select(Tenant).filter_by(tenant_id=self.tenant_id)
-        return session.scalars(stmt).first()
+        tenant: Tenant | None = session.scalars(stmt).first()
+        return tenant
 
     def _masthead(self, session, tenant: Tenant | None) -> dict[str, Any]:
         from sqlalchemy import func, select
@@ -794,7 +804,7 @@ class DashboardService:
                 db_session.execute(text("SELECT 1")).scalar()
 
             # Test audit logs table (our single data source)
-            test_activities = get_business_activities("health_check", limit=1)
+            get_business_activities("health_check", limit=1)
 
             return {
                 "status": "healthy",

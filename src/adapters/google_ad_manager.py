@@ -469,7 +469,7 @@ class GoogleAdManager(AdServerAdapter):
                 # Check if pricing model is supported by GAM adapter at all
                 try:
                     gam_cost_type = PricingCompatibility.get_gam_cost_type(pricing_model)
-                except ValueError as e:
+                except ValueError:
                     error_msg = (
                         f"Google Ad Manager adapter does not support '{pricing_model}' pricing. "
                         f"Supported pricing models: CPM, VCPM, CPC, FLAT_RATE. "
@@ -671,11 +671,10 @@ class GoogleAdManager(AdServerAdapter):
                     creative_deadline_days=None,
                     workflow_step_id=step_id,
                 )
-            else:
-                error_msg = "Failed to create manual order workflow step"
-                return CreateMediaBuyError(
-                    errors=[Error(code="workflow_creation_failed", message=error_msg, details=None)],
-                )
+            error_msg = "Failed to create manual order workflow step"
+            return CreateMediaBuyError(
+                errors=[Error(code="workflow_creation_failed", message=error_msg, details=None)],
+            )
 
         # Automatic mode - create order directly
         # Use pre-loaded naming template, or fallback to default
@@ -951,7 +950,8 @@ class GoogleAdManager(AdServerAdapter):
                 "[red]Error: GAM adapter not configured for order operations (missing advertiser_id or trafficker_id)[/red]"
             )
             return False
-        return self.orders_manager.archive_order(order_id)
+        archived: bool = self.orders_manager.archive_order(order_id)
+        return archived
 
     def get_advertisers(
         self, search_query: str | None = None, limit: int = 500, fetch_all: bool = False
@@ -1015,19 +1015,18 @@ class GoogleAdManager(AdServerAdapter):
                         )
                     )
                 return asset_statuses
-            else:
-                # Return failed statuses if workflow creation failed
-                asset_statuses = []
-                for asset in assets:
-                    asset_statuses.append(
-                        AssetStatus(
-                            asset_id=asset.get("asset_id", f"failed_{len(asset_statuses)}"),
-                            status="failed",
-                            message="Failed to create approval workflow step",
-                            creative_id=None,
-                        )
+            # Return failed statuses if workflow creation failed
+            asset_statuses = []
+            for asset in assets:
+                asset_statuses.append(
+                    AssetStatus(
+                        asset_id=asset.get("asset_id", f"failed_{len(asset_statuses)}"),
+                        status="failed",
+                        message="Failed to create approval workflow step",
+                        creative_id=None,
                     )
-                return asset_statuses
+                )
+            return asset_statuses
 
         # Automatic mode - process creatives directly
         # Pass placement_targeting_map for creative-level targeting (adcp#208)
@@ -1491,16 +1490,15 @@ class GoogleAdManager(AdServerAdapter):
                     affected_packages=[],  # List of package_ids affected by update
                     implementation_date=today,
                 )
-            else:
-                return UpdateMediaBuyError(
-                    errors=[
-                        Error(
-                            code="workflow_creation_failed",
-                            message="Failed to create approval workflow step",
-                            details=None,
-                        )
-                    ],
-                )
+            return UpdateMediaBuyError(
+                errors=[
+                    Error(
+                        code="workflow_creation_failed",
+                        message="Failed to create approval workflow step",
+                        details=None,
+                    )
+                ],
+            )
 
         # Check for activate_order action with guaranteed items
         if action == "activate_order":
@@ -1520,16 +1518,15 @@ class GoogleAdManager(AdServerAdapter):
                         implementation_date=today,
                         workflow_step_id=step_id,
                     )
-                else:
-                    return UpdateMediaBuyError(
-                        errors=[
-                            Error(
-                                code="activation_workflow_failed",
-                                message=f"Cannot auto-activate order with guaranteed line items: {', '.join(item_types)}",
-                                details=None,
-                            )
-                        ],
-                    )
+                return UpdateMediaBuyError(
+                    errors=[
+                        Error(
+                            code="activation_workflow_failed",
+                            message=f"Cannot auto-activate order with guaranteed line items: {', '.join(item_types)}",
+                            details=None,
+                        )
+                    ],
+                )
 
         # Handle package budget updates
         if action == "update_package_budget" and package_id and budget is not None:
@@ -1659,7 +1656,6 @@ class GoogleAdManager(AdServerAdapter):
 
             # Determine if we're pausing or resuming
             is_pause = action.startswith("pause_")
-            new_status = "PAUSED" if is_pause else "READY"
             action_verb = "Pausing" if is_pause else "Resuming"
 
             # Package-level actions

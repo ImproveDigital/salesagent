@@ -164,30 +164,29 @@ def map_gam_exception(exception: Exception) -> GAMError:
     if "AuthError" in type(exception).__name__ or "authentication" in error_message.lower():
         return GAMAuthenticationError(f"GAM authentication failed: {error_message}", error_details)
 
-    elif "PermissionError" in type(exception).__name__ or "permission" in error_message.lower():
+    if "PermissionError" in type(exception).__name__ or "permission" in error_message.lower():
         return GAMPermissionError(f"GAM permission denied: {error_message}", error_details)
 
-    elif "ValidationError" in type(exception).__name__ or "invalid" in error_message.lower():
+    if "ValidationError" in type(exception).__name__ or "invalid" in error_message.lower():
         return GAMValidationError(f"GAM validation failed: {error_message}", error_details)
 
-    elif "QuotaError" in type(exception).__name__ or "quota" in error_message.lower():
+    if "QuotaError" in type(exception).__name__ or "quota" in error_message.lower():
         return GAMQuotaError(f"GAM quota exceeded: {error_message}", error_details)
 
-    elif "NetworkError" in type(exception).__name__ or "network" in error_message.lower():
+    if "NetworkError" in type(exception).__name__ or "network" in error_message.lower():
         return GAMNetworkError(f"GAM network error: {error_message}", error_details)
 
-    elif "TimeoutError" in type(exception).__name__ or "timeout" in error_message.lower():
+    if "TimeoutError" in type(exception).__name__ or "timeout" in error_message.lower():
         return GAMTimeoutError(f"GAM operation timed out: {error_message}", error_details)
 
-    elif "NotFoundError" in type(exception).__name__ or "not found" in error_message.lower():
+    if "NotFoundError" in type(exception).__name__ or "not found" in error_message.lower():
         return GAMResourceNotFoundError(f"GAM resource not found: {error_message}", error_details)
 
-    elif "DuplicateError" in type(exception).__name__ or "already exists" in error_message.lower():
+    if "DuplicateError" in type(exception).__name__ or "already exists" in error_message.lower():
         return GAMDuplicateResourceError(f"GAM resource already exists: {error_message}", error_details)
 
-    else:
-        # Default to unknown error
-        return GAMError(f"GAM error: {error_message}", GAMErrorType.UNKNOWN, error_details)
+    # Default to unknown error
+    return GAMError(f"GAM error: {error_message}", GAMErrorType.UNKNOWN, error_details)
 
 
 def with_retry(

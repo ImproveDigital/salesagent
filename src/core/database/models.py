@@ -98,8 +98,6 @@ def _encrypt_optional_secret(value: str | None) -> str | None:
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy models using SQLAlchemy 2.0 declarative style."""
 
-    pass
-
 
 class Tenant(Base, JSONValidatorMixin):
     __tablename__ = "tenants"
@@ -531,7 +529,7 @@ class Product(Base, JSONValidatorMixin):
         # Convert product's authorization to AdCP publisher_properties format
         if self.properties:
             return ensure_selection_type(self.properties)
-        elif self.property_ids:
+        if self.property_ids:
             # AdCP 2.0.0 by_id variant
             # Get publisher_domain from tenant (use subdomain or virtual_host)
             if hasattr(self, "tenant") and self.tenant:
@@ -541,7 +539,7 @@ class Product(Base, JSONValidatorMixin):
             return [
                 {"publisher_domain": publisher_domain, "property_ids": self.property_ids, "selection_type": "by_id"}
             ]
-        elif self.property_tags:
+        if self.property_tags:
             # AdCP 2.0.0 by_tag variant
             # Get publisher_domain from tenant (use subdomain or virtual_host)
             if hasattr(self, "tenant") and self.tenant:

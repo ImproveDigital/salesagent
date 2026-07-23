@@ -10,7 +10,7 @@ Handles media buy updates including:
 
 import logging
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -834,7 +834,7 @@ def _update_media_buy_impl(
             return response_data
 
         adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
-        today = req.today or date.today()
+        today = req.today or datetime.now(UTC).date()
 
         # Dry-run mode: Return simulated response without any database writes
         # Validation has passed (principal verified, media buy exists), so we return what WOULD be updated
@@ -1176,53 +1176,52 @@ def _update_media_buy_impl(
                     error_message=result.errors[0].message if result.errors else "Pause/resume failed",
                 )
                 return error_response
-            else:
-                # UpdateMediaBuySuccess extends adcp v1.2.1 with internal fields
-                # Use getattr to safely access discriminated union fields
-                media_buy_id = getattr(result, "media_buy_id", req.media_buy_id or "")
-                affected_pkgs = getattr(result, "affected_packages", [])
+            # UpdateMediaBuySuccess extends adcp v1.2.1 with internal fields
+            # Use getattr to safely access discriminated union fields
+            media_buy_id = getattr(result, "media_buy_id", req.media_buy_id or "")
+            affected_pkgs = getattr(result, "affected_packages", [])
 
-                # Echo the resulting media-buy lifecycle status. Resume restores
-                # the pre-pause blocker/date state instead of blindly reporting
-                # active, so the response and get_media_buys readback agree.
-                resulting_media_buy_status = _persist_media_buy_pause_state(
-                    uow.media_buys,
-                    current_mb,
-                    req.media_buy_id,
-                    req.paused,
-                )
-                response_revision = _increment_revision_for_response(
-                    uow.media_buys,
-                    req.media_buy_id,
-                    current_revision,
-                )
-                success_response = UpdateMediaBuySuccess(
-                    media_buy_id=media_buy_id,
-                    media_buy_status=resulting_media_buy_status,
-                    affected_packages=affected_pkgs,
-                    revision=response_revision,
-                    context=req.context,
-                )
-                # Log successful update_media_buy (pause/resume)
-                audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
-                audit_logger.log_operation(
-                    operation="update_media_buy",
-                    principal_name=principal_id or "anonymous",
-                    principal_id=principal_id or "anonymous",
-                    adapter_id="mcp_server",
-                    success=True,
-                    details={
-                        "media_buy_id": req.media_buy_id,
-                        "action": action,
-                        "affected_packages_count": len(affected_pkgs),
-                    },
-                )
-                ctx_manager.update_workflow_step(
-                    step.step_id,
-                    status="completed",
-                    response_data=serialize_for_workflow_step(success_response),
-                )
-                return success_response
+            # Echo the resulting media-buy lifecycle status. Resume restores
+            # the pre-pause blocker/date state instead of blindly reporting
+            # active, so the response and get_media_buys readback agree.
+            resulting_media_buy_status = _persist_media_buy_pause_state(
+                uow.media_buys,
+                current_mb,
+                req.media_buy_id,
+                req.paused,
+            )
+            response_revision = _increment_revision_for_response(
+                uow.media_buys,
+                req.media_buy_id,
+                current_revision,
+            )
+            success_response = UpdateMediaBuySuccess(
+                media_buy_id=media_buy_id,
+                media_buy_status=resulting_media_buy_status,
+                affected_packages=affected_pkgs,
+                revision=response_revision,
+                context=req.context,
+            )
+            # Log successful update_media_buy (pause/resume)
+            audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
+            audit_logger.log_operation(
+                operation="update_media_buy",
+                principal_name=principal_id or "anonymous",
+                principal_id=principal_id or "anonymous",
+                adapter_id="mcp_server",
+                success=True,
+                details={
+                    "media_buy_id": req.media_buy_id,
+                    "action": action,
+                    "affected_packages_count": len(affected_pkgs),
+                },
+            )
+            ctx_manager.update_workflow_step(
+                step.step_id,
+                status="completed",
+                response_data=serialize_for_workflow_step(success_response),
+            )
+            return success_response
 
         # Handle package-level updates
         # (Package existence pre-validated above for issue #251 — every

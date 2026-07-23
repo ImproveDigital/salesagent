@@ -19,8 +19,6 @@ T = TypeVar("T")
 class TimeoutError(Exception):
     """Raised when operation times out."""
 
-    pass
-
 
 def timeout(seconds: int = 300):
     """

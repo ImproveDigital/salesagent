@@ -241,22 +241,6 @@ def _list_creatives_impl(
 
         # Convert to schema objects
         for db_creative in db_creatives:
-            # Handle content_uri - required field even for snippet creatives
-            # For snippet creatives, provide an HTML-looking URL to pass validation
-            snippet = db_creative.data.get("snippet") if db_creative.data else None
-            if snippet:
-                content_uri = (
-                    db_creative.data.get("url") or "<script>/* Snippet-based creative */</script>"
-                    if db_creative.data
-                    else "<script>/* Snippet-based creative */</script>"
-                )
-            else:
-                content_uri = (
-                    db_creative.data.get("url") or "https://placeholder.example.com/missing.jpg"
-                    if db_creative.data
-                    else "https://placeholder.example.com/missing.jpg"
-                )
-
             # Build Creative directly with explicit types to satisfy mypy
             from src.core.schemas import FormatId, url
 
@@ -384,9 +368,6 @@ def _list_creatives_impl(
     message = f"Found {len(creatives)} creatives"
     if total_count > len(creatives):
         message += f" (page {page} of {total_pages} total)"
-
-    # Calculate offset for pagination
-    offset_calc = (page - 1) * limit
 
     # Import required schema classes
     from src.core.schemas import Pagination as SchemaPagination

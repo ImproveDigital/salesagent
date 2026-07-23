@@ -409,8 +409,7 @@ class GAMInventoryDiscovery:
             if "argument should be integer or bytes-like object" in str(e):
                 logger.info("No labels found in GAM account (or empty result set)")
                 return []
-            else:
-                raise
+            raise
 
         logger.info(f"Discovered {len(discovered_labels)} labels")
         return discovered_labels
@@ -822,7 +821,7 @@ class GAMInventoryDiscovery:
                 "with_children": len([u for u in ad_units if u.has_children]),
             },
             "placements": {"total": len(placements), "active": len([p for p in placements if p.status == "ACTIVE"])},
-            "labels": {"total": len(labels), "active": len([l for l in labels if l.is_active])},
+            "labels": {"total": len(labels), "active": len([label for label in labels if label.is_active])},
             "custom_targeting": {
                 "total_keys": len(self.custom_targeting_keys),
                 "total_values": custom_targeting.get("total_values", 0),
@@ -895,7 +894,7 @@ class GAMInventoryDiscovery:
         if "labels" in sync_types:
             self.labels.clear()
             labels = self.discover_labels()
-            summary["labels"] = {"total": len(labels), "active": len([l for l in labels if l.is_active])}
+            summary["labels"] = {"total": len(labels), "active": len([label for label in labels if label.is_active])}
 
         # Sync custom targeting with optional limit
         if "custom_targeting" in sync_types:

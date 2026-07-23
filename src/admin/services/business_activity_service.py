@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import AuditLog, Principal
+from src.core.utils.time_format import relative_time_ago
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +83,12 @@ def get_business_activities(tenant_id: str, limit: int = 50) -> list[dict]:
                 operation = log.operation or "unknown"
                 if operation.startswith("A2A."):
                     activity_type = "a2a"
-                    icon = "📡"
                 elif operation.startswith("AdCP."):
                     activity_type = "adcp"
-                    icon = "🔌"
                 elif operation.startswith("MCP."):
                     activity_type = "mcp"
-                    icon = "🔗"
                 else:
                     activity_type = "system"
-                    icon = "⚙️"
 
                 # Build title from operation
                 operation_clean = operation.replace("AdCP.", "").replace("A2A.", "").replace("MCP.", "")
@@ -176,10 +173,8 @@ def get_business_activities(tenant_id: str, limit: int = 50) -> list[dict]:
                 # Build description
                 if log.success:
                     status_text = "✓ Success"
-                    badge_type = "success"
                 else:
                     status_text = f"✗ Failed: {log.error_message or 'Unknown error'}"
-                    badge_type = "error"
 
                 # Extract key details for description
                 description_parts = [status_text]
@@ -259,18 +254,6 @@ def get_business_activities(tenant_id: str, limit: int = 50) -> list[dict]:
     # Add relative time formatting
     now = datetime.now(UTC)
     for activity in activities[:limit]:
-        timestamp = cast(datetime, activity["timestamp"])
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=UTC)
-
-        delta = now - timestamp
-        if delta.days > 0:
-            activity["time_relative"] = f"{delta.days}d ago"
-        elif delta.seconds > 3600:
-            activity["time_relative"] = f"{delta.seconds // 3600}h ago"
-        elif delta.seconds > 60:
-            activity["time_relative"] = f"{delta.seconds // 60}m ago"
-        else:
-            activity["time_relative"] = "Just now"
+        activity["time_relative"] = relative_time_ago(cast(datetime, activity["timestamp"]), now)
 
     return activities[:limit]

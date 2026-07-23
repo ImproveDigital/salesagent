@@ -337,11 +337,10 @@ def format_duration(seconds: float) -> str:
     """
     if seconds < 1:
         return f"{seconds * 1000:.0f}ms"
-    elif seconds < 60:
+    if seconds < 60:
         return f"{seconds:.1f}s"
-    elif seconds < 3600:
+    if seconds < 3600:
         minutes = seconds / 60
         return f"{minutes:.1f}m"
-    else:
-        hours = seconds / 3600
-        return f"{hours:.1f}h"
+    hours = seconds / 3600
+    return f"{hours:.1f}h"

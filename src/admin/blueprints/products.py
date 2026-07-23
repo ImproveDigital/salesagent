@@ -162,14 +162,13 @@ def _format_id_to_display_name(format_id: str) -> str:
     # Add dimensions back if found
     if size_match:
         return f"{base_name} ({size_match.group(0)})"
-    else:
-        return base_name
+    return base_name
 
 
 def _format_error_to_dict(error: Any) -> dict[str, Any]:
     """Serialize an AdCP error object for tenant-management/admin responses."""
     if hasattr(error, "model_dump"):
-        data = error.model_dump(mode="json", exclude_none=True)
+        data: dict[str, Any] = error.model_dump(mode="json", exclude_none=True)
     elif isinstance(error, dict):
         data = {key: value for key, value in error.items() if value is not None}
     else:
@@ -297,6 +296,127 @@ def get_creative_formats(
     return catalog.formats
 
 
+def _collect_pricing_indices(form_data: dict) -> list[int]:
+    """Return the sorted pricing option indices found in form keys."""
+    # Find all pricing option indices by scanning form keys
+    # This handles non-contiguous indices (e.g., 0 removed, only 1 exists)
+    indices = set()
+    for key in form_data:
+        if key.startswith("pricing_model_"):
+            try:
+                idx = int(key.replace("pricing_model_", ""))
+                indices.add(idx)
+            except ValueError:
+                pass
+    return sorted(indices)
+
+
+def _resolve_pricing_model(pricing_model_raw: str) -> tuple[str, bool]:
+    """Map a combined form pricing-model value to (pricing_model, is_fixed)."""
+    # Parse pricing model and is_fixed from combined value
+    # Guaranteed (fixed): cpm_fixed, flat_rate
+    # Non-guaranteed (auction): cpm_auction, vcpm, cpc
+    if pricing_model_raw == "cpm_fixed":
+        return "cpm", True
+    if pricing_model_raw == "cpm_auction":
+        return "cpm", False
+    if pricing_model_raw == "flat_rate":
+        return "flat_rate", True
+    if pricing_model_raw == "vcpm":
+        return "vcpm", False  # vCPM is always auction-based
+    if pricing_model_raw == "cpc":
+        return "cpc", False  # CPC is always auction-based
+    # Fallback for any other models (shouldn't happen with current UI)
+    return pricing_model_raw, True
+
+
+def _parse_pricing_rate(form_data: dict, index: int, is_fixed: bool) -> float | None:
+    """Parse the rate field, enforcing that fixed pricing always has one."""
+    rate = None
+    rate_str = form_data.get(f"rate_{index}", "").strip()
+    if rate_str:
+        try:
+            rate = float(rate_str)
+        except ValueError as e:
+            raise ValueError(f"Invalid rate value for pricing option {index}") from e
+
+    # Validate rate is required for fixed pricing
+    if is_fixed and rate is None:
+        raise ValueError(f"Rate is required for fixed pricing (pricing option {index})")
+
+    return rate
+
+
+def _parse_price_guidance(form_data: dict, index: int, is_fixed: bool) -> dict | None:
+    """Parse auction price guidance (required floor plus optional percentiles)."""
+    if is_fixed:
+        return None
+
+    # Floor price is required for auction
+    floor_str = form_data.get(f"floor_{index}", "").strip()
+    if not floor_str:
+        raise ValueError(f"Floor price is required for auction pricing (pricing option {index})")
+    try:
+        floor = float(floor_str)
+        price_guidance = {"floor": floor}
+
+        # Optional percentiles
+        for percentile in ["p25", "p50", "p75", "p90"]:
+            value_str = form_data.get(f"{percentile}_{index}", "").strip()
+            if value_str:
+                try:
+                    price_guidance[percentile] = float(value_str)
+                except ValueError:
+                    pass
+    except ValueError as e:
+        raise ValueError(f"Invalid floor price value for pricing option {index}") from e
+
+    return price_guidance
+
+
+def _parse_min_spend(form_data: dict, index: int) -> float | None:
+    """Parse the optional min_spend field, ignoring invalid values."""
+    min_spend = None
+    min_spend_str = form_data.get(f"min_spend_{index}", "").strip()
+    if min_spend_str:
+        try:
+            min_spend = float(min_spend_str)
+        except ValueError:
+            pass
+    return min_spend
+
+
+def _parse_model_parameters(form_data: dict, index: int, pricing_model: str) -> dict | None:
+    """Parse model-specific parameters for cpp and cpv pricing models."""
+    parameters = None
+    if pricing_model == "cpp":
+        # CPP parameters
+        demographic = form_data.get(f"demographic_{index}", "").strip()
+        min_points_str = form_data.get(f"min_points_{index}", "").strip()
+        if demographic or min_points_str:
+            parameters = {}
+            if demographic:
+                parameters["demographic"] = demographic
+            if min_points_str:
+                try:
+                    parameters["min_points"] = float(min_points_str)
+                except ValueError:
+                    pass
+
+    elif pricing_model == "cpv":
+        # CPV parameters
+        view_threshold_str = form_data.get(f"view_threshold_{index}", "").strip()
+        if view_threshold_str:
+            try:
+                view_threshold = float(view_threshold_str)
+                if 0 <= view_threshold <= 1:
+                    parameters = {"view_threshold": view_threshold}
+            except ValueError:
+                pass
+
+    return parameters
+
+
 def parse_pricing_options_from_form(form_data: dict) -> list[dict]:
     """Parse pricing options from form data (AdCP PR #88).
 
@@ -307,119 +427,20 @@ def parse_pricing_options_from_form(form_data: dict) -> list[dict]:
     """
     pricing_options = []
 
-    # Find all pricing option indices by scanning form keys
-    # This handles non-contiguous indices (e.g., 0 removed, only 1 exists)
-    indices = set()
-    for key in form_data.keys():
-        if key.startswith("pricing_model_"):
-            try:
-                idx = int(key.replace("pricing_model_", ""))
-                indices.add(idx)
-            except ValueError:
-                pass
-
     # Process each found index in order
-    for index in sorted(indices):
+    for index in _collect_pricing_indices(form_data):
         pricing_model_raw = form_data.get(f"pricing_model_{index}")
         if not pricing_model_raw:
             continue
 
-        # Parse pricing model and is_fixed from combined value
-        # Guaranteed (fixed): cpm_fixed, flat_rate
-        # Non-guaranteed (auction): cpm_auction, vcpm, cpc
-        if pricing_model_raw == "cpm_fixed":
-            pricing_model = "cpm"
-            is_fixed = True
-        elif pricing_model_raw == "cpm_auction":
-            pricing_model = "cpm"
-            is_fixed = False
-        elif pricing_model_raw == "flat_rate":
-            pricing_model = "flat_rate"
-            is_fixed = True
-        elif pricing_model_raw == "vcpm":
-            pricing_model = "vcpm"
-            is_fixed = False  # vCPM is always auction-based
-        elif pricing_model_raw == "cpc":
-            pricing_model = "cpc"
-            is_fixed = False  # CPC is always auction-based
-        else:
-            # Fallback for any other models (shouldn't happen with current UI)
-            pricing_model = pricing_model_raw
-            is_fixed = True
+        pricing_model, is_fixed = _resolve_pricing_model(pricing_model_raw)
 
         # Parse basic fields
         currency = form_data.get(f"currency_{index}", "USD")
-
-        # Parse rate (for fixed pricing)
-        rate = None
-        rate_str = form_data.get(f"rate_{index}", "").strip()
-        if rate_str:
-            try:
-                rate = float(rate_str)
-            except ValueError as e:
-                raise ValueError(f"Invalid rate value for pricing option {index}") from e
-
-        # Validate rate is required for fixed pricing
-        if is_fixed and rate is None:
-            raise ValueError(f"Rate is required for fixed pricing (pricing option {index})")
-
-        # Parse price_guidance (for auction pricing)
-        price_guidance = None
-        if not is_fixed:
-            # Floor price is required for auction
-            floor_str = form_data.get(f"floor_{index}", "").strip()
-            if not floor_str:
-                raise ValueError(f"Floor price is required for auction pricing (pricing option {index})")
-            try:
-                floor = float(floor_str)
-                price_guidance = {"floor": floor}
-
-                # Optional percentiles
-                for percentile in ["p25", "p50", "p75", "p90"]:
-                    value_str = form_data.get(f"{percentile}_{index}", "").strip()
-                    if value_str:
-                        try:
-                            price_guidance[percentile] = float(value_str)
-                        except ValueError:
-                            pass
-            except ValueError as e:
-                raise ValueError(f"Invalid floor price value for pricing option {index}") from e
-
-        # Parse min_spend_per_package
-        min_spend = None
-        min_spend_str = form_data.get(f"min_spend_{index}", "").strip()
-        if min_spend_str:
-            try:
-                min_spend = float(min_spend_str)
-            except ValueError:
-                pass
-
-        # Parse model-specific parameters
-        parameters = None
-        if pricing_model == "cpp":
-            # CPP parameters
-            demographic = form_data.get(f"demographic_{index}", "").strip()
-            min_points_str = form_data.get(f"min_points_{index}", "").strip()
-            if demographic or min_points_str:
-                parameters = {}
-                if demographic:
-                    parameters["demographic"] = demographic
-                if min_points_str:
-                    try:
-                        parameters["min_points"] = float(min_points_str)
-                    except ValueError:
-                        pass
-
-        elif pricing_model == "cpv":
-            # CPV parameters
-            view_threshold_str = form_data.get(f"view_threshold_{index}", "").strip()
-            if view_threshold_str:
-                try:
-                    view_threshold = float(view_threshold_str)
-                    if 0 <= view_threshold <= 1:
-                        parameters = {"view_threshold": view_threshold}
-                except ValueError:
-                    pass
+        rate = _parse_pricing_rate(form_data, index, is_fixed)
+        price_guidance = _parse_price_guidance(form_data, index, is_fixed)
+        min_spend = _parse_min_spend(form_data, index)
+        parameters = _parse_model_parameters(form_data, index, pricing_model)
 
         # Build pricing option dict
         pricing_option = {
@@ -433,7 +454,6 @@ def parse_pricing_options_from_form(form_data: dict) -> list[dict]:
         }
 
         pricing_options.append(pricing_option)
-        index += 1
 
     return pricing_options
 
@@ -774,21 +794,20 @@ def _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_d
                 principals=principals_list,
                 form_data=form_data,  # Preserve form data on error
             )
-        else:
-            # For Mock and other adapters - use unified template
-            formats = get_creative_formats(tenant_id=tenant_id)
-            return render_template(
-                "add_product.html",
-                tenant_id=tenant_id,
-                tenant=tenant,
-                adapter_type=adapter_type,
-                formats=formats,
-                authorized_properties=properties_list,
-                property_tags=property_tags,
-                currencies=currencies,
-                principals=principals_list,
-                form_data=form_data,  # Preserve form data on error
-            )
+        # For Mock and other adapters - use unified template
+        formats = get_creative_formats(tenant_id=tenant_id)
+        return render_template(
+            "add_product.html",
+            tenant_id=tenant_id,
+            tenant=tenant,
+            adapter_type=adapter_type,
+            formats=formats,
+            authorized_properties=properties_list,
+            property_tags=property_tags,
+            currencies=currencies,
+            principals=principals_list,
+            form_data=form_data,  # Preserve form data on error
+        )
 
 
 @products_bp.route("/add", methods=["GET", "POST"])
@@ -1708,7 +1727,9 @@ def edit_product(tenant_id, product_id):
                     # Otherwise, preserve existing config structure
                     if line_item_type:
                         gam_config_service = GAMProductConfigService()
-                        default_config = gam_config_service.generate_default_config(product.delivery_type, formats)
+                        default_config = gam_config_service.generate_default_config(
+                            product.delivery_type, product.format_ids
+                        )
                         # Merge default config into base_config (preserving other fields)
                         base_config.update(default_config)
 
@@ -2207,21 +2228,20 @@ def edit_product(tenant_id, product_id):
                     authorized_properties=authorized_properties_list,
                     selected_publisher_properties=selected_publisher_properties,
                 )
-            else:
-                # For non-GAM adapters - use unified edit template
-                # Reload tenant for template context (measurement_providers, etc.)
-                tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-                return render_template(
-                    "edit_product.html",
-                    tenant_id=tenant_id,
-                    tenant=tenant,
-                    adapter_type=adapter_type,
-                    product=product_dict,
-                    currencies=currencies,
-                    principals=principals_list,
-                    authorized_properties=authorized_properties_list,
-                    selected_publisher_properties=selected_publisher_properties,
-                )
+            # For non-GAM adapters - use unified edit template
+            # Reload tenant for template context (measurement_providers, etc.)
+            tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            return render_template(
+                "edit_product.html",
+                tenant_id=tenant_id,
+                tenant=tenant,
+                adapter_type=adapter_type,
+                product=product_dict,
+                currencies=currencies,
+                principals=principals_list,
+                authorized_properties=authorized_properties_list,
+                selected_publisher_properties=selected_publisher_properties,
+            )
 
     except Exception as e:
         logger.error(f"Error editing product: {e}", exc_info=True)
@@ -2438,17 +2458,16 @@ def assign_inventory_to_product(tenant_id, product_id):
                         "inventory_name": inventory.name,
                     }
                 )
-            else:
-                return (
-                    jsonify(
-                        {
-                            "message": "Inventory assigned to product successfully",
-                            "mapping_id": mapping.id,
-                            "inventory_name": inventory.name,
-                        }
-                    ),
-                    201,
-                )
+            return (
+                jsonify(
+                    {
+                        "message": "Inventory assigned to product successfully",
+                        "mapping_id": mapping.id,
+                        "inventory_name": inventory.name,
+                    }
+                ),
+                201,
+            )
 
     except Exception as e:
         logger.error(f"Error assigning inventory to product: {e}", exc_info=True)
@@ -2524,8 +2543,6 @@ def unassign_inventory_from_product(tenant_id, product_id, mapping_id):
 
             # Store details for logging
             inventory_name = f"{mapping.inventory_type}:{mapping.inventory_id}"
-            inventory_id_to_remove = mapping.inventory_id
-            inventory_type_to_remove = mapping.inventory_type
 
             # Delete the mapping
             db_session.delete(mapping)

@@ -827,14 +827,12 @@ class AdServerAdapter(ABC):
         Returns:
             CreateMediaBuyResponse with media buy details
         """
-        pass
 
     @abstractmethod
     def add_creative_assets(
         self, media_buy_id: str, assets: list[dict[str, Any]], today: datetime
     ) -> list[AssetStatus]:
         """Adds creative assets to an existing media buy."""
-        pass
 
     @abstractmethod
     def associate_creatives(self, line_item_ids: list[str], platform_creative_ids: list[str]) -> list[dict[str, Any]]:
@@ -851,19 +849,16 @@ class AdServerAdapter(ABC):
             List of association results with status for each combination
             Example: [{"line_item_id": "123", "creative_id": "456", "status": "success"}]
         """
-        pass
 
     @abstractmethod
     def check_media_buy_status(self, media_buy_id: str, today: datetime) -> CheckMediaBuyStatusResponse:
         """Checks the status of a media buy on the ad server."""
-        pass
 
     @abstractmethod
     def get_media_buy_delivery(
         self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
     ) -> AdapterGetMediaBuyDeliveryResponse:
         """Gets delivery data for a media buy."""
-        pass
 
     def get_packages_snapshot(
         self, package_refs: list[tuple[str, str, str | None]]
@@ -905,7 +900,6 @@ class AdServerAdapter(ABC):
         today: datetime,
     ) -> UpdateMediaBuyResponse:
         """Updates a media buy with a specific action."""
-        pass
 
     def get_config_ui_endpoint(self) -> str | None:
         """
@@ -926,7 +920,6 @@ class AdServerAdapter(ABC):
         def gam_product_config(tenant_id, product_id):
             return render_template('gam_config.html', ...)
         """
-        pass
 
     def validate_product_config(self, config: dict[str, Any]) -> tuple[bool, str | None]:
         """

@@ -74,7 +74,7 @@ def extract_error_info(error: Exception) -> tuple[str, str, str | None]:
 
     if isinstance(error, AdCPError):
         return error.error_code, error.message, error.recovery
-    elif isinstance(error, ToolError):
+    if isinstance(error, ToolError):
         # ToolError may be constructed as ToolError("CODE", "message", "recovery")
         # or ToolError("CODE", "message") or ToolError("message")
         # Check if first arg looks like an error code (all caps, no spaces, reasonable length)
@@ -90,12 +90,10 @@ def extract_error_info(error: Exception) -> tuple[str, str, str | None]:
                 # Structured format: ToolError("CODE", "message") or ("CODE", "message", "recovery")
                 recovery = str(error.args[2]) if len(error.args) > 2 else None
                 return first_arg, str(error.args[1]), recovery
-            else:
-                # Single-arg format: ToolError("message")
-                return "TOOL_ERROR", str(error), None
+            # Single-arg format: ToolError("message")
+            return "TOOL_ERROR", str(error), None
         return "TOOL_ERROR", str(error), None
-    else:
-        return type(error).__name__, str(error), None
+    return type(error).__name__, str(error), None
 
 
 def _log_tool_error(tool_name: str, error: Exception, tenant_id: str | None, principal_id: str | None) -> None:
@@ -158,7 +156,7 @@ def _translate_to_tool_error(error: Exception) -> NoReturn:
 
     if isinstance(error, ToolError):
         raise
-    elif isinstance(error, AdCPError):
+    if isinstance(error, AdCPError):
         # Include details as JSON 4th arg so the MCP round-trip preserves them.
         # The lowlevel server does str(exception) which produces a tuple string:
         # "('CODE', 'message', 'recovery', '{\"suggestion\": \"...\"}')"
@@ -170,12 +168,11 @@ def _translate_to_tool_error(error: Exception) -> NoReturn:
         except (TypeError, ValueError):
             details_json = None
         raise ToolError(error.error_code, error.message, error.recovery, details_json) from error
-    elif isinstance(error, ValueError):
+    if isinstance(error, ValueError):
         raise ToolError("VALIDATION_ERROR", str(error)) from error
-    elif isinstance(error, PermissionError):
+    if isinstance(error, PermissionError):
         raise ToolError("AUTHORIZATION_ERROR", str(error)) from error
-    else:
-        raise
+    raise
 
 
 def with_error_logging(tool_func: Callable) -> Callable:
@@ -224,29 +221,28 @@ def with_error_logging(tool_func: Callable) -> Callable:
                 _translate_to_tool_error(e)
 
         return async_wrapper
-    else:
 
-        @functools.wraps(tool_func)
-        def sync_wrapper(*args, **kwargs) -> Any:
-            try:
-                return tool_func(*args, **kwargs)
-            except Exception as e:
-                # Extract context from args/kwargs
-                context = None
-                for arg in args:
-                    if isinstance(arg, FastMCPContext) or hasattr(arg, "tenant_id"):
-                        context = arg
-                        break
-                for v in kwargs.values():
-                    if isinstance(v, FastMCPContext) or hasattr(v, "tenant_id"):
-                        context = v
-                        break
+    @functools.wraps(tool_func)
+    def sync_wrapper(*args, **kwargs) -> Any:
+        try:
+            return tool_func(*args, **kwargs)
+        except Exception as e:
+            # Extract context from args/kwargs
+            context = None
+            for arg in args:
+                if isinstance(arg, FastMCPContext) or hasattr(arg, "tenant_id"):
+                    context = arg
+                    break
+            for v in kwargs.values():
+                if isinstance(v, FastMCPContext) or hasattr(v, "tenant_id"):
+                    context = v
+                    break
 
-                # Extract tenant/principal and log error
-                tenant_id, principal_id = _extract_tenant_and_principal(context) if context else (None, None)
-                _log_tool_error(tool_func.__name__, e, tenant_id, principal_id)
+            # Extract tenant/principal and log error
+            tenant_id, principal_id = _extract_tenant_and_principal(context) if context else (None, None)
+            _log_tool_error(tool_func.__name__, e, tenant_id, principal_id)
 
-                # Translate typed exceptions to ToolError at the MCP boundary
-                _translate_to_tool_error(e)
+            # Translate typed exceptions to ToolError at the MCP boundary
+            _translate_to_tool_error(e)
 
-        return sync_wrapper
+    return sync_wrapper

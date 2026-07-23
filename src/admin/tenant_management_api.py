@@ -299,7 +299,8 @@ def _pydantic_error_details(exc: PydanticValidationError) -> list[dict[str, Any]
     safe_errors: list[dict[str, Any]] = []
     for error in exc.errors():
         safe_errors.append({key: value for key, value in error.items() if key in {"type", "loc", "msg", "url"}})
-    return json.loads(json.dumps(safe_errors, default=str))
+    json_safe_errors: list[dict[str, Any]] = json.loads(json.dumps(safe_errors, default=str))
+    return json_safe_errors
 
 
 def _template_macro_names(macros: list[dict[str, str]]) -> set[str]:
@@ -5301,7 +5302,8 @@ def _find_account_by_natural_key(session, tenant_id: str, req: CreateAccountRequ
         stmt = stmt.where(Account.brand["brand_id"].as_string() == req.brand.brand_id)
     if req.billing == "agent" and req.buyer_agent_principal_id:
         stmt = stmt.where(Account.principal_id == req.buyer_agent_principal_id)
-    return session.scalars(stmt).first()
+    account: Account | None = session.scalars(stmt).first()
+    return account
 
 
 def _grant_account_access_for_existing_principal(

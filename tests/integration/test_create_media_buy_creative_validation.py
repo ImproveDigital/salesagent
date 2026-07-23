@@ -31,7 +31,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 # ---------------------------------------------------------------------------
 
 
-def _make_package_with_creative(creative_id: str, product_id: str = "nonexistent_prod") -> "MediaPackage":  # noqa: F821
+def _make_package_with_creative(creative_id: str, product_id: str = "nonexistent_prod") -> MediaPackage:  # noqa: F821
     """Build a minimal MediaPackage that references a creative_id.
 
     product_id is set to a non-existent value so the product format-compatibility
@@ -65,35 +65,41 @@ def _create_tenant_and_creative(session, *, status: str, format_id: str = "displ
     creative_id = f"cre_{suffix}"
     now = datetime.now(UTC)
 
-    session.add(Tenant(
-        tenant_id=tenant_id,
-        name=f"Creative Val Tenant {suffix}",
-        subdomain=f"crea-{suffix}",
-        is_active=True,
-        ad_server="mock",
-        human_review_required=False,
-        created_at=now,
-        updated_at=now,
-    ))
-    session.add(Principal(
-        tenant_id=tenant_id,
-        principal_id=principal_id,
-        name="Test Agent",
-        access_token=f"tok_{suffix}",
-        platform_mappings={"mock": {"id": "adv_test"}},  # non-empty: PlatformMappingModel requires it
-        created_at=now,
-    ))
+    session.add(
+        Tenant(
+            tenant_id=tenant_id,
+            name=f"Creative Val Tenant {suffix}",
+            subdomain=f"crea-{suffix}",
+            is_active=True,
+            ad_server="mock",
+            human_review_required=False,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.add(
+        Principal(
+            tenant_id=tenant_id,
+            principal_id=principal_id,
+            name="Test Agent",
+            access_token=f"tok_{suffix}",
+            platform_mappings={"mock": {"id": "adv_test"}},  # non-empty: PlatformMappingModel requires it
+            created_at=now,
+        )
+    )
     session.flush()  # satisfy FK before inserting Creative
-    session.add(Creative(
-        tenant_id=tenant_id,
-        creative_id=creative_id,
-        principal_id=principal_id,
-        name=f"Test Creative {suffix}",
-        agent_url="https://creative.adcontextprotocol.org",
-        format=format_id,
-        status=status,
-        data={"assets": {"banner": {"url": "https://example.com/banner.png"}}},
-    ))
+    session.add(
+        Creative(
+            tenant_id=tenant_id,
+            creative_id=creative_id,
+            principal_id=principal_id,
+            name=f"Test Creative {suffix}",
+            agent_url="https://creative.adcontextprotocol.org",
+            format=format_id,
+            status=status,
+            data={"assets": {"banner": {"url": "https://example.com/banner.png"}}},
+        )
+    )
     session.commit()
     return tenant_id, creative_id
 
@@ -128,12 +134,8 @@ class TestCreativeErrorStatusBlocksCreate:
                 _validate_creatives_before_adapter_call([package], tenant_id, session=session)
 
         error_text = str(exc_info.value)
-        assert "error" in error_text.lower(), (
-            "Error message must mention the creative's terminal status."
-        )
-        assert creative_id in error_text, (
-            "Error message must name the offending creative_id so buyers can identify it."
-        )
+        assert "error" in error_text.lower(), "Error message must mention the creative's terminal status."
+        assert creative_id in error_text, "Error message must name the offending creative_id so buyers can identify it."
         details = exc_info.value.details or {}
         assert details.get("error_code") == "INVALID_CREATIVES", (
             "error_code must be INVALID_CREATIVES for adapter to map it correctly."
@@ -207,37 +209,54 @@ class TestCreativeFormatMismatchBlocksCreate:
         now = datetime.now(UTC)
 
         with get_db_session() as session:
-            session.add(Tenant(
-                tenant_id=tenant_id, name=f"Fmt Mismatch {suffix}",
-                subdomain=f"fmt-{suffix}", is_active=True, ad_server="mock",
-                human_review_required=False, created_at=now, updated_at=now,
-            ))
-            session.add(Principal(
-                tenant_id=tenant_id, principal_id=principal_id,
-                name="Agent", access_token=f"tok_{suffix}",
-                platform_mappings={"mock": {"id": "adv_test"}},
-                created_at=now,
-            ))
+            session.add(
+                Tenant(
+                    tenant_id=tenant_id,
+                    name=f"Fmt Mismatch {suffix}",
+                    subdomain=f"fmt-{suffix}",
+                    is_active=True,
+                    ad_server="mock",
+                    human_review_required=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                Principal(
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    name="Agent",
+                    access_token=f"tok_{suffix}",
+                    platform_mappings={"mock": {"id": "adv_test"}},
+                    created_at=now,
+                )
+            )
             session.flush()  # satisfy FK before inserting Creative
             # Creative uses display format
-            session.add(Creative(
-                tenant_id=tenant_id, creative_id=creative_id,
-                principal_id=principal_id, name="Display Creative",
-                agent_url="https://creative.adcontextprotocol.org",
-                format="display_300x250",  # ← display format
-                status="pending",
-                data={"assets": {"banner": {"url": "https://example.com/banner.png", "width": 300, "height": 250}}},
-            ))
+            session.add(
+                Creative(
+                    tenant_id=tenant_id,
+                    creative_id=creative_id,
+                    principal_id=principal_id,
+                    name="Display Creative",
+                    agent_url="https://creative.adcontextprotocol.org",
+                    format="display_300x250",  # ← display format
+                    status="pending",
+                    data={"assets": {"banner": {"url": "https://example.com/banner.png", "width": 300, "height": 250}}},
+                )
+            )
             # Product ONLY accepts video — intentional mismatch
-            session.add(Product(
-                tenant_id=tenant_id, product_id=product_id,
-                name="Video Product", delivery_type="guaranteed",
-                targeting_template={},
-                format_ids=[
-                    {"agent_url": "https://creative.adcontextprotocol.org", "id": "video_15s"}
-                ],
-                property_tags=["all_inventory"],
-            ))
+            session.add(
+                Product(
+                    tenant_id=tenant_id,
+                    product_id=product_id,
+                    name="Video Product",
+                    delivery_type="guaranteed",
+                    targeting_template={},
+                    format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "video_15s"}],
+                    property_tags=["all_inventory"],
+                )
+            )
             session.commit()
 
         # Package references the display creative but targets the video product

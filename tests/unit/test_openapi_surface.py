@@ -11,8 +11,9 @@ beads: salesagent-b61l.16
 
 from starlette.testclient import TestClient
 
-from src.app import app
+from core.main import build_app
 
+app = build_app()
 client = TestClient(app)
 
 

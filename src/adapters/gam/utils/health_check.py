@@ -201,14 +201,13 @@ class GAMHealthChecker:
                     },
                     duration_ms=(time.time() - start_time) * 1000,
                 )
-            else:
-                return HealthCheckResult(
-                    status=HealthStatus.UNHEALTHY,
-                    check_name="permissions",
-                    message="Missing required permissions",
-                    details={"missing": missing_permissions},
-                    duration_ms=(time.time() - start_time) * 1000,
-                )
+            return HealthCheckResult(
+                status=HealthStatus.UNHEALTHY,
+                check_name="permissions",
+                message="Missing required permissions",
+                details={"missing": missing_permissions},
+                duration_ms=(time.time() - start_time) * 1000,
+            )
 
         except Exception as e:
             return HealthCheckResult(
@@ -321,7 +320,7 @@ class GAMHealthChecker:
                     },
                     duration_ms=(time.time() - start_time) * 1000,
                 )
-            elif accessible_units:
+            if accessible_units:
                 return HealthCheckResult(
                     status=HealthStatus.DEGRADED,
                     check_name="inventory_access",
@@ -329,14 +328,13 @@ class GAMHealthChecker:
                     details={"accessible": accessible_units, "inaccessible": inaccessible_units},
                     duration_ms=(time.time() - start_time) * 1000,
                 )
-            else:
-                return HealthCheckResult(
-                    status=HealthStatus.UNHEALTHY,
-                    check_name="inventory_access",
-                    message="No ad units are accessible",
-                    details={"inaccessible": inaccessible_units},
-                    duration_ms=(time.time() - start_time) * 1000,
-                )
+            return HealthCheckResult(
+                status=HealthStatus.UNHEALTHY,
+                check_name="inventory_access",
+                message="No ad units are accessible",
+                details={"inaccessible": inaccessible_units},
+                duration_ms=(time.time() - start_time) * 1000,
+            )
 
         except Exception as e:
             return HealthCheckResult(
@@ -388,14 +386,13 @@ class GAMHealthChecker:
                     details=service_status,
                     duration_ms=(time.time() - start_time) * 1000,
                 )
-            else:
-                return HealthCheckResult(
-                    status=HealthStatus.DEGRADED,
-                    check_name="service_availability",
-                    message="Some GAM services are unavailable",
-                    details=service_status,
-                    duration_ms=(time.time() - start_time) * 1000,
-                )
+            return HealthCheckResult(
+                status=HealthStatus.DEGRADED,
+                check_name="service_availability",
+                message="Some GAM services are unavailable",
+                details=service_status,
+                duration_ms=(time.time() - start_time) * 1000,
+            )
 
         except Exception as e:
             return HealthCheckResult(

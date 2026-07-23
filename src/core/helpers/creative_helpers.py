@@ -535,12 +535,11 @@ def _detect_snippet_type(snippet: str) -> str:
     """Auto-detect snippet type from content for legacy support."""
     if snippet.startswith("<?xml") or ".xml" in snippet:
         return "vast_xml"
-    elif snippet.startswith("http") and "vast" in snippet.lower():
+    if snippet.startswith("http") and "vast" in snippet.lower():
         return "vast_url"
-    elif snippet.startswith("<script"):
+    if snippet.startswith("<script"):
         return "javascript"
-    else:
-        return "html"  # Default
+    return "html"  # Default
 
 
 def validate_creative_format_against_product(

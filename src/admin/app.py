@@ -95,7 +95,8 @@ def _sanitize_for_log(value, *, max_len: int = 200) -> str:
         value = str(value)
     if len(value) > max_len:
         value = value[:max_len] + "…"
-    return value.replace("\r", "\\r").replace("\n", "\\n").replace("\x00", "\\x00")
+    sanitized: str = value.replace("\r", "\\r").replace("\n", "\\n").replace("\x00", "\\x00")
+    return sanitized
 
 
 # Custom ProxyFix for handling X-Script-Name and fixing redirect URLs
@@ -352,10 +353,10 @@ def create_app(config=None):
             # stay green. Tests that need to exercise the production
             # CSRF path (see test_admin_csrf_global.py) flip TESTING
             # off explicitly via a per-test fixture.
-            return None
+            return
 
         if request.method in _CSRF_SAFE_METHODS:
-            return None
+            return
 
         # CSRF can only be mounted when the victim's browser
         # auto-attaches a session cookie to the attacker's cross-
@@ -374,7 +375,7 @@ def create_app(config=None):
         # be forged by an attacker on a cookie-authed admin route.
         session_cookie_name = app.config.get("SESSION_COOKIE_NAME", "session")
         if not request.cookies.get(session_cookie_name):
-            return None
+            return
 
         candidate = request.headers.get("Origin") or request.headers.get("Referer") or ""
         expected = request.host_url.rstrip("/")
@@ -386,7 +387,7 @@ def create_app(config=None):
                 and submitted_token
                 and hmac.compare_digest(expected_token, submitted_token)
             ):
-                return None
+                return
 
             logger.warning(
                 "Refusing admin %s to %s with missing/invalid CSRF token — origin=%r referer=%r host_url=%r",
@@ -425,12 +426,12 @@ def create_app(config=None):
         from flask import request
 
         if app.config.get("TESTING"):
-            return None
+            return
         if not request.headers.get("X-Identity-Subject"):
-            return None
+            return
         has_prefix = bool(request.headers.get("X-Forwarded-Prefix") or request.headers.get("X-Script-Name"))
         if has_prefix:
-            return None
+            return
         logger.warning(
             "[EMBEDDED_PREFIX_MISSING] Embedded auth present (X-Identity-Subject set) "
             "but no X-Forwarded-Prefix/X-Script-Name header on %s %s — generated "

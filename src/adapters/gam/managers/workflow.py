@@ -449,12 +449,11 @@ class GAMWorkflowManager(BaseWorkflowManager):
                 "description": "Manual mode activated - human intervention needed to create GAM order",
                 "color": "#FF9500",  # Orange
             }
-        elif action_type == "activate_gam_order":
+        if action_type == "activate_gam_order":
             return {
                 "title": "GAM Order Activation Approval Required",
                 "description": "Order created successfully - approval needed for activation",
                 "color": "#FFD700",  # Gold
             }
-        else:
-            # Fall back to base class behavior
-            return super()._get_notification_details(step_id, action_details)
+        # Fall back to base class behavior
+        return super()._get_notification_details(step_id, action_details)

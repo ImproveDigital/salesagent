@@ -9,4 +9,3 @@ class CreativeEngineAdapter(ABC):
     @abstractmethod
     def process_creatives(self, creatives: list[Creative]) -> list[CreativeApprovalStatus]:
         """Processes creative assets, returning their status."""
-        pass

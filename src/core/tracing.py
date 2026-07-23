@@ -58,24 +58,23 @@ def traced(func: Callable) -> Callable:
                     raise
 
         return async_wrapper
-    else:
 
-        @functools.wraps(func)
-        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not is_tracing_enabled():
+    @functools.wraps(func)
+    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not is_tracing_enabled():
+            return func(*args, **kwargs)
+
+        tracer = get_tracer(_TRACER_NAME)
+        with tracer.start_as_current_span(name) as span:
+            _set_identity_attribute(span, args, kwargs, identity_arg_index)
+            try:
                 return func(*args, **kwargs)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                raise
 
-            tracer = get_tracer(_TRACER_NAME)
-            with tracer.start_as_current_span(name) as span:
-                _set_identity_attribute(span, args, kwargs, identity_arg_index)
-                try:
-                    return func(*args, **kwargs)
-                except Exception as exc:
-                    span.record_exception(exc)
-                    span.set_status(Status(StatusCode.ERROR, str(exc)))
-                    raise
-
-        return sync_wrapper
+    return sync_wrapper
 
 
 def _identity_positional_index(func: Callable) -> int | None:

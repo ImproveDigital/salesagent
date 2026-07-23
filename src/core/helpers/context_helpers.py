@@ -64,7 +64,8 @@ def ensure_tenant_context(identity: ResolvedIdentity | None = None) -> dict[str,
             return loaded
         # DB lookup failed — use identity.tenant as fallback
         if identity and identity.tenant and isinstance(identity.tenant, dict) and "tenant_id" in identity.tenant:
-            set_current_tenant(identity.tenant)
-            return identity.tenant
+            fallback_tenant: dict[str, Any] = identity.tenant
+            set_current_tenant(fallback_tenant)
+            return fallback_tenant
 
     raise AdCPAuthenticationError("No tenant context available")

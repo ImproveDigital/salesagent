@@ -83,7 +83,7 @@ class TritonClient:
                 status_code=response.status_code,
                 body=response.text,
             )
-        token = response.json().get("access_token") or response.json().get("token")
+        token: str | None = response.json().get("access_token") or response.json().get("token")
         if not token:
             raise TritonAPIError(
                 "Triton login response missing access_token",
@@ -121,31 +121,39 @@ class TritonClient:
     # ----- entity operations -----
 
     def create_campaign(self, advertiser_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("POST", f"/advertisers/{advertiser_id}/campaigns", json=payload)
+        result: dict[str, Any] = self._request("POST", f"/advertisers/{advertiser_id}/campaigns", json=payload)
+        return result
 
     def create_flight(self, campaign_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("POST", f"/campaigns/{campaign_id}/flights", json=payload)
+        result: dict[str, Any] = self._request("POST", f"/campaigns/{campaign_id}/flights", json=payload)
+        return result
 
     def update_flight(self, flight_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("PATCH", f"/flights/{flight_id}", json=payload)
+        result: dict[str, Any] = self._request("PATCH", f"/flights/{flight_id}", json=payload)
+        return result
 
     def update_campaign(self, campaign_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("PATCH", f"/campaigns/{campaign_id}", json=payload)
+        result: dict[str, Any] = self._request("PATCH", f"/campaigns/{campaign_id}", json=payload)
+        return result
 
     def get_campaign(self, campaign_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/campaigns/{campaign_id}")
+        result: dict[str, Any] = self._request("GET", f"/campaigns/{campaign_id}")
+        return result
 
     def list_flights(self, campaign_id: str) -> list[dict[str, Any]]:
         result = self._request("GET", f"/campaigns/{campaign_id}/flights")
-        return result.get("items", []) if isinstance(result, dict) else result
+        items: list[dict[str, Any]] = result.get("items", []) if isinstance(result, dict) else result
+        return items
 
     def list_stations(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/stations")
-        return result.get("items", []) if isinstance(result, dict) else result
+        items: list[dict[str, Any]] = result.get("items", []) if isinstance(result, dict) else result
+        return items
 
     def get_publisher(self) -> dict[str, Any]:
         """Return the publisher record associated with the JWT.
 
         Useful as a connectivity test — if this returns 200, credentials are valid.
         """
-        return self._request("GET", "/publisher")
+        result: dict[str, Any] = self._request("GET", "/publisher")
+        return result

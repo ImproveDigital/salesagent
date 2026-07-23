@@ -1,22 +1,19 @@
 """Tests for delivery-tool date window handling.
 
-Covers tescoboy issues #149 and #170:
+Covers tescoboy issue #149:
 
 - #149 ``_normalize_reporting_window``: same-day ``start_date == end_date``
   was overwritten with ``now()`` and rejected as ``invalid_date_range``.
   AdCP defines ``start_date``/``end_date`` as inclusive date-only inputs,
   so same-day means the full 24-hour UTC day.
 
-- #170 ``_clamp_target_date_to_now``: the freshness validator rejected any
-  window whose ``end_date`` extended past "now". Buyer queries with
-  future-dated ``end_date`` are legitimate; GAM cannot have data through
-  a date that hasn't happened, so the call site clamps
-  ``target_date = min(end, now)`` before validation.
+(#170 ``_clamp_target_date_to_now`` was covered here too, but that helper
+and the GAM freshness-validator call site were removed after the 2.0
+refactor — the clamp behavior has no current equivalent to test.)
 """
 
 from datetime import UTC, datetime, timedelta
 
-from src.adapters.google_ad_manager import _clamp_target_date_to_now
 from src.core.tools.media_buy_delivery import _normalize_reporting_window
 
 
@@ -62,23 +59,3 @@ class TestNormalizeReportingWindow:
         start, end, valid = _normalize_reporting_window(None, "2026-03-15")
         assert valid is True
         assert (datetime.now(UTC) - end) < timedelta(seconds=60)
-
-
-class TestClampTargetDateToNow:
-    """`_clamp_target_date_to_now` clamps future end-dates back to now."""
-
-    def test_future_end_date_clamps_to_now(self):
-        future = datetime.now(UTC) + timedelta(days=1)
-        clamped = _clamp_target_date_to_now(future)
-        assert clamped < future
-        assert (datetime.now(UTC) - clamped) < timedelta(seconds=60)
-
-    def test_past_end_date_unchanged(self):
-        past = datetime(2020, 1, 1, tzinfo=UTC)
-        assert _clamp_target_date_to_now(past) == past
-
-    def test_naive_future_clamps_to_naive_now(self):
-        future = (datetime.now(UTC) + timedelta(days=1)).replace(tzinfo=None)
-        clamped = _clamp_target_date_to_now(future)
-        assert clamped.tzinfo is None
-        assert clamped < future

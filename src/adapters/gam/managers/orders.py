@@ -173,15 +173,13 @@ class GAMOrdersManager:
             logger.info(f"  Flight Dates: {start_time.date()} to {end_time.date()}")
             # Return a mock order ID for dry run
             return f"dry_run_order_{int(datetime.now(UTC).timestamp())}"
-        else:
-            order_service = self.client_manager.get_service("OrderService")
-            created_orders = order_service.createOrders([order])
-            if created_orders:
-                order_id = str(created_orders[0]["id"])
-                logger.info(f"✓ Created GAM Order ID: {order_id}")
-                return order_id
-            else:
-                raise Exception("Failed to create order - no orders returned")
+        order_service = self.client_manager.get_service("OrderService")
+        created_orders = order_service.createOrders([order])
+        if created_orders:
+            order_id = str(created_orders[0]["id"])
+            logger.info(f"✓ Created GAM Order ID: {order_id}")
+            return order_id
+        raise Exception("Failed to create order - no orders returned")
 
     @timeout(seconds=30)  # 30 seconds timeout for status check
     def get_order_status(self, order_id: str) -> str:
@@ -208,8 +206,7 @@ class GAMOrdersManager:
             if result and "results" in result and result["results"]:
                 order = result["results"][0]
                 return order["status"] if "status" in order else "UNKNOWN"
-            else:
-                return "NOT_FOUND"
+            return "NOT_FOUND"
         except Exception as e:
             logger.error(f"Error getting order status for {order_id}: {e}")
             return "ERROR"
@@ -247,9 +244,8 @@ class GAMOrdersManager:
             if num_changes > 0:
                 logger.info(f"✓ Successfully archived GAM Order {order_id}")
                 return True
-            else:
-                logger.warning(f"No changes made when archiving Order {order_id} (may already be archived)")
-                return True  # Consider this successful
+            logger.warning(f"No changes made when archiving Order {order_id} (may already be archived)")
+            return True  # Consider this successful
 
         except Exception as e:
             logger.error(f"Failed to archive GAM Order {order_id}: {str(e)}")
@@ -304,9 +300,8 @@ class GAMOrdersManager:
                 if num_changes > 0:
                     logger.info(f"✓ Successfully approved GAM Order {order_id} ({num_changes} changes)")
                     return True
-                else:
-                    logger.warning(f"No changes made when approving Order {order_id} (may already be approved)")
-                    return True  # Consider this successful if already approved
+                logger.warning(f"No changes made when approving Order {order_id} (may already be approved)")
+                return True  # Consider this successful if already approved
 
             except Exception as e:
                 error_str = str(e)
@@ -323,25 +318,23 @@ class GAMOrdersManager:
                         )
                         time.sleep(poll_interval)
                         continue  # Retry
-                    else:
-                        logger.error(
-                            f"[APPROVAL] Failed to approve Order {order_id} after {max_retries} attempts "
-                            f"({max_retries * poll_interval}s total): "
-                            f"GAM forecasting still not ready. Order remains in DRAFT status."
-                        )
-                        return False
-                else:
-                    # PERMISSION_DENIED means the service account can never approve — raise
-                    # so callers can switch to external-approval status polling.
-                    if "PERMISSION_DENIED" in error_str or "OrderActionError.PERMISSION_DENIED" in error_str:
-                        raise GAMOrderApprovalPermissionDenied(
-                            f"Service account cannot approve GAM order {order_id} "
-                            f"(OrderActionError.PERMISSION_DENIED). "
-                            f"The order will remain in DRAFT until approved manually in GAM."
-                        ) from e
-                    # Other errors - don't retry
-                    logger.error(f"Failed to approve GAM Order {order_id}: {error_str}")
+                    logger.error(
+                        f"[APPROVAL] Failed to approve Order {order_id} after {max_retries} attempts "
+                        f"({max_retries * poll_interval}s total): "
+                        f"GAM forecasting still not ready. Order remains in DRAFT status."
+                    )
                     return False
+                # PERMISSION_DENIED means the service account can never approve — raise
+                # so callers can switch to external-approval status polling.
+                if "PERMISSION_DENIED" in error_str or "OrderActionError.PERMISSION_DENIED" in error_str:
+                    raise GAMOrderApprovalPermissionDenied(
+                        f"Service account cannot approve GAM order {order_id} "
+                        f"(OrderActionError.PERMISSION_DENIED). "
+                        f"The order will remain in DRAFT until approved manually in GAM."
+                    ) from e
+                # Other errors - don't retry
+                logger.error(f"Failed to approve GAM Order {order_id}: {error_str}")
+                return False
 
         # Should not reach here, but just in case
         return False
@@ -692,10 +685,11 @@ class GAMOrdersManager:
                             placeholder_height = placeholder.get("size", {}).get("height")
 
                             # 1x1 placeholders are special (templates, native) - always include
-                            if placeholder_width == 1 and placeholder_height == 1:
-                                filtered_placeholders.append(placeholder)
-                            # Include if we have creatives of this size
-                            elif (placeholder_width, placeholder_height) in creative_sizes:
+                            if (
+                                placeholder_width == 1
+                                and placeholder_height == 1
+                                or (placeholder_width, placeholder_height) in creative_sizes
+                            ):
                                 filtered_placeholders.append(placeholder)
 
                         if filtered_placeholders:
@@ -1199,9 +1193,8 @@ class GAMOrdersManager:
                         f"(goal units: {new_goal_units}, pricing: {pricing_model})"
                     )
                     return True
-                else:
-                    logger.error(f"Failed to update line item {line_item_id} - GAM API returned no results")
-                    return False
+                logger.error(f"Failed to update line item {line_item_id} - GAM API returned no results")
+                return False
 
             except Exception as e:
                 error_str = str(e)
@@ -1216,10 +1209,9 @@ class GAMOrdersManager:
                     )
                     time.sleep(wait_time)
                     continue  # Retry
-                else:
-                    # Non-retryable error or last attempt
-                    logger.error(f"Error updating line item {line_item_id} budget: {e}")
-                    return False
+                # Non-retryable error or last attempt
+                logger.error(f"Error updating line item {line_item_id} budget: {e}")
+                return False
 
         # All retries exhausted
         logger.error(f"Failed to update line item {line_item_id} budget after {max_retries} attempts")
@@ -1423,9 +1415,8 @@ class GAMOrdersManager:
             if updated_line_items:
                 logger.info(f"✓ Updated line item {line_item_id} status to {new_status}")
                 return True
-            else:
-                logger.error(f"Failed to update line item {line_item_id} status - GAM API returned no results")
-                return False
+            logger.error(f"Failed to update line item {line_item_id} status - GAM API returned no results")
+            return False
 
         except Exception as e:
             logger.error(f"Error updating line item {line_item_id} status: {e}")

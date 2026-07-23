@@ -13,8 +13,8 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.resolved_identity import ResolvedIdentity
 
 logger = logging.getLogger(__name__)

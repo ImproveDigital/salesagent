@@ -161,17 +161,16 @@ def convert_pricing_option_to_adcp(
                 **common_fields,
                 fixed_price=float(rate),
             )
-        else:
-            return CpmPricingOption(
-                **_auction_pricing_fields(
-                    pricing_model=pricing_model,
-                    pricing_option_id=pricing_option_id,
-                    common_fields=common_fields,
-                    price_guidance=price_guidance,
-                )
+        return CpmPricingOption(
+            **_auction_pricing_fields(
+                pricing_model=pricing_model,
+                pricing_option_id=pricing_option_id,
+                common_fields=common_fields,
+                price_guidance=price_guidance,
             )
+        )
 
-    elif pricing_model == "vcpm":
+    if pricing_model == "vcpm":
         if is_fixed:
             if not rate:
                 raise ValueError(f"Fixed VCPM pricing option {pricing_option_id} requires rate")
@@ -179,17 +178,16 @@ def convert_pricing_option_to_adcp(
                 **common_fields,
                 fixed_price=float(rate),
             )
-        else:
-            return VcpmPricingOption(
-                **_auction_pricing_fields(
-                    pricing_model=pricing_model,
-                    pricing_option_id=pricing_option_id,
-                    common_fields=common_fields,
-                    price_guidance=price_guidance,
-                )
+        return VcpmPricingOption(
+            **_auction_pricing_fields(
+                pricing_model=pricing_model,
+                pricing_option_id=pricing_option_id,
+                common_fields=common_fields,
+                price_guidance=price_guidance,
             )
+        )
 
-    elif pricing_model == "cpc":
+    if pricing_model == "cpc":
         if is_fixed:
             if not rate:
                 raise ValueError(f"Fixed CPC pricing option {pricing_option_id} requires rate")
@@ -197,17 +195,16 @@ def convert_pricing_option_to_adcp(
                 **common_fields,
                 fixed_price=float(rate),
             )
-        else:
-            return CpcPricingOption(
-                **_auction_pricing_fields(
-                    pricing_model=pricing_model,
-                    pricing_option_id=pricing_option_id,
-                    common_fields=common_fields,
-                    price_guidance=price_guidance,
-                )
+        return CpcPricingOption(
+            **_auction_pricing_fields(
+                pricing_model=pricing_model,
+                pricing_option_id=pricing_option_id,
+                common_fields=common_fields,
+                price_guidance=price_guidance,
             )
+        )
 
-    elif pricing_model == "cpcv":
+    if pricing_model == "cpcv":
         # CPCV (Cost Per Completed View) - typically fixed rate
         if not rate:
             raise ValueError(f"CPCV pricing option {pricing_option_id} requires rate")
@@ -220,7 +217,7 @@ def convert_pricing_option_to_adcp(
             result_fields["parameters"] = parameters
         return CpcvPricingOption(**result_fields)
 
-    elif pricing_model == "cpv":
+    if pricing_model == "cpv":
         # CPV (Cost Per View) - typically auction-based
         if not rate:
             raise ValueError(f"CPV pricing option {pricing_option_id} requires rate")
@@ -234,7 +231,7 @@ def convert_pricing_option_to_adcp(
             result_fields["parameters"] = parameters
         return CpvPricingOption(**result_fields)
 
-    elif pricing_model == "cpp":
+    if pricing_model == "cpp":
         # CPP (Cost Per Point) - requires demographic parameters
         if not rate:
             raise ValueError(f"CPP pricing option {pricing_option_id} requires rate")
@@ -246,7 +243,7 @@ def convert_pricing_option_to_adcp(
             parameters=parameters,
         )
 
-    elif pricing_model == "flat_rate":
+    if pricing_model == "flat_rate":
         # Flat rate pricing - fixed cost regardless of delivery
         if not rate:
             raise ValueError(f"Flat rate pricing option {pricing_option_id} requires rate")
@@ -262,10 +259,9 @@ def convert_pricing_option_to_adcp(
             result_fields["parameters"] = parameters
         return FlatRatePricingOption(**result_fields)
 
-    else:
-        raise ValueError(
-            f"Unsupported pricing_model '{pricing_model}'. Supported models: cpm, vcpm, cpc, cpcv, cpv, cpp, flat_rate"
-        )
+    raise ValueError(
+        f"Unsupported pricing_model '{pricing_model}'. Supported models: cpm, vcpm, cpc, cpcv, cpv, cpp, flat_rate"
+    )
 
 
 def convert_product_model_to_schema(product_model, adapter_type: str | None = None) -> Product:

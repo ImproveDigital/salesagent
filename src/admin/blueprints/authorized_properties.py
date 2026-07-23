@@ -248,12 +248,11 @@ def _construct_agent_url(tenant_id: str, request: Any) -> str:
                 url = f"https://{virtual_host}"
                 logger.info(f"🌐 Production: using virtual_host -> {url}")
                 return url
-            else:
-                # Fallback to subdomain pattern
-                tenant_url = get_tenant_url(subdomain)
-                if tenant_url:
-                    logger.info(f"🌐 Production: using subdomain pattern -> {tenant_url}")
-                    return tenant_url
+            # Fallback to subdomain pattern
+            tenant_url = get_tenant_url(subdomain)
+            if tenant_url:
+                logger.info(f"🌐 Production: using subdomain pattern -> {tenant_url}")
+                return tenant_url
                 # If SALES_AGENT_DOMAIN not configured, fall through to development mode
 
         # For development, use MCP server port

@@ -303,7 +303,6 @@ def detect_gam_network(tenant_id):
             except AttributeError as e:
                 # getAllNetworks might not be available in this GAM version
                 logger.info(f"getAllNetworks AttributeError: {e}")
-                pass
 
             # If getAllNetworks didn't work, we can't get the network without a network_code
             logger.warning("getAllNetworks() returned empty/None or AttributeError - cannot auto-detect network")
@@ -822,8 +821,7 @@ def get_service_account_email(tenant_id):
 
         if email:
             return jsonify({"success": True, "service_account_email": email})
-        else:
-            return jsonify({"success": True, "service_account_email": None, "message": "No service account created"})
+        return jsonify({"success": True, "service_account_email": None, "message": "No service account created"})
 
     except Exception as e:
         logger.error(f"Error getting service account email: {e}", exc_info=True)

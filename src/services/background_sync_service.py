@@ -182,7 +182,7 @@ def start_inventory_sync_background(
                     f"start_inventory_sync_background called with pending_sync_id="
                     f"{pending_sync_id!r} but no SyncJob row matches"
                 )
-            sync_id = pending_row.sync_id
+            sync_id: str = pending_row.sync_id
             pending_row.status = "running"
             # Restamp ``started_at`` so the value reflects when the worker
             # actually picked up the row, not when /refresh queued it.
@@ -606,6 +606,7 @@ def _run_sync_thread(
         try:
             from src.services.gam_advertisers_sync import _build_gam_client_for_tenant
             from src.services.gam_orders_service import GAMOrdersService
+
             with _sync_session() as db:
                 GAMOrdersService(db).sync_tenant_orders(tenant_id, _build_gam_client_for_tenant(tenant_id))
         except Exception as _oe:

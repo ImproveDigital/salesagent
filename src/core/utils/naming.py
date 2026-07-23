@@ -31,10 +31,9 @@ def format_date_range(start_time: datetime, end_time: datetime) -> str:
     """
     if start_time.year != end_time.year:
         return f"{start_time.strftime('%b %d, %Y')} - {end_time.strftime('%b %d, %Y')}"
-    elif start_time.month != end_time.month:
+    if start_time.month != end_time.month:
         return f"{start_time.strftime('%b %d')} - {end_time.strftime('%b %d, %Y')}"
-    else:
-        return f"{start_time.strftime('%b %d')}-{end_time.strftime('%d, %Y')}"
+    return f"{start_time.strftime('%b %d')}-{end_time.strftime('%d, %Y')}"
 
 
 def format_month_year(start_time: datetime) -> str:
@@ -52,8 +51,9 @@ def _extract_brand_name(request) -> str | None:
 
     brand = request.brand
     if hasattr(brand, "domain"):
-        return brand.domain
-    elif isinstance(brand, dict):
+        domain: str | None = brand.domain
+        return domain
+    if isinstance(brand, dict):
         return brand.get("domain")
     return None
 
@@ -159,7 +159,7 @@ def generate_auto_name(
         # Run async agent — handle both sync and async calling contexts
         from src.core.validation_helpers import run_async_in_sync_context
 
-        generated_name = run_async_in_sync_context(
+        generated_name: str = run_async_in_sync_context(
             generate_name_async(
                 agent=agent,
                 campaign_name=None,  # Not in AdCP spec

@@ -97,9 +97,8 @@ class DatabaseConfig:
         if host.startswith("/"):
             # Unix socket: put path in query string, not in authority
             return f"postgresql://{auth}@/{config['database']}?host={host}"
-        else:
-            # TCP connection: standard format
-            return f"postgresql://{auth}@{host}:{config['port']}/{config['database']}?sslmode={config['sslmode']}"
+        # TCP connection: standard format
+        return f"postgresql://{auth}@{host}:{config['port']}/{config['database']}?sslmode={config['sslmode']}"
 
 
 class DatabaseConnection:

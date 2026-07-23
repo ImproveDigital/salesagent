@@ -273,7 +273,7 @@ def _collect_context_for_step(step: BddStepInfo) -> str:
         full_source = Path(step.file_path).read_text()
         # Only include imports and helper functions, not the full file
         lines = full_source.splitlines()
-        imports = [l for l in lines if l.startswith(("import ", "from "))]
+        imports = [line for line in lines if line.startswith(("import ", "from "))]
         if imports:
             context_parts.append("## Imports in step file\n" + "\n".join(imports))
     except OSError:

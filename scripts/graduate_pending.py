@@ -81,13 +81,10 @@ def analyze(report_path: str) -> dict:
     # Categorize
     graduate_all_transports = []  # (scenario, row) where all 4 xpass
     graduate_partial = []  # (scenario, row, transports) where some xpass
-    xfailed_all = []  # all 4 xfail — no action needed
 
     for (scenario, row), transport_outcomes in sorted(results.items()):
         xpass_transports = {t for t, o in transport_outcomes.items() if o == "xpassed"}
-        xfail_transports = {t for t, o in transport_outcomes.items() if o == "xfailed"}
         pass_transports = {t for t, o in transport_outcomes.items() if o == "passed"}
-        fail_transports = {t for t, o in transport_outcomes.items() if o == "failed"}
 
         if not xpass_transports:
             continue

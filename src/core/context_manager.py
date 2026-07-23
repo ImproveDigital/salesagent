@@ -134,8 +134,7 @@ class ContextManager(DatabaseManager):
 
         if context_id:
             return self.get_context(context_id)
-        else:
-            return self.create_context(tenant_id, principal_id)
+        return self.create_context(tenant_id, principal_id)
 
     def update_activity(self, context_id: str) -> None:
         """Update the last activity timestamp for a context.
@@ -487,7 +486,6 @@ class ContextManager(DatabaseManager):
         """
         # For now, we can store this in the latest workflow step's response_data
         # or create a dedicated notification step
-        pass
 
     def get_context_status(self, context_id: str) -> dict[str, Any]:
         """Get the overall status of a context by checking its workflow steps.
@@ -636,7 +634,6 @@ class ContextManager(DatabaseManager):
                 return
 
             tenant_id = context.tenant_id
-            principal_id = context.principal_id
 
             # Workflow callbacks are request-scoped. Durable catalog-change
             # subscriptions live in push_notification_configs with a separate

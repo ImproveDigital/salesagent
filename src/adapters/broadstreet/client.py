@@ -242,8 +242,11 @@ class BroadstreetClient:
         return result.get("campaign", result) if result else {}
 
     def delete_campaign(self, advertiser_id: str, campaign_id: str) -> dict[str, Any]:
-        """Delete a campaign."""
-        return self.delete(f"/networks/{self.network_id}/advertisers/{advertiser_id}/campaigns/{campaign_id}")
+        """Delete a campaign. DELETE endpoints may return an empty body."""
+        result: dict[str, Any] = (
+            self.delete(f"/networks/{self.network_id}/advertisers/{advertiser_id}/campaigns/{campaign_id}") or {}
+        )
+        return result
 
     # =========================================================================
     # Advertisement Operations
@@ -323,8 +326,12 @@ class BroadstreetClient:
         return result.get("advertisement", result) if result else {}
 
     def delete_advertisement(self, advertiser_id: str, advertisement_id: str) -> dict[str, Any]:
-        """Delete an advertisement."""
-        return self.delete(f"/networks/{self.network_id}/advertisers/{advertiser_id}/advertisements/{advertisement_id}")
+        """Delete an advertisement. DELETE endpoints may return an empty body."""
+        result: dict[str, Any] = (
+            self.delete(f"/networks/{self.network_id}/advertisers/{advertiser_id}/advertisements/{advertisement_id}")
+            or {}
+        )
+        return result
 
     def get_advertisement_report(
         self,
@@ -382,10 +389,12 @@ class BroadstreetClient:
             "zone_id": zone_id,
             "advertisement_id": advertisement_id,
         }
-        return self.post(
+        result: dict[str, Any] | None = self.post(
             f"/networks/{self.network_id}/advertisers/{advertiser_id}/campaigns/{campaign_id}/placements",
             data,
         )
+        # Unwrap the response envelope like every sibling create_* method
+        return result.get("placement", result) if result else {}
 
     # =========================================================================
     # Zone Operations
@@ -421,5 +430,6 @@ class BroadstreetClient:
         return result.get("zone", result) if result else {}
 
     def delete_zone(self, zone_id: str) -> dict[str, Any]:
-        """Delete a zone."""
-        return self.delete(f"/networks/{self.network_id}/zones/{zone_id}")
+        """Delete a zone. DELETE endpoints may return an empty body."""
+        result: dict[str, Any] = self.delete(f"/networks/{self.network_id}/zones/{zone_id}") or {}
+        return result

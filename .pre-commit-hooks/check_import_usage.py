@@ -94,7 +94,7 @@ class UsageCollector(ast.NodeVisitor):
         """Extract name from node (handles Name and Attribute)."""
         if isinstance(node, ast.Name):
             return node.id
-        elif isinstance(node, ast.Attribute):
+        if isinstance(node, ast.Attribute):
             # For chained attributes like foo.bar.Baz, just get the first part
             # since that's what needs to be imported
             base = node

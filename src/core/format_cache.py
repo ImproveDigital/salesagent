@@ -155,7 +155,8 @@ def load_format_cache() -> dict[str, str]:
     try:
         with open(CACHE_FILE) as f:
             data = json.load(f)
-            return data.get("formats", {})
+            formats: dict[str, str] = data.get("formats", {})
+            return formats
     except (OSError, json.JSONDecodeError):
         return {}
 

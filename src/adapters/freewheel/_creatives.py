@@ -46,10 +46,12 @@ def _unwrap_creative(envelope: dict[str, Any]) -> dict[str, Any]:
     wrapper key is present.
     """
     if "creative" in envelope:
-        return envelope["creative"]
+        creative: dict[str, Any] = envelope["creative"]
+        return creative
     data = envelope.get("data")
     if isinstance(data, dict) and "creative" in data:
-        return data["creative"]
+        creative = data["creative"]
+        return creative
     return envelope
 
 

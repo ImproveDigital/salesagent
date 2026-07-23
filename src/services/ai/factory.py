@@ -161,7 +161,7 @@ class AIServiceFactory:
             # is now the default ``"google"`` provider (#521 dep bump).
             return GoogleModel(model_name, provider="google")
 
-        elif provider == "anthropic":
+        if provider == "anthropic":
             from pydantic_ai.models.anthropic import AnthropicModel
             from pydantic_ai.providers.anthropic import AnthropicProvider
 
@@ -169,7 +169,7 @@ class AIServiceFactory:
                 return AnthropicModel(model_name, provider=AnthropicProvider(api_key=api_key))
             return AnthropicModel(model_name, provider="anthropic")
 
-        elif provider == "openai":
+        if provider == "openai":
             from pydantic_ai.models.openai import OpenAIChatModel
             from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -177,7 +177,7 @@ class AIServiceFactory:
                 return OpenAIChatModel(model_name, provider=OpenAIProvider(api_key=api_key))
             return OpenAIChatModel(model_name, provider="openai")
 
-        elif provider == "groq":
+        if provider == "groq":
             from pydantic_ai.models.groq import GroqModel
             from pydantic_ai.providers.groq import GroqProvider
 
@@ -185,7 +185,7 @@ class AIServiceFactory:
                 return GroqModel(model_name, provider=GroqProvider(api_key=api_key))
             return GroqModel(model_name, provider="groq")
 
-        elif provider == "mistral":
+        if provider == "mistral":
             from pydantic_ai.models.mistral import MistralModel
             from pydantic_ai.providers.mistral import MistralProvider
 
@@ -193,7 +193,7 @@ class AIServiceFactory:
                 return MistralModel(model_name, provider=MistralProvider(api_key=api_key))
             return MistralModel(model_name, provider="mistral")
 
-        elif provider == "cohere":
+        if provider == "cohere":
             from pydantic_ai.models.cohere import CohereModel
             from pydantic_ai.providers.cohere import CohereProvider
 
@@ -201,15 +201,14 @@ class AIServiceFactory:
                 return CohereModel(model_name, provider=CohereProvider(api_key=api_key))
             return CohereModel(model_name, provider="cohere")
 
-        else:
-            # Fallback: use model string and let Pydantic AI resolve it
-            # This handles gateway providers and any new providers
-            model_string = build_model_string(provider, model_name)
-            logger.warning(
-                f"Provider '{provider}' not explicitly supported, "
-                f"using model string '{model_string}' (API key must be in env var)"
-            )
-            return model_string
+        # Fallback: use model string and let Pydantic AI resolve it
+        # This handles gateway providers and any new providers
+        model_string = build_model_string(provider, model_name)
+        logger.warning(
+            f"Provider '{provider}' not explicitly supported, "
+            f"using model string '{model_string}' (API key must be in env var)"
+        )
+        return model_string
 
     def is_ai_enabled(
         self,

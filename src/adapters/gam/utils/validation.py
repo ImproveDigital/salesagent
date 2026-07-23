@@ -14,8 +14,6 @@ from urllib.parse import urlparse
 class GAMValidationError(Exception):
     """Exception raised when creative fails GAM validation."""
 
-    pass
-
 
 class GAMValidator:
     """Validator for GAM creative assets and content."""
@@ -311,9 +309,11 @@ class GAMValidator:
         creative_type = "display"  # default
         if any(file_path.endswith(ext) for ext in self.ALLOWED_EXTENSIONS["html5"]):
             creative_type = "html5"
-        elif any(file_path.endswith(ext) for ext in self.ALLOWED_EXTENSIONS["video"]):
-            creative_type = "video"
-        elif format_type and "video" in format_type.lower():
+        elif (
+            any(file_path.endswith(ext) for ext in self.ALLOWED_EXTENSIONS["video"])
+            or format_type
+            and "video" in format_type.lower()
+        ):
             creative_type = "video"
         elif format_type and ("html5" in format_type.lower() or "rich_media" in format_type.lower()):
             creative_type = "html5"
@@ -332,11 +332,10 @@ class GAMValidator:
             snippet_type = asset["snippet_type"]
             if snippet_type in ["vast_xml", "vast_url"]:
                 return "vast"
-            else:
-                return "third_party_tag"
-        elif asset.get("template_variables"):
+            return "third_party_tag"
+        if asset.get("template_variables"):
             return "native"
-        elif asset.get("media_url") or asset.get("url"):
+        if asset.get("media_url") or asset.get("url"):
             # Determine type based on URL or format
             url = asset.get("media_url") or asset.get("url") or ""
             format_type = asset.get("format", "")
@@ -348,14 +347,14 @@ class GAMValidator:
                 or (format_type and "rich_media" in format_type.lower())
             ):
                 return "html5"
-            elif any(url.lower().endswith(ext) for ext in self.ALLOWED_EXTENSIONS["video"]):
+            if (
+                any(url.lower().endswith(ext) for ext in self.ALLOWED_EXTENSIONS["video"])
+                or format_type
+                and "video" in format_type.lower()
+            ):
                 return "video"
-            elif format_type and "video" in format_type.lower():
-                return "video"
-            else:
-                return "display"
-        else:
             return "display"
+        return "display"
 
 
 # Convenience function for easy import

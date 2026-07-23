@@ -1131,22 +1131,12 @@ def test_domain_access(tenant_id):
     return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="access"))
 
 
-def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
-    """Parse Flask form data into PolicyService update format.
-
-    Args:
-        form_data: Flask request.form or request.get_json() data
-
-    Returns:
-        Dict suitable for PolicyService.update_policies()
-    """
+def _parse_currency_limits(form_data, updates: dict[str, Any]) -> None:
+    """Parse currency_limits[...] form fields into a currencies update."""
     from decimal import Decimal
 
     from src.services.policy_service import CurrencyLimitData
 
-    updates: dict[str, Any] = {}
-
-    # Parse currency limits
     currency_data: dict[str, dict[str, Any]] = {}
     for key in form_data.keys():
         if key.startswith("currency_limits["):
@@ -1176,7 +1166,9 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
             for code, data in currency_data.items()
         ]
 
-    # Parse measurement providers
+
+def _parse_measurement_providers(form_data, updates: dict[str, Any]) -> None:
+    """Parse measurement provider form fields into a providers/default update."""
     # Check if measurement providers section is present in the form
     # Hidden field _measurement_providers_section ensures validation runs even when all providers removed
     has_provider_section = "_measurement_providers_section" in form_data
@@ -1200,14 +1192,18 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
         # This ensures validation runs even when removing all providers
         updates["measurement_providers"] = {"providers": providers, "default": default_provider}
 
-    # Parse naming templates
+
+def _parse_naming_templates(form_data, updates: dict[str, Any]) -> None:
+    """Parse order/line-item naming template form fields."""
     if "order_name_template" in form_data:
         updates["order_name_template"] = form_data.get("order_name_template", "").strip()
 
     if "line_item_name_template" in form_data:
         updates["line_item_name_template"] = form_data.get("line_item_name_template", "").strip()
 
-    # Parse approval settings
+
+def _parse_approval_settings(form_data, updates: dict[str, Any]) -> None:
+    """Parse approval mode, review criteria, and creative threshold form fields."""
     if "approval_mode" in form_data:
         updates["approval_mode"] = form_data.get("approval_mode", "auto-approve")
 
@@ -1226,7 +1222,9 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
         except (ValueError, TypeError):
             pass
 
-    # Parse feature flags
+
+def _parse_feature_flags(form_data, updates: dict[str, Any]) -> None:
+    """Parse enable_axe_signals and brand_manifest_policy form fields."""
     if "enable_axe_signals" in form_data:
         updates["enable_axe_signals"] = form_data.get("enable_axe_signals") in [True, "true", "on", 1, "1"]
 
@@ -1241,7 +1239,9 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
             if policy_value:
                 updates["brand_manifest_policy"] = policy_value
 
-    # Parse AI policy
+
+def _parse_ai_policy(form_data, updates: dict[str, Any]) -> None:
+    """Parse AI creative-policy form fields into an ai_policy update."""
     ai_policy_fields = [
         "creative_auto_approve_threshold",
         "creative_auto_reject_threshold",
@@ -1279,7 +1279,9 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
         if ai_policy:
             updates["ai_policy"] = ai_policy
 
-    # Parse advertising policy
+
+def _parse_advertising_policy(form_data, updates: dict[str, Any]) -> None:
+    """Parse advertising policy toggle and prohibited-list form fields."""
     advertising_policy_fields = [
         "policy_check_enabled",
         "default_prohibited_categories",
@@ -1316,10 +1318,33 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
         if advertising_policy:
             updates["advertising_policy"] = advertising_policy
 
-    # Parse product ranking prompt
+
+def _parse_product_ranking_prompt(form_data, updates: dict[str, Any]) -> None:
+    """Parse the product_ranking_prompt form field (blank becomes None)."""
     if "product_ranking_prompt" in form_data:
         prompt_value = form_data.get("product_ranking_prompt", "").strip()
         updates["product_ranking_prompt"] = prompt_value if prompt_value else None
+
+
+def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
+    """Parse Flask form data into PolicyService update format.
+
+    Args:
+        form_data: Flask request.form or request.get_json() data
+
+    Returns:
+        Dict suitable for PolicyService.update_policies()
+    """
+    updates: dict[str, Any] = {}
+
+    _parse_currency_limits(form_data, updates)
+    _parse_measurement_providers(form_data, updates)
+    _parse_naming_templates(form_data, updates)
+    _parse_approval_settings(form_data, updates)
+    _parse_feature_flags(form_data, updates)
+    _parse_ai_policy(form_data, updates)
+    _parse_advertising_policy(form_data, updates)
+    _parse_product_ranking_prompt(form_data, updates)
 
     return updates
 
@@ -1494,11 +1519,10 @@ def check_approximated_domain_status(tenant_id):
                     "target_address": domain_data.get("target_address"),
                 }
             )
-        elif response.status_code == 404:
+        if response.status_code == 404:
             return jsonify({"success": True, "registered": False})
-        else:
-            logger.error(f"Approximated API error: {response.status_code} - {response.text}")
-            return jsonify({"success": False, "error": f"API error: {response.status_code}"}), 500
+        logger.error(f"Approximated API error: {response.status_code} - {response.text}")
+        return jsonify({"success": False, "error": f"API error: {response.status_code}"}), 500
 
     except Exception as e:
         logger.error(f"Error checking domain status: {e}", exc_info=True)
@@ -1551,14 +1575,13 @@ def register_approximated_domain(tenant_id):
         if response.status_code in (200, 201):
             logger.info(f"✅ Registered domain with Approximated: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} registered successfully"})
-        elif response.status_code == 409:
+        if response.status_code == 409:
             # Already exists - that's OK
             logger.info(f"✅ Domain already registered: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} already registered"})
-        else:
-            error_msg = f"Approximated API error: {response.status_code} - {response.text}"
-            logger.error(error_msg)
-            return jsonify({"success": False, "error": error_msg}), response.status_code
+        error_msg = f"Approximated API error: {response.status_code} - {response.text}"
+        logger.error(error_msg)
+        return jsonify({"success": False, "error": error_msg}), response.status_code
 
     except Exception as e:
         logger.error(f"Error registering domain: {e}", exc_info=True)
@@ -1596,14 +1619,13 @@ def unregister_approximated_domain(tenant_id):
         if response.status_code in (200, 204):
             logger.info(f"✅ Unregistered domain from Approximated: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} unregistered successfully"})
-        elif response.status_code == 404:
+        if response.status_code == 404:
             # Already gone - that's OK
             logger.info(f"✅ Domain already unregistered: {domain}")
             return jsonify({"success": True, "message": f"Domain {domain} was not registered"})
-        else:
-            error_msg = f"Approximated API error: {response.status_code} - {response.text}"
-            logger.error(error_msg)
-            return jsonify({"success": False, "error": error_msg}), response.status_code
+        error_msg = f"Approximated API error: {response.status_code} - {response.text}"
+        logger.error(error_msg)
+        return jsonify({"success": False, "error": error_msg}), response.status_code
 
     except Exception as e:
         logger.error(f"Error unregistering domain: {e}", exc_info=True)
@@ -1643,9 +1665,8 @@ def get_approximated_token(tenant_id):
                 token_data = response.json()
                 logger.info(f"Approximated API response: {token_data}")
                 return jsonify({"success": True, "token": token_data.get("token"), "proxy_ip": approximated_proxy_ip})
-            else:
-                logger.error(f"Approximated API error: {response.status_code} - {response.text}")
-                return jsonify({"success": False, "error": f"API error: {response.status_code}"}), response.status_code
+            logger.error(f"Approximated API error: {response.status_code} - {response.text}")
+            return jsonify({"success": False, "error": f"API error: {response.status_code}"}), response.status_code
 
     except Exception as e:
         logger.error(f"Error generating Approximated token: {e}", exc_info=True)

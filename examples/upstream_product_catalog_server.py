@@ -204,40 +204,39 @@ Select the most relevant products (up to 3) and return as JSON:
             # Filter products by AI selection
             return [p for p in all_products if p["product_id"] in selected_ids]
 
-        else:
-            # Fallback to rule-based matching
-            analysis = self.analyze_brief(brief)
-            scored_products = []
+        # Fallback to rule-based matching
+        analysis = self.analyze_brief(brief)
+        scored_products = []
 
-            for product in all_products:
-                score = 0
+        for product in all_products:
+            score = 0
 
-                # Topic matching
-                product_topics = product.get("targeting_template", {}).get("content_cat_any_of", [])
-                for topic in analysis["topics"]:
-                    if topic in product_topics:
-                        score += 10
+            # Topic matching
+            product_topics = product.get("targeting_template", {}).get("content_cat_any_of", [])
+            for topic in analysis["topics"]:
+                if topic in product_topics:
+                    score += 10
 
-                # Format matching
-                product_formats = [f["type"] for f in product.get("formats", [])]
-                for format_type in analysis["formats"]:
-                    if format_type in product_formats:
-                        score += 5
-
-                # Special timing matching
-                if "march_madness" in analysis["timing"] and product.get("availability", {}).get("march_madness"):
-                    score += 15
-
-                # Audience matching
-                if "premium" in analysis["audience"] and product.get("cpm", 0) > 20:
+            # Format matching
+            product_formats = [f["type"] for f in product.get("formats", [])]
+            for format_type in analysis["formats"]:
+                if format_type in product_formats:
                     score += 5
 
-                if score > 0:
-                    scored_products.append((score, product))
+            # Special timing matching
+            if "march_madness" in analysis["timing"] and product.get("availability", {}).get("march_madness"):
+                score += 15
 
-            # Sort by score and return top products
-            scored_products.sort(key=lambda x: x[0], reverse=True)
-            return [p[1] for p in scored_products[:3]]
+            # Audience matching
+            if "premium" in analysis["audience"] and product.get("cpm", 0) > 20:
+                score += 5
+
+            if score > 0:
+                scored_products.append((score, product))
+
+        # Sort by score and return top products
+        scored_products.sort(key=lambda x: x[0], reverse=True)
+        return [p[1] for p in scored_products[:3]]
 
 
 # Global matcher instance

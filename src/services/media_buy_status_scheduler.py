@@ -159,9 +159,8 @@ class MediaBuyStatusScheduler:
                         return "active"
                     # Creatives not approved yet - stay pending
                     return None
-                else:
-                    # scheduled -> active (no creative check needed, already validated)
-                    return "active"
+                # scheduled -> active (no creative check needed, already validated)
+                return "active"
 
         return None
 

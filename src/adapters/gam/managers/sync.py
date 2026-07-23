@@ -542,15 +542,14 @@ class GAMSyncManager:
                 "status": "running",
                 "message": "Sync already in progress",
             }
-        else:
-            summary = json.loads(recent_sync.summary) if recent_sync.summary else {}
-            return {
-                "sync_id": recent_sync.sync_id,
-                "status": "completed",
-                "completed_at": recent_sync.completed_at.isoformat() if recent_sync.completed_at else None,
-                "summary": summary,
-                "message": "Recent sync exists",
-            }
+        summary = json.loads(recent_sync.summary) if recent_sync.summary else {}
+        return {
+            "sync_id": recent_sync.sync_id,
+            "status": "completed",
+            "completed_at": recent_sync.completed_at.isoformat() if recent_sync.completed_at else None,
+            "summary": summary,
+            "message": "Recent sync exists",
+        }
 
     def _create_sync_job(self, db_session: Session, sync_type: str, triggered_by: str) -> SyncJob:
         """Create a new sync job record.

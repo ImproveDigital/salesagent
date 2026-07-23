@@ -14,7 +14,7 @@ push configs, and audit logs have somewhere to attach. See
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from adcp.types import MediaBuyStatus
@@ -285,7 +285,7 @@ def materialize_projected_buy(
         (advertiser.name if advertiser else None) or order.advertiser_name or order.advertiser_id or "Unknown"
     )
 
-    today = date.today()
+    today = datetime.now(UTC).date()
     mb_repo = MediaBuyRepository(session, tenant_id)
     try:
         # Wrap the insert in a SAVEPOINT so a unique-index / PK collision

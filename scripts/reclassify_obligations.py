@@ -234,14 +234,14 @@ def _extract_obligations_from_uc_doc(filepath: Path) -> list[Obligation]:
                     text_lines = [scenario_title]
                     j = i + 1
                     while j < len(lines):
-                        l = lines[j]
-                        if l.startswith("#### Scenario:") and j != i:
+                        line = lines[j]
+                        if line.startswith("#### Scenario:") and j != i:
                             break
-                        if l.startswith("### ") and not l.startswith("#### "):
+                        if line.startswith("### ") and not line.startswith("#### "):
                             break
-                        if l.strip() == "---":
+                        if line.strip() == "---":
                             break
-                        text_lines.append(l)
+                        text_lines.append(line)
                         j += 1
 
                     obligations.append(
@@ -281,18 +281,18 @@ def _extract_obligations_from_rules(filepath: Path) -> list[Obligation]:
             layer = "behavioral"
             j = i + 1
             while j < len(lines):
-                l = lines[j]
-                if l.startswith("### ") and not l.startswith("#### "):
+                line = lines[j]
+                if line.startswith("### ") and not line.startswith("#### "):
                     break
-                if l.strip() == "---":
+                if line.strip() == "---":
                     break
-                section_lines.append(l)
-                if "**Obligation ID**" in l:
-                    m2 = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", l)
+                section_lines.append(line)
+                if "**Obligation ID**" in line:
+                    m2 = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", line)
                     if m2:
                         oid = m2.group(1)
-                if "**Layer**" in l:
-                    m3 = re.search(r"\*\*Layer\*\*\s+(\S+)", l)
+                if "**Layer**" in line:
+                    m3 = re.search(r"\*\*Layer\*\*\s+(\S+)", line)
                     if m3:
                         layer = m3.group(1)
                 j += 1
@@ -338,18 +338,18 @@ def _extract_obligations_from_constraints(filepath: Path) -> list[Obligation]:
             layer = "behavioral"
             j = i + 1
             while j < len(lines):
-                l = lines[j]
-                if l.startswith("### ") and not l.startswith("#### "):
+                line = lines[j]
+                if line.startswith("### ") and not line.startswith("#### "):
                     break
-                if l.strip() == "---":
+                if line.strip() == "---":
                     break
-                section_lines.append(l)
-                if "**Obligation ID**" in l:
-                    m = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", l)
+                section_lines.append(line)
+                if "**Obligation ID**" in line:
+                    m = re.search(r"\*\*Obligation ID\*\*\s+(\S+)", line)
                     if m:
                         oid = m.group(1)
-                if "**Layer**" in l:
-                    m2 = re.search(r"\*\*Layer\*\*\s+(\S+)", l)
+                if "**Layer**" in line:
+                    m2 = re.search(r"\*\*Layer\*\*\s+(\S+)", line)
                     if m2:
                         layer = m2.group(1)
                 j += 1

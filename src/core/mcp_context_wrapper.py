@@ -82,8 +82,7 @@ class MCPContextWrapper:
 
         if is_async:
             return self._wrap_async_tool(tool_func)
-        else:
-            return self._wrap_sync_tool(tool_func)
+        return self._wrap_sync_tool(tool_func)
 
     def _wrap_async_tool(self, tool_func: AsyncMCPTool) -> Callable:
         """Wrap an async MCP tool."""
@@ -205,12 +204,11 @@ class MCPContextWrapper:
             # Determine if header is missing or just invalid
             if auth_header == "NOT_PRESENT":
                 raise ValueError(f"Missing x-adcp-auth header. Apx-Incoming-Host: {apx_host}")
-            else:
-                raise ValueError(
-                    f"Invalid x-adcp-auth token (not found in database). "
-                    f"Token: {auth_header[:20]}..., "
-                    f"Apx-Incoming-Host: {apx_host}"
-                )
+            raise ValueError(
+                f"Invalid x-adcp-auth token (not found in database). "
+                f"Token: {auth_header[:20]}..., "
+                f"Apx-Incoming-Host: {apx_host}"
+            )
 
         if not identity.tenant_id:
             raise ValueError(
@@ -276,11 +274,9 @@ class MCPContextWrapper:
         """Replace FastMCP Context with ToolContext in arguments."""
         # Replace in kwargs: set on whichever key carried the FastMCP context (supports 'ctx' or others)
         new_kwargs = {}
-        replaced = False
         for k, v in kwargs.items():
             if isinstance(v, FastMCPContext):
                 new_kwargs[k] = tool_context
-                replaced = True
             else:
                 new_kwargs[k] = v
         kwargs = new_kwargs

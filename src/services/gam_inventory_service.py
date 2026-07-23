@@ -678,7 +678,7 @@ class GAMInventoryService:
                 },
                 "last_synced": sync_time,
             }
-        elif inventory_type == "placement":
+        if inventory_type == "placement":
             return {
                 "tenant_id": tenant_id,
                 "inventory_type": "placement",
@@ -695,7 +695,7 @@ class GAMInventoryService:
                 },
                 "last_synced": sync_time,
             }
-        elif inventory_type == "label":
+        if inventory_type == "label":
             return {
                 "tenant_id": tenant_id,
                 "inventory_type": "label",
@@ -710,7 +710,7 @@ class GAMInventoryService:
                 },
                 "last_synced": sync_time,
             }
-        elif inventory_type == "audience_segment":
+        if inventory_type == "audience_segment":
             return {
                 "tenant_id": tenant_id,
                 "inventory_type": "audience_segment",
@@ -728,8 +728,7 @@ class GAMInventoryService:
                 },
                 "last_synced": sync_time,
             }
-        else:
-            raise ValueError(f"Unknown inventory type: {inventory_type}")
+        raise ValueError(f"Unknown inventory type: {inventory_type}")
 
     def _flush_batch(self, to_insert: list, to_update: list):
         """Flush a batch of inserts and updates to database with timeout and connection recovery.
@@ -1658,8 +1657,7 @@ def create_inventory_endpoints(app):
 
             if success:
                 return jsonify({"status": "success"})
-            else:
-                return jsonify({"error": "Update failed"}), 400
+            return jsonify({"error": "Update failed"}), 400
 
         except Exception as e:
             logger.error(f"Failed to update product inventory: {e}", exc_info=True)

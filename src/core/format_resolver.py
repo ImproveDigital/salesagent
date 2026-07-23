@@ -164,12 +164,12 @@ def get_format(
     # If agent_url provided, get format directly from that agent
     # Coerce to str: FormatId.agent_url is Pydantic AnyUrl (not a str subclass)
     if agent_url:
-        fmt = run_async_in_sync_context(registry.get_format(str(agent_url), format_id))
+        fmt: Format | None = run_async_in_sync_context(registry.get_format(str(agent_url), format_id))
         if fmt:
             return fmt
     else:
         # Search all agents for this format
-        all_formats = run_async_in_sync_context(registry.list_all_formats(tenant_id=tenant_id))
+        all_formats: list[Format] = run_async_in_sync_context(registry.list_all_formats(tenant_id=tenant_id))
         for fmt in all_formats:
             discovered_format_ref = fmt.format_id
             discovered_format_id = getattr(discovered_format_ref, "id", discovered_format_ref)
@@ -241,10 +241,6 @@ def _get_product_format_override(
             return None
 
         # Get base format from creative agent registry (WITHOUT product_id to avoid recursion)
-        from src.core.creative_agent_registry import get_creative_agent_registry
-
-        registry = get_creative_agent_registry()
-
         try:
             # format_id is a string key in format_overrides dict
             # Pass agent_url to find the base format from the correct creative agent
@@ -356,7 +352,9 @@ def list_available_formats_with_errors(
 
     # Get formats from all agents (default + tenant-specific)
     try:
-        result = run_async_in_sync_context(registry.list_all_formats_with_errors(tenant_id=tenant_id))
+        result: FormatFetchResult | list[Format] = run_async_in_sync_context(
+            registry.list_all_formats_with_errors(tenant_id=tenant_id)
+        )
         if isinstance(result, list):
             result = FormatFetchResult(formats=result, errors=[])
     except Exception as e:

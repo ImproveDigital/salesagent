@@ -97,10 +97,7 @@ def get_tenant_config_from_db(tenant_id):
                     )
                 elif adapter_type == "mock":
                     adapter_config[adapter_type]["dry_run"] = adapter_obj.mock_dry_run or False
-                elif adapter_type in {"triton", "triton_digital"}:
-                    if adapter_obj.config_json:
-                        adapter_config[adapter_type].update(adapter_obj.config_json)
-                elif adapter_type == "freewheel":
+                elif adapter_type in {"triton", "triton_digital"} or adapter_type == "freewheel":
                     if adapter_obj.config_json:
                         adapter_config[adapter_type].update(adapter_obj.config_json)
 
@@ -825,11 +822,11 @@ def translate_custom_targeting(custom_targeting_node, tenant_id=None):
 
                 if len(children) == 1:
                     return children[0]
-                elif len(children) > 1:
+                if len(children) > 1:
                     return {operator: children}
                 return None
 
-            elif "keyId" in node:
+            if "keyId" in node:
                 # This is a key-value targeting node
                 key_id = str(node["keyId"])
                 key_name = key_mappings.get(key_id, f"key_{key_id}")
@@ -845,10 +842,9 @@ def translate_custom_targeting(custom_targeting_node, tenant_id=None):
 
                 if operator == "IS":
                     return {"key": key_name, "in": values}
-                elif operator == "IS_NOT":
+                if operator == "IS_NOT":
                     return {"key": key_name, "not_in": values}
-                else:
-                    return {"key": key_name, "operator": operator, "values": values}
+                return {"key": key_name, "operator": operator, "values": values}
 
         elif hasattr(node, "logicalOperator"):
             # Handle SOAP/object-based nodes (from GAM)
@@ -862,7 +858,7 @@ def translate_custom_targeting(custom_targeting_node, tenant_id=None):
 
             if len(children) == 1:
                 return children[0]
-            elif len(children) > 1:
+            if len(children) > 1:
                 return {operator: children}
             return None
 
@@ -882,10 +878,9 @@ def translate_custom_targeting(custom_targeting_node, tenant_id=None):
 
             if operator == "IS":
                 return {"key": key_name, "in": values}
-            elif operator == "IS_NOT":
+            if operator == "IS_NOT":
                 return {"key": key_name, "not_in": values}
-            else:
-                return {"key": key_name, "operator": operator, "values": values}
+            return {"key": key_name, "operator": operator, "values": values}
 
         return None
 

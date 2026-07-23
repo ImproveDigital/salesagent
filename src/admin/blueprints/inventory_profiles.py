@@ -922,7 +922,8 @@ def _placement_subkind(row, child_ids: list[str]) -> str:
     metadata = (row.raw or {}).get("metadata") or {}
     explicit = metadata.get("bundle_kind") or metadata.get("placement_kind") or metadata.get("kind")
     if explicit in {"site", "tag"}:
-        return explicit
+        subkind: str = explicit
+        return subkind
     return "site" if child_ids else "tag"
 
 

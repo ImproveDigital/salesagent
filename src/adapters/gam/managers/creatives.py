@@ -438,11 +438,10 @@ class GAMCreativesManager:
         if asset.get("snippet") and asset.get("snippet_type"):
             if asset["snippet_type"] in ["vast_xml", "vast_url"]:
                 return "vast"
-            else:
-                return "third_party_tag"
-        elif asset.get("template_variables"):
+            return "third_party_tag"
+        if asset.get("template_variables"):
             return "native"
-        elif asset.get("media_url") or asset.get("media_data"):
+        if asset.get("media_url") or asset.get("media_data"):
             # Check if HTML5 based on file extension or format
             media_url = asset.get("media_url", "")
             format_str = asset.get("format", "")
@@ -452,27 +451,24 @@ class GAMCreativesManager:
                 or "rich_media" in format_str.lower()
             ):
                 return "html5"
-            else:
-                return "hosted_asset"
-        else:
-            # Auto-detect from legacy patterns for backward compatibility
-            url = asset.get("url", "")
-            format_str = asset.get("format", "")
+            return "hosted_asset"
+        # Auto-detect from legacy patterns for backward compatibility
+        url = asset.get("url", "")
+        format_str = asset.get("format", "")
 
-            if self._is_html_snippet(url):
-                return "third_party_tag"
-            elif "native" in format_str:
-                return "native"
-            elif url and (".xml" in url.lower() or "vast" in url.lower()):
-                return "vast"
-            elif (
-                url.lower().endswith((".html", ".htm", ".html5", ".zip"))
-                or "html5" in format_str.lower()
-                or "rich_media" in format_str.lower()
-            ):
-                return "html5"
-            else:
-                return "hosted_asset"  # Default
+        if self._is_html_snippet(url):
+            return "third_party_tag"
+        if "native" in format_str:
+            return "native"
+        if url and (".xml" in url.lower() or "vast" in url.lower()):
+            return "vast"
+        if (
+            url.lower().endswith((".html", ".htm", ".html5", ".zip"))
+            or "html5" in format_str.lower()
+            or "rich_media" in format_str.lower()
+        ):
+            return "html5"
+        return "hosted_asset"  # Default
 
     def _validate_creative_for_gam(self, asset: dict[str, Any]) -> list[str]:
         """Validate creative asset against GAM requirements before API submission.
@@ -608,15 +604,14 @@ class GAMCreativesManager:
         """
         if creative_type == "third_party_tag":
             return self._create_third_party_creative(asset)
-        elif creative_type == "native":
+        if creative_type == "native":
             return self._create_native_creative(asset)
-        elif creative_type == "html5":
+        if creative_type == "html5":
             return self._create_html5_creative(asset)
-        elif creative_type == "hosted_asset":
+        if creative_type == "hosted_asset":
             return self._create_hosted_asset_creative(asset)
-        else:
-            logger.warning(f"Unsupported creative type: {creative_type}")
-            return None
+        logger.warning(f"Unsupported creative type: {creative_type}")
+        return None
 
     def _create_third_party_creative(self, asset: dict[str, Any]) -> dict[str, Any]:
         """Create a third-party creative for GAM."""
@@ -788,7 +783,7 @@ class GAMCreativesManager:
         if asset.get("media_data"):
             try:
                 # Decode base64 if needed
-                content = asset["media_data"]
+                content: str = asset["media_data"]
                 if content.startswith("data:"):
                     # Extract base64 part after comma
                     content = content.split(",", 1)[1]
@@ -828,7 +823,8 @@ class GAMCreativesManager:
         """Determine content type from asset."""
         # Check explicit mime type
         if asset.get("mime_type"):
-            return asset["mime_type"]
+            mime_type: str = asset["mime_type"]
+            return mime_type
 
         # Guess from URL extension
         url = asset.get("media_url") or asset.get("url", "")
@@ -837,11 +833,11 @@ class GAMCreativesManager:
             path = parsed.path.lower()
             if path.endswith((".jpg", ".jpeg")):
                 return "image/jpeg"
-            elif path.endswith(".png"):
+            if path.endswith(".png"):
                 return "image/png"
-            elif path.endswith(".gif"):
+            if path.endswith(".gif"):
                 return "image/gif"
-            elif path.endswith((".mp4", ".mov")):
+            if path.endswith((".mp4", ".mov")):
                 return "video/mp4"
 
         # Default
@@ -852,8 +848,7 @@ class GAMCreativesManager:
         content_type = self._get_content_type(asset)
         if content_type.startswith("video/"):
             return "video"
-        else:
-            return "image"
+        return "image"
 
     def _get_native_template_id(self, asset: dict[str, Any]) -> str:
         """Get the GAM native template ID for the asset."""

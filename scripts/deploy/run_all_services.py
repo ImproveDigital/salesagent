@@ -308,8 +308,7 @@ def run_nginx():
     if test_proc.returncode != 0:
         print(f"❌ Nginx configuration test failed: {test_proc.stderr}")
         return
-    else:
-        print("✅ Nginx configuration test passed")
+    print("✅ Nginx configuration test passed")
 
     # Start nginx
     proc = subprocess.Popen(

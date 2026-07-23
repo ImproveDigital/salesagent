@@ -99,7 +99,7 @@ def save_config(tenant_id: str):
         return jsonify({"error": "client_secret is required for new configuration"}), 400
 
     try:
-        config = save_oidc_config(
+        save_oidc_config(
             tenant_id=tenant_id,
             provider=provider,
             client_id=client_id,
@@ -146,8 +146,7 @@ def enable(tenant_id: str):
                 "oidc_enabled": actual_enabled,
             }
         )
-    else:
-        return jsonify({"error": "Cannot enable OIDC. Please test the configuration first."}), 400
+    return jsonify({"error": "Cannot enable OIDC. Please test the configuration first."}), 400
 
 
 @oidc_bp.route("/tenant/<tenant_id>/disable", methods=["POST"])

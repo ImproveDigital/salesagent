@@ -34,7 +34,11 @@ def main():
     print(f"Starting AdCP Sales Agent on {host}:{port}")
     print(f"Server endpoint: http://{host}:{port}/")
 
-    os.environ.setdefault("ADCP_PORT", str(port))
+    # ADCP_SALES_PORT is this launcher's operator-facing knob (compose sets it
+    # to 8080 and healthchecks that port). Assign — not setdefault — so the
+    # image-baked ENV ADCP_PORT=8000 (used by the run_all_services entrypoint)
+    # can't silently win and leave nginx proxying to a port nobody listens on.
+    os.environ["ADCP_PORT"] = str(port)
     from core.main import main as _core_main
 
     try:

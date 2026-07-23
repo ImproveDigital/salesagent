@@ -30,7 +30,7 @@ class ProductCard(LibraryProductCard):
     Standard card is 300x400px for marketplace display.
     """
 
-    pass  # All fields inherited from library
+    # All fields inherited from library
 
 
 class ProductCardDetailed(LibraryProductCardDetailed):
@@ -40,7 +40,7 @@ class ProductCardDetailed(LibraryProductCardDetailed):
     Provides rich product presentation similar to media kit pages.
     """
 
-    pass  # All fields inherited from library
+    # All fields inherited from library
 
 
 class Placement(LibraryPlacement):

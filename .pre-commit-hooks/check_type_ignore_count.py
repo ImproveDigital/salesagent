@@ -94,16 +94,16 @@ def main() -> int:
         print("   Run: mypy src/your_file.py --config-file=mypy.ini", file=sys.stderr)
         return 1
 
-    elif current_count == baseline_count:
+    if current_count == baseline_count:
         print(f"✓ Type ignore count unchanged: {current_count}")
         return 0
 
-    else:  # current_count < baseline_count
-        decrease = baseline_count - current_count
-        print(f"🎉 Type ignore count decreased from {baseline_count} to {current_count} (-{decrease})!")
-        print(f"   Automatically updating {BASELINE_FILE}...")
-        write_baseline(baseline_file, current_count)
-        return 0
+    # current_count < baseline_count
+    decrease = baseline_count - current_count
+    print(f"🎉 Type ignore count decreased from {baseline_count} to {current_count} (-{decrease})!")
+    print(f"   Automatically updating {BASELINE_FILE}...")
+    write_baseline(baseline_file, current_count)
+    return 0
 
 
 if __name__ == "__main__":

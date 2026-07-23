@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from a2a.types import DataPart, Message, MessageSendParams, Part, Role, Task, TaskState, TaskStatus
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from tests.utils.a2a_helpers import create_a2a_message_with_skill, create_a2a_text_message
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]

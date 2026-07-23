@@ -140,7 +140,7 @@ class WebhookQueue:
             max_size: Maximum number of webhooks in queue
         """
         self.max_size = max_size
-        self.queue: deque = deque(maxlen=max_size)
+        self.queue: deque[dict[str, Any]] = deque(maxlen=max_size)
         self._lock = threading.Lock()
         self._dropped_count = 0
 

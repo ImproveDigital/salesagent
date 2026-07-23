@@ -5,7 +5,6 @@ shared implementation pattern from CLAUDE.md.
 """
 
 import logging
-import os
 import time
 from typing import Any
 
@@ -24,7 +23,6 @@ from src.core.sandbox import account_ref_from_request, sandbox_mode_for_request,
 from src.core.schemas import (
     GetProductsResponse,  # Extends library Product
 )
-from src.core.testing_hooks import AdCPTestContext
 from src.core.tracing import traced
 from src.core.validation_helpers import safe_parse_json_field
 from src.services.policy_check_service import PolicyCheckService, PolicyStatus
@@ -107,7 +105,7 @@ def extract_product_property_ids(
         if inner.selection_type == "all":
             # Product covers ALL properties for this domain
             return None
-        elif inner.selection_type == "by_id":
+        if inner.selection_type == "by_id":
             for pid in inner.property_ids:
                 property_ids.add(pid.root)
         # by_tag: we don't resolve tags to IDs here; tags are excluded from matching
@@ -229,7 +227,6 @@ async def _get_products_impl(
     if identity is None:
         raise AdCPValidationError("Identity is required")
 
-    testing_ctx: AdCPTestContext | None = identity.testing_context or AdCPTestContext()
     principal_id: str | None = identity.principal_id
     tenant: dict[str, Any] = identity.tenant if identity.tenant else {}
 
@@ -270,7 +267,7 @@ async def _get_products_impl(
     # Enforce policy-based validation
     if brand_manifest_policy == "require_brand" and not offering:
         raise AdCPAuthorizationError("Brand manifest required by tenant policy", recovery="correctable")
-    elif brand_manifest_policy == "require_auth" and not principal_id:
+    if brand_manifest_policy == "require_auth" and not principal_id:
         raise AdCPAuthenticationError("Authentication required by tenant policy")
     # public policy allows all requests (no brand_manifest or auth required)
 
@@ -278,10 +275,6 @@ async def _get_products_impl(
     # Use a generic offering if not provided
     if not offering:
         offering = "Generic product inquiry"
-
-    # Skip strict validation in test environments (allow simple test values)
-
-    is_test_mode = (testing_ctx and testing_ctx.test_session_id is not None) or os.getenv("ADCP_TESTING") == "true"
 
     # Note: brand_manifest validation is handled by Pydantic schema, no need for runtime validation here
 
@@ -292,7 +285,6 @@ async def _get_products_impl(
 
     # Only run policy checks if enabled in tenant settings
     policy_check_enabled = advertising_policy.get("enabled", False)  # Default to False for new tenants
-    policy_disabled_reason = None
 
     # Extract brief text early - needed for policy checks, dynamic variants, and AI ranking
     brief_text = req.brief if req.brief else ""
@@ -300,7 +292,6 @@ async def _get_products_impl(
     if not policy_check_enabled:
         # Skip policy checks if disabled
         policy_result = None
-        policy_disabled_reason = "disabled_by_tenant"
         logger.info(f"Policy checks disabled for tenant {tenant['tenant_id']}")
     else:
         # Get tenant's Gemini API key for policy checks
@@ -308,7 +299,6 @@ async def _get_products_impl(
         if not tenant_gemini_key:
             # No API key - cannot run policy checks
             policy_result = None
-            policy_disabled_reason = "no_gemini_api_key"
             logger.warning(f"Policy checks enabled but no Gemini API key configured for tenant {tenant['tenant_id']}")
         else:
             policy_service = PolicyCheckService(gemini_api_key=tenant_gemini_key)
@@ -358,9 +348,8 @@ async def _get_products_impl(
                     },
                 )
 
-                # Fail open by default (allow campaigns) with warning in response
+                # Fail open by default (allow campaigns)
                 policy_result = None
-                policy_disabled_reason = f"service_error: {type(e).__name__}"
                 logger.warning(f"Policy check failed, allowing campaign by default: {e}")
 
     # Handle policy result based on settings

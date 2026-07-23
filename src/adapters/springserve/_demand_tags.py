@@ -219,4 +219,5 @@ class SpringServeDemandTagsClient:
             body["value_ids"] = list(value_ids)
         if value_list_ids:
             body["value_list_ids"] = list(value_list_ids)
-        return self._transport.post_json(f"/demand_tags/{demand_tag_id}/demand_tag_keys", body)
+        result: dict[str, Any] = self._transport.post_json(f"/demand_tags/{demand_tag_id}/demand_tag_keys", body)
+        return result

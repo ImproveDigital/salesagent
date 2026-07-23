@@ -226,7 +226,7 @@ def get_adapter(
         return MockAdServerAdapter(
             adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
         )
-    elif selected_adapter == "google_ad_manager":
+    if selected_adapter == "google_ad_manager":
         # network_code is required for GoogleAdManager
         network_code = adapter_config.get("network_code")
         if not network_code or not isinstance(network_code, str):
@@ -247,16 +247,15 @@ def get_adapter(
             targeting_config=targeting_config,
             naming_templates=naming_templates,
         )
-    elif selected_adapter in {"triton", "triton_digital"}:
+    if selected_adapter in {"triton", "triton_digital"}:
         return TritonAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
-    elif selected_adapter == "freewheel":
+    if selected_adapter == "freewheel":
         return FreeWheelAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
-    elif selected_adapter == "broadstreet":
+    if selected_adapter == "broadstreet":
         return BroadstreetAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
-    elif selected_adapter == "springserve":
+    if selected_adapter == "springserve":
         return SpringServeAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
-    else:
-        # Default to mock for unsupported adapters
-        return MockAdServerAdapter(
-            adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
-        )
+    # Default to mock for unsupported adapters
+    return MockAdServerAdapter(
+        adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
+    )

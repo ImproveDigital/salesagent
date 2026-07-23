@@ -50,10 +50,9 @@ class GAMAuthManager:
         try:
             if self.refresh_token:
                 return self._get_oauth_credentials()
-            elif self.service_account_json or self.key_file:
+            if self.service_account_json or self.key_file:
                 return self._get_service_account_credentials()
-            else:
-                raise ValueError("No valid authentication method configured")
+            raise ValueError("No valid authentication method configured")
         except Exception as e:
             # Log the type and short message only — never the full repr,
             # which on JSONDecodeError carries the input doc and could
@@ -132,7 +131,6 @@ class GAMAuthManager:
         """Get the current authentication method name."""
         if self.is_oauth_configured():
             return "oauth"
-        elif self.is_service_account_configured():
+        if self.is_service_account_configured():
             return "service_account"
-        else:
-            return "none"
+        return "none"

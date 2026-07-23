@@ -155,7 +155,7 @@ class GAMForecastManager:
         ``ForecastResult.forecast == None``.
         """
         fetched_at = datetime.now(UTC).isoformat()
-        start_d = date.today() + timedelta(days=1)
+        start_d = datetime.now(UTC).date() + timedelta(days=1)
         end_d = start_d + timedelta(days=days)
         window_start = start_d.isoformat()
         window_end = end_d.isoformat()

@@ -259,7 +259,8 @@ def _resolve_ref(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]
     if len(parts) == 2:
         def_name = parts[1]
         if def_name in defs:
-            return defs[def_name]
+            resolved: dict[str, Any] = defs[def_name]
+            return resolved
     return schema
 
 

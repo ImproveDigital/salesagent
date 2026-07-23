@@ -333,6 +333,7 @@ class DeliveryWebhookScheduler:
                 for d in (delivery_response.media_buy_deliveries or [])
             )
             delivery_response.partial_data = partial
+            delivery_response.sequence_number = sequence_number
             delivery_response.unavailable_count = 0  # TODO: Count reporting_delayed/failed deliveries
 
             # Extract webhook URL and authentication

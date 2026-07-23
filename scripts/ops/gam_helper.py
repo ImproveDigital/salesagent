@@ -19,7 +19,7 @@ def get_ad_manager_client_for_tenant(tenant_id: str) -> ad_manager.AdManagerClie
     Supports both OAuth (refresh token) and service account authentication,
     determined by the tenant's adapter config (gam_auth_method field).
 
-    
+
     Args:
         tenant_id: The tenant ID to get the client for
 
@@ -158,7 +158,7 @@ def ensure_network_timezone(tenant_id: str) -> str:
         logger.info(f"Fetching network timezone from GAM for tenant {tenant_id}...")
         try:
             network_info = get_gam_network_info(tenant_id)
-            timezone = network_info.get("timezone", "America/New_York")
+            timezone: str = network_info.get("timezone", "America/New_York")
             logger.info(f"Got network timezone for tenant {tenant_id}: {timezone}")
             return timezone
         except Exception as e:

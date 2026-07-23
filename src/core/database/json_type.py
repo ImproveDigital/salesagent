@@ -62,7 +62,7 @@ class JSONType(TypeDecorator):
         self._is_list = is_list
         super().__init__(*args, **kwargs)
 
-    def process_bind_param(self, value: Any, dialect: Dialect) -> dict | list | None:
+    def process_bind_param(self, value: Any, dialect: Dialect) -> dict | list | BaseModel | None:
         """Serialize value for database storage.
 
         Accepts Pydantic models, dicts, and lists. Pydantic models are
@@ -81,7 +81,8 @@ class JSONType(TypeDecorator):
             )
             value = {}
 
-        return value
+        bind_value: dict | list | BaseModel = value
+        return bind_value
 
     def process_result_value(self, value: Any, dialect: Dialect) -> Any:
         """Deserialize value from database, coercing to Pydantic model if configured."""
