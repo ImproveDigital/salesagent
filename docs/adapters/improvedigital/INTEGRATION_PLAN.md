@@ -166,6 +166,63 @@ creatives, and performance feedback.
 
 ---
 
+## GAM-hardcoded admin surfaces (found by walking a live GAM tenant)
+
+Findings from a UI walk of a fully-configured GAM tenant
+(`tenant_azerion_gaming` on sales-agent.yieldpro.improvedigital.com, 2026-07-24):
+several admin surfaces are **not** adapter-generic. The adding-a-new-adapter
+playbook doesn't cover these — they are extra scope for full parity, roughly in
+descending impact:
+
+- [ ] **H1 — Reports tab is GAM-only.** `/tenant/<id>/reporting` renders
+      `templates/gam_reporting.html` backed by `src/adapters/gam_reporting_api.py`
+      (page title "GAM Reporting", dimensions Advertiser/Country/Ad Unit/Order/Line
+      Item). On an Improve Digital tenant this tab is broken/empty. Build an
+      Improve Digital reporting view (dimensions from Report API `EXT_CONSOLIDATE`:
+      campaign, line item, placement, country, day/hour; metrics: impressions,
+      clicks, `advertiser_payout`, video events) registered via the adapter's
+      `register_ui_routes()` — or genericize the Reports tab to dispatch per
+      adapter. **Without this, "Reports" shows nothing for Improve tenants.**
+- [ ] **H2 — Buyer Routing + "GAM Default Advertiser" are GAM-hardcoded.** The
+      Buyer Routing page (canonical place for buyer → advertiser mapping), the
+      setup-checklist items "GAM Default Advertiser" / "GAM Advertiser Create
+      Permission", and the advertiser auto-provision path
+      (`accounts.py`, gated on `tenant_ad_server == "google_ad_manager"`) all
+      assume GAM. Improve equivalent: default + per-buyer identity =
+      `buying_entity_id` (DSP) + `buying_entity_office_ids` (seat) +
+      `metadata.advertiser_uuid`; principal platform-mapping type
+      `improvedigital`; principal create/edit form fields; checklist provider
+      entries for the Improve flavor.
+- [ ] **H3 — Signals page is fed by GAM entity types.** `/tenant/<id>/signals/`
+      lists synced `audience_segment` and `custom_targeting_key`/values from the
+      GAM inventory cache ("Map this segment", "Show values"). For parity, extend
+      the Improve inventory sync (Phase 2) with extra entity types: DMP segments
+      (`GET /dmp/v2/dmp-segments`), contextual segments
+      (`/rtb/v1/contextual-segments`, Azerion Intelligence lookups), and key-value
+      targeting keys/values (`GET /rtb/v3/keys`, `GET /rtb/v3/values`). Decide
+      whether this ships in M1 (sync) or as a follow-up — Signals is not
+      order-blocking.
+- [ ] **H4 — Inventory browse/sync/targeting pages are GAM pages (confirmed).**
+      A Configure-menu walk confirms all three inventory operator pages are
+      GAM-specific, not just GAM-flavored: `/inventory/browse` is titled "GAM
+      Inventory Browser" (entity types Ad Units/Placements/Labels, ad-unit
+      hierarchy tree), `/inventory` (Sync Inventory) says "Sync custom targeting
+      keys, audience segments, and labels from GAM", and `/targeting` (Targeting
+      Criteria Browser) is GAM custom-targeting keys + audience segments + labels
+      + AXE key mapping. The bundles page (`/inventory-profiles/`) is generic-ish
+      but counts GAM entity types. Improve Digital needs its own
+      browse/sync/targeting views over placements/packages/sizes (or these pages
+      generalized to adapter entity types) — the admin sync trigger endpoints in
+      Phase 6 cover the API side, but the operator UI is extra scope.
+- [ ] **H5 — (Optional) Marketplace deal-import projection.** GAM tenants show
+      imported orders (`Order-<id>` rows) via `src/core/tools/_gam_projection.py`
+      (`source='gam_import'`). If operators want pre-existing Improve Marketplace
+      deals visible in `get_media_buys`/Media Buys UI, an analogous
+      `improvedigital_import` projection is needed. Degrades gracefully if
+      skipped — new-deal flows are unaffected.
+
+---
+
 ## What we have vs. what we need
 
 ### Already in the codebase (nothing to build)
@@ -307,6 +364,9 @@ picker card, 3 admin endpoints, tests, docs, regenerated OpenAPI.
       counts + errors; wire as `run_inventory_sync` via `_wrap_sync_run` so the shared
       scheduler picks it up. Respect the doc's pagination metadata; JSON IDs → cast
       to the right type at the boundary.
+- [ ] Signals-feeding entity types (DMP segments, contextual segments, key-value
+      keys/values) — see **H3**; decide M1 vs follow-up.
+- [ ] Verify bundle/browse pages pick up our entity types — see **H4**.
 
 ## Phase 3 — Reporting cache + delivery read path
 
@@ -332,6 +392,8 @@ picker card, 3 admin endpoints, tests, docs, regenerated OpenAPI.
 - [ ] Optional (nice-to-have): blend `GET /rtb/v3/line-items/{id}/impression-delivery`
       into `get_packages_snapshot` for fresher trend data — but never as source of
       truth (the doc is explicit about this).
+- [ ] Admin **Reports tab** for Improve Digital tenants — see **H1** (the current
+      page is GAM-only).
 
 ## Phase 4 — Registration (3 places — miss one and it's unreachable)
 
@@ -354,6 +416,9 @@ picker card, 3 admin endpoints, tests, docs, regenerated OpenAPI.
 - [ ] `templates/adapters/improvedigital/product_config.html` — placement/package/size
       pickers with `data-entity-type`, populated from the inventory query endpoint;
       filters for `azerion_owned`/`seller_types`.
+- [ ] Buyer identity UI — principal `improvedigital` platform-mapping fields (DSP +
+      seat + advertiser UUID) in principal create/edit, plus the Buyer Routing /
+      default-buyer equivalent — see **H2**.
 - [ ] All JS uses `const scriptRoot = '{{ request.script_root }}' || '';` — never
       hardcode paths.
 
@@ -443,11 +508,12 @@ picker card, 3 admin endpoints, tests, docs, regenerated OpenAPI.
    inventory endpoints + connection UI. Independently shippable; immediately useful
    for product configuration.
 3. **M2 — Buy path**: unified-deal create/update/status, targeting translation,
-   placement assignment.
+   placement assignment, buyer-identity mapping (**H2**).
 4. **M3 — Delivery**: Report API sync + delivery read path + webhook-scheduler
-   compatibility.
+   compatibility + admin Reports view for Improve tenants (**H1**).
 5. **M4 — Polish & ship**: registration, typed embedder config, tests, docs, OpenAPI,
-   live smoke.
+   live smoke. Signals entity sync (**H3**) and deal-import projection (**H5**) can
+   trail as follow-ups.
 
 ## Quick file checklist
 
