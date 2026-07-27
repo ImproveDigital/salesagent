@@ -975,6 +975,165 @@ def test_springserve_connection(tenant_id, **kwargs):
         return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
 
 
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/test-connection", methods=["POST"])
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
+def test_improvedigital_connection(tenant_id, **kwargs):
+    """Verify Improve Digital OAuth2 credentials by minting a bearer and
+    probing a Classic-campaigns read.
+
+    Submitted ciphertext on the secret field is rejected to prevent
+    cross-tenant replay; missing fields fall back to the encrypted values
+    already on AdapterConfig.config_json.
+
+    Read-only probe — never writes to AdapterConfig — so it opts into the
+    embedded-write gate.
+    """
+    from src.core.utils.encryption import is_encrypted
+
+    try:
+        data = request.get_json() or {}
+        client_id = data.get("client_id")
+        client_secret = data.get("client_secret")
+        api_base_url = data.get("api_base_url")
+
+        if client_secret and is_encrypted(client_secret):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "client_secret must be plaintext (encrypted-token replay rejected)",
+                    }
+                ),
+                400,
+            )
+
+        if not (client_id and client_secret):
+            from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+            with get_db_session() as session:
+                existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+                if existing and existing.config_json:
+                    from src.adapters.improvedigital import ImproveDigitalConnectionConfig
+
+                    try:
+                        rehydrated = ImproveDigitalConnectionConfig.model_validate(existing.config_json)
+                        client_id = client_id or rehydrated.client_id
+                        client_secret = client_secret or rehydrated.client_secret
+                        api_base_url = api_base_url or rehydrated.api_base_url
+                    except ValidationError:
+                        pass
+
+        if not (client_id and client_secret):
+            return (
+                jsonify({"success": False, "error": "Connection test requires client_id + client_secret"}),
+                400,
+            )
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client_kwargs: dict = {"client_id": client_id, "client_secret": client_secret}
+        if api_base_url:
+            client_kwargs["base_url"] = api_base_url
+        client = ImproveDigitalClient(**client_kwargs)
+        try:
+            status, _body = client.probe("GET", "/rtb/v1/classic/campaigns?limit=1")
+        except ImproveDigitalError as exc:
+            logger.warning(
+                "Improve Digital credential probe failed: tenant_id=%s status=%s error=%s body_excerpt=%s",
+                tenant_id,
+                exc.status_code,
+                exc,
+                safe_upstream_body_excerpt(exc.body),
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the credentials"}), 200
+
+        if status >= 400:
+            return jsonify({"success": False, "error": f"Improve Digital responded HTTP {status}"}), 200
+
+        return jsonify({"success": True, "base_url": client._transport.base_url})
+    except Exception as e:
+        logger.error(f"Improve Digital connection test failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory", methods=["GET"])
+@require_tenant_access()
+def list_improvedigital_inventory(tenant_id, **kwargs):
+    """Return locally-cached Improve Digital inventory entries for the
+    product setup UI.
+
+    Filterable by ``entity_type`` (publisher, placement, package, size).
+    Optional ``parent_id`` narrows placements to one publisher. Optional
+    ``q`` substring-matches the ``name`` field.
+
+    Returns a flat list (no pagination — the cache is small enough that
+    sending the whole filtered set is fine for now).
+    """
+    from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+    entity_type = request.args.get("entity_type")
+    parent_id = request.args.get("parent_id")
+    q = request.args.get("q")
+
+    if not entity_type:
+        return jsonify({"success": False, "error": "entity_type query param is required"}), 400
+
+    with get_db_session() as session:
+        repo = ImproveDigitalInventoryRepository(session, tenant_id)
+        rows = repo.list_by_type(entity_type, parent_id=parent_id)
+
+    items = [
+        {"entity_id": row.entity_id, "name": row.name, "parent_id": row.parent_id}
+        for row in rows
+        if not q or (row.name and q.lower() in row.name.lower())
+    ]
+    return jsonify({"success": True, "entity_type": entity_type, "count": len(items), "items": items})
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-inventory", methods=["POST"])
+@require_tenant_access(role=("admin",))
+def sync_improvedigital_inventory(tenant_id, **kwargs):
+    """Sweep the 360Yield buy-side inventory and refresh the local cache.
+
+    Runs through the shared sync orchestration (adapter construction from
+    stored config, SyncJob bookkeeping). Returns per-entity-type counts +
+    any partial-failure errors.
+
+    The cache feeds the Improve Digital product setup UI; it's not exposed
+    to AdCP buyers (property discovery goes through AAO lookup).
+    """
+    from src.services.adapter_sync_orchestration import execute_adapter_sync
+
+    try:
+        result = execute_adapter_sync(
+            tenant_id=tenant_id,
+            adapter_type="improvedigital",
+            sync_kind="inventory",
+            triggered_by="admin_button",
+        )
+        if result is None:
+            return (
+                jsonify({"success": False, "error": "Improve Digital adapter is not configured for this tenant"}),
+                400,
+            )
+        return jsonify(
+            {
+                "success": result.succeeded,
+                "sync_id": result.sync_id,
+                "counts": result.counts,
+                "errors": result.errors,
+                "total_synced": sum(result.counts.values()),
+                "started_at": result.started_at.isoformat() if result.started_at else None,
+                "finished_at": result.finished_at.isoformat() if result.finished_at else None,
+            }
+        )
+    except ValidationError as exc:
+        return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400
+    except Exception as e:
+        logger.error(f"Improve Digital inventory sync failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/springserve/inventory", methods=["GET"])
 @require_tenant_access()
 def list_springserve_inventory(tenant_id, **kwargs):

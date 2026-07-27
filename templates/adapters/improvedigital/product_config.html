@@ -1,0 +1,157 @@
+{#
+Improve Digital Product Configuration Template
+
+Included by add_product.html / edit_product.html when the tenant's adapter
+is improvedigital. Renders Classic line-item inventory pickers backed by the
+synced improvedigital_inventory cache (run "Sync Inventory Now" on the
+Ad Server settings page first) plus line-item delivery defaults.
+
+Form fields use the impl_ prefix and are parsed by
+_improvedigital_implementation_config() in src/admin/blueprints/products.py.
+
+Expected context:
+- tenant_id: current tenant ID
+- product (edit page only): dict with implementation_config
+#}
+
+{% set impl = (product.implementation_config if product is defined and product and product.implementation_config else {}) %}
+
+<div class="form-section" data-adapter-type="improvedigital">
+    <h3>Improve Digital Configuration</h3>
+    <p class="text-muted" style="margin-bottom: 1.5rem;">
+        Pin this product's Classic line items to 360Yield inventory. Pickers load
+        from the synced inventory cache — if they're empty, run
+        <strong>Sync Inventory Now</strong> on the Ad Server settings page.
+    </p>
+
+    <div class="form-group">
+        <label for="impl_placement_ids">Placements</label>
+        <select id="impl_placement_ids" name="impl_placement_ids" multiple size="8"
+                class="impd-inventory-picker" data-entity-type="placement"
+                data-selected="{{ impl.get('placement_ids', [])|tojson }}">
+        </select>
+        <small class="form-text text-muted">
+            Placements the line item is pinned to. Hold Cmd/Ctrl to select multiple.
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_excluded_placement_ids">Excluded Placements</label>
+        <select id="impl_excluded_placement_ids" name="impl_excluded_placement_ids" multiple size="4"
+                class="impd-inventory-picker" data-entity-type="placement"
+                data-selected="{{ impl.get('excluded_placement_ids', [])|tojson }}">
+        </select>
+        <small class="form-text text-muted">
+            Placements explicitly excluded from delivery.
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_package_ids">Placement Packages</label>
+        <select id="impl_package_ids" name="impl_package_ids" multiple size="4"
+                class="impd-inventory-picker" data-entity-type="package"
+                data-selected="{{ impl.get('package_ids', [])|tojson }}">
+        </select>
+        <small class="form-text text-muted">
+            Reusable placement groupings assigned to the line item.
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_size_ids">Creative Sizes</label>
+        <select id="impl_size_ids" name="impl_size_ids" multiple size="6"
+                class="impd-inventory-picker" data-entity-type="size"
+                data-selected="{{ impl.get('size_ids', [])|tojson }}">
+        </select>
+        <small class="form-text text-muted">
+            Creative sizes the line item targets.
+        </small>
+    </div>
+
+    <h4 style="margin-top: 1.5rem;">Line-item Defaults</h4>
+
+    <div class="form-group">
+        <label for="impl_pricing_model">Pricing Model</label>
+        <select id="impl_pricing_model" name="impl_pricing_model" class="form-control">
+            <option value="" {% if not impl.get('pricing_model') %}selected{% endif %}>Platform default</option>
+            <option value="CPM" {% if impl.get('pricing_model') == 'CPM' %}selected{% endif %}>CPM</option>
+        </select>
+        <small class="form-text text-muted">
+            CPM is confirmed; further models are pending platform confirmation (gap G2).
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_frequency_cap">Frequency Cap</label>
+        <input type="number" id="impl_frequency_cap" name="impl_frequency_cap" min="1"
+               value="{{ impl.get('frequency_cap', '') }}"
+               placeholder="Impressions per user per interval">
+    </div>
+
+    <div class="form-group" style="display: flex; gap: 1rem;">
+        <div style="flex: 1;">
+            <label for="impl_frequency_interval">Frequency Interval</label>
+            <input type="number" id="impl_frequency_interval" name="impl_frequency_interval" min="1" step="any"
+                   value="{{ impl.get('frequency_interval', '') }}"
+                   placeholder="e.g. 1">
+        </div>
+        <div style="flex: 1;">
+            <label for="impl_frequency_interval_type">Interval Unit</label>
+            <select id="impl_frequency_interval_type" name="impl_frequency_interval_type" class="form-control">
+                <option value="" {% if not impl.get('frequency_interval_type') %}selected{% endif %}>—</option>
+                {% for unit in ['months', 'weeks', 'days', 'hours', 'minutes'] %}
+                <option value="{{ unit }}" {% if impl.get('frequency_interval_type') == unit %}selected{% endif %}>{{ unit }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_delivery_schedule">Delivery Schedule</label>
+        <input type="text" id="impl_delivery_schedule" name="impl_delivery_schedule"
+               value="{{ impl.get('delivery_schedule', '') }}"
+               placeholder="Optional — pacing schedule">
+    </div>
+</div>
+
+<script>
+(function() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const apiBase = scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/inventory';
+
+    function populatePicker(select) {
+        const entityType = select.dataset.entityType;
+        let selected = [];
+        try {
+            selected = JSON.parse(select.dataset.selected || '[]').map(String);
+        } catch (e) { /* leave empty */ }
+
+        fetch(apiBase + '?entity_type=' + encodeURIComponent(entityType), {credentials: 'same-origin'})
+            .then(response => response.json())
+            .then(data => {
+                if (!(data.success && data.items)) return;
+                if (data.items.length === 0) {
+                    const opt = document.createElement('option');
+                    opt.disabled = true;
+                    opt.textContent = '(no ' + entityType + 's in cache — run Sync Inventory)';
+                    select.appendChild(opt);
+                    return;
+                }
+                data.items
+                    .slice()
+                    .sort((a, b) => String(a.name || a.entity_id).localeCompare(String(b.name || b.entity_id)))
+                    .forEach(item => {
+                        const opt = document.createElement('option');
+                        opt.value = item.entity_id;
+                        opt.textContent = item.name || item.entity_id;
+                        if (selected.includes(String(item.entity_id))) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+            })
+            .catch(() => { /* cache endpoint unavailable — pickers stay empty */ });
+    }
+
+    document.querySelectorAll('.impd-inventory-picker').forEach(populatePicker);
+})();
+</script>
