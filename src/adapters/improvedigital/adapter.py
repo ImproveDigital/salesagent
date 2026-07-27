@@ -204,7 +204,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
 
         def _probe(method: str, path: str) -> tuple[int, str]:
             assert self._client is not None
-            return self._client._transport.probe(method, path)
+            return self._client.probe(method, path)
 
         try:
             self._walk_permission_probes(report, probes, _probe, auth_error_types=(ImproveDigitalAuthError,))

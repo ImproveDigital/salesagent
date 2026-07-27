@@ -975,6 +975,87 @@ def test_springserve_connection(tenant_id, **kwargs):
         return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
 
 
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/test-connection", methods=["POST"])
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
+def test_improvedigital_connection(tenant_id, **kwargs):
+    """Verify Improve Digital OAuth2 credentials by minting a bearer and
+    probing a Classic-campaigns read.
+
+    Submitted ciphertext on the secret field is rejected to prevent
+    cross-tenant replay; missing fields fall back to the encrypted values
+    already on AdapterConfig.config_json.
+
+    Read-only probe — never writes to AdapterConfig — so it opts into the
+    embedded-write gate.
+    """
+    from src.core.utils.encryption import is_encrypted
+
+    try:
+        data = request.get_json() or {}
+        client_id = data.get("client_id")
+        client_secret = data.get("client_secret")
+        api_base_url = data.get("api_base_url")
+
+        if client_secret and is_encrypted(client_secret):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "client_secret must be plaintext (encrypted-token replay rejected)",
+                    }
+                ),
+                400,
+            )
+
+        if not (client_id and client_secret):
+            from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+            with get_db_session() as session:
+                existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+                if existing and existing.config_json:
+                    from src.adapters.improvedigital import ImproveDigitalConnectionConfig
+
+                    try:
+                        rehydrated = ImproveDigitalConnectionConfig.model_validate(existing.config_json)
+                        client_id = client_id or rehydrated.client_id
+                        client_secret = client_secret or rehydrated.client_secret
+                        api_base_url = api_base_url or rehydrated.api_base_url
+                    except ValidationError:
+                        pass
+
+        if not (client_id and client_secret):
+            return (
+                jsonify({"success": False, "error": "Connection test requires client_id + client_secret"}),
+                400,
+            )
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client_kwargs: dict = {"client_id": client_id, "client_secret": client_secret}
+        if api_base_url:
+            client_kwargs["base_url"] = api_base_url
+        client = ImproveDigitalClient(**client_kwargs)
+        try:
+            status, _body = client.probe("GET", "/rtb/v1/classic/campaigns?limit=1")
+        except ImproveDigitalError as exc:
+            logger.warning(
+                "Improve Digital credential probe failed: tenant_id=%s status=%s error=%s body_excerpt=%s",
+                tenant_id,
+                exc.status_code,
+                exc,
+                safe_upstream_body_excerpt(exc.body),
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the credentials"}), 200
+
+        if status >= 400:
+            return jsonify({"success": False, "error": f"Improve Digital responded HTTP {status}"}), 200
+
+        return jsonify({"success": True, "base_url": client._transport.base_url})
+    except Exception as e:
+        logger.error(f"Improve Digital connection test failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/springserve/inventory", methods=["GET"])
 @require_tenant_access()
 def list_springserve_inventory(tenant_id, **kwargs):

@@ -264,6 +264,10 @@ class ImproveDigitalClient:
         self.lookups = ImproveDigitalLookupsClient(self._transport)
         self.reporting = ImproveDigitalReportingClient(self._transport)
 
+    def probe(self, method: str, path: str) -> tuple[int, str]:
+        """Non-raising permission probe — see :meth:`ImproveDigitalTransport.probe`."""
+        return self._transport.probe(method, path)
+
     def close(self) -> None:
         """Best-effort server-side token invalidation."""
         self._transport.logout()
