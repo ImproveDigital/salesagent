@@ -144,25 +144,25 @@ creatives, and performance feedback.
       (needs "an active Polaris user with the necessary permissions"). Confirm whether
       a staging/sandbox environment exists. Also grab the OpenAPI JSON from
       <https://openapi.360yield.com/dashboard> once we have a login.
-- [ ] **G1 — Creative upload has no documented v3 endpoint.** v3 only lists, exports,
-      VAST-validates, and archives creatives on Classic campaigns; creation happens
-      "from within the line item form" (UI) or presumably via v1/v2 endpoints not in
-      this doc. **Decision**: start with **UDID deals** (primary v3 flow) where
-      creatives are managed buyer-side in the DSP — `add_creative_assets` /
-      `associate_creatives` then raise a clear `FeatureNotSupportedException` (No Quiet
-      Failures) or route to a HITL manual-approval step. Ask the Improve team whether a
-      programmatic Classic creative-upload API exists; if yes, wire it in a follow-up.
+- [x] ~~**G1 — Creative upload has no documented v3 endpoint.**~~ **Resolved via the
+      OpenAPI spec** (committed at `api-doc/rtb-v3-openapi.json`): the **v1 Classic
+      surface has full creative CRUD** — `POST /rtb/v1/classic/campaigns/{id}/creatives`
+      (JSON `CreativeDto`; required: `name`, `type`, `size`, `status`, `tag`), bulk
+      upload (`.../creatives/bulk-upload`, third-party-tag variant), per-creative
+      GET/PUT/DELETE, `PUT .../creatives/{id}/status?activate=`, and line-item binding
+      via `PUT .../line-items/{id}/creatives` (`LineItemCreativesDto` with weights).
 - [ ] **G2 — `pricing_model_type` allowed values not enumerated** in the doc (plain
       "string"). Probe `GET /common/v2/buying-types` + the unified-deal JSON schema
       (`GET /schema/rtb/v3/unified-deal-creation`) and confirm with the platform team.
       Working assumption: CPM (deals are `cpm_bid`-driven; CPC exists — "BUDGET is
       default for CPC line items").
-- [ ] **G3 — UDID vs Classic strategy.** UDID requires a `buying_entity_id` (DSP) +
-      seat — i.e. the buyer transacts through their own DSP and our "media buy" is the
-      deal setup. Classic means Improve adserver serves our creatives directly. This
-      changes what `create_media_buy` needs from the buyer principal (DSP + seat IDs
-      as principal-level platform mappings, like GAM's `advertiser_id`). Decide with
-      product which flow (or both) AdCP buyers get. **Recommendation: UDID first.**
+- [x] ~~**G3 — UDID vs Classic strategy.**~~ **Decided (2026-07-27): Classic first.**
+      Phase 1 targets Classic (direct) campaigns — the Improve adserver hosts and
+      serves our creatives (`/rtb/v1/classic/*`: campaign → line items → creatives,
+      placement assignment via `/rtb/v2/classic/.../placements/assign`). Buyer
+      principal identity = `advertiser_id` platform mapping (like GAM), plus a
+      tenant-level `improve_demand_contact_id` (required on every `CampaignDto`).
+      UDID unified deals become a later milestone.
 
 ---
 
