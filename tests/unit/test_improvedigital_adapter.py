@@ -56,11 +56,11 @@ class TestRegistry:
         assert schemas.product_config is ImproveDigitalProductConfig
         assert schemas.capabilities.inventory_entity_label == "Placements"
 
-    def test_sync_capabilities_off_until_caches_land(self):
-        # Phase 2/3 of the integration plan flip these alongside the real
-        # sync implementations — the scheduler must not call the stubs.
+    def test_sync_capabilities_match_implementation_state(self):
+        # Inventory sync landed with Phase 2; reporting flips alongside the
+        # Phase 3 Report API cache — the scheduler must not call its stub.
         schemas = get_adapter_schemas("improvedigital")
-        assert schemas.capabilities.supports_inventory_sync is False
+        assert schemas.capabilities.supports_inventory_sync is True
         assert schemas.capabilities.supports_reporting_sync is False
 
     def test_default_channels_cover_classic_media_types(self):
@@ -155,6 +155,14 @@ class TestAdapterDryRun:
             today=datetime.now(UTC),
         )
         assert response.errors
+
+    def test_dry_run_inventory_sync_soft_fails(self, mock_principal):
+        # No credentials in dry-run — the sync reports a failed run instead
+        # of raising, so the shared scheduler records it as a failed SyncJob.
+        adapter = make_dry_run_adapter(mock_principal)
+        result = adapter.run_inventory_sync()
+        assert result.succeeded is False
+        assert "dry-run" in result.errors["adapter"]
 
     def test_pause_media_buy_dry_run_succeeds(self, mock_principal):
         adapter = make_dry_run_adapter(mock_principal)

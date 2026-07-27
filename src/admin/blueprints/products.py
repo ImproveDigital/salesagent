@@ -696,6 +696,46 @@ def list_products(tenant_id):
         return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
 
 
+def _improvedigital_implementation_config(base_config: dict) -> dict:
+    """Layer Improve Digital line-item fields from the product form onto
+    ``base_config``.
+
+    Reads the ``impl_*`` fields rendered by
+    ``templates/adapters/improvedigital/product_config.html`` — inventory
+    pickers submit multi-selects (``request.form.getlist``), the rest are
+    scalars. Blank fields remove the corresponding key so clearing a picker
+    on edit actually clears the stored config.
+    """
+    config = dict(base_config)
+
+    for field in ("placement_ids", "excluded_placement_ids", "package_ids", "size_ids"):
+        values = [int(v) for v in request.form.getlist(f"impl_{field}") if str(v).strip().isdigit()]
+        if values:
+            config[field] = values
+        else:
+            config.pop(field, None)
+
+    for field in ("pricing_model", "frequency_interval_type", "delivery_schedule"):
+        raw = (request.form.get(f"impl_{field}") or "").strip()
+        if raw:
+            config[field] = raw
+        else:
+            config.pop(field, None)
+
+    for field, cast in (("frequency_cap", int), ("frequency_interval", float)):
+        raw = (request.form.get(f"impl_{field}") or "").strip()
+        if raw:
+            try:
+                config[field] = cast(raw)
+            except ValueError:
+                flash(f"Invalid value for {field.replace('_', ' ')}: {raw!r} — must be a number", "error")
+                config.pop(field, None)
+        else:
+            config.pop(field, None)
+
+    return config
+
+
 def _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_data=None):
     """Helper to render add product form with optional preserved form data.
 
@@ -962,6 +1002,14 @@ def add_product(tenant_id):
                         base_config["priority"] = int(form_data["priority"])
 
                     implementation_config = base_config
+                elif adapter_type == "improvedigital":
+                    # Start from the generic default config, then layer the
+                    # Improve Digital picker fields (placements/packages/sizes
+                    # + line-item defaults) from the form.
+                    gam_config_service = GAMProductConfigService()
+                    implementation_config = _improvedigital_implementation_config(
+                        gam_config_service.generate_default_config(delivery_type, formats)
+                    )
                 else:
                     # For other adapters, use simple config
                     gam_config_service = GAMProductConfigService()
@@ -1838,6 +1886,15 @@ def edit_product(tenant_id, product_id):
                     if base_config.get("custom_targeting_keys"):
                         custom_keys = base_config["custom_targeting_keys"]
                         create_custom_key_inventory_mappings(db_session, tenant_id, product_id, custom_keys)
+
+                elif adapter_type == "improvedigital":
+                    # Layer the Improve Digital picker fields onto the stored
+                    # config (preserving keys the form doesn't manage).
+                    base_config = product.implementation_config.copy() if product.implementation_config else {}
+                    product.implementation_config = _improvedigital_implementation_config(base_config)
+                    from sqlalchemy.orm import attributes
+
+                    attributes.flag_modified(product, "implementation_config")
 
                 # Update pricing options (AdCP PR #88)
                 # Note: min_spend is now stored in pricing_options[].min_spend_per_package

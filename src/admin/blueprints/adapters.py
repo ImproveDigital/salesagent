@@ -1056,6 +1056,84 @@ def test_improvedigital_connection(tenant_id, **kwargs):
         return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
 
 
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory", methods=["GET"])
+@require_tenant_access()
+def list_improvedigital_inventory(tenant_id, **kwargs):
+    """Return locally-cached Improve Digital inventory entries for the
+    product setup UI.
+
+    Filterable by ``entity_type`` (publisher, placement, package, size).
+    Optional ``parent_id`` narrows placements to one publisher. Optional
+    ``q`` substring-matches the ``name`` field.
+
+    Returns a flat list (no pagination — the cache is small enough that
+    sending the whole filtered set is fine for now).
+    """
+    from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+    entity_type = request.args.get("entity_type")
+    parent_id = request.args.get("parent_id")
+    q = request.args.get("q")
+
+    if not entity_type:
+        return jsonify({"success": False, "error": "entity_type query param is required"}), 400
+
+    with get_db_session() as session:
+        repo = ImproveDigitalInventoryRepository(session, tenant_id)
+        rows = repo.list_by_type(entity_type, parent_id=parent_id)
+
+    items = [
+        {"entity_id": row.entity_id, "name": row.name, "parent_id": row.parent_id}
+        for row in rows
+        if not q or (row.name and q.lower() in row.name.lower())
+    ]
+    return jsonify({"success": True, "entity_type": entity_type, "count": len(items), "items": items})
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-inventory", methods=["POST"])
+@require_tenant_access(role=("admin",))
+def sync_improvedigital_inventory(tenant_id, **kwargs):
+    """Sweep the 360Yield buy-side inventory and refresh the local cache.
+
+    Runs through the shared sync orchestration (adapter construction from
+    stored config, SyncJob bookkeeping). Returns per-entity-type counts +
+    any partial-failure errors.
+
+    The cache feeds the Improve Digital product setup UI; it's not exposed
+    to AdCP buyers (property discovery goes through AAO lookup).
+    """
+    from src.services.adapter_sync_orchestration import execute_adapter_sync
+
+    try:
+        result = execute_adapter_sync(
+            tenant_id=tenant_id,
+            adapter_type="improvedigital",
+            sync_kind="inventory",
+            triggered_by="admin_button",
+        )
+        if result is None:
+            return (
+                jsonify({"success": False, "error": "Improve Digital adapter is not configured for this tenant"}),
+                400,
+            )
+        return jsonify(
+            {
+                "success": result.succeeded,
+                "sync_id": result.sync_id,
+                "counts": result.counts,
+                "errors": result.errors,
+                "total_synced": sum(result.counts.values()),
+                "started_at": result.started_at.isoformat() if result.started_at else None,
+                "finished_at": result.finished_at.isoformat() if result.finished_at else None,
+            }
+        )
+    except ValidationError as exc:
+        return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400
+    except Exception as e:
+        logger.error(f"Improve Digital inventory sync failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/springserve/inventory", methods=["GET"])
 @require_tenant_access()
 def list_springserve_inventory(tenant_id, **kwargs):

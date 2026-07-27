@@ -127,6 +127,22 @@ Expected context:
             </button>
             <span id="improvedigital-connection-status"></span>
         </div>
+
+        <hr style="margin: 2rem 0 1rem 0;">
+
+        <h4>Inventory Sync</h4>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Pull 360Yield buy-side inventory (publishers, placements, packages,
+            creative sizes) into the local cache. The product setup UI uses this
+            cache so you can pin line items to placements without round-tripping
+            to the 360Yield API on every page render.
+        </p>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="syncImproveDigitalInventory()" class="btn btn-secondary">
+                Sync Inventory Now
+            </button>
+            <span id="improvedigital-inventory-sync-status"></span>
+        </div>
     </div>
 </div>
 
@@ -179,6 +195,38 @@ function saveImproveDigitalConfig() {
     })
     .catch(error => {
         showNotification('Error saving configuration: ' + error.message, 'error');
+    });
+}
+
+function syncImproveDigitalInventory() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('improvedigital-inventory-sync-status');
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Syncing… (this can take 15-30s)</span>';
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/sync-inventory', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const summary = Object.entries(data.counts || {})
+                .map(([k, v]) => k + '=' + v)
+                .join(', ');
+            statusEl.innerHTML = '<span style="color: #10b981;">✓ Synced ' + data.total_synced + ' items (' + summary + ')</span>';
+        } else if (data.counts && Object.keys(data.counts).length > 0) {
+            const counts = Object.entries(data.counts).map(([k, v]) => k + '=' + v).join(', ');
+            const errors = Object.entries(data.errors || {}).map(([k, v]) => k + ': ' + v).join('; ');
+            statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Partial: synced ' + counts + ' but failed: ' + errors + '</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Sync failed') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
     });
 }
 

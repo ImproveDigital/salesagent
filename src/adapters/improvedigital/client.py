@@ -200,6 +200,10 @@ class ImproveDigitalInventoryClient:
         free-text ``search``, plus ``offset``/``limit`` pagination."""
         return self._transport.get_json("/rtb/v3/placements", **params)
 
+    def list_packages(self, **params: Any) -> dict[str, Any]:
+        """``GET /rtb/v1/packages`` — reusable placement groupings."""
+        return self._transport.get_json("/rtb/v1/packages", **params)
+
 
 class ImproveDigitalLookupsClient:
     """Dimension lookups for targeting/config pickers."""

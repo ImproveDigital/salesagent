@@ -34,6 +34,7 @@ from typing import Any
 
 from src.adapters.base import (
     AdapterCapabilities,
+    AdapterSyncResult,
     AdServerAdapter,
     CreativeEngineAdapter,
     DeliveryDataUnavailable,
@@ -78,8 +79,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
     connection_config_class = ImproveDigitalConnectionConfig
     product_config_class = ImproveDigitalProductConfig
     capabilities = AdapterCapabilities(
-        # Flip alongside the Phase 2 placement cache (inventory_sync.py).
-        supports_inventory_sync=False,
+        supports_inventory_sync=True,
         # Flip alongside the Phase 3 Report API cache (reporting_sync.py).
         supports_reporting_sync=False,
         inventory_entity_label="Placements",
@@ -161,6 +161,79 @@ class ImproveDigitalAdapter(AdServerAdapter):
             geo_countries=True,
             geo_regions=True,
         )
+
+    # ----- inventory sync -----
+
+    def run_inventory_sync(self) -> AdapterSyncResult:
+        """Refresh the local 360Yield inventory cache (placements,
+        publishers, packages, sizes) from the API.
+
+        Called by the shared adapter sync scheduler and the admin
+        "Sync Inventory Now" button.
+        """
+        start = datetime.now(UTC)
+        if self.dry_run or self._client is None:
+            return AdapterSyncResult(
+                sync_kind="inventory",
+                started_at=start,
+                finished_at=datetime.now(UTC),
+                succeeded=False,
+                errors={"adapter": "dry-run mode — Improve Digital inventory sync requires live credentials"},
+            )
+
+        from src.adapters.improvedigital.inventory_sync import ImproveDigitalInventorySync
+        from src.core.database.database_session import get_db_session
+
+        with get_db_session() as session:
+            sync = ImproveDigitalInventorySync(
+                client=self._client, session=session, tenant_id=self.tenant_id or "default"
+            )
+            inner = sync.run()
+            session.commit()
+
+        return AdapterSyncResult(
+            sync_kind="inventory",
+            started_at=inner.started_at or start,
+            finished_at=inner.finished_at or datetime.now(UTC),
+            succeeded=inner.succeeded,
+            counts=dict(inner.counts),
+            errors=dict(inner.errors),
+        )
+
+    def latest_inventory_sync_at(self) -> datetime | None:
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+        with get_db_session() as session:
+            return ImproveDigitalInventoryRepository(session, self.tenant_id or "default").latest_sync_at()
+
+    async def get_available_inventory(self) -> dict[str, Any]:
+        """Surface the synced placement cache to the AI product configurator."""
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+        with get_db_session() as session:
+            repo = ImproveDigitalInventoryRepository(session, self.tenant_id or "default")
+            placements = [
+                {"id": row.entity_id, "name": row.name, "publisher_id": row.parent_id}
+                for row in repo.list_by_type("placement")
+            ]
+            packages = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("package")]
+            sizes = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("size")]
+            publishers = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("publisher")]
+
+        return {
+            "placements": placements,
+            "ad_units": [],
+            "targeting_options": {"packages": packages, "sizes": sizes, "publishers": publishers},
+            "creative_specs": sizes,
+            "properties": {
+                "placement_count": len(placements),
+                "publisher_count": len(publishers),
+                "package_count": len(packages),
+                "size_count": len(sizes),
+            },
+        }
 
     # ----- permissions -----
 
