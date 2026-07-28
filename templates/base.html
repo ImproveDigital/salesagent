@@ -115,8 +115,8 @@
             <nav>
                 {% if session.authenticated %}
                     {# Identity lockup. The "ADMIN" mode pill is super-admin-only
-                       (operator-of-platform); for tenant_admin we don't need a
-                       pill since the workspace name already conveys context. #}
+                       (operator-of-platform); for tenant users the pill shows
+                       the configured ad-server adapter instead. #}
                     <span class="role-tag">
                         {% if session.role == 'super_admin' %}
                             <span class="workspace-name">{{ session.email or session.username }}</span>
@@ -127,6 +127,9 @@
                             <span class="workspace-name">{{ session.email or session.username }}</span>
                         {% endif %}
                     </span>
+                    {% if nav_adapter_type %}
+                            <span class="workspace-name">{{ nav_adapter_type }}</span>
+                    {% endif %}
                     {% if session.role == 'super_admin' %}
                         <a href="{{ script_name }}/">Accounts</a>
                         <a href="{{ script_name }}/admin/scheduling">Scheduling</a>
