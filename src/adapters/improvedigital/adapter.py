@@ -101,22 +101,23 @@ class ImproveDigitalAdapter(AdServerAdapter):
         creative_engine: CreativeEngineAdapter | None = None,
         tenant_id: str | None = None,
     ):
-        """Resolve advertiser identity + OAuth credentials and target host.
+        """Resolve buying-entity identity + OAuth credentials and target host.
 
         Dry-run defers client construction so the adapter can be configured
         before Improve Digital issues API credentials (blocker B2).
         """
         super().__init__(config, principal, dry_run, creative_engine, tenant_id)
 
-        # Classic buyer identity: the campaign's advertiser. Principal
-        # mapping wins; the tenant-level connection default backs it.
+        # Buyer attribution (principal mapping, tenant default fallback).
+        # NOT part of the Classic campaign create schema — retained for the
+        # pending buyer-attribution mechanism (metadata-campaigns).
         self.advertiser_id = self.principal.get_adapter_id("improvedigital") or self.config.get("default_advertiser_id")
-        if not self.advertiser_id and not self.dry_run:
-            raise ValueError(
-                f"Principal {principal.principal_id} does not have an Improve Digital "
-                "advertiser ID and no default_advertiser_id is configured"
-            )
-        # Required by the Classic campaign API on every campaign.
+        # Campaign identity chain (sandbox-confirmed): buying entity +
+        # office are required on every campaign; the office carries a
+        # default demand contact, so the explicit contact is an override.
+        self.buying_entity_id = self.config.get("buying_entity_id")
+        self.buying_entity_office_id = self.config.get("buying_entity_office_id")
+        self.campaign_type = self.config.get("campaign_type") or "Improve"
         self.improve_demand_contact_id = self.config.get("improve_demand_contact_id")
         self.agency_id = self.config.get("agency_id")
 
@@ -135,10 +136,11 @@ class ImproveDigitalAdapter(AdServerAdapter):
         else:
             if not (self.client_id and self.client_secret):
                 raise ValueError("Improve Digital config requires client_id + client_secret")
-            if not self.improve_demand_contact_id:
+            if not (self.buying_entity_id and self.buying_entity_office_id):
                 raise ValueError(
-                    "Improve Digital config requires improve_demand_contact_id — the Classic "
-                    "campaign API rejects campaigns without it"
+                    "Improve Digital config requires buying_entity_id + buying_entity_office_id — "
+                    "the Classic campaign API rejects campaigns without them (discover via "
+                    "the adapter settings' Test Connection, or ask the Improve Digital team)"
                 )
             self._client = ImproveDigitalClient(
                 client_id=self.client_id,
@@ -306,7 +308,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
         buy_name = self._buy_name(request)
 
         if self.dry_run:
-            campaign_payload = self._campaign_payload(buy_name, start_time, end_time)
+            campaign_payload = self._campaign_payload(
+                buy_name, start_time, end_time, reference_number=request.po_number
+            )
             self.log(f"Would call: POST {self.base_url}/rtb/v1/classic/campaigns")
             self.log(f"  Campaign: {campaign_payload}")
             for package in packages:
@@ -327,20 +331,31 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # validation. Lands in milestone M2 of the integration plan.
         return self._pending_creds_error()
 
-    def _campaign_payload(self, buy_name: str, start_time: datetime, end_time: datetime) -> dict[str, Any]:
-        """Build a ``CampaignDto`` body (required: name, start_date,
-        improve_demand_contact_id)."""
+    def _campaign_payload(
+        self, buy_name: str, start_time: datetime, end_time: datetime, reference_number: str | None = None
+    ) -> dict[str, Any]:
+        """Build a Classic campaign creation body.
+
+        Sandbox-confirmed contract (``/schema/rtb/v1/classic/campaigns/campaign``
+        + live probes): required = name, type, buying_entity_id, start_date,
+        time_zone; a business rule additionally demands at least one office in
+        ``buying_entity_office_ids``. ``advertiserId``/``agencyId`` are NOT in
+        the create schema and must not be sent.
+        """
         payload: dict[str, Any] = {
             "name": buy_name,
+            "type": self.campaign_type,
+            "buying_entity_id": int(self.buying_entity_id) if self.buying_entity_id else None,
+            "buying_entity_office_ids": [int(self.buying_entity_office_id)] if self.buying_entity_office_id else [],
             "start_date": start_time.date().isoformat(),
             "end_date": end_time.date().isoformat(),
             "time_zone": self.timezone,
             "currency": self.currency,
-            "improve_demand_contact_id": self.improve_demand_contact_id,
-            "advertiserId": int(self.advertiser_id) if self.advertiser_id else None,
         }
-        if self.agency_id:
-            payload["agencyId"] = int(self.agency_id)
+        if self.improve_demand_contact_id:
+            payload["improve_demand_contact_id"] = int(self.improve_demand_contact_id)
+        if reference_number:
+            payload["reference_number"] = reference_number
         return payload
 
     def _line_item_payload(

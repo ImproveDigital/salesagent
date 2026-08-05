@@ -27,9 +27,13 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
     """Connection settings for the 360Yield Marketplace API (Classic campaigns).
 
     Auth is OAuth2 client_credentials only — one client id/secret pair is
-    issued per client application. ``improve_demand_contact_id`` is required
-    by the Classic campaign API on every campaign; ``default_advertiser_id``
-    backs principals without their own advertiser mapping.
+    issued per client application. Campaign creation requires
+    ``buying_entity_id`` + ``buying_entity_office_id`` (sandbox-confirmed:
+    the server-side JSON schema requires the entity; a business rule then
+    requires at least one office). Both are discoverable via the Admin API
+    (``/admin/v1/buying-entities-combo`` → ``.../buying-entity-offices``)
+    when the credentials carry admin scope. ``improve_demand_contact_id`` is
+    optional on the wire — the selected office carries a default contact.
     """
 
     client_id: str | None = Field(
@@ -47,26 +51,54 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
         description="360Yield API host (override for testing only)",
         json_schema_extra={"ui_order": 3},
     )
+    buying_entity_id: int | None = Field(
+        default=None,
+        description="Buying entity the Classic campaigns book under — required on every campaign",
+        json_schema_extra={"ui_order": 4},
+    )
+    buying_entity_office_id: int | None = Field(
+        default=None,
+        description=(
+            "Buying entity office (currency-specific) assigned to every campaign — "
+            "must belong to buying_entity_id and match the configured currency"
+        ),
+        json_schema_extra={"ui_order": 5},
+    )
     improve_demand_contact_id: int | None = Field(
         default=None,
-        description="Improve demand contact ID — required by the Classic campaign API on every campaign",
-        json_schema_extra={"ui_order": 4},
+        description=(
+            "Improve demand contact override — optional; when omitted the buying "
+            "entity office's default contact applies"
+        ),
+        json_schema_extra={"ui_order": 6},
+    )
+    campaign_type: str = Field(
+        default="Improve",
+        description='Classic campaign "type" field — required by the campaign API ("Improve" for marketplace-booked campaigns)',
+        json_schema_extra={"ui_order": 7},
     )
     default_advertiser_id: int | None = Field(
         default=None,
-        description="Fallback advertiser ID for principals without an Improve Digital platform mapping",
-        json_schema_extra={"ui_order": 5},
+        description=(
+            "Fallback advertiser ID for principals without an Improve Digital platform "
+            "mapping — NOT part of the Classic campaign create schema; retained for the "
+            "pending buyer-attribution mechanism (metadata-campaigns)"
+        ),
+        json_schema_extra={"ui_order": 8},
     )
     agency_id: int | None = Field(
         default=None,
-        description="Default agency ID applied to Classic campaigns (optional)",
-        json_schema_extra={"ui_order": 6},
+        description=(
+            "Default agency ID — NOT part of the Classic campaign create schema; retained "
+            "pending the buyer-attribution decision"
+        ),
+        json_schema_extra={"ui_order": 9},
     )
     currency: str = Field(
         default="EUR",
         description="Default campaign currency (ISO 4217)",
         json_schema_extra={
-            "ui_order": 7,
+            "ui_order": 10,
             # CampaignDto currency enum from the rtb/v3 OpenAPI spec.
             "enum": [
                 "EUR",
@@ -89,8 +121,8 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
     )
     timezone: str = Field(
         default="UTC",
-        description="Default campaign timezone",
-        json_schema_extra={"ui_order": 8},
+        description="Default campaign timezone (IANA name, e.g. Europe/Amsterdam) — required by the campaign API",
+        json_schema_extra={"ui_order": 11},
     )
 
     @field_serializer("client_secret")

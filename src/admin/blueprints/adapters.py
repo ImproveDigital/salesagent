@@ -975,65 +975,109 @@ def test_springserve_connection(tenant_id, **kwargs):
         return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
 
 
+def _resolve_improvedigital_credentials(tenant_id: str, data: dict) -> tuple[dict | None, str | None]:
+    """Resolve Improve Digital client credentials from a request body, falling
+    back to the values stored on AdapterConfig.config_json.
+
+    Submitted ciphertext on the secret field is rejected to prevent
+    cross-tenant replay. Returns ``(client_kwargs, error_message)``.
+    """
+    from src.core.utils.encryption import is_encrypted
+
+    client_id = data.get("client_id")
+    client_secret = data.get("client_secret")
+    api_base_url = data.get("api_base_url")
+
+    if client_secret and is_encrypted(client_secret):
+        return None, "client_secret must be plaintext (encrypted-token replay rejected)"
+
+    if not (client_id and client_secret):
+        from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+        with get_db_session() as session:
+            existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+            if existing and existing.config_json:
+                from src.adapters.improvedigital import ImproveDigitalConnectionConfig
+
+                try:
+                    rehydrated = ImproveDigitalConnectionConfig.model_validate(existing.config_json)
+                    client_id = client_id or rehydrated.client_id
+                    client_secret = client_secret or rehydrated.client_secret
+                    api_base_url = api_base_url or rehydrated.api_base_url
+                except ValidationError:
+                    pass
+
+    if not (client_id and client_secret):
+        return None, "client_id + client_secret are required (submit them or save the configuration first)"
+
+    client_kwargs: dict = {"client_id": client_id, "client_secret": client_secret}
+    if api_base_url:
+        client_kwargs["base_url"] = api_base_url
+    return client_kwargs, None
+
+
+def _improvedigital_rows(payload, *keys: str) -> list:
+    """Unwrap a 360Yield list envelope (e.g. ``{"buying_entity_offices": [...]}``)."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in keys:
+            if isinstance(payload.get(key), list):
+                return payload[key]
+        for value in payload.values():
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _improvedigital_paginate(fetch_page, envelope_key: str, page_size: int = 100, max_rows: int = 10000) -> list:
+    """Exhaust a 360Yield offset/limit-paginated list endpoint.
+
+    The server clamps ``limit`` (observed max 100), so a page shorter than the
+    requested size is NOT a termination signal. Advance by what was actually
+    returned and stop on an empty page, on reaching the envelope's
+    ``totalNumberOfElemements`` (sic — upstream typo), or on a page that adds
+    no unseen ids (guards against a server that ignores ``offset``);
+    ``max_rows`` backstops a runaway loop.
+    """
+    rows: list = []
+    seen_ids: set = set()
+    offset = 0
+    while len(rows) < max_rows:
+        payload = fetch_page(limit=page_size, offset=offset)
+        page = _improvedigital_rows(payload, envelope_key)
+        if not page:
+            break
+        fresh = [row for row in page if not isinstance(row, dict) or row.get("id") not in seen_ids]
+        seen_ids.update(row.get("id") for row in fresh if isinstance(row, dict))
+        if not fresh:
+            break
+        rows.extend(fresh)
+        total = payload.get("totalNumberOfElemements") if isinstance(payload, dict) else None
+        if isinstance(total, int) and len(rows) >= total:
+            break
+        offset += len(page)
+    return rows[:max_rows]
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/test-connection", methods=["POST"])
 @require_tenant_access(role=("admin",), allow_embedded_writes=True)
 def test_improvedigital_connection(tenant_id, **kwargs):
     """Verify Improve Digital OAuth2 credentials by minting a bearer and
-    probing a Classic-campaigns read.
-
-    Submitted ciphertext on the secret field is rejected to prevent
-    cross-tenant replay; missing fields fall back to the encrypted values
-    already on AdapterConfig.config_json.
+    probing a Classic-campaigns read; on success, best-effort identify the
+    API user via ``/lookup/v1/user-details``.
 
     Read-only probe — never writes to AdapterConfig — so it opts into the
     embedded-write gate.
     """
-    from src.core.utils.encryption import is_encrypted
-
     try:
         data = request.get_json() or {}
-        client_id = data.get("client_id")
-        client_secret = data.get("client_secret")
-        api_base_url = data.get("api_base_url")
-
-        if client_secret and is_encrypted(client_secret):
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": "client_secret must be plaintext (encrypted-token replay rejected)",
-                    }
-                ),
-                400,
-            )
-
-        if not (client_id and client_secret):
-            from src.core.database.repositories.adapter_config import AdapterConfigRepository
-
-            with get_db_session() as session:
-                existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
-                if existing and existing.config_json:
-                    from src.adapters.improvedigital import ImproveDigitalConnectionConfig
-
-                    try:
-                        rehydrated = ImproveDigitalConnectionConfig.model_validate(existing.config_json)
-                        client_id = client_id or rehydrated.client_id
-                        client_secret = client_secret or rehydrated.client_secret
-                        api_base_url = api_base_url or rehydrated.api_base_url
-                    except ValidationError:
-                        pass
-
-        if not (client_id and client_secret):
-            return (
-                jsonify({"success": False, "error": "Connection test requires client_id + client_secret"}),
-                400,
-            )
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
 
         from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
 
-        client_kwargs: dict = {"client_id": client_id, "client_secret": client_secret}
-        if api_base_url:
-            client_kwargs["base_url"] = api_base_url
         client = ImproveDigitalClient(**client_kwargs)
         try:
             status, _body = client.probe("GET", "/rtb/v1/classic/campaigns?limit=1")
@@ -1050,10 +1094,87 @@ def test_improvedigital_connection(tenant_id, **kwargs):
         if status >= 400:
             return jsonify({"success": False, "error": f"Improve Digital responded HTTP {status}"}), 200
 
-        return jsonify({"success": True, "base_url": client._transport.base_url})
+        result: dict = {"success": True, "base_url": client._transport.base_url}
+        try:
+            details = client.lookups.user_details()
+            result["user"] = {
+                "user_id": details.get("user_id"),
+                "name": f"{details.get('first_name', '')} {details.get('last_name', '')}".strip(),
+                "business_unit": details.get("business_unit_name"),
+            }
+        except ImproveDigitalError:
+            pass  # identity display is optional — credentials are already verified
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Improve Digital connection test failed: {e}", exc_info=True)
         return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/discover-buying-entities", methods=["POST"])
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
+def discover_improvedigital_buying_entities(tenant_id, **kwargs):
+    """Discover buying entities — or, when ``buying_entity_id`` is submitted,
+    that entity's offices (each carrying its ``improve_demand_contact_id``).
+
+    Backs the cascading pickers in the adapter connection UI. Requires
+    admin-scoped Improve Digital credentials; a 403 upstream is reported as
+    ``discovery_available: false`` so the UI falls back to manual ID entry.
+
+    Read-only — never writes to AdapterConfig — so it opts into the
+    embedded-write gate.
+    """
+    try:
+        data = request.get_json() or {}
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client = ImproveDigitalClient(**client_kwargs)
+        try:
+            if data.get("buying_entity_id"):
+                rows = _improvedigital_paginate(
+                    lambda **params: client.admin.list_buying_entity_offices(int(data["buying_entity_id"]), **params),
+                    "buying_entity_offices",
+                )
+                offices = [
+                    {
+                        "id": row.get("id"),
+                        "office": row.get("office"),
+                        "buying_entity_id": row.get("buying_entity_id"),
+                        "improve_demand_contact_id": row.get("improve_demand_contact_id"),
+                        "billing_currency_code": row.get("billing_currency_code"),
+                        "buying_types": row.get("buying_types") or [],
+                    }
+                    for row in rows
+                    if row.get("active") and "Classic" in (row.get("buying_types") or [])
+                ]
+                return jsonify({"success": True, "offices": offices})
+
+            rows = _improvedigital_paginate(client.admin.list_buying_entities, "buying_entities_combo")
+            entities = [{"id": row.get("id"), "name": row.get("name")} for row in rows]
+            return jsonify({"success": True, "buying_entities": entities})
+        except ImproveDigitalError as exc:
+            if exc.status_code == 403:
+                return jsonify(
+                    {
+                        "success": False,
+                        "discovery_available": False,
+                        "error": "Credentials lack Admin API scope — enter the IDs manually",
+                    }
+                )
+            logger.warning(
+                "Improve Digital buying-entity discovery failed: tenant_id=%s status=%s error=%s body_excerpt=%s",
+                tenant_id,
+                exc.status_code,
+                exc,
+                safe_upstream_body_excerpt(exc.body),
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the discovery request"}), 200
+    except Exception as e:
+        logger.error(f"Improve Digital buying-entity discovery failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Discovery failed (see server logs)"}), 500
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory", methods=["GET"])

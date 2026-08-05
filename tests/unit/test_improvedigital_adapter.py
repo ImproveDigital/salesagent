@@ -84,20 +84,27 @@ class TestAdapterConstruction:
                 tenant_id="tenant_impd_1",
             )
 
-    def test_live_mode_without_advertiser_raises(self, mock_principal):
+    def test_live_mode_without_advertiser_constructs(self, mock_principal):
+        # advertiserId is not part of the Classic campaign create schema
+        # (sandbox-confirmed) — a missing advertiser mapping must not block.
         mock_principal.get_adapter_id.return_value = None
-        with pytest.raises(ValueError, match="advertiser ID"):
-            ImproveDigitalAdapter(
-                config={"client_id": "app-1", "client_secret": "s", "improve_demand_contact_id": 7},
-                principal=mock_principal,
-                dry_run=False,
-                tenant_id="tenant_impd_1",
-            )
+        adapter = ImproveDigitalAdapter(
+            config={
+                "client_id": "app-1",
+                "client_secret": "s",
+                "buying_entity_id": 421,
+                "buying_entity_office_id": 635,
+            },
+            principal=mock_principal,
+            dry_run=False,
+            tenant_id="tenant_impd_1",
+        )
+        assert adapter.advertiser_id is None
 
-    def test_live_mode_without_demand_contact_raises(self, mock_principal):
-        # The Classic campaign API rejects campaigns without
-        # improve_demand_contact_id — fail at construction, not at create.
-        with pytest.raises(ValueError, match="improve_demand_contact_id"):
+    def test_live_mode_without_buying_entity_raises(self, mock_principal):
+        # The Classic campaign API rejects campaigns without a buying entity
+        # + office (sandbox-confirmed) — fail at construction, not at create.
+        with pytest.raises(ValueError, match="buying_entity"):
             ImproveDigitalAdapter(
                 config={"client_id": "app-1", "client_secret": "s"},
                 principal=mock_principal,
