@@ -801,10 +801,37 @@ class ImproveDigitalAdapter(AdServerAdapter):
                             return campaign_id
         return None
 
+    def _resolve_campaign_id(self, media_buy_id: str) -> str:
+        """Classic campaign ID behind a media buy reference.
+
+        The adapter returns ``improvedigital_<campaign_id>`` at create time,
+        but delivery callers (the admin detail page, the MCP delivery tool)
+        pass the core layer's internal ID (``mb_*``) — the adapter reference
+        is stamped on ``media_buys.external_id``. Mirror the reporting
+        sync's write-side resolution so read paths hit the same cache rows.
+        """
+        campaign_id = media_buy_id.removeprefix("improvedigital_")
+        if campaign_id.isdigit():
+            return campaign_id
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+
+        with get_db_session() as session:
+            repo = MediaBuyRepository(session, self.tenant_id or "default")
+            buy = repo.get_by_id(media_buy_id)
+            external = str(buy.external_id or "") if buy is not None else ""
+        external_campaign = external.removeprefix("improvedigital_")
+        if external_campaign.isdigit():
+            return external_campaign
+        return campaign_id
+
     # ----- status / delivery -----
 
     def check_media_buy_status(self, media_buy_id: str, today: datetime) -> CheckMediaBuyStatusResponse:
-        campaign_id = media_buy_id.removeprefix("improvedigital_")
+        campaign_id = (
+            media_buy_id.removeprefix("improvedigital_") if self.dry_run else self._resolve_campaign_id(media_buy_id)
+        )
         if self.dry_run:
             self.log(f"Would call: GET {self.base_url}/rtb/v1/classic/campaigns/{campaign_id}")
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="active")
@@ -839,7 +866,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
             ImproveDigitalLineItemStatsRepository,
         )
 
-        campaign_id = media_buy_id.removeprefix("improvedigital_")
+        campaign_id = self._resolve_campaign_id(media_buy_id)
         with get_db_session() as session:
             repo = ImproveDigitalLineItemStatsRepository(session, self.tenant_id or "default")
             stat_rows = repo.list_by_campaign(campaign_id)

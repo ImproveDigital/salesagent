@@ -1332,6 +1332,159 @@ def sync_improvedigital_inventory(tenant_id, **kwargs):
         return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
 
 
+def _improvedigital_reporting_payload(stat_rows, buys_by_campaign: dict, currency: str) -> dict:
+    """Shape line-item stats cache rows into the reporting-page JSON.
+
+    ``buys_by_campaign`` maps Classic campaign IDs to MediaBuy rows so each
+    stats row can carry the buy it belongs to; rows whose campaign has no
+    matching buy (e.g. booked outside salesagent) still render, unattributed.
+    Spend is stored as micros — converted to currency units here, once.
+    """
+    rows = []
+    total_impressions = 0
+    total_clicks = 0
+    total_spend = 0.0
+    total_completed = 0
+    for stat in stat_rows:
+        impressions = int(stat.impressions or 0)
+        clicks = int(stat.clicks) if stat.clicks is not None else None
+        spend = round((stat.spend_micros or 0) / 1_000_000, 2)
+        buy = buys_by_campaign.get(str(stat.campaign_id)) if stat.campaign_id else None
+        rows.append(
+            {
+                "campaign_id": stat.campaign_id,
+                "line_item_id": stat.line_item_id,
+                "media_buy_id": buy.media_buy_id if buy else None,
+                "order_name": buy.order_name if buy else None,
+                "advertiser_name": buy.advertiser_name if buy else None,
+                "impressions": impressions,
+                "clicks": clicks,
+                "ctr": round(clicks / impressions * 100, 2) if clicks and impressions else None,
+                "completed_views": int(stat.completed_views) if stat.completed_views is not None else None,
+                "spend": spend,
+                "currency": stat.currency or currency,
+                "as_of": stat.as_of.isoformat() if stat.as_of else None,
+            }
+        )
+        total_impressions += impressions
+        total_clicks += clicks or 0
+        total_spend += spend
+        total_completed += int(stat.completed_views or 0)
+    return {
+        "rows": rows,
+        "totals": {
+            "impressions": total_impressions,
+            "clicks": total_clicks,
+            "ctr": round(total_clicks / total_impressions * 100, 2) if total_impressions else None,
+            "completed_views": total_completed,
+            "spend": round(total_spend, 2),
+        },
+        "currency": currency,
+    }
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/reporting", methods=["GET"])
+@require_tenant_access(api_mode=True)
+def get_improvedigital_reporting(tenant_id, **kwargs):
+    """Serve the Report-API stats cache for the reporting page.
+
+    Reads ``improvedigital_line_item_stats`` (populated by the reporting
+    sync — no upstream call here, so the page loads instantly) and joins
+    campaigns to media buys via the ``improvedigital_<campaign_id>``
+    reference on ``external_id`` / ``media_buy_id``.
+    """
+    from src.core.database.models import MediaBuy
+    from src.core.database.repositories.improvedigital_line_item_stats import (
+        ImproveDigitalLineItemStatsRepository,
+    )
+
+    with get_db_session() as session:
+        repo = ImproveDigitalLineItemStatsRepository(session, tenant_id)
+        stat_rows = repo.list_all()
+        last_synced_at = repo.latest_sync_at()
+
+        buys_by_campaign: dict = {}
+        for buy in session.scalars(select(MediaBuy).filter_by(tenant_id=tenant_id)).all():
+            for candidate in (buy.external_id, buy.media_buy_id):
+                if not candidate:
+                    continue
+                campaign_id = str(candidate).removeprefix("improvedigital_")
+                if campaign_id.isdigit():
+                    buys_by_campaign[campaign_id] = buy
+                    break
+
+        config_row = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
+        currency = str((config_row.config_json or {}).get("currency") or "EUR") if config_row else "EUR"
+
+        payload = _improvedigital_reporting_payload(stat_rows, buys_by_campaign, currency)
+
+    payload["success"] = True
+    payload["last_synced_at"] = last_synced_at.isoformat() if last_synced_at else None
+    return jsonify(payload)
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-reporting", methods=["POST"])
+@require_tenant_access(role=("admin",), api_mode=True)
+def sync_improvedigital_reporting(tenant_id, **kwargs):
+    """Pull fresh delivery metrics from the 360Yield Report API and upsert
+    the ``improvedigital_line_item_stats`` cache feeding the reporting page
+    and ``get_media_buy_delivery``.
+
+    Returns 503 when the Report API scope is still pending for this OAuth2
+    client (mirrors the FreeWheel sync-reporting contract).
+    """
+    from src.services.adapter_sync_orchestration import SyncAlreadyRunning, execute_adapter_sync
+
+    try:
+        result = execute_adapter_sync(
+            tenant_id=tenant_id,
+            adapter_type="improvedigital",
+            sync_kind="reporting",
+            triggered_by="admin_button",
+        )
+        if result is None:
+            return (
+                jsonify({"success": False, "error": "Improve Digital adapter is not configured for this tenant"}),
+                400,
+            )
+        if result.scope_pending:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "scope_pending": True,
+                        "sync_id": result.sync_id,
+                        "error": result.errors.get("scope", "Report API scope grant pending"),
+                    }
+                ),
+                503,
+            )
+        return jsonify(
+            {
+                "success": result.succeeded,
+                "sync_id": result.sync_id,
+                "line_items_updated": result.counts.get("line_items", 0),
+                "campaigns_covered": result.counts.get("campaigns", 0),
+                "error": next(iter(result.errors.values()), None) if result.errors else None,
+            }
+        )
+    except SyncAlreadyRunning as exc:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": f"A reporting sync is already running ({exc.sync_id}) — wait for it to finish",
+                }
+            ),
+            409,
+        )
+    except ValidationError as exc:
+        return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400
+    except Exception as e:
+        logger.error(f"Improve Digital reporting sync failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/springserve/inventory", methods=["GET"])
 @require_tenant_access()
 def list_springserve_inventory(tenant_id, **kwargs):

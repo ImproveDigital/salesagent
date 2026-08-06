@@ -39,6 +39,16 @@ class ImproveDigitalLineItemStatsRepository:
         )
         return {row.line_item_id: row for row in self._session.scalars(stmt).all()}
 
+    def list_all(self) -> list[ImproveDigitalLineItemStats]:
+        """Return every cached line-item stats row for this tenant, newest
+        campaigns first. Feeds the admin reporting page."""
+        stmt = (
+            select(ImproveDigitalLineItemStats)
+            .filter_by(tenant_id=self._tenant_id)
+            .order_by(ImproveDigitalLineItemStats.campaign_id.desc(), ImproveDigitalLineItemStats.line_item_id)
+        )
+        return list(self._session.scalars(stmt).all())
+
     def list_by_campaign(self, campaign_id: str) -> list[ImproveDigitalLineItemStats]:
         """Return all cached line-item stats for one Classic campaign. Used by
         ``get_media_buy_delivery`` to aggregate totals across packages."""

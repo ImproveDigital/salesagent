@@ -33,6 +33,7 @@ LIVE_CONFIG = {
     "client_secret": "s3cret",
     "improve_demand_contact_id": 17918,
     "buying_entity_id": 421,
+    "buying_entity_office_id": 5068,
     "business_unit_id": 33,
     "api_base_url": "https://api.360yielddev.example",
     "currency": "EUR",
@@ -287,6 +288,51 @@ class TestDeliveryLive:
             repo_cls.return_value.list_by_campaign.return_value = []
             with pytest.raises(DeliveryDataUnavailable):
                 adapter.get_media_buy_delivery("improvedigital_101", self._reporting_period(), datetime.now(UTC))
+
+    def test_internal_media_buy_id_resolves_campaign_via_external_id(self):
+        """Callers (admin delivery sync, MCP delivery tool) pass the core
+        layer's internal ``mb_*`` ID; the Classic campaign reference lives on
+        ``media_buys.external_id``. The read path must resolve it the same
+        way the reporting sync's write path does."""
+        adapter = make_live_adapter()
+        rows = [
+            SimpleNamespace(
+                line_item_id="202",
+                impressions=1000,
+                clicks=10,
+                completed_views=None,
+                spend_micros=4_000_000,
+                currency="EUR",
+            ),
+        ]
+        with (
+            patch("src.core.database.database_session.get_db_session"),
+            patch("src.core.database.repositories.media_buy.MediaBuyRepository") as buy_repo_cls,
+            patch(
+                "src.core.database.repositories.improvedigital_line_item_stats.ImproveDigitalLineItemStatsRepository"
+            ) as stats_repo_cls,
+        ):
+            buy_repo_cls.return_value.get_by_id.return_value = SimpleNamespace(external_id="improvedigital_101")
+            stats_repo_cls.return_value.list_by_campaign.return_value = rows
+            response = adapter.get_media_buy_delivery("mb_70aa67ac413f", self._reporting_period(), datetime.now(UTC))
+        stats_repo_cls.return_value.list_by_campaign.assert_called_once_with("101")
+        assert response.totals.impressions == 1000
+
+    def test_internal_id_without_external_mapping_soft_fails(self):
+        """An internal ID whose buy row is missing (or has no external stamp)
+        must stay a soft DeliveryDataUnavailable, never a hard error."""
+        adapter = make_live_adapter()
+        with (
+            patch("src.core.database.database_session.get_db_session"),
+            patch("src.core.database.repositories.media_buy.MediaBuyRepository") as buy_repo_cls,
+            patch(
+                "src.core.database.repositories.improvedigital_line_item_stats.ImproveDigitalLineItemStatsRepository"
+            ) as stats_repo_cls,
+        ):
+            buy_repo_cls.return_value.get_by_id.return_value = None
+            stats_repo_cls.return_value.list_by_campaign.return_value = []
+            with pytest.raises(DeliveryDataUnavailable):
+                adapter.get_media_buy_delivery("mb_70aa67ac413f", self._reporting_period(), datetime.now(UTC))
 
     def test_cache_rows_aggregate_to_delivery_totals(self):
         adapter = make_live_adapter()
