@@ -237,6 +237,10 @@ class ImproveDigitalInventoryClient:
         """``GET /rtb/v1/packages`` — reusable placement groupings."""
         return self._transport.get_json("/rtb/v1/packages", **params)
 
+    def package_placements(self, package_id: int, **params: Any) -> dict[str, Any]:
+        """``GET /rtb/v1/packages/{id}/placements`` — a package's member placements."""
+        return self._transport.get_json(f"/rtb/v1/packages/{package_id}/placements", **params)
+
 
 class ImproveDigitalLookupsClient:
     """Dimension lookups for targeting/config pickers."""
@@ -253,6 +257,34 @@ class ImproveDigitalLookupsClient:
 
     def countries(self, **params: Any) -> Any:
         return self._transport.get_json("/common/v1/countries", **params)
+
+    def user_details(self) -> dict[str, Any]:
+        """``GET /lookup/v1/user-details`` — identity behind the OAuth pair
+        (user_id, name, business unit, buyers). Lookup-scoped, so it works
+        even for credentials without admin scope."""
+        return self._transport.get_json("/lookup/v1/user-details")
+
+
+class ImproveDigitalAdminClient:
+    """Admin API discovery — buying entities and their offices.
+
+    Requires admin-scoped credentials (403 otherwise); callers must treat
+    these as best-effort and fall back to manually configured IDs.
+    """
+
+    def __init__(self, transport: ImproveDigitalTransport):
+        self._transport = transport
+
+    def list_buying_entities(self, **params: Any) -> dict[str, Any]:
+        """``GET /admin/v1/buying-entities-combo`` — lightweight ``{id, name}``
+        rows for pickers."""
+        return self._transport.get_json("/admin/v1/buying-entities-combo", **params)
+
+    def list_buying_entity_offices(self, buying_entity_id: int, **params: Any) -> dict[str, Any]:
+        """``GET /admin/v1/buying-entities/{id}/buying-entity-offices`` — office
+        rows carry ``improve_demand_contact_id``, ``billing_currency_code`` and
+        ``buying_types`` (sandbox-confirmed)."""
+        return self._transport.get_json(f"/admin/v1/buying-entities/{buying_entity_id}/buying-entity-offices", **params)
 
 
 class ImproveDigitalReportingClient:
@@ -300,6 +332,7 @@ class ImproveDigitalClient:
         self.inventory = ImproveDigitalInventoryClient(self._transport)
         self.lookups = ImproveDigitalLookupsClient(self._transport)
         self.reporting = ImproveDigitalReportingClient(self._transport)
+        self.admin = ImproveDigitalAdminClient(self._transport)
 
     def probe(self, method: str, path: str) -> tuple[int, str]:
         """Non-raising permission probe — see :meth:`ImproveDigitalTransport.probe`."""

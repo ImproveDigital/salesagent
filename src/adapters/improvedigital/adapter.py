@@ -131,15 +131,16 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # Optional — the Classic campaign API accepts campaigns without an
         # advertiser (every live dev campaign carries advertiserId=null).
         self.advertiser_id = self.principal.get_adapter_id("improvedigital") or self.config.get("default_advertiser_id")
-        # Required by the Classic campaign API on every campaign.
-        self.improve_demand_contact_id = self.config.get("improve_demand_contact_id")
-        self.agency_id = self.config.get("agency_id")
-        # Required by the Classic campaign JSON schema (validated live on the
-        # dev platform: e.g. 421 = "Improve Digital Marketplace").
+        # Campaign identity chain (sandbox-confirmed): buying entity +
+        # office are required on every campaign; the office carries a
+        # default demand contact, so the explicit contact is an override.
         self.buying_entity_id = self.config.get("buying_entity_id")
         self.buying_entity_office_id = self.config.get("buying_entity_office_id")
-        # Required on Classic line items (e.g. 33 = Azerion on dev).
+        self.campaign_type = self.config.get("campaign_type") or "Improve"
         self.business_unit_id = self.config.get("business_unit_id")
+
+        self.improve_demand_contact_id = self.config.get("improve_demand_contact_id")
+        self.agency_id = self.config.get("agency_id")
 
         self.client_id = self.config.get("client_id")
         self.client_secret = self.config.get("client_secret")
@@ -168,8 +169,12 @@ class ImproveDigitalAdapter(AdServerAdapter):
             # sync inventory while setup completes.
             if not (self.client_id and self.client_secret):
                 raise ValueError("Improve Digital config requires client_id + client_secret")
-            # Wide timeout: creative binding and rate-limited reads can take
-            # >30s on the dev platform (verified live).
+            if not (self.buying_entity_id and self.buying_entity_office_id):
+                raise ValueError(
+                    "Improve Digital config requires buying_entity_id + buying_entity_office_id — "
+                    "the Classic campaign API rejects campaigns without them (discover via "
+                    "the adapter settings' Test Connection, or ask the Improve Digital team)"
+                )
             self._client = ImproveDigitalClient(
                 client_id=self.client_id,
                 client_secret=self.client_secret,

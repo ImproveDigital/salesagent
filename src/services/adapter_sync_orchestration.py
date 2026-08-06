@@ -31,7 +31,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -184,6 +184,50 @@ def _rehydrate_connection_config(adapter_class: Any, config_dict: dict[str, Any]
     return {name: getattr(validated, name) for name in type(validated).model_fields}
 
 
+class SyncAlreadyRunning(Exception):
+    """A sync of this kind is already in flight for the tenant + adapter.
+
+    Concurrent runs of the same stream race each other on upstream rate
+    limits (e.g. 360Yield's 100 reads/60s) and duplicate work — callers
+    should surface "already running" instead of starting a second sweep.
+    """
+
+    def __init__(self, sync_id: str):
+        self.sync_id = sync_id
+        super().__init__(f"sync already in progress: {sync_id}")
+
+
+# In-flight rows older than this are treated as crashed (a stuck row must
+# not block syncs forever). Rate-limited inventory sweeps legitimately run
+# for many minutes, so the window is generous.
+_ACTIVE_SYNC_MAX_AGE = timedelta(minutes=60)
+
+
+def _find_active_sync(
+    tenant_id: str,
+    adapter_type: str,
+    sync_kind: str,
+    *,
+    exclude_sync_id: str | None = None,
+) -> str | None:
+    """Return the sync_id of a fresh in-flight run for this stream, if any."""
+    from src.core.database.repositories.sync_job import SyncJobRepository
+
+    with get_db_session() as session:
+        job = SyncJobRepository(session, tenant_id).latest_running_for_stream(
+            adapter_type=adapter_type, sync_type=sync_kind
+        )
+        if job is None or job.sync_id == exclude_sync_id:
+            return None
+        started = job.started_at
+        if started is not None:
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            if datetime.now(UTC) - started > _ACTIVE_SYNC_MAX_AGE:
+                return None
+        return job.sync_id
+
+
 def execute_adapter_sync(
     *,
     tenant_id: str,
@@ -215,8 +259,25 @@ def execute_adapter_sync(
             return None
         config_dict = dict(existing.config_json or {})
 
+    # A concurrent run of the same stream (scheduler startup sweep + admin
+    # button is the classic race) doubles upstream read traffic and trips
+    # rate limits. When resuming a pre-created queued row, sync_id is our
+    # own job and must not block itself.
+    active_sync_id = _find_active_sync(tenant_id, adapter_type, sync_kind, exclude_sync_id=sync_id)
+    if active_sync_id:
+        raise SyncAlreadyRunning(active_sync_id)
+
     adapter_class = get_adapter_class(adapter_type)
     config_dict = _rehydrate_connection_config(adapter_class, config_dict, tenant_id=tenant_id)
+
+    # config_json stores secret fields encrypted; the connection schema's
+    # field validators decrypt them. Rehydrate and read via attribute access —
+    # model_dump() would re-run the field serializers and re-encrypt, handing
+    # the adapter ciphertext credentials (auth would fail with 401).
+    connection_schema = getattr(adapter_class, "connection_config_class", None)
+    if connection_schema is not None and config_dict:
+        validated = connection_schema.model_validate(config_dict)
+        config_dict = {**config_dict, **{name: getattr(validated, name) for name in connection_schema.model_fields}}
 
     # Stub principal — sync runs operate at the tenant level, not on
     # behalf of a specific principal. Adapters that need an advertiser
@@ -318,6 +379,19 @@ def enqueue_adapter_sync(
             triggered_by=triggered_by,
             triggered_by_id=triggered_by_id,
         )
+
+    # Idempotent under concurrency: if a run of this stream is already in
+    # flight, hand back its sync_id instead of enqueuing a duplicate.
+    active_sync_id = _find_active_sync(tenant_id, adapter_type, sync_kind)
+    if active_sync_id:
+        logger.info(
+            "enqueue_adapter_sync: %s/%s %s sync already in flight (%s) — not enqueuing a duplicate",
+            tenant_id,
+            adapter_type,
+            sync_kind,
+            active_sync_id,
+        )
+        return active_sync_id
 
     sync_id = f"sync_{uuid.uuid4().hex[:16]}"
     with get_db_session() as session:

@@ -57,11 +57,11 @@ class TestRegistry:
         assert schemas.capabilities.inventory_entity_label == "Placements"
 
     def test_sync_capabilities_match_implementation_state(self):
-        # Inventory sync landed with Phase 2; reporting landed with the
-        # Phase 3 Report API cache (improvedigital_line_item_stats).
+        # Inventory sync landed with Phase 2; reporting flips alongside the
+        # Phase 3 Report API cache — the scheduler must not call its stub.
         schemas = get_adapter_schemas("improvedigital")
         assert schemas.capabilities.supports_inventory_sync is True
-        assert schemas.capabilities.supports_reporting_sync is True
+        assert schemas.capabilities.supports_reporting_sync is False
 
     def test_default_channels_cover_classic_media_types(self):
         channels = get_adapter_default_channels("improvedigital")
@@ -84,17 +84,16 @@ class TestAdapterConstruction:
                 tenant_id="tenant_impd_1",
             )
 
-    def test_live_mode_without_advertiser_is_allowed(self, mock_principal):
-        # The Classic campaign API accepts campaigns without an advertiser
-        # (validated live: every dev campaign carries advertiserId=null), so
-        # a missing mapping must not block adapter construction.
+    def test_live_mode_without_advertiser_constructs(self, mock_principal):
+        # advertiserId is not part of the Classic campaign create schema
+        # (sandbox-confirmed) — a missing advertiser mapping must not block.
         mock_principal.get_adapter_id.return_value = None
         adapter = ImproveDigitalAdapter(
             config={
                 "client_id": "app-1",
                 "client_secret": "s",
-                "improve_demand_contact_id": 7,
                 "buying_entity_id": 421,
+                "buying_entity_office_id": 635,
             },
             principal=mock_principal,
             dry_run=False,
@@ -102,24 +101,16 @@ class TestAdapterConstruction:
         )
         assert adapter.advertiser_id is None
 
-    def test_live_mode_without_booking_identity_constructs_but_blocks_create(self, mock_principal):
-        # Credentials alone must be enough to construct (Test Connection and
-        # inventory sync only need reads). The booking-identity fields are
-        # enforced at create time with a typed, actionable error instead —
-        # a half-configured tenant could otherwise never sync inventory.
-        from tests.helpers.adapter_test_helpers import invoke_create_media_buy, make_sample_create_request
-
-        adapter = ImproveDigitalAdapter(
-            config={"client_id": "app-1", "client_secret": "s"},
-            principal=mock_principal,
-            dry_run=False,
-            tenant_id="tenant_impd_1",
-        )
-        response = invoke_create_media_buy(adapter, make_sample_create_request(), [])
-        assert response.errors[0].code == "incomplete_adapter_config"
-        assert "improve_demand_contact_id" in response.errors[0].message
-        assert "buying_entity_id" in response.errors[0].message
-        assert "business_unit_id" in response.errors[0].message
+    def test_live_mode_without_buying_entity_raises(self, mock_principal):
+        # The Classic campaign API rejects campaigns without a buying entity
+        # + office (sandbox-confirmed) — fail at construction, not at create.
+        with pytest.raises(ValueError, match="buying_entity"):
+            ImproveDigitalAdapter(
+                config={"client_id": "app-1", "client_secret": "s"},
+                principal=mock_principal,
+                dry_run=False,
+                tenant_id="tenant_impd_1",
+            )
 
     def test_supported_pricing_models(self, mock_principal):
         adapter = make_dry_run_adapter(mock_principal)
@@ -205,7 +196,6 @@ class TestClassicCreatives:
                     "snippet": "<script>tag()</script>",
                     "width": 300,
                     "height": 250,
-                    "click_url": "https://www.brand.example.com/landing",
                 }
             ],
             today=datetime.now(UTC),

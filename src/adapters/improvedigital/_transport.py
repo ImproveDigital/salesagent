@@ -44,13 +44,12 @@ DEFAULT_TIMEOUT = 30.0
 # observed TTLs stay usable.)
 _REFRESH_LEEWAY_SECONDS = 2 * 60
 
-# The API rate-limits reads to 100 requests per 60s window (observed live:
-# HTTP 429 "maximum number of read requests is 100 per 60s"). Paginated
-# inventory sweeps legitimately exceed this, so 429s are retried after the
-# window resets rather than failing the sync.
+# The platform rate-limits reads to 100 per 60s (429 RateLimitException).
+# Pagination sweeps (inventory sync) legitimately exhaust the window, so a
+# 429 is retried after sleeping; the second delay crosses a full window even
+# when the quota was burned at its very start.
+_RATE_LIMIT_RETRY_DELAYS = (20.0, 65.0)
 _RATE_LIMIT_SLEEP_SECONDS = 61.0
-_RATE_LIMIT_MAX_RETRIES = 3
-
 
 class ImproveDigitalError(Exception):
     """Base exception for Improve Digital API errors.
@@ -77,8 +76,12 @@ class ImproveDigitalNotFoundError(ImproveDigitalError):
     """404 — the requested resource does not exist."""
 
 
+class ImproveDigitalRateLimitError(ImproveDigitalError):
+    """429 — read quota exhausted (100 requests per 60s) after retries."""
+
+
 class ImproveDigitalValidationError(ImproveDigitalError):
-    """4xx (other than 401/403/404) — typically an ``ExceptionWrapper`` validation envelope."""
+    """4xx (other than 401/403/404/429) — typically an ``ExceptionWrapper`` validation envelope."""
 
 
 class ImproveDigitalServerError(ImproveDigitalError):
@@ -302,22 +305,20 @@ class ImproveDigitalTransport:
         if response.status_code == 401:
             logger.info("Improve Digital: 401 with cached token; minting fresh and retrying")
             self._token_cache.invalidate()
-            response = self._do_request(method, path, params, body, content_type, files)
-        # 429: the 100-reads-per-60s window is exhausted (normal during
-        # paginated inventory sweeps) — wait out the window and retry.
-        retries = 0
-        while response.status_code == 429 and retries < _RATE_LIMIT_MAX_RETRIES:
-            retries += 1
+            response = self._do_request(method, path, params, body, content_type)
+        for delay in _RATE_LIMIT_RETRY_DELAYS:
+            if response.status_code != 429:
+                break
+            retry_after = response.headers.get("Retry-After")
+            wait = float(retry_after) if retry_after and retry_after.isdigit() else delay
             logger.info(
-                "Improve Digital: 429 rate limited on %s %s; sleeping %.0fs (retry %d/%d)",
+                "Improve Digital: 429 rate-limited on %s %s — sleeping %.0fs before retry",
                 method,
                 path,
-                _RATE_LIMIT_SLEEP_SECONDS,
-                retries,
-                _RATE_LIMIT_MAX_RETRIES,
+                wait,
             )
-            time.sleep(_RATE_LIMIT_SLEEP_SECONDS)
-            response = self._do_request(method, path, params, body, content_type, files)
+            time.sleep(wait)
+            response = self._do_request(method, path, params, body, content_type)
         self._raise_for_status(response, method, path)
         return response
 
@@ -379,6 +380,8 @@ class ImproveDigitalTransport:
             raise ImproveDigitalForbiddenError(message, status_code=status, body=body)
         if status == 404:
             raise ImproveDigitalNotFoundError(message, status_code=status, body=body)
+        if status == 429:
+            raise ImproveDigitalRateLimitError(message, status_code=status, body=body)
         if 400 <= status < 500:
             raise ImproveDigitalValidationError(message, status_code=status, body=body)
         raise ImproveDigitalServerError(message, status_code=status, body=body)

@@ -85,6 +85,28 @@ def _extract_items(body: Any, *preferred_keys: str) -> list[dict[str, Any]]:
     return []
 
 
+def _row_id(item: dict[str, Any]) -> Any:
+    """Entity id under generic or endpoint-prefixed keys (the v3 placement
+    search uses ``placement_id`` — sandbox-confirmed)."""
+    for key in ("id", "placement_id", "package_id", "size_id"):
+        if item.get(key) is not None:
+            return item[key]
+    return None
+
+
+def _reported_total(body: Any) -> int | None:
+    """Total row count from either envelope spelling: the v1 endpoints use
+    ``totalNumberOfElemements`` (sic), the v3 placement search uses
+    ``total_number_of_elements``."""
+    if not isinstance(body, dict):
+        return None
+    for key in ("totalNumberOfElemements", "total_number_of_elements"):
+        value = body.get(key)
+        if isinstance(value, int):
+            return value
+    return None
+
+
 class ImproveDigitalInventorySync:
     """Walks the 360Yield inventory surfaces into the local cache."""
 
@@ -133,18 +155,27 @@ class ImproveDigitalInventorySync:
             "placements",
             "content",
         ):
-            # v3 placement rows carry ``placement_id``/``placement_name``
-            # (verified live on the dev platform), not the generic id/name
-            # of the v1 envelopes.
-            placement_id = item.get("placement_id", item.get("id"))
+            # The live v3 search returns prefixed keys (placement_id,
+            # placement_name, site_name) — sandbox-confirmed; the generic
+            # id/name spelling is kept as a fallback.
+            placement_id = item.get("placement_id") if item.get("placement_id") is not None else item.get("id")
             if placement_id is None:
                 continue
+            name = item.get("placement_name") or item.get("name")
+            site = item.get("site_name")
+            # Placement names usually already embed their site; only append it
+            # when it adds information, so pickers don't show "X-300x250 — X".
+            display_name: str | None
+            if name and site and site not in name:
+                display_name = f"{name} — {site}"
+            else:
+                display_name = name or site
             publisher_id = item.get("publisher_id")
             placement_rows.append(
                 {
                     "entity_type": "placement",
                     "entity_id": str(placement_id),
-                    "name": item.get("placement_name") or item.get("name"),
+                    "name": display_name,
                     "parent_id": str(publisher_id) if publisher_id is not None else None,
                     "raw_json": item,
                     "last_synced_at": synced_at,
@@ -221,19 +252,25 @@ class ImproveDigitalInventorySync:
     def _iter_paginated(self, fetch, *item_keys: str) -> Iterator[dict[str, Any]]:
         """Yield items across offset/limit pages.
 
-        Stops when a page comes back short/empty, when the reported
-        ``totalNumberOfElemements`` (sic — upstream spelling) is reached,
-        or at the MAX_PAGES backstop.
+        The server clamps ``limit`` (observed max 100), so a page shorter
+        than the requested size does NOT mean it was the last one. Stops on
+        an empty page, on a page with no unseen ids (a server ignoring
+        ``offset`` would otherwise loop forever), when the reported
+        ``totalNumberOfElemements`` (sic — upstream spelling) is reached, or
+        at the MAX_PAGES backstop. Already-seen rows are not re-yielded.
         """
         offset = 0
+        seen_ids: set[Any] = set()
         for _page in range(MAX_PAGES):
             body = fetch(offset, PAGE_SIZE)
             items = _extract_items(body, *item_keys)
-            yield from items
+            fresh = [item for item in items if _row_id(item) is None or _row_id(item) not in seen_ids]
+            seen_ids.update(_row_id(item) for item in fresh if _row_id(item) is not None)
+            yield from fresh
 
-            total = body.get("totalNumberOfElemements") if isinstance(body, dict) else None
+            total = _reported_total(body)
             offset += len(items)
-            if len(items) < PAGE_SIZE:
+            if not items or len(fresh) < len(items):
                 return
             if isinstance(total, int) and offset >= total:
                 return
