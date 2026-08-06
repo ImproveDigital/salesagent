@@ -128,8 +128,18 @@ class ImproveDigitalCampaignsClient:
         )
 
     def set_packages(self, campaign_id: int, line_item_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """``PUT /rtb/v1/classic/.../line-items/{id}/packages`` —
+        ``LineItemPackagesDto``: ``{"line_item_packages": [{"id": ..., "assigned": true}]}``."""
         return self._transport.put_json(
             f"/rtb/v1/classic/campaigns/{campaign_id}/line-items/{line_item_id}/packages", payload
+        )
+
+    def set_line_item_placements(self, campaign_id: int, line_item_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """``PUT /rtb/v1/classic/.../line-items/{id}/placements`` — explicit
+        placement assignment (``CommonDealLineItemPlacementsDto``:
+        ``{"line_item_placements": [{"id": ..., "assigned": true}]}``)."""
+        return self._transport.put_json(
+            f"/rtb/v1/classic/campaigns/{campaign_id}/line-items/{line_item_id}/placements", payload
         )
 
 
@@ -145,8 +155,31 @@ class ImproveDigitalCreativesClient:
         self._transport = transport
 
     def create_creative(self, campaign_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-        """``POST /rtb/v1/classic/campaigns/{id}/creatives``."""
-        return self._transport.post_json(f"/rtb/v1/classic/campaigns/{campaign_id}/creatives", payload)
+        """``POST /rtb/v1/classic/campaigns/{id}/creatives`` — a multipart
+        servlet: the ``CreativeDto`` goes in the ``body`` part; binary image
+        parts (hosted-image creatives) are a later milestone."""
+        return self._transport.post_multipart(f"/rtb/v1/classic/campaigns/{campaign_id}/creatives", payload)
+
+    def create_third_party_tag_creatives(
+        self,
+        campaign_id: int,
+        creatives: list[dict[str, Any]],
+        *,
+        creative_type: str = "Third Party Tag",
+        line_item_id: int | None = None,
+    ) -> Any:
+        """``POST /rtb/v1/classic/campaign/creatives/third-party-tag/bulk-upload``
+        — plain-JSON create for tag-based creatives (``CreativeBulkUploadDto``;
+        required: campaign_id, creative_type, creatives). Optionally binds the
+        new creatives to ``line_item_id`` in the same call."""
+        payload: dict[str, Any] = {
+            "campaign_id": campaign_id,
+            "creative_type": creative_type,
+            "creatives": creatives,
+        }
+        if line_item_id is not None:
+            payload["line_item_id"] = line_item_id
+        return self._transport.post_json("/rtb/v1/classic/campaign/creatives/third-party-tag/bulk-upload", payload)
 
     def get_creative(self, campaign_id: int, creative_id: int) -> dict[str, Any]:
         return self._transport.get_json(f"/rtb/v1/classic/campaigns/{campaign_id}/creatives/{creative_id}")

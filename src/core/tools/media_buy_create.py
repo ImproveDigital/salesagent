@@ -1133,6 +1133,63 @@ def _ensure_order_status_watcher(
         logger.info(f"[APPROVAL] Order status watcher already running for order {order_id}")
 
 
+def _upload_approval_creatives_via_adapter(
+    *,
+    adapter: Any,
+    platform_media_buy_id: str,
+    assets: list[dict[str, Any]],
+    creative_map: dict[str, Any],
+    platform_line_item_ids: dict[str, str],
+    session: Any,
+) -> None:
+    """Approval-path creative upload for adapters without a GAM-style
+    ``creatives_manager`` (e.g. Improve Digital).
+
+    Uploads through ``adapter.add_creative_assets`` (which echoes the
+    platform creative ID in each status row), persists that ID on the
+    Creative row, and binds the creatives to their packages' platform
+    line items via ``adapter.associate_creatives``.
+    """
+    asset_statuses = adapter.add_creative_assets(platform_media_buy_id, assets, datetime.now(UTC))
+    logger.info(f"[APPROVAL] Creative upload completed: {len(asset_statuses)} assets processed")
+
+    # Statuses come back one per asset, in order; successful rows carry the
+    # platform creative ID in ``creative_id`` (the original ID is replaced).
+    platform_ids_by_creative: dict[str, str] = {}
+    for asset, status in zip(assets, asset_statuses, strict=False):
+        if str(getattr(status, "status", "") or "").lower() == "failed":
+            logger.error(
+                f"[APPROVAL] Failed to upload creative {asset['creative_id']}: {getattr(status, 'message', None)}"
+            )
+            continue
+        platform_creative_id = getattr(status, "creative_id", None)
+        if platform_creative_id:
+            platform_ids_by_creative[str(asset["creative_id"])] = str(platform_creative_id)
+
+    for creative_id, platform_creative_id in platform_ids_by_creative.items():
+        creative = creative_map.get(creative_id)
+        if creative is None:
+            continue
+        data = creative.data or {}
+        if not data.get("platform_creative_id"):
+            creative.data = {**data, "platform_creative_id": platform_creative_id}
+            session.add(creative)
+
+    if not platform_ids_by_creative or not callable(getattr(adapter, "associate_creatives", None)):
+        return
+    creatives_by_line_item: dict[str, list[str]] = {}
+    for asset in assets:
+        platform_creative_id = platform_ids_by_creative.get(str(asset["creative_id"]))
+        if not platform_creative_id:
+            continue
+        for package_assignment in asset.get("package_assignments") or []:
+            line_item_id = platform_line_item_ids.get(package_assignment["package_id"])
+            if line_item_id:
+                creatives_by_line_item.setdefault(str(line_item_id), []).append(platform_creative_id)
+    for line_item_id, line_item_creative_ids in creatives_by_line_item.items():
+        adapter.associate_creatives([line_item_id], line_item_creative_ids)
+
+
 def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool, str | None]:
     """Execute adapter creation for a manually approved media buy.
 
@@ -1716,6 +1773,19 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                                     logger.error(
                                         f"[APPROVAL] Failed to upload creative {status.creative_id}: {status.message}"
                                     )
+                        elif gam_order_id and not hasattr(adapter, "creatives_manager"):
+                            # Non-GAM adapters (e.g. Improve Digital) implement
+                            # add_creative_assets directly on the adapter. GAM
+                            # defines creatives_manager even when it is None, so
+                            # a GAM init failure still takes the skip branch.
+                            _upload_approval_creatives_via_adapter(
+                                adapter=adapter,
+                                platform_media_buy_id=gam_order_id,
+                                assets=assets,
+                                creative_map=creative_map,
+                                platform_line_item_ids=platform_line_item_ids,
+                                session=session,
+                            )
                         else:
                             logger.warning("[APPROVAL] Adapter does not support creative upload, skipping")
                     except Exception as creative_error:

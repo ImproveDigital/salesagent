@@ -62,11 +62,29 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
         description="Default agency ID applied to Classic campaigns (optional)",
         json_schema_extra={"ui_order": 6},
     )
+    buying_entity_id: int | None = Field(
+        default=None,
+        description=(
+            "Buying entity ID — required by the Classic campaign API "
+            "(e.g. 421 = 'Improve Digital Marketplace' on the dev platform)"
+        ),
+        json_schema_extra={"ui_order": 7},
+    )
+    buying_entity_office_id: int | None = Field(
+        default=None,
+        description="Buying entity office (buyer seat) ID applied to Classic campaigns",
+        json_schema_extra={"ui_order": 8},
+    )
+    business_unit_id: int | None = Field(
+        default=None,
+        description="Business unit ID — required on Classic line items (e.g. 33 = Azerion on the dev platform)",
+        json_schema_extra={"ui_order": 9},
+    )
     currency: str = Field(
         default="EUR",
         description="Default campaign currency (ISO 4217)",
         json_schema_extra={
-            "ui_order": 7,
+            "ui_order": 10,
             # CampaignDto currency enum from the rtb/v3 OpenAPI spec.
             "enum": [
                 "EUR",
@@ -90,7 +108,7 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
     timezone: str = Field(
         default="UTC",
         description="Default campaign timezone",
-        json_schema_extra={"ui_order": 8},
+        json_schema_extra={"ui_order": 11},
     )
 
     @field_serializer("client_secret")

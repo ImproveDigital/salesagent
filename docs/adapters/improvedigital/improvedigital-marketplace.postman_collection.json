@@ -1,0 +1,476 @@
+{
+  "info": {
+    "name": "Improve Digital Marketplace — Direct (Classic) Campaign Booking",
+    "description": "End-to-end direct-campaign booking against the 360Yield Marketplace API (beta-deals.360yielddev.com / direct-campaigns).\n\nEvery request in this collection was validated live against the dev platform (2026-08-04) — the payloads encode wire requirements the OpenAPI spec gets wrong or omits (see docs/adapters/improvedigital/live-wire-shapes.md in the salesagent repo).\n\nSETUP\n1. Set collection variables `client_id` and `client_secret` (OAuth2 client credentials issued by Improve Digital).\n2. Confirm the account variables (`demand_contact_id`, `buying_entity_id`, `buying_entity_office_id`, `business_unit_id`) — the defaults are the dev-platform values for the 'AdCP API Acceptance' client. On another account, run `0.2 Who am I` and copy the values from an existing campaign (`2.4 List campaigns`).\n3. Run the folders top to bottom: 1 auth → 2 discovery → 3 booking → 4 lifecycle → 5 reporting → 6 cleanup. Requests chain automatically: campaign_id, line_item_id, placement_id and creative_id are captured into collection variables by test scripts.\n\nAUTH\nBearer tokens live ~30 minutes and there is NO refresh token. A collection-level pre-request script re-mints automatically when the cached token is missing or expiring, so you normally never need to run the token request by hand.\n\nRATE LIMIT\nThe API allows 100 read requests per 60s — heavy pagination (placement sweeps) will hit 429; wait out the window.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Auto-mint the OAuth2 bearer when missing or expiring (<60s left).",
+          "// 360Yield issues NO refresh token — re-mint on expiry is the contract.",
+          "const expiresAt = Number(pm.collectionVariables.get('token_expires_at') || 0);",
+          "const token = pm.collectionVariables.get('access_token');",
+          "if (token && Date.now() < expiresAt - 60000) { return; }",
+          "const clientId = pm.collectionVariables.get('client_id');",
+          "const clientSecret = pm.collectionVariables.get('client_secret');",
+          "if (!clientId || !clientSecret) { throw new Error('Set client_id and client_secret collection variables first'); }",
+          "pm.sendRequest({",
+          "    url: pm.collectionVariables.get('base_url') + '/oauth/token',",
+          "    method: 'POST',",
+          "    header: {",
+          "        'Content-Type': 'application/x-www-form-urlencoded',",
+          "        'Authorization': 'Basic ' + btoa(clientId + ':' + clientSecret)",
+          "    },",
+          "    body: { mode: 'urlencoded', urlencoded: [{ key: 'grant_type', value: 'client_credentials' }] }",
+          "}, (err, res) => {",
+          "    if (err) { throw err; }",
+          "    const body = res.json();",
+          "    if (!body.value) { throw new Error('Token mint failed: ' + JSON.stringify(body)); }",
+          "    pm.collectionVariables.set('access_token', body.value);",
+          "    pm.collectionVariables.set('token_expires_at', String(Date.now() + (body.expiresIn || 600) * 1000));",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base_url", "value": "https://api.360yielddev.com", "type": "string" },
+    { "key": "client_id", "value": "", "type": "string", "description": "OAuth2 client ID issued by Improve Digital" },
+    { "key": "client_secret", "value": "", "type": "string", "description": "OAuth2 client secret — set locally, never commit" },
+    { "key": "access_token", "value": "", "type": "string", "description": "Auto-filled by the collection pre-request script" },
+    { "key": "token_expires_at", "value": "0", "type": "string" },
+    { "key": "demand_contact_id", "value": "17918", "type": "string", "description": "== your API user's user_id (see 0.2 Who am I)" },
+    { "key": "buying_entity_id", "value": "421", "type": "string", "description": "421 = 'Improve Digital Marketplace' on dev" },
+    { "key": "buying_entity_office_id", "value": "5068", "type": "string", "description": "Buyer seat — at least one office is required on campaigns" },
+    { "key": "business_unit_id", "value": "33", "type": "string", "description": "33 = Azerion on dev; required on line items" },
+    { "key": "campaign_name", "value": "postman-demo-campaign", "type": "string" },
+    { "key": "cpm_bid", "value": "2.5", "type": "string" },
+    { "key": "impression_cap", "value": "10000", "type": "string" },
+    { "key": "campaign_id", "value": "", "type": "string", "description": "Auto-filled by 3.1" },
+    { "key": "line_item_id", "value": "", "type": "string", "description": "Auto-filled by 3.2" },
+    { "key": "placement_id", "value": "", "type": "string", "description": "Auto-filled by 2.2 (first 300x250-capable placement)" },
+    { "key": "creative_id", "value": "", "type": "string", "description": "Auto-filled by 3.4" }
+  ],
+  "item": [
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "1.1 Get OAuth token (manual)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('token minted', () => pm.expect(body.value).to.be.a('string'));",
+                  "pm.collectionVariables.set('access_token', body.value);",
+                  "pm.collectionVariables.set('token_expires_at', String(Date.now() + (body.expiresIn || 600) * 1000));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "basic",
+              "basic": [
+                { "key": "username", "value": "{{client_id}}", "type": "string" },
+                { "key": "password", "value": "{{client_secret}}", "type": "string" }
+              ]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [{ "key": "grant_type", "value": "client_credentials" }]
+            },
+            "url": { "raw": "{{base_url}}/oauth/token", "host": ["{{base_url}}"], "path": ["oauth", "token"] },
+            "description": "Token comes back under `value` (NOT access_token), TTL in `expiresIn` (~30 min). No refresh token — re-mint on 401. Normally unnecessary: the collection pre-request script mints automatically."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Discovery & lookups",
+      "item": [
+        {
+          "name": "2.1 Who am I (user-details)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/lookup/v1/user-details", "host": ["{{base_url}}"], "path": ["lookup", "v1", "user-details"] },
+            "description": "Your `user_id` here is the `improve_demand_contact_id` to use on campaigns and line items. `business_unit_id` also appears here."
+          }
+        },
+        {
+          "name": "2.2 Search placements (300x250-capable)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const rows = pm.response.json().placements || [];",
+                  "pm.test('placements found', () => pm.expect(rows.length).to.be.above(0));",
+                  "if (rows.length) {",
+                  "    // NOTE: v3 rows are keyed placement_id / placement_name, not id / name.",
+                  "    pm.collectionVariables.set('placement_id', String(rows[0].placement_id));",
+                  "    console.log('placement_id =', rows[0].placement_id, rows[0].placement_name);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v3/placements?limit=10&offset=0&size_ids=4",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v3", "placements"],
+              "query": [
+                { "key": "limit", "value": "10" },
+                { "key": "offset", "value": "0" },
+                { "key": "size_ids", "value": "4", "description": "4 = 300x250 (Medium Rectangle); see 2.3" }
+              ]
+            },
+            "description": "Filter by size so the creative you upload later has matching inventory — the creative endpoint rejects sizes with no available placements. Saves the first result as {{placement_id}}."
+          }
+        },
+        {
+          "name": "2.3 List all creative sizes",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/rtb/v1/sizes-all", "host": ["{{base_url}}"], "path": ["rtb", "v1", "sizes-all"] },
+            "description": "Size dictionary — 300x250 => id 4, name '300x250 (Medium Rectangle)'. Creatives must reference the display name + size_id, not a bare '300x250'."
+          }
+        },
+        {
+          "name": "2.4 List recent campaigns",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns?limit=10&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns"],
+              "query": [
+                { "key": "limit", "value": "10" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Use this to discover working values for buying_entity_id / office / demand contact on a new account: copy them from a recent, working campaign."
+          }
+        },
+        {
+          "name": "2.5 Creative type names (i18n)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/common/v1/i18n/creative_type", "host": ["{{base_url}}"], "path": ["common", "v1", "i18n", "creative_type"] },
+            "description": "Canonical creative type names: Third Party Tag, Image (PNG, GIF, JPG), Html5, VAST, VAST_VPAID, Video File, Native, Ad Builder, Raw Video, VAST Audio. Creative create resolves types by exact name."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Book a campaign",
+      "item": [
+        {
+          "name": "3.1 Create campaign",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Platform datetime wire format: YYYY-MM-DD HH:MM:SS (no T, no zone)",
+                  "function fmt(d) { return d.toISOString().slice(0, 19).replace('T', ' '); }",
+                  "const start = new Date(Date.now() + 60 * 60 * 1000);",
+                  "const end = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);",
+                  "pm.variables.set('start_date', fmt(start));",
+                  "pm.variables.set('end_date', fmt(end));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('campaign created (201)', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('campaign_id', String(body.id));",
+                  "console.log('campaign_id =', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{campaign_name}}\",\n  \"type\": \"Improve\",\n  \"start_date\": \"{{start_date}}\",\n  \"end_date\": \"{{end_date}}\",\n  \"time_zone\": \"Europe/Amsterdam\",\n  \"currency\": \"EUR\",\n  \"improve_demand_contact_id\": {{demand_contact_id}},\n  \"buying_entity_id\": {{buying_entity_id}},\n  \"buying_entity_office_id\": {{buying_entity_office_id}},\n  \"buying_entity_office_ids\": [{{buying_entity_office_id}}]\n}"
+            },
+            "url": { "raw": "{{base_url}}/rtb/v1/classic/campaigns", "host": ["{{base_url}}"], "path": ["rtb", "v1", "classic", "campaigns"] },
+            "description": "Required beyond the OpenAPI spec (validated live): `type: \"Improve\"` (Classic/direct = Improve adserver hosts the creatives), `buying_entity_id`, and at least one buying entity office — otherwise 500 'Assign at least one Always on Deal buying entity office'. Note: the platform may override `currency` to the account owner's default. Saves {{campaign_id}}."
+          }
+        },
+        {
+          "name": "3.2 Create line item",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function fmt(d) { return d.toISOString().slice(0, 19).replace('T', ' '); }",
+                  "pm.variables.set('start_date', fmt(new Date(Date.now() + 60 * 60 * 1000)));",
+                  "pm.variables.set('end_date', fmt(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('line item created (201)', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('line_item_id', String(body.id));",
+                  "console.log('line_item_id =', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{campaign_name}}-li\",\n  \"type\": \"Standard\",\n  \"line_item_status\": \"Active\",\n  \"goal\": \"IMPRESSION\",\n  \"start_date\": \"{{start_date}}\",\n  \"end_date\": \"{{end_date}}\",\n  \"time_zone\": \"Europe/Amsterdam\",\n  \"pricing_model\": \"CPM\",\n  \"cpm_bid\": {{cpm_bid}},\n  \"impression_cap\": {{impression_cap}},\n  \"improve_demand_contact_id\": {{demand_contact_id}},\n  \"business_unit_id\": {{business_unit_id}}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items"]
+            },
+            "description": "Required (validated live): `type: \"Standard\"`, `line_item_status: \"Active\"`, `goal` for CPM items (IMPRESSION or BUDGET), `business_unit_id`, `improve_demand_contact_id`. Do NOT send `currency` — it must match the campaign owner's default and 400s otherwise; it inherits from the campaign when omitted. Saves {{line_item_id}}."
+          }
+        },
+        {
+          "name": "3.3 Assign placements to line item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('placements assigned (2xx)', () => pm.expect(pm.response.code).to.be.within(200, 299));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"line_item_placements\": [\n    { \"id\": {{placement_id}}, \"assigned\": true }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items/{{line_item_id}}/placements",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}", "placements"]
+            },
+            "description": "Explicit placement assignment — envelope `{\"line_item_placements\": [{id, assigned: true}]}`. Add more entries for more placements. (Reusable packages use the same pattern at `.../packages` with `line_item_packages`.)"
+          }
+        },
+        {
+          "name": "3.4 Create creative (Third Party Tag)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('creative created (2xx)', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                  "const body = pm.response.json();",
+                  "const created = Array.isArray(body) ? body[0] : (body.creatives || [])[0];",
+                  "if (created && created.id) {",
+                  "    pm.collectionVariables.set('creative_id', String(created.id));",
+                  "    console.log('creative_id =', created.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"campaign_id\": {{campaign_id}},\n  \"creative_type\": \"Third Party Tag\",\n  \"creatives\": [\n    {\n      \"name\": \"{{campaign_name}}-cr\",\n      \"size\": \"300x250 (Medium Rectangle)\",\n      \"size_id\": 4,\n      \"width\": 300,\n      \"height\": 250,\n      \"status\": \"Active\",\n      \"tag\": \"<div>postman demo creative</div>\",\n      \"tag_secure\": true,\n      \"advertiser_domain\": \"example.com\",\n      \"third_party_type\": \"display\",\n      \"platform_types\": [\"Web\"]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaign/creatives/third-party-tag/bulk-upload",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaign", "creatives", "third-party-tag", "bulk-upload"]
+            },
+            "description": "Tag creatives use this plain-JSON bulk endpoint — the single-create `POST .../campaigns/{id}/creatives` is a multipart servlet and 500s on plain JSON. Live-validated requirements: creative_type exactly 'Third Party Tag', advertiser_domain, third_party_type 'display', platform_types ['Web'] (capital W), and the RESOLVED size (display name + size_id from 2.3 — a bare '300x250' is rejected with 'no available placements with this creative size'). Saves {{creative_id}}."
+          }
+        },
+        {
+          "name": "3.5 Bind creative to line item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('creative bound (2xx)', () => pm.expect(pm.response.code).to.be.within(200, 299));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"line_item_creatives\": [\n    { \"id\": {{creative_id}}, \"assigned\": true }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items/{{line_item_id}}/creatives",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}", "creatives"]
+            },
+            "description": "Envelope `{\"line_item_creatives\": [{id, assigned: true}]}`. This call can take >30s on the dev platform — raise Postman's request timeout if it aborts. After this the campaign is fully booked and appears under beta-deals.360yielddev.com/direct-campaigns."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Lifecycle",
+      "item": [
+        {
+          "name": "4.1 Get campaign",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}"]
+            }
+          }
+        },
+        {
+          "name": "4.2 List line items",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items"]
+            }
+          }
+        },
+        {
+          "name": "4.3 Pause line item",
+          "request": {
+            "method": "PUT",
+            "url": {
+              "raw": "{{base_url}}/rtb/v3/campaigns/{{campaign_id}}/line-items/{{line_item_id}}/status?active=false",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v3", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}", "status"],
+              "query": [{ "key": "active", "value": "false" }]
+            },
+            "description": "Status toggles are query-param PUTs with no body. Campaign-level pause = pause every line item."
+          }
+        },
+        {
+          "name": "4.4 Resume line item",
+          "request": {
+            "method": "PUT",
+            "url": {
+              "raw": "{{base_url}}/rtb/v3/campaigns/{{campaign_id}}/line-items/{{line_item_id}}/status?active=true",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v3", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}", "status"],
+              "query": [{ "key": "active", "value": "true" }]
+            }
+          }
+        },
+        {
+          "name": "4.5 Update line item (impression cap)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{campaign_name}}-li\",\n  \"type\": \"Standard\",\n  \"line_item_status\": \"Active\",\n  \"goal\": \"IMPRESSION\",\n  \"pricing_model\": \"CPM\",\n  \"cpm_bid\": {{cpm_bid}},\n  \"impression_cap\": 20000,\n  \"improve_demand_contact_id\": {{demand_contact_id}},\n  \"business_unit_id\": {{business_unit_id}}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items/{{line_item_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}"]
+            },
+            "description": "PUT expects the full DTO — read-modify-write: GET the line item (4.2), change the field, PUT it back. This body is a minimal example; safest is to echo everything 4.2 returned with your change applied."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Reporting (delivery metrics)",
+      "item": [
+        {
+          "name": "5.1 Report preview (campaign delivery)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rows\": 500,\n  \"report_generation_request\": {\n    \"title\": \"\",\n    \"report_type\": \"EXT_CONSOLIDATE\",\n    \"currency_id\": 1,\n    \"date_range\": { \"quick\": \"LAST_7_DAYS\" },\n    \"dimensions\": [\"campaign_id\", \"line_item_id\"],\n    \"metrics\": [\"impressions\", \"clicks\", \"advertiser_payout\", \"complete\"],\n    \"filters\": [\n      { \"column\": \"campaign_id\", \"operation\": \"IN\", \"value\": [{{campaign_id}}] }\n    ],\n    \"timezone\": \"UTC\",\n    \"action\": \"PREVIEW_REPORT\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/report/ext/preview",
+              "host": ["{{base_url}}"],
+              "path": ["report", "ext", "preview"]
+            },
+            "description": "Synchronous report, <=500 rows as JSON. CRITICAL: the body is snake_case (`report_generation_request`, `report_type`, `date_range`) — the camelCase in the OpenAPI spec 500s with 'request is null'. `advertiser_payout` = spend; `complete` = video completions. currency_id: 1=EUR, 2=USD. A fresh campaign returns 0 rows until it has delivered. For >500 rows use POST /report/ext/generation + GET /report/ext/generation-status/{id}."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Cleanup",
+      "item": [
+        {
+          "name": "6.1 Delete campaign (hard)",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}"]
+            },
+            "description": "Refused with 400 once the campaign has served impressions (the dev platform attributes simulated impressions within seconds of activation) — use 6.2 then."
+          }
+        },
+        {
+          "name": "6.2 Archive campaign (soft)",
+          "request": {
+            "method": "PUT",
+            "url": {
+              "raw": "{{base_url}}/rtb/v3/campaigns/{{campaign_id}}/archive",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v3", "campaigns", "{{campaign_id}}", "archive"]
+            },
+            "description": "The platform-sanctioned cleanup for campaigns that already served."
+          }
+        }
+      ]
+    }
+  ]
+}

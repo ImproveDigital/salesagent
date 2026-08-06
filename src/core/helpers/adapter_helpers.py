@@ -47,6 +47,7 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
 from src.adapters.broadstreet import BroadstreetAdapter
 from src.adapters.freewheel import FreeWheelAdapter
 from src.adapters.google_ad_manager import GoogleAdManager
+from src.adapters.improvedigital import ImproveDigitalAdapter
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
 from src.adapters.springserve import SpringServeAdapter
 from src.adapters.triton import TritonAdapter
@@ -67,7 +68,15 @@ def _principal_gam_advertiser_id(principal: Principal) -> str | None:
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | TritonAdapter | FreeWheelAdapter | BroadstreetAdapter | SpringServeAdapter:
+) -> (
+    MockAdServerAdapter
+    | GoogleAdManager
+    | TritonAdapter
+    | FreeWheelAdapter
+    | BroadstreetAdapter
+    | SpringServeAdapter
+    | ImproveDigitalAdapter
+):
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
@@ -195,6 +204,30 @@ def get_adapter(
                             "manual_approval_required": bs_validated.manual_approval_required,
                         }
                     )
+            elif adapter_type == "improvedigital":
+                # Improve Digital credentials live in config_json. Same
+                # plaintext-via-attribute-access requirement as Triton above —
+                # model_dump() would re-encrypt client_secret before it
+                # reaches the OAuth2 token mint.
+                stored = config_row.config_json or {}
+                if stored:
+                    impd_validated = ImproveDigitalAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "client_id": impd_validated.client_id,
+                            "client_secret": impd_validated.client_secret,
+                            "api_base_url": impd_validated.api_base_url,
+                            "improve_demand_contact_id": impd_validated.improve_demand_contact_id,
+                            "default_advertiser_id": impd_validated.default_advertiser_id,
+                            "agency_id": impd_validated.agency_id,
+                            "buying_entity_id": impd_validated.buying_entity_id,
+                            "buying_entity_office_id": impd_validated.buying_entity_office_id,
+                            "business_unit_id": impd_validated.business_unit_id,
+                            "currency": impd_validated.currency,
+                            "timezone": impd_validated.timezone,
+                            "manual_approval_required": impd_validated.manual_approval_required,
+                        }
+                    )
             elif adapter_type == "springserve":
                 stored = config_row.config_json or {}
                 if stored:
@@ -222,6 +255,16 @@ def get_adapter(
     # Create the appropriate adapter instance with tenant_id and testing context
     logger.debug(f"[ADAPTER_SELECT] FINAL selected_adapter: {selected_adapter}")
     if selected_adapter == "mock":
+        declared_ad_server = tenant.get("ad_server") if isinstance(tenant, dict) else getattr(tenant, "ad_server", None)
+        if declared_ad_server and declared_ad_server != "mock":
+            # No quiet failures: a tenant configured for a real ad server must
+            # never silently trade down to the mock adapter. Surface the full
+            # caller chain so the triggering flow can be identified.
+            logger.warning(
+                f"[ADAPTER_SELECT] Tenant {tenant_id!r} declares ad_server={declared_ad_server!r} "
+                f"but resolved to the MOCK adapter — silent mock fallback",
+                stack_info=True,
+            )
         logger.debug("[ADAPTER_SELECT] Instantiating MockAdServerAdapter")
         return MockAdServerAdapter(
             adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
@@ -253,10 +296,18 @@ def get_adapter(
         return FreeWheelAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     elif selected_adapter == "broadstreet":
         return BroadstreetAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "improvedigital":
+        return ImproveDigitalAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     elif selected_adapter == "springserve":
         return SpringServeAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
-        # Default to mock for unsupported adapters
+        # Default to mock for unsupported adapters — loud, so a typo'd or
+        # transiently-missing adapter type never books silently against mock.
+        logger.warning(
+            f"[ADAPTER_SELECT] Unknown adapter type {selected_adapter!r} for tenant {tenant_id!r} — "
+            f"falling back to the MOCK adapter",
+            stack_info=True,
+        )
         return MockAdServerAdapter(
             adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
         )
