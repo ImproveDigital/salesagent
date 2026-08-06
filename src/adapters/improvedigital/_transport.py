@@ -49,7 +49,7 @@ _REFRESH_LEEWAY_SECONDS = 2 * 60
 # 429 is retried after sleeping; the second delay crosses a full window even
 # when the quota was burned at its very start.
 _RATE_LIMIT_RETRY_DELAYS = (20.0, 65.0)
-
+_RATE_LIMIT_SLEEP_SECONDS = 61.0
 
 class ImproveDigitalError(Exception):
     """Base exception for Improve Digital API errors.
@@ -161,6 +161,19 @@ class ImproveDigitalTransport:
         )
         return response.json() if response.content else {}
 
+    def post_multipart(self, path: str, json_body: dict[str, Any], part_name: str = "body", **params: Any) -> Any:
+        """POST a JSON payload as one part of a multipart/form-data request.
+
+        The Classic creative endpoints are multipart servlets: the
+        ``CreativeDto`` travels as a ``body`` part (content-type
+        application/json) alongside optional binary image parts. Sending
+        plain JSON gets HTTP 500 "Failed to parse multipart servlet
+        request" (verified live on the dev platform).
+        """
+        files = {part_name: (None, json.dumps(json_body), "application/json")}
+        response = self._request("POST", path, params=params or None, files=files)
+        return response.json() if response.content else {}
+
     def put_json(self, path: str, json_body: dict[str, Any] | None = None, **params: Any) -> Any:
         """PUT a JSON body, parse the JSON response.
 
@@ -269,8 +282,24 @@ class ImproveDigitalTransport:
         params: dict[str, Any] | None = None,
         body: str | None = None,
         content_type: str | None = None,
+        files: dict[str, Any] | None = None,
     ) -> requests.Response:
-        response = self._do_request(method, path, params, body, content_type)
+        try:
+            response = self._do_request(method, path, params, body, content_type, files)
+        except requests.Timeout:
+            if method != "GET":
+                raise
+            # Reads stall when the rate-limit window is exhausted (observed
+            # live after large paginated sweeps) — idempotent, retry once
+            # after the window resets.
+            logger.info(
+                "Improve Digital: %s %s timed out; retrying once after %.0fs",
+                method,
+                path,
+                _RATE_LIMIT_SLEEP_SECONDS,
+            )
+            time.sleep(_RATE_LIMIT_SLEEP_SECONDS)
+            response = self._do_request(method, path, params, body, content_type, files)
         # No refresh token exists — a 401 with a cached token means it
         # expired. Mint a fresh one and retry once before propagating.
         if response.status_code == 401:
@@ -300,6 +329,7 @@ class ImproveDigitalTransport:
         params: dict[str, Any] | None,
         body: str | None,
         content_type: str | None,
+        files: dict[str, Any] | None = None,
     ) -> requests.Response:
         url = f"{self.base_url}{path}"
         if params:
@@ -316,6 +346,7 @@ class ImproveDigitalTransport:
                 url=url,
                 headers=headers,
                 data=body,
+                files=files,
                 timeout=self.timeout,
             )
         except requests.RequestException:

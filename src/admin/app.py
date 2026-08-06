@@ -615,8 +615,9 @@ def create_app(config=None):
         from flask import g, session
         from sqlalchemy import func, select
 
+        from src.admin.utils.helpers import ADAPTER_LABELS
         from src.core.database.database_session import get_db_session
-        from src.core.database.models import Product, Tenant
+        from src.core.database.models import AdapterConfig, Product, Tenant
         from src.core.domain_config import get_sales_agent_domain, get_support_email
         from src.core.version import get_build_info
 
@@ -668,6 +669,16 @@ def create_app(config=None):
                         context["nav_product_count"] = (
                             db_session.scalar(select(func.count()).select_from(Product).filter_by(tenant_id=tenant_id))
                             or 0
+                        )
+                        # Adapter type shown next to the workspace name in the
+                        # top bar; fetched here because ``tenant`` is detached
+                        # once the session closes, so the relationship can't
+                        # be lazy-loaded from the template.
+                        adapter_type = db_session.scalar(
+                            select(AdapterConfig.adapter_type).filter_by(tenant_id=tenant_id)
+                        )
+                        context["nav_adapter_type"] = (
+                            ADAPTER_LABELS.get(adapter_type, adapter_type) if adapter_type else None
                         )
             except Exception as e:
                 logger.warning(f"Could not load tenant {tenant_id} for context: {e}")

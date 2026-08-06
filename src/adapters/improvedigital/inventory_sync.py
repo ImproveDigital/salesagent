@@ -34,12 +34,14 @@ from src.core.database.repositories.improvedigital_inventory import ImproveDigit
 
 logger = logging.getLogger(__name__)
 
-# Page size for offset/limit pagination. 360Yield caps vary per endpoint;
-# 200 keeps request counts low without tripping validation.
-PAGE_SIZE = 200
+# Page size for offset/limit pagination. Validated live: the placement
+# search serves 1000-row (and larger) pages; big pages keep the sweep well
+# under the API's 100-reads-per-60s rate limit (~25 pages for ~25k dev
+# placements vs ~125 at the previous 200).
+PAGE_SIZE = 1000
 
 # Hard ceiling on pages per family — a runaway-pagination backstop, not a
-# coverage limit (200 * 500 = 100k rows per family).
+# coverage limit (1000 * 500 = 500k rows per family).
 MAX_PAGES = 500
 
 

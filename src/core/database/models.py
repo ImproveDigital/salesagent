@@ -2705,6 +2705,42 @@ class ImproveDigitalInventory(Base, JSONValidatorMixin):
     )
 
 
+class ImproveDigitalLineItemStats(Base):
+    """Per-line-item delivery stats cache for the Improve Digital adapter.
+
+    Populated by the periodic Report API sync (``POST /report/ext/preview``
+    with dimensions campaign_id/line_item_id). Read by
+    ``ImproveDigitalAdapter.get_media_buy_delivery`` so AdCP delivery
+    surfaces serve results without round-tripping to 360Yield on every
+    request.
+
+    Spend is stored as currency-minor-unit micros (1 EUR = 1_000_000
+    micros, from the Report API ``advertiser_payout`` metric) to avoid
+    floating-point precision loss when aggregating.
+    """
+
+    __tablename__ = "improvedigital_line_item_stats"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False, primary_key=True)
+    line_item_id: Mapped[str] = mapped_column(String(64), nullable=False, primary_key=True)
+    campaign_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    impressions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    clicks: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    completed_views: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    tenant = relationship("Tenant", backref="improvedigital_line_item_stats")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+        Index("idx_impd_li_stats_tenant_campaign", "tenant_id", "campaign_id"),
+    )
+
+
 class SpringServeDemandTagStats(Base):
     """Per-demand-tag delivery stats cache for the SpringServe adapter.
 

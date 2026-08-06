@@ -155,6 +155,35 @@ def adapter_supports_sync_kind(caps: Any, sync_kind: SyncKind) -> bool:
     return bool(getattr(caps, _SYNC_CAPABILITY_ATTRS[sync_kind], False))
 
 
+def _rehydrate_connection_config(adapter_class: Any, config_dict: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    """Decrypt stored connection secrets before adapter construction.
+
+    ``config_json`` holds Fernet ciphertext for fields the adapter's
+    connection schema marks secret (client_secret, password, api_token).
+    Passing the raw row to the adapter ships ciphertext to the upstream
+    auth endpoint (observed live: Improve Digital /oauth/token 401).
+    Validating through ``connection_config_class`` runs the field
+    validators that decrypt; attribute access (not ``model_dump()``,
+    which would re-encrypt) yields plaintext values — the same round-trip
+    ``get_adapter()`` uses.
+    """
+    connection_cls = getattr(adapter_class, "connection_config_class", None)
+    if connection_cls is None or not config_dict:
+        return config_dict
+    try:
+        validated = connection_cls(**config_dict)
+    except Exception:
+        # Legacy rows (e.g. GAM per-column configs) may not match the
+        # schema — keep the raw dict, matching pre-existing behaviour.
+        logger.warning(
+            "Adapter config for tenant=%s did not validate against %s; passing raw config_json",
+            tenant_id,
+            connection_cls.__name__,
+        )
+        return config_dict
+    return {name: getattr(validated, name) for name in type(validated).model_fields}
+
+
 class SyncAlreadyRunning(Exception):
     """A sync of this kind is already in flight for the tenant + adapter.
 
@@ -239,6 +268,7 @@ def execute_adapter_sync(
         raise SyncAlreadyRunning(active_sync_id)
 
     adapter_class = get_adapter_class(adapter_type)
+    config_dict = _rehydrate_connection_config(adapter_class, config_dict, tenant_id=tenant_id)
 
     # config_json stores secret fields encrypted; the connection schema's
     # field validators decrypt them. Rehydrate and read via attribute access —
