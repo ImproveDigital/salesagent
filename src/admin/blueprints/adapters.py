@@ -292,6 +292,23 @@ def save_adapter_config(tenant_id, **kwargs):
             # Note: GAM will be added as its schema is created. FreeWheel
             # already uses config_json via its connection schema.
 
+            # Keep tenant.ad_server in sync: the products/settings pages resolve
+            # the active adapter from tenant.ad_server, while the runtime
+            # get_adapter() prefers AdapterConfig.adapter_type — saving a config
+            # here IS an adapter switch, so both must agree or the product forms
+            # render the wrong adapter's UI.
+            from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+            tenant = TenantConfigRepository(session, tenant_id).get_tenant()
+            if tenant and tenant.ad_server != adapter_type:
+                logger.info(
+                    "Adapter config save switches tenant.ad_server: tenant_id=%s %s -> %s",
+                    tenant_id,
+                    tenant.ad_server,
+                    adapter_type,
+                )
+                tenant.ad_server = adapter_type
+
             session.commit()
             if adapter_type == "freewheel":
                 logger.info(
@@ -1211,6 +1228,56 @@ def list_improvedigital_inventory(tenant_id, **kwargs):
     return jsonify({"success": True, "entity_type": entity_type, "count": len(items), "items": items})
 
 
+@adapters_bp.route(
+    "/api/tenant/<tenant_id>/adapters/improvedigital/packages/<int:package_id>/placements", methods=["GET"]
+)
+@require_tenant_access()
+def peek_improvedigital_package_placements(tenant_id, package_id, **kwargs):
+    """Peek inside one placement package — live membership from the 360Yield
+    API (``GET /rtb/v1/packages/{id}/placements``).
+
+    On-demand per package the operator actually expands: package membership
+    is dynamic on Improve Digital's side, so it is deliberately NOT part of
+    the inventory sync (2k+ packages × one request each would eat the
+    100-reads/60s quota for ~20 minutes per sweep).
+    """
+    try:
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, {})
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client = ImproveDigitalClient(**client_kwargs)
+        try:
+            raw = client.inventory.package_placements(package_id)
+        except ImproveDigitalError as exc:
+            if exc.status_code == 404:
+                return jsonify({"success": False, "error": "Package not found on Improve Digital"}), 404
+            logger.warning(
+                "Improve Digital package peek failed: tenant_id=%s package_id=%s status=%s error=%s",
+                tenant_id,
+                package_id,
+                exc.status_code,
+                exc,
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the lookup"}), 200
+
+        placements = [
+            {
+                "id": row.get("placement_id") if row.get("placement_id") is not None else row.get("id"),
+                "name": row.get("placement_name") or row.get("name"),
+                "site": row.get("site_name"),
+                "publisher": row.get("publisher_name"),
+            }
+            for row in _improvedigital_rows(raw, "placements", "content")
+        ]
+        return jsonify({"success": True, "package_id": package_id, "count": len(placements), "placements": placements})
+    except Exception as e:
+        logger.error(f"Improve Digital package peek failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Package lookup failed (see server logs)"}), 500
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-inventory", methods=["POST"])
 @require_tenant_access(role=("admin",))
 def sync_improvedigital_inventory(tenant_id, **kwargs):
@@ -1223,7 +1290,7 @@ def sync_improvedigital_inventory(tenant_id, **kwargs):
     The cache feeds the Improve Digital product setup UI; it's not exposed
     to AdCP buyers (property discovery goes through AAO lookup).
     """
-    from src.services.adapter_sync_orchestration import execute_adapter_sync
+    from src.services.adapter_sync_orchestration import SyncAlreadyRunning, execute_adapter_sync
 
     try:
         result = execute_adapter_sync(
@@ -1247,6 +1314,16 @@ def sync_improvedigital_inventory(tenant_id, **kwargs):
                 "started_at": result.started_at.isoformat() if result.started_at else None,
                 "finished_at": result.finished_at.isoformat() if result.finished_at else None,
             }
+        )
+    except SyncAlreadyRunning as exc:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": f"An inventory sync is already running ({exc.sync_id}) — wait for it to finish",
+                }
+            ),
+            409,
         )
     except ValidationError as exc:
         return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400

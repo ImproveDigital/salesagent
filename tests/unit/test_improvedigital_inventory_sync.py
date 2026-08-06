@@ -89,6 +89,31 @@ class TestPlacementSync:
         result = sync.run()
         assert result.counts["placement"] == 1
 
+    def test_live_v3_wire_shape(self):
+        # Sandbox-confirmed: the v3 placement search returns placement_id /
+        # placement_name / site_name and a snake_case total — the original
+        # id/name mapping silently stored zero rows.
+        client = make_client()
+        client.inventory.search_placements.return_value = {
+            "placements": [
+                {
+                    "placement_id": 22289819,
+                    "placement_name": "Toppbanner",
+                    "site_name": "Avisa Sør-Trøndelag",
+                    "publisher_id": 1574,
+                    "publisher_name": "PM Tjenestesenter AS",
+                },
+            ],
+            "total_number_of_elements": 1,
+        }
+        sync, _session = make_sync(client)
+        result = sync.run()
+
+        assert result.counts["placement"] == 1
+        assert result.counts["publisher"] == 1
+        # snake_case total honored: one page, no second request
+        assert client.inventory.search_placements.call_count == 1
+
 
 class TestPartialFailure:
     def test_placement_failure_does_not_block_other_families(self):

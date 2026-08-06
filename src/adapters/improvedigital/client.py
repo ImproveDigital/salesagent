@@ -204,6 +204,10 @@ class ImproveDigitalInventoryClient:
         """``GET /rtb/v1/packages`` — reusable placement groupings."""
         return self._transport.get_json("/rtb/v1/packages", **params)
 
+    def package_placements(self, package_id: int, **params: Any) -> dict[str, Any]:
+        """``GET /rtb/v1/packages/{id}/placements`` — a package's member placements."""
+        return self._transport.get_json(f"/rtb/v1/packages/{package_id}/placements", **params)
+
 
 class ImproveDigitalLookupsClient:
     """Dimension lookups for targeting/config pickers."""

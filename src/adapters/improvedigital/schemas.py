@@ -171,7 +171,11 @@ class ImproveDigitalProductConfig(BaseProductConfig):
     )
     size_ids: list[int] = Field(
         default_factory=list,
-        description="Creative size IDs targeted by the line item",
+        description=(
+            "Explicit creative-size override for line-item size targeting. "
+            "Normally left empty — sizes are derived from the product's "
+            "creative formats at buy time so the two can't diverge (M2)"
+        ),
     )
 
     # -- Classic line-item defaults --
