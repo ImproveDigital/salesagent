@@ -1057,6 +1057,13 @@ def _improvedigital_paginate(fetch_page, envelope_key: str, page_size: int = 100
     no unseen ids (guards against a server that ignores ``offset``);
     ``max_rows`` backstops a runaway loop.
     """
+
+    def _row_key(row: dict) -> tuple:
+        # Dictionary rows (RegionDto/CountryDto) carry only ``name`` — keying
+        # on id alone would collapse them all to None and stop pagination
+        # after the first page.
+        return (row.get("id"), row.get("name"))
+
     rows: list = []
     seen_ids: set = set()
     offset = 0
@@ -1065,8 +1072,8 @@ def _improvedigital_paginate(fetch_page, envelope_key: str, page_size: int = 100
         page = _improvedigital_rows(payload, envelope_key)
         if not page:
             break
-        fresh = [row for row in page if not isinstance(row, dict) or row.get("id") not in seen_ids]
-        seen_ids.update(row.get("id") for row in fresh if isinstance(row, dict))
+        fresh = [row for row in page if not isinstance(row, dict) or _row_key(row) not in seen_ids]
+        seen_ids.update(_row_key(row) for row in fresh if isinstance(row, dict))
         if not fresh:
             break
         rows.extend(fresh)

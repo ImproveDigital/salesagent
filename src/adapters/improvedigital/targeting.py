@@ -6,10 +6,10 @@ endpoints (``geo-targeting``, ``device-targeting``, ``time-targeting``,
 ``pixel-targeting``) plus flat fields on the line item itself
 (``size_ids``, frequency caps).
 
-This module emits the line-item-creation subset only (inventory selection +
-sizes); the per-dimension targeting PUTs land with the M2 buy path. The wire
-shapes are exercised by dry-run logging until live calls are validated
-against real credentials.
+This module emits the line-item-creation subset (inventory selection +
+sizes) plus the ``geo_targeting`` list consumed by the live per-line-item
+``geo-targeting`` PUT (``LineItemGeoTargetingDto``: ``{"filter": true,
+"geo_targeting": [{"country"|"region": ..., "exclude": bool}]}``).
 
 Hard platform constraint: location targeting supports region/country/state/
 city (+ up to 10 IP ranges) — **no postal codes**. Postal targeting is
@@ -18,7 +18,81 @@ rejected permanently, not "pending".
 
 from __future__ import annotations
 
+import re
+import unicodedata
+from functools import cache
 from typing import Any
+
+
+def _token(value: Any) -> str:
+    """Unwrap adcp RootModel tokens (``.root``) to their plain string."""
+    return str(getattr(value, "root", value))
+
+
+# ISO 3166-1 alpha-2 → the platform's display name, for the countries whose
+# 360Yield name diverges from the CLDR English name beyond what
+# ``normalize_geo_name`` bridges. Curated empirically against the full live
+# dev geo dictionary (2026-08-07): every other assigned code matches via
+# babel + normalization.
+_GEO_NAME_ALIASES: dict[str, str] = {
+    "AN": "Netherland Antilles",  # deprecated ISO code, still on the platform
+    "BQ": "Bonaire, Sint Eustatius, and Saba",
+    "CD": "DR Congo",
+    "CG": "Congo Republic",
+    "CI": "Ivory Coast",
+    "CV": "Cabo Verde",
+    "FM": "Federated States of Micronesia",
+    "GS": "South Georgia and the South Sandwich Islands",
+    "HK": "Hong Kong",
+    "MM": "Myanmar",
+    "MO": "Macao",
+    "PS": "Palestine",
+}
+
+
+def normalize_geo_name(name: str) -> str:
+    """Fold a geo display name for dictionary matching.
+
+    Lowercases, strips diacritics (``São Tomé`` ≡ ``Sao Tome``), folds
+    ``&``/punctuation, drops a leading ``the`` (``The Netherlands`` ≡
+    ``Netherlands``) and expands ``St.`` → ``Saint`` — the divergences
+    observed between CLDR English names and the live 360Yield dictionary.
+    """
+    folded = unicodedata.normalize("NFKD", name)
+    folded = "".join(c for c in folded if not unicodedata.combining(c)).lower()
+    folded = folded.replace("&", " and ")
+    folded = re.sub(r"[^a-z0-9 ]+", " ", folded)
+    folded = re.sub(r"\s+", " ", folded).strip()
+    folded = folded.removeprefix("the ")
+    return re.sub(r"\bst\b", "saint", folded)
+
+
+@cache
+def _cldr_country_name(code: str) -> str | None:
+    """ISO 3166-1 alpha-2 → CLDR English display name (via babel)."""
+    from babel import Locale
+
+    return Locale("en").territories.get(code)
+
+
+def candidate_country_names(token: str) -> list[str]:
+    """Display-name candidates for a country token, most specific first.
+
+    AdCP buyers can only send ISO alpha-2 codes (``GeoCountry`` is
+    ``^[A-Z]{2}$``); operators may store either codes or platform names.
+    A bare token is tried verbatim; a two-letter token additionally tries
+    the curated platform alias and the CLDR English name.
+    """
+    candidates = [token]
+    code = token.strip().upper()
+    if len(code) == 2 and code.isalpha():
+        alias = _GEO_NAME_ALIASES.get(code)
+        if alias:
+            candidates.append(alias)
+        cldr = _cldr_country_name(code)
+        if cldr:
+            candidates.append(cldr)
+    return candidates
 
 
 def build_targeting(
@@ -31,12 +105,16 @@ def build_targeting(
     Inputs:
         targeting_overlay: AdCP ``Targeting`` model (geo, device, custom).
         product_config: ``ImproveDigitalProductConfig`` as a dict — supplies
-            static inventory selection (placements/packages/sizes).
+            static inventory selection (placements/packages/sizes) and the
+            publisher's default geo targeting (``geo_countries`` /
+            ``geo_regions`` from the product-config page).
         tenant_id: reserved for signal resolution (M2+); unused for now.
 
     Returns a dict of line-item field values; only populated dimensions are
-    included. Geo lands under ``geo_targeting`` for the dry-run echo — the
-    live path PUTs it to the per-line-item ``geo-targeting`` endpoint (M2).
+    included. ``geo_targeting`` is the union of the product's default geo
+    and the buyer's overlay (includes and excludes), deduplicated — the
+    create path pops it off the payload and PUTs it to the per-line-item
+    ``geo-targeting`` endpoint.
     """
     product_config = product_config or {}
     targeting: dict[str, Any] = {}
@@ -46,14 +124,37 @@ def build_targeting(
         if values:
             targeting[config_key] = list(values)
 
+    geo: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, bool]] = set()
+
+    def _add(kind: str, value: Any, exclude: bool = False) -> None:
+        token = _token(value)
+        key = (kind, token, exclude)
+        if token and key not in seen:
+            seen.add(key)
+            # ``exclude`` is required on every entry — the live geo-targeting
+            # endpoint 400s with 'missing required properties ["exclude", ...]'
+            # when it is omitted, even for plain includes.
+            geo.append({kind: token, "exclude": exclude})
+
+    for country in product_config.get("geo_countries") or []:
+        _add("country", country)
+    for region in product_config.get("geo_regions") or []:
+        _add("region", region)
+
     if targeting_overlay is not None:
-        geo: list[dict[str, Any]] = []
-        if getattr(targeting_overlay, "geo_countries", None):
-            geo.extend({"country": c.root} for c in targeting_overlay.geo_countries)
-        if getattr(targeting_overlay, "geo_regions", None):
-            geo.extend({"region": r.root} for r in targeting_overlay.geo_regions)
-        if geo:
-            targeting["geo_targeting"] = geo
+        # Overlay geo_regions are deliberately NOT mapped: AdCP GeoRegion
+        # tokens are ISO 3166-2 subdivisions (e.g. "US-NY") while the
+        # platform's region dimension is continental (APAC/EMEA/…) — the
+        # vocabularies cannot meet, so validate_targeting rejects them
+        # upfront before any campaign is created.
+        for country in getattr(targeting_overlay, "geo_countries", None) or []:
+            _add("country", country)
+        for country in getattr(targeting_overlay, "geo_countries_exclude", None) or []:
+            _add("country", country, exclude=True)
+
+    if geo:
+        targeting["geo_targeting"] = geo
 
     return targeting
 
@@ -78,8 +179,26 @@ def validate_targeting(targeting_overlay: Any) -> list[str]:
     ):
         unsupported.append(
             "Postal-area targeting is not supported on Improve Digital — location targeting "
-            "goes down to city level only. Use geo_regions or geo_countries instead."
+            "goes down to city level only. Use geo_countries instead."
         )
+
+    if getattr(targeting_overlay, "geo_metros", None) or getattr(targeting_overlay, "geo_metros_exclude", None):
+        unsupported.append(
+            "Metro/DMA targeting is not supported on Improve Digital — the Classic geo "
+            "dimensions are country/region/state/city. Use geo_countries instead."
+        )
+
+    if getattr(targeting_overlay, "geo_regions", None) or getattr(targeting_overlay, "geo_regions_exclude", None):
+        unsupported.append(
+            "Region targeting is not supported on Improve Digital buyer overlays — AdCP "
+            "geo_regions are ISO 3166-2 subdivisions (e.g. 'US-NY') but the platform's "
+            "region dimension is continental (APAC/EMEA/…), and the platform's state "
+            "dimension is pending live validation. Use geo_countries; publishers can set "
+            "platform regions on the product configuration."
+        )
+
+    if getattr(targeting_overlay, "geo_proximity", None):
+        unsupported.append("Proximity (radius) targeting is not supported on Improve Digital.")
 
     if getattr(targeting_overlay, "frequency_cap", None):
         unsupported.append(

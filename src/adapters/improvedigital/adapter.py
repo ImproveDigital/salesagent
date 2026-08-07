@@ -398,10 +398,19 @@ class ImproveDigitalAdapter(AdServerAdapter):
             for package in packages:
                 rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
                 payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
+                # Geo travels via its own per-line-item endpoint, not the
+                # create body (LineItemGeoTargetingDto — see targeting.py).
+                geo_targeting = payload.pop("geo_targeting", None)
                 line_item = self._client.campaigns.create_line_item(campaign_id, payload)
                 line_item_id = int(line_item["id"])
                 self._line_item_campaigns[str(line_item_id)] = campaign_id
                 self._assign_inventory(campaign_id, line_item_id, package)
+                if geo_targeting:
+                    self._client.campaigns.set_line_item_geo_targeting(
+                        campaign_id,
+                        line_item_id,
+                        {"filter": True, "geo_targeting": self._resolve_geo_regions(geo_targeting)},
+                    )
                 platform_line_item_ids[package.package_id] = str(line_item_id)
                 package_responses.append(
                     ResponsePackage(
@@ -475,6 +484,123 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 {"line_item_packages": [{"id": int(pid), "assigned": True} for pid in package_ids]},
             )
 
+    def _resolve_geo_regions(self, geo_targeting: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Complete geo entries to the platform's required shape.
+
+        The live geo-targeting endpoint requires ``exclude`` AND ``region``
+        on every entry (validated live: HTTP 400 'object has missing
+        required properties ["exclude","region"]'), and geo values must be
+        the platform's own display names. Country tokens are resolved
+        against the platform geo dictionary — accepting ISO alpha-2 codes
+        (all AdCP buyer overlays: ``GeoCountry`` is ``^[A-Z]{2}$``), CLDR
+        English names, and case/diacritic variants — and rewritten to the
+        platform's exact spelling with their region attached. Region tokens
+        are matched against the platform region list the same way. An
+        unresolvable token fails the booking loudly — sending it would 400
+        upstream anyway.
+        """
+        from src.adapters.improvedigital.targeting import candidate_country_names, normalize_geo_name
+
+        countries, regions = self._geo_dictionary()
+        resolved = []
+        for entry in geo_targeting:
+            entry = dict(entry)
+            entry.setdefault("exclude", False)
+            if entry.get("country"):
+                match = next(
+                    (
+                        countries[normalize_geo_name(candidate)]
+                        for candidate in candidate_country_names(str(entry["country"]))
+                        if normalize_geo_name(candidate) in countries
+                    ),
+                    None,
+                )
+                if match is None:
+                    raise ValueError(
+                        f"could not resolve country {entry['country']!r} in the 360Yield geo "
+                        "dictionary — use an ISO alpha-2 code or a platform country name "
+                        "(pick them from the product page dropdowns)"
+                    )
+                entry["country"], entry["region"] = match
+            elif entry.get("region"):
+                region_name = regions.get(normalize_geo_name(str(entry["region"])))
+                if region_name is None:
+                    raise ValueError(
+                        f"could not resolve region {entry['region']!r} in the 360Yield geo "
+                        f"dictionary — valid regions: {', '.join(sorted(regions.values()))}"
+                    )
+                entry["region"] = region_name
+            resolved.append(entry)
+
+        # Post-resolution dedup: distinct input tokens ('NL' from the buyer,
+        # 'The Netherlands' from the product config) resolve to identical
+        # rows — send each geo once. When include and exclude collide on the
+        # same geo, the exclude wins: AdCP overlay semantics are that the
+        # buyer's exclusion narrows the product default, and sending both
+        # contradictory rows would delegate the outcome to undocumented
+        # platform precedence.
+        deduped: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+        for entry in resolved:
+            key = (entry.get("country"), entry.get("region"))
+            existing = deduped.get(key)
+            if existing is None or (entry["exclude"] and not existing["exclude"]):
+                deduped[key] = entry
+        return list(deduped.values())
+
+    def _geo_dictionary(self) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
+        """The platform geo dictionary, keyed by normalized display name.
+
+        Returns ``(countries, regions)`` where ``countries`` maps a
+        normalized country name to ``(platform_country_name, region_name)``
+        and ``regions`` maps a normalized region name to the platform
+        region name. Built from ``/rtb/v1/regions`` +
+        ``/rtb/v1/regions/{name}/countries`` (both paginated), once per
+        adapter instance.
+        """
+        from src.adapters.improvedigital.targeting import normalize_geo_name
+
+        assert self._client is not None
+        if not hasattr(self, "_geo_dictionary_cache"):
+            client = self._client
+            countries: dict[str, tuple[str, str]] = {}
+            regions: dict[str, str] = {}
+            for region_name in self._paginated_geo_names(client.lookups.regions, "regions"):
+                regions.setdefault(normalize_geo_name(region_name), region_name)
+                for country_name in self._paginated_geo_names(
+                    lambda **params: client.lookups.region_countries(region_name, **params),  # noqa: B023
+                    "countries",
+                ):
+                    countries.setdefault(normalize_geo_name(country_name), (country_name, region_name))
+            self._geo_dictionary_cache: tuple[dict[str, tuple[str, str]], dict[str, str]] = (countries, regions)
+        return self._geo_dictionary_cache
+
+    @staticmethod
+    def _paginated_geo_names(fetch: Any, envelope_key: str) -> list[str]:
+        """Exhaust an offset/limit-paginated geo dictionary endpoint and
+        return the row names. Stops on an empty page, a page with no unseen
+        names (server ignoring ``offset``), or a 10k backstop."""
+        names: list[str] = []
+        seen: set[str] = set()
+        offset = 0
+        while offset <= 10_000:
+            body = fetch(limit=100, offset=offset)
+            rows = body.get(envelope_key) if isinstance(body, dict) else body
+            rows = rows if isinstance(rows, list) else []
+            if not rows:
+                break
+            page_names = [
+                str(row.get("name")) if isinstance(row, dict) else str(row)
+                for row in rows
+                if (isinstance(row, dict) and row.get("name")) or not isinstance(row, dict)
+            ]
+            fresh = [name for name in page_names if name not in seen]
+            if not fresh:
+                break
+            seen.update(fresh)
+            names.extend(fresh)
+            offset += len(rows)
+        return names
+
     @staticmethod
     def _format_datetime(value: datetime) -> str:
         """Platform datetime wire format (``YYYY-MM-DD HH:MM:SS``) —
@@ -526,7 +652,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
         business_unit_id, improve_demand_contact_id, and a goal for CPM
         line items.
         """
-        product_config = self._product_config_from_package(package)
+        product_config = self._with_product_geo_defaults(package, self._product_config_from_package(package))
         payload: dict[str, Any] = {
             "name": package.name or package.package_id,
             "type": "Standard",
@@ -556,6 +682,31 @@ class ImproveDigitalAdapter(AdServerAdapter):
     def _product_config_from_package(self, package: MediaPackage) -> dict[str, Any]:
         impl = getattr(package, "implementation_config", None) or {}
         return impl.get("improvedigital", impl) if isinstance(impl, dict) else {}
+
+    def _with_product_geo_defaults(self, package: MediaPackage, product_config: dict[str, Any]) -> dict[str, Any]:
+        """Fold the product's generic "Target Countries" selection
+        (``Product.countries``, ISO alpha-2 codes from the Channel &
+        Geographic Targeting section) into the adapter geo defaults, so the
+        product page's advertised geo is what the booked line items actually
+        target.
+
+        The visible generic selection wins over any legacy
+        ``geo_countries`` stored in the adapter config; both lose to
+        nothing — an empty selection means no geo restriction. Live-only
+        (dry-run must stay DB-free).
+        """
+        if self.dry_run or not getattr(package, "product_id", None):
+            return product_config
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.product import ProductRepository
+
+        with get_db_session() as session:
+            product = ProductRepository(session, self.tenant_id or "default").get_by_id(str(package.product_id))
+            countries = list(product.countries) if product is not None and product.countries else None
+        if not countries:
+            return product_config
+        return {**product_config, "geo_countries": countries}
 
     def _buy_name(self, request: CreateMediaBuyRequest) -> str:
         """Derive a human-readable buy name — po_number when present,
@@ -630,10 +781,70 @@ class ImproveDigitalAdapter(AdServerAdapter):
         if payload.get("type") == "Third Party Tag":
             body = {k: v for k, v in payload.items() if k != "type"}
             created = self._client.creatives.create_third_party_tag_creatives(campaign_id, [body])
-            if isinstance(created, list):
-                return created[0]
-            return created["creatives"][0]
-        return self._client.creatives.create_creative(campaign_id, payload)
+        else:
+            created = self._client.creatives.create_creative(campaign_id, payload)
+        creative_id = self._created_creative_id(created)
+        if creative_id is None:
+            # The platform accepted the create but the response carried no
+            # usable ID (endpoint response shapes vary between the bulk
+            # servlets). Without the ID the creative would exist upstream but
+            # never get bound to a line item — recover it by name from the
+            # campaign's creative list.
+            creative_id = self._find_creative_id_by_name(campaign_id, str(payload.get("name") or ""))
+        if creative_id is None:
+            raise ValueError(
+                f"could not determine the platform creative ID (create response: {str(created)[:200]!r}); "
+                "the creative may exist on the platform but cannot be bound to a line item"
+            )
+        return {"id": creative_id}
+
+    @staticmethod
+    def _created_creative_id(created: Any) -> int | None:
+        """Extract the platform creative ID from a create response.
+
+        Handles the shapes seen across the Classic creative endpoints: a bare
+        ``CreativeDto`` list (per the OpenAPI spec), an enveloped list
+        (``{"creatives"|"content"|"data": [...]}``), or a single entity dict.
+        Returns ``None`` when no row carries an ID (e.g. empty 200 body).
+        """
+        rows: Any = created
+        if isinstance(created, dict):
+            for key in ("creatives", "content", "data"):
+                if isinstance(created.get(key), list):
+                    rows = created[key]
+                    break
+            else:
+                rows = [created]
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    for id_key in ("id", "creative_id"):
+                        if row.get(id_key) is not None:
+                            return int(row[id_key])
+        return None
+
+    def _find_creative_id_by_name(self, campaign_id: int, name: str) -> int | None:
+        """Recover a just-created creative's platform ID by name lookup.
+
+        Newest ID wins when names repeat — the creative created moments ago
+        is by construction the highest ID for that name."""
+        if not name:
+            return None
+        assert self._client is not None
+        try:
+            body = self._client.creatives.list_creatives(campaign_id)
+        except ImproveDigitalError as exc:
+            logger.warning("Improve Digital creative recovery lookup failed for campaign %s: %s", campaign_id, exc)
+            return None
+        rows = body.get("creatives") if isinstance(body, dict) else body
+        matches = [
+            row
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict) and row.get("name") == name and str(row.get("id") or "").isdigit()
+        ]
+        if not matches:
+            return None
+        return max(int(row["id"]) for row in matches)
 
     def _resolve_size(self, width: int, height: int) -> dict[str, Any] | None:
         """Look up the platform size entry for a width×height pair.
@@ -789,16 +1000,16 @@ class ImproveDigitalAdapter(AdServerAdapter):
 
         with get_db_session() as session:
             repo = MediaBuyRepository(session, self.tenant_id or "default")
-            for buy in repo.get_active():
-                for package in repo.get_packages(buy.media_buy_id):
-                    platform_id = (package.package_config or {}).get("platform_line_item_id")
-                    if platform_id is not None and str(platform_id) == str(line_item_id):
-                        buy_ref = str(buy.external_id or buy.media_buy_id)
-                        campaign_ref = buy_ref.removeprefix("improvedigital_")
-                        if campaign_ref.isdigit():
-                            campaign_id = int(campaign_ref)
-                            self._line_item_campaigns[str(line_item_id)] = campaign_id
-                            return campaign_id
+            # No status filter — creative binding must also resolve buys that
+            # haven't started serving yet (pending_start, HITL states).
+            buy = repo.find_by_platform_line_item_id(str(line_item_id))
+            if buy is not None:
+                for buy_ref in (buy.external_id, buy.media_buy_id):
+                    campaign_ref = str(buy_ref or "").removeprefix("improvedigital_")
+                    if campaign_ref.isdigit():
+                        campaign_id = int(campaign_ref)
+                        self._line_item_campaigns[str(line_item_id)] = campaign_id
+                        return campaign_id
         return None
 
     def _resolve_campaign_id(self, media_buy_id: str) -> str:
