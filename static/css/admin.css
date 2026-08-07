@@ -316,6 +316,41 @@ pre {
     font-size: 9px;
     margin-left: 2px;
 }
+/* Ad-server chip — identifies the tenant's configured adapter in the top
+   bar. Outlined mono lockup with a dim "AD SERVER" prefix and a neutral
+   dot: reads as metadata, not a control, and stays monochrome per the
+   header's ink/paper language (header vars keep it legible on the
+   inverted super-admin bar too). */
+.header .role-tag .adapter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border: 1px solid var(--sa-header-rule);
+    border-radius: 999px;
+    font-family: var(--sa-font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    line-height: 1;
+    color: var(--sa-header-fg);
+    white-space: nowrap;
+}
+.header .role-tag .adapter-chip::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--sa-header-fg-dim);
+    flex-shrink: 0;
+}
+.header .role-tag .adapter-chip .adapter-chip__label {
+    color: var(--sa-header-fg-dim);
+    padding-right: 6px;
+    border-right: 1px solid var(--sa-header-rule);
+}
+
 /* The role badge becomes the Ledger STOREFRONT / ADMIN pill — mono lockup,
    inverted from the bar background. */
 .header .role-tag .status {

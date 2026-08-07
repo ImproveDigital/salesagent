@@ -126,10 +126,15 @@
                         {% else %}
                             <span class="workspace-name">{{ session.email or session.username }}</span>
                         {% endif %}
+                        {% if nav_adapter_type %}
+                            {# Configured ad-server chip — metadata, not a control
+                               (deliberately NOT .workspace-name: that class carries
+                               the ▾ switcher affordance). #}
+                            <span class="adapter-chip" title="Configured ad server: {{ nav_adapter_type }}">
+                                <span class="adapter-chip__label">Ad server</span>{{ nav_adapter_type }}
+                            </span>
+                        {% endif %}
                     </span>
-                    {% if nav_adapter_type %}
-                            <span class="workspace-name">{{ nav_adapter_type }}</span>
-                    {% endif %}
                     {% if session.role == 'super_admin' %}
                         <a href="{{ script_name }}/">Accounts</a>
                         <a href="{{ script_name }}/admin/scheduling">Scheduling</a>
