@@ -103,6 +103,17 @@ Expected context:
         </div>
 
         <div class="form-group">
+            <label for="improvedigital_business_unit_id">Business Unit ID</label>
+            <input type="number" id="improvedigital_business_unit_id" name="improvedigital_business_unit_id"
+                   value="{{ adapter_config.get('business_unit_id', '') if adapter_config else '' }}"
+                   placeholder="Required for booking — auto-filled by Test Connection">
+            <small class="form-text text-muted">
+                The Improve Digital business unit campaigns book under (your API user's own
+                unit — <strong>Test Connection</strong> fills it in automatically).
+            </small>
+        </div>
+
+        <div class="form-group">
             <label for="improvedigital_default_advertiser_id">Default Advertiser ID</label>
             <input type="number" id="improvedigital_default_advertiser_id" name="improvedigital_default_advertiser_id"
                    value="{{ adapter_config.get('default_advertiser_id', '') if adapter_config else '' }}"
@@ -201,6 +212,7 @@ function _improvedigitalPayload() {
     const buyingEntityEl = document.getElementById('improvedigital_buying_entity_id');
     const officeEl = document.getElementById('improvedigital_buying_entity_office_id');
     const demandContactEl = document.getElementById('improvedigital_demand_contact_id');
+    const businessUnitEl = document.getElementById('improvedigital_business_unit_id');
     const advertiserEl = document.getElementById('improvedigital_default_advertiser_id');
     const agencyEl = document.getElementById('improvedigital_agency_id');
     const baseUrlEl = document.getElementById('improvedigital_api_base_url');
@@ -209,6 +221,7 @@ function _improvedigitalPayload() {
         buying_entity_id: buyingEntityEl.value ? parseInt(buyingEntityEl.value, 10) : null,
         buying_entity_office_id: officeEl.value ? parseInt(officeEl.value, 10) : null,
         improve_demand_contact_id: demandContactEl.value ? parseInt(demandContactEl.value, 10) : null,
+        business_unit_id: businessUnitEl.value ? parseInt(businessUnitEl.value, 10) : null,
         default_advertiser_id: advertiserEl.value ? parseInt(advertiserEl.value, 10) : null,
         agency_id: agencyEl.value ? parseInt(agencyEl.value, 10) : null,
         currency: document.getElementById('improvedigital_currency').value,
@@ -451,6 +464,14 @@ function testImproveDigitalConnection() {
                 (data.user.business_unit ? ' (' + data.user.business_unit + ')' : '') : '';
             statusEl.innerHTML = '<span style="color: #10b981;">✓ Authenticated' + who + ' against ' +
                 (data.base_url || '360Yield') + '</span>';
+            // Booking requires business_unit_id; the API user's own unit is
+            // the right value — fill it in when the operator hasn't set one.
+            const buEl = document.getElementById('improvedigital_business_unit_id');
+            if (buEl && !buEl.value && data.user && data.user.business_unit_id) {
+                buEl.value = data.user.business_unit_id;
+                statusEl.innerHTML += '<span style="color: #6b7280;"> — Business Unit ID filled in (' +
+                    data.user.business_unit_id + '), remember to Save</span>';
+            }
         } else {
             statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Connection failed') + '</span>';
         }
