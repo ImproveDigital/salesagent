@@ -23,6 +23,12 @@ incomplete in several places.
 - **Advertiser is optional** on Classic campaigns (`advertiserId` is null on
   every live dev campaign); metadata advertisers (`/api/metadata-advertisers`)
   are UUIDs and do not fit `CampaignDto.advertiserId` (integer).
+- **Geo targeting** (`PUT .../line-items/{id}/geo-targeting`) requires
+  `exclude` AND `region` on every `geo_targeting` entry — includes too —
+  despite the spec marking all `Geo` fields optional (400 "object has
+  missing required properties [\"exclude\",\"region\"]"). Country entries
+  must carry their region, resolved from `/rtb/v1/regions` +
+  `/rtb/v1/regions/{name}/countries`.
 
 ## Inventory
 

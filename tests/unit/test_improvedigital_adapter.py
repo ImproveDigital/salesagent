@@ -57,11 +57,11 @@ class TestRegistry:
         assert schemas.capabilities.inventory_entity_label == "Placements"
 
     def test_sync_capabilities_match_implementation_state(self):
-        # Inventory sync landed with Phase 2; reporting flips alongside the
-        # Phase 3 Report API cache — the scheduler must not call its stub.
+        # Inventory sync landed with Phase 2; reporting sync landed with the
+        # Report API cache (run_reporting_sync → improvedigital_line_item_stats).
         schemas = get_adapter_schemas("improvedigital")
         assert schemas.capabilities.supports_inventory_sync is True
-        assert schemas.capabilities.supports_reporting_sync is False
+        assert schemas.capabilities.supports_reporting_sync is True
 
     def test_default_channels_cover_classic_media_types(self):
         channels = get_adapter_default_channels("improvedigital")
@@ -196,6 +196,9 @@ class TestClassicCreatives:
                     "snippet": "<script>tag()</script>",
                     "width": 300,
                     "height": 250,
+                    # CreativeDto requires advertiser_domain (derived from the
+                    # click URL when not given) — validated live on dev.
+                    "click_url": "https://brand.example.com/landing",
                 }
             ],
             today=datetime.now(UTC),

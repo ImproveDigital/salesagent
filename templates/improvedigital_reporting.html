@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% from '_macros.html' import currency_symbol %}
+
+{% block title %}Improve Digital Reporting - {{ tenant.name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center">
+        <h1>Improve Digital Reporting - {{ tenant.name }}</h1>
+        <div>
+            <span id="last-synced" class="text-muted me-3" style="margin-right: 12px;"></span>
+            <button id="sync-btn" class="btn btn-primary" onclick="syncReporting()">Sync Reporting Now</button>
+        </div>
+    </div>
+    <p class="text-muted">
+        Definitive delivery metrics from the 360Yield Report API (last 31 days), refreshed by the
+        reporting sync. Numbers update when the sync runs — not in real time.
+    </p>
+
+    <div id="sync-status" class="alert" style="display: none;"></div>
+
+    <!-- Summary Cards -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Impressions</h5>
+                    <h2 id="total-impressions">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Spend</h5>
+                    <h2 id="total-spend">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Clicks / CTR</h5>
+                    <h2 id="total-clicks">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Completed Views</h5>
+                    <h2 id="total-completed">-</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Per-line-item table -->
+    <div class="card">
+        <div class="card-body">
+            <div id="table-loading" class="text-center py-5">
+                <div class="spinner-border" role="status"><span class="sr-only">Loading...</span></div>
+            </div>
+            <div id="table-empty" class="text-center py-5 text-muted" style="display: none;">
+                No delivery data in the reporting cache yet. Book a media buy, let it deliver,
+                then press <strong>Sync Reporting Now</strong>.
+            </div>
+            <table class="table table-striped" id="report-table" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>Media Buy</th>
+                        <th>Advertiser</th>
+                        <th>Campaign</th>
+                        <th>Line Item</th>
+                        <th class="text-end">Impressions</th>
+                        <th class="text-end">Clicks</th>
+                        <th class="text-end">CTR</th>
+                        <th class="text-end">Completed Views</th>
+                        <th class="text-end">Spend</th>
+                    </tr>
+                </thead>
+                <tbody id="report-rows"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+const scriptRoot = '{{ request.script_root }}' || '';
+const tenantId = {{ tenant.tenant_id | tojson }};
+const currencySym = {{ currency_symbol(currency) | tojson }};
+
+function fmtInt(v) { return v === null || v === undefined ? '—' : Number(v).toLocaleString(); }
+function fmtMoney(v) { return v === null || v === undefined ? '—' : currencySym + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function fmtPct(v) { return v === null || v === undefined ? '—' : Number(v).toFixed(2) + '%'; }
+function esc(v) { const d = document.createElement('div'); d.textContent = v ?? ''; return d.innerHTML; }
+
+async function loadReporting() {
+    document.getElementById('table-loading').style.display = '';
+    document.getElementById('report-table').style.display = 'none';
+    document.getElementById('table-empty').style.display = 'none';
+    try {
+        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/improvedigital/reporting`, {
+            headers: {'Accept': 'application/json'}
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.error || `HTTP ${response.status}`);
+        }
+
+        document.getElementById('total-impressions').textContent = fmtInt(data.totals.impressions);
+        document.getElementById('total-spend').textContent = fmtMoney(data.totals.spend);
+        document.getElementById('total-clicks').textContent =
+            `${fmtInt(data.totals.clicks)}${data.totals.ctr !== null ? ' (' + fmtPct(data.totals.ctr) + ')' : ''}`;
+        document.getElementById('total-completed').textContent = fmtInt(data.totals.completed_views);
+        document.getElementById('last-synced').textContent = data.last_synced_at
+            ? `Last synced: ${new Date(data.last_synced_at).toLocaleString()}`
+            : 'Never synced';
+
+        const tbody = document.getElementById('report-rows');
+        tbody.innerHTML = '';
+        for (const row of data.rows) {
+            const buyCell = row.media_buy_id
+                ? `<a href="${scriptRoot}/tenant/${tenantId}/media-buy/${encodeURIComponent(row.media_buy_id)}">${esc(row.order_name || row.media_buy_id)}</a>`
+                : '<span class="text-muted">not booked via salesagent</span>';
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${buyCell}</td>
+                <td>${esc(row.advertiser_name) || '—'}</td>
+                <td>${esc(row.campaign_id) || '—'}</td>
+                <td>${esc(row.line_item_id)}</td>
+                <td class="text-end">${fmtInt(row.impressions)}</td>
+                <td class="text-end">${fmtInt(row.clicks)}</td>
+                <td class="text-end">${fmtPct(row.ctr)}</td>
+                <td class="text-end">${fmtInt(row.completed_views)}</td>
+                <td class="text-end">${fmtMoney(row.spend)}</td>`;
+            tbody.appendChild(tr);
+        }
+        document.getElementById('table-loading').style.display = 'none';
+        if (data.rows.length) {
+            document.getElementById('report-table').style.display = '';
+        } else {
+            document.getElementById('table-empty').style.display = '';
+        }
+    } catch (err) {
+        document.getElementById('table-loading').style.display = 'none';
+        showStatus('danger', `Failed to load reporting data: ${err.message}`);
+    }
+}
+
+function showStatus(kind, message) {
+    const el = document.getElementById('sync-status');
+    el.className = `alert alert-${kind}`;
+    el.textContent = message;
+    el.style.display = '';
+}
+
+async function syncReporting() {
+    const btn = document.getElementById('sync-btn');
+    btn.disabled = true;
+    btn.textContent = 'Syncing…';
+    showStatus('info', 'Pulling fresh metrics from the 360Yield Report API…');
+    try {
+        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/improvedigital/sync-reporting`, {
+            method: 'POST',
+            headers: {'Accept': 'application/json'}
+        });
+        const data = await response.json();
+        if (response.status === 503 && data.scope_pending) {
+            showStatus('warning', data.error);
+        } else if (!data.success) {
+            showStatus('danger', data.error || 'Sync failed');
+        } else {
+            showStatus('success', `Synced ${data.line_items_updated} line items across ${data.campaigns_covered} campaigns.`);
+            await loadReporting();
+        }
+    } catch (err) {
+        showStatus('danger', `Sync request failed: ${err.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Sync Reporting Now';
+    }
+}
+
+loadReporting();
+</script>
+{% endblock %}

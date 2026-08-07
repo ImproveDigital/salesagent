@@ -142,6 +142,16 @@ class ImproveDigitalCampaignsClient:
             f"/rtb/v1/classic/campaigns/{campaign_id}/line-items/{line_item_id}/placements", payload
         )
 
+    def set_line_item_geo_targeting(
+        self, campaign_id: int, line_item_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``PUT /rtb/v1/classic/.../line-items/{id}/geo-targeting`` —
+        ``LineItemGeoTargetingDto``: ``{"filter": true, "geo_targeting":
+        [{"country"|"region"|"state"|"city": ..., "exclude": bool}]}``."""
+        return self._transport.put_json(
+            f"/rtb/v1/classic/campaigns/{campaign_id}/line-items/{line_item_id}/geo-targeting", payload
+        )
+
 
 class ImproveDigitalCreativesClient:
     """Classic creatives — hosted by the Improve adserver.
@@ -257,6 +267,16 @@ class ImproveDigitalLookupsClient:
 
     def countries(self, **params: Any) -> Any:
         return self._transport.get_json("/common/v1/countries", **params)
+
+    def regions(self, **params: Any) -> Any:
+        """``GET /rtb/v1/regions`` — geo region dictionary
+        (``RegionsDto``: ``{"regions": [{"name": ...}]}``)."""
+        return self._transport.get_json("/rtb/v1/regions", **params)
+
+    def region_countries(self, region_name: str, **params: Any) -> Any:
+        """``GET /rtb/v1/regions/{regionName}/countries`` — country
+        dictionary per region (``CountriesDto``: ``{"countries": [{"name": ...}]}``)."""
+        return self._transport.get_json(f"/rtb/v1/regions/{region_name}/countries", **params)
 
     def user_details(self) -> dict[str, Any]:
         """``GET /lookup/v1/user-details`` — identity behind the OAuth pair

@@ -184,6 +184,21 @@ class ImproveDigitalProductConfig(BaseProductConfig):
     )
 
     # -- Classic line-item defaults --
+    geo_countries: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Default geo targeting: country names from the platform geo dictionary "
+            "(/common/v1/countries), applied to every line item booked from this "
+            "product (buyer overlays add on top)"
+        ),
+    )
+    geo_regions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Default geo targeting: region names from the platform geo dictionary "
+            "(/rtb/v1/regions), applied to every line item booked from this product"
+        ),
+    )
     pricing_model: str | None = Field(
         default=None,
         description="Line-item pricing model (CPM confirmed; further values pending platform confirmation — gap G2)",

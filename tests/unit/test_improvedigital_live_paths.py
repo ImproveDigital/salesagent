@@ -33,6 +33,7 @@ LIVE_CONFIG = {
     "client_secret": "s3cret",
     "improve_demand_contact_id": 17918,
     "buying_entity_id": 421,
+    "buying_entity_office_id": 5068,
     "business_unit_id": 33,
     "api_base_url": "https://api.360yielddev.example",
     "currency": "EUR",
@@ -68,6 +69,10 @@ class FakeCampaignsClient:
 
     def set_line_item_placements(self, campaign_id, line_item_id, payload):
         self.calls.append(("set_line_item_placements", campaign_id, line_item_id, payload))
+        return payload
+
+    def set_line_item_geo_targeting(self, campaign_id, line_item_id, payload):
+        self.calls.append(("set_line_item_geo_targeting", campaign_id, line_item_id, payload))
         return payload
 
     def set_packages(self, campaign_id, line_item_id, payload):
@@ -116,6 +121,16 @@ class FakeCreativesClient:
 class FakeLookupsClient:
     def sizes(self, **params):
         return {"sizes": [{"id": 4, "width": 300, "height": 250, "name": "300x250 (Medium Rectangle)"}]}
+
+    def regions(self, **params):
+        if params.get("offset"):
+            return {"regions": []}
+        return {"regions": [{"name": "EMEA"}]}
+
+    def region_countries(self, region_name, **params):
+        if params.get("offset"):
+            return {"countries": []}
+        return {"countries": [{"name": "The Netherlands"}, {"name": "Belgium"}]}
 
 
 class FakeClient:
@@ -166,6 +181,133 @@ class TestCreateMediaBuyLive:
         }
         packages_call = next(c for c in calls if c[0] == "set_packages")
         assert packages_call[3] == {"line_item_packages": [{"id": 77, "assigned": True}]}
+
+    def test_product_geo_defaults_put_to_geo_targeting_endpoint(self):
+        """Geo travels via the per-line-item geo-targeting PUT, never in the
+        line-item create body (LineItemGeoTargetingDto wire shape)."""
+        adapter = make_live_adapter()
+        package = make_targeted_package()
+        package.implementation_config = {"improvedigital": {"placement_ids": [11, 12], "geo_countries": ["NL", "BE"]}}
+        invoke_create_media_buy(adapter, make_sample_create_request(), [package])
+
+        calls = adapter._client.campaigns.calls
+        geo_calls = [c for c in calls if c[0] == "set_line_item_geo_targeting"]
+        # Every entry carries region + exclude ('missing required properties
+        # ["exclude","region"]' otherwise — validated live), and ISO codes
+        # are rewritten to the platform's own display names.
+        assert geo_calls == [
+            (
+                "set_line_item_geo_targeting",
+                101,
+                202,
+                {
+                    "filter": True,
+                    "geo_targeting": [
+                        {"country": "The Netherlands", "exclude": False, "region": "EMEA"},
+                        {"country": "Belgium", "exclude": False, "region": "EMEA"},
+                    ],
+                },
+            )
+        ]
+        line_item_payload = next(c[2] for c in calls if c[0] == "create_line_item")
+        assert "geo_targeting" not in line_item_payload
+
+    def test_region_tokens_and_platform_names_resolve_case_insensitively(self):
+        """'emea' and 'the netherlands' (free-text spellings) both resolve to
+        the platform's exact display names on the wire."""
+        adapter = make_live_adapter()
+        package = make_targeted_package()
+        package.implementation_config = {
+            "improvedigital": {
+                "placement_ids": [11],
+                "geo_countries": ["the netherlands"],
+                "geo_regions": ["emea"],
+            }
+        }
+        invoke_create_media_buy(adapter, make_sample_create_request(), [package])
+
+        geo_call = next(c for c in adapter._client.campaigns.calls if c[0] == "set_line_item_geo_targeting")
+        assert geo_call[3]["geo_targeting"] == [
+            {"country": "The Netherlands", "exclude": False, "region": "EMEA"},
+            {"region": "EMEA", "exclude": False},
+        ]
+
+    def test_product_target_countries_fold_into_geo_targeting(self):
+        """The generic 'Channel & Geographic Targeting' selection
+        (Product.countries, ISO codes) is what booked line items geo-target —
+        it wins over legacy geo_countries in the adapter config."""
+        adapter = make_live_adapter()
+        package = make_targeted_package()
+        package.product_id = "prod_1"
+        package.implementation_config = {
+            "improvedigital": {"placement_ids": [11], "geo_countries": ["BE"]}  # legacy, must lose
+        }
+        with (
+            patch("src.core.database.database_session.get_db_session"),
+            patch("src.core.database.repositories.product.ProductRepository") as repo_cls,
+        ):
+            repo_cls.return_value.get_by_id.return_value = SimpleNamespace(countries=["NL"])
+            invoke_create_media_buy(adapter, make_sample_create_request(), [package])
+
+        geo_call = next(c for c in adapter._client.campaigns.calls if c[0] == "set_line_item_geo_targeting")
+        assert geo_call[3]["geo_targeting"] == [{"country": "The Netherlands", "exclude": False, "region": "EMEA"}]
+
+    def test_product_without_countries_keeps_legacy_config_geo(self):
+        """Product.countries=None (All Countries) falls back to legacy
+        geo_countries stored in the adapter config."""
+        adapter = make_live_adapter()
+        package = make_targeted_package()
+        package.product_id = "prod_1"
+        package.implementation_config = {"improvedigital": {"placement_ids": [11], "geo_countries": ["NL"]}}
+        with (
+            patch("src.core.database.database_session.get_db_session"),
+            patch("src.core.database.repositories.product.ProductRepository") as repo_cls,
+        ):
+            repo_cls.return_value.get_by_id.return_value = SimpleNamespace(countries=None)
+            invoke_create_media_buy(adapter, make_sample_create_request(), [package])
+
+        geo_call = next(c for c in adapter._client.campaigns.calls if c[0] == "set_line_item_geo_targeting")
+        assert geo_call[3]["geo_targeting"] == [{"country": "The Netherlands", "exclude": False, "region": "EMEA"}]
+
+    def test_resolved_duplicates_collapse_to_one_row(self):
+        """Config 'The Netherlands' + buyer 'NL' resolve to the same platform
+        geo — the PUT must carry it once, not twice."""
+        adapter = make_live_adapter()
+        rows = adapter._resolve_geo_regions(
+            [
+                {"country": "The Netherlands", "exclude": False},
+                {"country": "NL", "exclude": False},
+            ]
+        )
+        assert rows == [{"country": "The Netherlands", "exclude": False, "region": "EMEA"}]
+
+    def test_buyer_exclude_overrides_matching_include(self):
+        """AdCP overlay semantics: the buyer's exclusion narrows the product
+        default — never send contradictory include+exclude rows for the same geo."""
+        adapter = make_live_adapter()
+        rows = adapter._resolve_geo_regions(
+            [
+                {"country": "The Netherlands", "exclude": False},
+                {"country": "Belgium", "exclude": False},
+                {"country": "NL", "exclude": True},
+            ]
+        )
+        assert rows == [
+            {"country": "The Netherlands", "exclude": True, "region": "EMEA"},
+            {"country": "Belgium", "exclude": False, "region": "EMEA"},
+        ]
+
+    def test_unresolvable_geo_country_fails_booking_with_cleanup(self):
+        """A country outside the platform geo dictionary must fail the buy
+        (the PUT would 400 upstream anyway) and clean up the partial campaign."""
+        adapter = make_live_adapter()
+        package = make_targeted_package()
+        package.implementation_config = {"improvedigital": {"placement_ids": [11], "geo_countries": ["Atlantis"]}}
+        response = invoke_create_media_buy(adapter, make_sample_create_request(), [package])
+
+        assert type(response).__name__.endswith("Error")
+        assert "Atlantis" in str(response.errors[0].message)
+        assert any(c[0] == "delete_campaign" for c in adapter._client.campaigns.calls)
 
     def test_package_without_inventory_selection_fails_loudly(self):
         adapter = make_live_adapter()
@@ -224,6 +366,58 @@ class TestCreativesLive:
             results = adapter.associate_creatives(["999"], ["9001"])
         assert results[0]["status"] == "failed"
         assert "No Classic campaign" in results[0]["message"]
+
+    def test_created_creative_id_handles_response_shape_variants(self):
+        extract = ImproveDigitalAdapter._created_creative_id
+        assert extract([{"id": 9001}]) == 9001
+        assert extract({"creatives": [{"id": 9002}]}) == 9002
+        assert extract({"id": 9003, "name": "x"}) == 9003
+        assert extract({"content": [{"creative_id": 9004}]}) == 9004
+        assert extract([]) is None
+        assert extract({}) is None
+        assert extract([{"name": "no id echo"}]) is None
+
+    def test_upload_recovers_platform_id_by_name_when_response_has_no_id(self):
+        """The bulk servlet created the creative but echoed no ID — the
+        adapter must recover it from the campaign's creative list, or the
+        creative would exist upstream but never bind to a line item."""
+        adapter = make_live_adapter()
+        creatives_client = adapter._client.creatives
+        creatives_client.create_third_party_tag_creatives = lambda campaign_id, creatives, **kw: []
+        creatives_client.list_creatives = lambda campaign_id, **kw: {
+            "creatives": [{"id": 528059, "name": "other"}, {"id": 528060, "name": "Banner 300x250"}]
+        }
+        statuses = adapter.add_creative_assets(
+            "improvedigital_101",
+            assets=[
+                {
+                    "creative_id": "cr_1",
+                    "name": "Banner 300x250",
+                    "asset_type": "banner",
+                    "snippet": "<script>tag()</script>",
+                    "width": 300,
+                    "height": 250,
+                    "advertiser_domain": "brand.example.com",
+                }
+            ],
+            today=datetime.now(UTC),
+        )
+        assert statuses[0].status == "approved"
+        assert statuses[0].creative_id == "528060"
+
+    def test_campaign_fallback_resolves_pending_start_buys(self):
+        """Cross-instance binding (e.g. sync_creatives after a HITL booking)
+        must resolve buys that haven't started serving yet."""
+        adapter = make_live_adapter()
+        buy = SimpleNamespace(external_id=None, media_buy_id="improvedigital_314410")
+        with (
+            patch("src.core.database.database_session.get_db_session"),
+            patch("src.core.database.repositories.media_buy.MediaBuyRepository") as repo_cls,
+        ):
+            repo_cls.return_value.find_by_platform_line_item_id.return_value = buy
+            campaign_id = adapter._campaign_id_for_line_item("585190")
+        assert campaign_id == 314410
+        repo_cls.return_value.find_by_platform_line_item_id.assert_called_once_with("585190")
 
 
 class TestUpdateMediaBuyLive:
@@ -287,6 +481,51 @@ class TestDeliveryLive:
             repo_cls.return_value.list_by_campaign.return_value = []
             with pytest.raises(DeliveryDataUnavailable):
                 adapter.get_media_buy_delivery("improvedigital_101", self._reporting_period(), datetime.now(UTC))
+
+    def test_internal_media_buy_id_resolves_campaign_via_external_id(self):
+        """Callers (admin delivery sync, MCP delivery tool) pass the core
+        layer's internal ``mb_*`` ID; the Classic campaign reference lives on
+        ``media_buys.external_id``. The read path must resolve it the same
+        way the reporting sync's write path does."""
+        adapter = make_live_adapter()
+        rows = [
+            SimpleNamespace(
+                line_item_id="202",
+                impressions=1000,
+                clicks=10,
+                completed_views=None,
+                spend_micros=4_000_000,
+                currency="EUR",
+            ),
+        ]
+        with (
+            patch("src.core.database.database_session.get_db_session"),
+            patch("src.core.database.repositories.media_buy.MediaBuyRepository") as buy_repo_cls,
+            patch(
+                "src.core.database.repositories.improvedigital_line_item_stats.ImproveDigitalLineItemStatsRepository"
+            ) as stats_repo_cls,
+        ):
+            buy_repo_cls.return_value.get_by_id.return_value = SimpleNamespace(external_id="improvedigital_101")
+            stats_repo_cls.return_value.list_by_campaign.return_value = rows
+            response = adapter.get_media_buy_delivery("mb_70aa67ac413f", self._reporting_period(), datetime.now(UTC))
+        stats_repo_cls.return_value.list_by_campaign.assert_called_once_with("101")
+        assert response.totals.impressions == 1000
+
+    def test_internal_id_without_external_mapping_soft_fails(self):
+        """An internal ID whose buy row is missing (or has no external stamp)
+        must stay a soft DeliveryDataUnavailable, never a hard error."""
+        adapter = make_live_adapter()
+        with (
+            patch("src.core.database.database_session.get_db_session"),
+            patch("src.core.database.repositories.media_buy.MediaBuyRepository") as buy_repo_cls,
+            patch(
+                "src.core.database.repositories.improvedigital_line_item_stats.ImproveDigitalLineItemStatsRepository"
+            ) as stats_repo_cls,
+        ):
+            buy_repo_cls.return_value.get_by_id.return_value = None
+            stats_repo_cls.return_value.list_by_campaign.return_value = []
+            with pytest.raises(DeliveryDataUnavailable):
+                adapter.get_media_buy_delivery("mb_70aa67ac413f", self._reporting_period(), datetime.now(UTC))
 
     def test_cache_rows_aggregate_to_delivery_totals(self):
         adapter = make_live_adapter()
