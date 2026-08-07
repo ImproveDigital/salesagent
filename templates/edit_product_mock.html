@@ -172,7 +172,9 @@
 
         {# Enhanced targeting selector with OR/AND operators and include/exclude #}
         {% include 'components/targeting_selector_widget.html' %}
-        <input type="hidden" id="targeting-data" name="targeting_template" value="{{ product.targeting_template | tojson if product.targeting_template else '{}' }}">
+        {# Single-quoted attribute: |tojson emits double quotes (escapes <>&' but not "),
+           so a double-quoted value= truncates at the first key — same pattern as add_product_gam.html #}
+        <input type="hidden" id="targeting-data" name="targeting_template" value='{{ product.targeting_template | tojson if product.targeting_template else "{}" }}'>
 
         <!-- Channel Selection (AdCP 2.5) -->
         <h3 style="margin-top: 2rem;">
