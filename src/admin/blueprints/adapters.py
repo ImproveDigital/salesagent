@@ -1125,6 +1125,10 @@ def test_improvedigital_connection(tenant_id, **kwargs):
                 "user_id": details.get("user_id"),
                 "name": f"{details.get('first_name', '')} {details.get('last_name', '')}".strip(),
                 "business_unit": details.get("business_unit_name"),
+                # Campaign booking requires a business_unit_id (layer-2 rule,
+                # not in the create schema) — the API user's own unit is the
+                # right default, so the UI auto-fills it from here.
+                "business_unit_id": details.get("business_unit_id"),
             }
         except ImproveDigitalError:
             pass  # identity display is optional — credentials are already verified
