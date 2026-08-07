@@ -1744,6 +1744,21 @@ def edit_product(tenant_id, product_id):
                     elif line_item_type in ["PRICE_PRIORITY", "HOUSE"]:
                         product.delivery_type = "non_guaranteed"
 
+                # Parse targeting template from form (custom targeting key-value
+                # pairs). The unified edit form posts this field for EVERY
+                # adapter — storing it must not be GAM-only, or non-GAM tenants
+                # silently lose their Custom Targeting edits on save.
+                targeting_template_json = form_data.get("targeting_template", "{}")
+                try:
+                    targeting_template = json.loads(targeting_template_json) if targeting_template_json else {}
+                except json.JSONDecodeError:
+                    targeting_template = {}
+
+                product.targeting_template = targeting_template
+                from sqlalchemy.orm import attributes as _sa_attributes
+
+                _sa_attributes.flag_modified(product, "targeting_template")
+
                 # Update implementation_config with GAM-specific fields
                 # Note: This must run even if line_item_type is not present (automatic mode)
                 if adapter_type == "google_ad_manager":
@@ -1799,14 +1814,8 @@ def edit_product(tenant_id, product_id):
                     if form_data.get("priority"):
                         base_config["priority"] = int(form_data["priority"])
 
-                    # Parse targeting template from form (includes custom targeting key-value pairs)
-                    targeting_template_json = form_data.get("targeting_template", "{}")
-                    try:
-                        targeting_template = json.loads(targeting_template_json) if targeting_template_json else {}
-                    except json.JSONDecodeError:
-                        targeting_template = {}
-
-                    # If targeting template has key_value_pairs, copy to implementation_config for GAM
+                    # If targeting template (parsed above, stored for every
+                    # adapter) has key_value_pairs, copy to implementation_config for GAM
                     if targeting_template.get("key_value_pairs"):
                         if "custom_targeting_keys" not in base_config:
                             base_config["custom_targeting_keys"] = {}
@@ -1822,8 +1831,7 @@ def edit_product(tenant_id, product_id):
                             # Legacy format - merge as before
                             base_config["custom_targeting_keys"].update(kv_pairs)
 
-                    # Store targeting_template in product
-                    product.targeting_template = targeting_template
+                    # (targeting_template itself is stored above for every adapter)
 
                     # Reject inconsistent GAM inventory configuration. Only applies to direct
                     # targeting — profile-based products derive their inventory from the profile.

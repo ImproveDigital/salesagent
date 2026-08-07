@@ -59,6 +59,12 @@ class TargetingTemplateModel(BaseModel):
     audience_segments: list[str] | None = None
     content_categories: list[str] | None = None
     custom_parameters: dict[str, Any] | None = None
+    # Custom targeting rules from the product-form targeting widget —
+    # {"groups": [{"criteria": [{"keyId", "values"}]}]} (grouped),
+    # {"include"/"exclude": ...} (enhanced), or a flat key→values dict
+    # (legacy). Without this field Pydantic silently dropped the key and
+    # every product save scrubbed the widget's targeting to {}.
+    key_value_pairs: dict[str, Any] | None = None
 
 
 class PolicySettingsModel(BaseModel):
