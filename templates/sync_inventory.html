@@ -15,11 +15,33 @@
         </div>
     </div>
 
-    {% if not is_gam %}
+    {% if not is_gam and supports_inventory_sync %}
+    {# Capability-driven sync for non-GAM adapters — posts to the shared
+       adapter sync orchestration (execute_adapter_sync), which handles
+       concurrency (409 when a sync is in flight) and SyncJob bookkeeping. #}
+    <div class="row mt-3">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h5 class="card-title mb-1">{{ adapter_label }} — {{ inventory_entity_label }}</h5>
+                            <p class="mb-0 text-muted" id="adapterSyncStatus">
+                                Pull {{ inventory_entity_label|lower }} and related inventory from {{ adapter_label }} into the local cache.
+                            </p>
+                        </div>
+                        <button class="btn btn-primary" onclick="syncAdapterInventory()" id="adapterSyncBtn">
+                            <i class="fas fa-sync"></i> Sync Now
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% elif not is_gam %}
     <div class="alert alert-warning mt-3">
         <i class="fas fa-info-circle"></i>
-        Inventory sync is only available for Google Ad Manager tenants. Your tenant is configured to use the
-        <code>{{ adapter_type }}</code> adapter.
+        The <code>{{ adapter_type }}</code> adapter does not support inventory sync.
     </div>
     {% else %}
 
@@ -98,6 +120,39 @@
 const tenantId = '{{ tenant_id }}';
 const scriptRoot = '{{ request.script_root }}';
 const isGam = {{ 'true' if is_gam else 'false' }};
+const adapterType = '{{ adapter_type }}';
+
+// Non-GAM adapters with supports_inventory_sync: one-shot sync through the
+// shared orchestration. Synchronous call — completes (or 409s) in-request.
+function syncAdapterInventory() {
+    const btn = document.getElementById('adapterSyncBtn');
+    const statusEl = document.getElementById('adapterSyncStatus');
+    if (!btn) return;
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing…';
+    statusEl.textContent = 'Syncing — large catalogs can take a minute (upstream rate limits apply).';
+
+    fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/${adapterType}/sync-inventory`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }
+    })
+        .then(r => r.json().then(data => ({ status: r.status, data })))
+        .then(({ status, data }) => {
+            if (data.success) {
+                const summary = Object.entries(data.counts || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+                statusEl.textContent = `✓ Synced ${(data.total_synced || 0).toLocaleString()} items (${summary})`;
+            } else if (status === 409) {
+                statusEl.textContent = data.error || 'A sync is already running — wait for it to finish.';
+            } else {
+                const errors = data.errors ? Object.entries(data.errors).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+                statusEl.textContent = `✗ ${data.error || errors || 'Sync failed'}`;
+            }
+        })
+        .catch(err => { statusEl.textContent = '✗ ' + err.message; })
+        .finally(() => { btn.disabled = false; btn.innerHTML = original; });
+}
 
 function syncInventory(mode) {
     if (!isGam) return;

@@ -1244,16 +1244,16 @@ def list_improvedigital_inventory(tenant_id, **kwargs):
 
     Filterable by ``entity_type`` (publisher, placement, package, size).
     Optional ``parent_id`` narrows placements to one publisher. Optional
-    ``q`` substring-matches the ``name`` field.
-
-    Returns a flat list (no pagination — the cache is small enough that
-    sending the whole filtered set is fine for now).
+    ``q`` substring-matches the ``name`` field. Optional ``limit`` caps the
+    returned rows AFTER filtering (the browse page passes it; the product
+    pickers omit it and cache the full set client-side).
     """
     from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
 
     entity_type = request.args.get("entity_type")
     parent_id = request.args.get("parent_id")
     q = request.args.get("q")
+    limit = request.args.get("limit", type=int)
 
     if not entity_type:
         return jsonify({"success": False, "error": "entity_type query param is required"}), 400
@@ -1267,7 +1267,33 @@ def list_improvedigital_inventory(tenant_id, **kwargs):
         for row in rows
         if not q or (row.name and q.lower() in row.name.lower())
     ]
-    return jsonify({"success": True, "entity_type": entity_type, "count": len(items), "items": items})
+    total = len(items)
+    if limit is not None and limit >= 0:
+        items = items[:limit]
+    return jsonify({"success": True, "entity_type": entity_type, "count": total, "items": items})
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory-stats", methods=["GET"])
+@require_tenant_access()
+def improvedigital_inventory_stats(tenant_id, **kwargs):
+    """Quick stats for the Improve Digital inventory cache — row counts per
+    entity type + last sync time. Feeds the Browse Inventory header and the
+    Sync Inventory page without materializing the 20k+ cached rows."""
+    from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+    with get_db_session() as session:
+        repo = ImproveDigitalInventoryRepository(session, tenant_id)
+        counts = repo.counts_by_type()
+        last_synced = repo.latest_sync_at()
+
+    return jsonify(
+        {
+            "success": True,
+            "counts": counts,
+            "total": sum(counts.values()),
+            "last_synced_at": last_synced.isoformat() if last_synced else None,
+        }
+    )
 
 
 @adapters_bp.route(
