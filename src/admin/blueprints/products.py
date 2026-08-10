@@ -715,7 +715,7 @@ def _improvedigital_implementation_config(base_config: dict) -> dict:
         else:
             config.pop(field, None)
 
-    for field in ("pricing_model", "frequency_interval_type", "delivery_schedule"):
+    for field in ("pricing_model", "frequency_interval_type", "delivery_schedule", "goal"):
         raw = (request.form.get(f"impl_{field}") or "").strip()
         if raw:
             config[field] = raw

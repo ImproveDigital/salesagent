@@ -99,11 +99,19 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
         description="Business unit ID — required on Classic line items (e.g. 33 = Azerion on the dev platform)",
         json_schema_extra={"ui_order": 10},
     )
+    buyer_id: int | None = Field(
+        default=None,
+        description=(
+            "Buyer the line items book under — sent as CommonDealLineItemDto.buyer_id "
+            "(omitted when unset; the platform then derives it from the campaign)"
+        ),
+        json_schema_extra={"ui_order": 11},
+    )
     currency: str = Field(
         default="EUR",
         description="Default campaign currency (ISO 4217)",
         json_schema_extra={
-            "ui_order": 11,
+            "ui_order": 12,
             # CampaignDto currency enum from the rtb/v3 OpenAPI spec.
             "enum": [
                 "EUR",
@@ -127,7 +135,7 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
     timezone: str = Field(
         default="UTC",
         description="Default campaign timezone (IANA name, e.g. Europe/Amsterdam) — required by the campaign API",
-        json_schema_extra={"ui_order": 12},
+        json_schema_extra={"ui_order": 13},
     )
 
     @field_serializer("client_secret")
@@ -202,6 +210,15 @@ class ImproveDigitalProductConfig(BaseProductConfig):
     pricing_model: str | None = Field(
         default=None,
         description="Line-item pricing model (CPM confirmed; further values pending platform confirmation — gap G2)",
+    )
+    goal: str = Field(
+        default="BUDGET",
+        description=(
+            "Line-item delivery goal. BUDGET books against the package budget "
+            "(sent as budget + flight_details); IMPRESSION books against the "
+            "impression cap derived from budget ÷ rate"
+        ),
+        json_schema_extra={"enum": ["BUDGET", "IMPRESSION"]},
     )
     frequency_cap: int | None = Field(
         default=None,

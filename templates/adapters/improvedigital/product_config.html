@@ -183,6 +183,19 @@ Expected context:
     </div>
 
     <div class="form-group">
+        <label for="impl_goal">Delivery Goal</label>
+        <select id="impl_goal" name="impl_goal" class="form-control">
+            {% set current_goal = impl.get('goal') or 'BUDGET' %}
+            <option value="BUDGET" {% if current_goal == 'BUDGET' %}selected{% endif %}>Budget</option>
+            <option value="IMPRESSION" {% if current_goal == 'IMPRESSION' %}selected{% endif %}>Impressions</option>
+        </select>
+        <small class="form-text text-muted">
+            What the line item paces against. Budget uses the package budget; Impressions
+            uses the cap derived from budget ÷ rate. Both figures are sent either way.
+        </small>
+    </div>
+
+    <div class="form-group">
         <label for="impl_frequency_cap">Frequency Cap</label>
         <input type="number" id="impl_frequency_cap" name="impl_frequency_cap" min="1"
                value="{{ impl.get('frequency_cap', '') }}"
@@ -211,7 +224,11 @@ Expected context:
         <label for="impl_delivery_schedule">Delivery Schedule</label>
         <input type="text" id="impl_delivery_schedule" name="impl_delivery_schedule"
                value="{{ impl.get('delivery_schedule', '') }}"
-               placeholder="Optional — pacing schedule">
+               placeholder="Optional — defaults to Evenly">
+        <small class="form-text text-muted">
+            Line-item pacing. Left blank, line items book with the platform's
+            <code>Evenly</code> schedule.
+        </small>
     </div>
 </div>
 

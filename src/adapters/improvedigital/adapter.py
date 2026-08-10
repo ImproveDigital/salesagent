@@ -138,6 +138,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
         self.buying_entity_office_id = self.config.get("buying_entity_office_id")
         self.campaign_type = self.config.get("campaign_type") or "Improve"
         self.business_unit_id = self.config.get("business_unit_id")
+        self.buyer_id = self.config.get("buyer_id")
 
         self.improve_demand_contact_id = self.config.get("improve_demand_contact_id")
         self.agency_id = self.config.get("agency_id")
@@ -651,13 +652,27 @@ class ImproveDigitalAdapter(AdServerAdapter):
         platform): name, type, line_item_status, start_date,
         business_unit_id, improve_demand_contact_id, and a goal for CPM
         line items.
+
+        The booking goal comes from the product's ``goal`` config: ``BUDGET``
+        (the default) paces against the money figure, ``IMPRESSION`` against
+        the impression cap. Both figures ride along either way — on the line
+        item itself and on a single ``flight_details`` row spanning the
+        flight — because the platform's own create sends both. The
+        delivery/compliance flags below mirror that same payload: the API
+        leaves them unset rather than defaulted when omitted.
         """
         product_config = self._with_product_geo_defaults(package, self._product_config_from_package(package))
+        goal = str(product_config.get("goal") or "BUDGET").upper()
+        # Packages booked from a buy-level budget carry no per-package figure;
+        # reverse the core layer's budget→goal-units conversion
+        # (media_buy_create._goal_units_from_budget) so a BUDGET-goal line item
+        # always books the money the impression cap was sized for.
+        budget = float(package.budget) if package.budget is not None else round(package.impressions * rate / 1000, 2)
         payload: dict[str, Any] = {
             "name": package.name or package.package_id,
             "type": "Standard",
             "line_item_status": "Active",
-            "goal": "IMPRESSION",
+            "goal": goal,
             "start_date": self._format_datetime(start_time),
             "end_date": self._format_datetime(end_time),
             "time_zone": self.timezone,
@@ -667,17 +682,55 @@ class ImproveDigitalAdapter(AdServerAdapter):
             # match default campaign owner/publisher currency").
             "cpm_bid": rate,
             "pricing_model": product_config.get("pricing_model") or rate_type,
+            "pricing_model_type": "First Bid",
             "impression_cap": package.impressions,
+            "impression_cap_daily": False,
+            "budget_is_daily": False,
+            "invoice_type": "on_actuals",
+            "delivery_schedule": product_config.get("delivery_schedule") or "Evenly",
+            "third_party_inventory": True,
+            "is_optimised": True,
+            "is_dynamic_optimization": False,
+            "dynamic_optimization_kpi_type": "",
+            "dynamic_optimization_kpi_value": 0,
+            "conversion_tracking_enabled": False,
+            "keep_on_delivering": False,
+            "track_viewability": False,
+            "is_consentless": False,
+            "is_coppa_compliant": False,
+            "optout_mechanism": [],
             "reference_number": package.package_id,
             "improve_demand_contact_id": self.improve_demand_contact_id,
         }
+        payload["budget"] = budget
+        payload["flight_details"] = [self._flight_detail(budget, package.impressions, start_time, end_time)]
         if self.business_unit_id:
             payload["business_unit_id"] = int(self.business_unit_id)
-        for field in ("frequency_cap", "frequency_interval", "frequency_interval_type", "delivery_schedule"):
+        if self.buyer_id:
+            payload["buyer_id"] = int(self.buyer_id)
+        for field in ("frequency_cap", "frequency_interval", "frequency_interval_type"):
             if product_config.get(field) is not None:
                 payload[field] = product_config[field]
         payload.update(build_targeting(package.targeting_overlay, product_config, tenant_id=self.tenant_id))
         return payload
+
+    def _flight_detail(
+        self, budget: float, impressions: int, start_time: datetime, end_time: datetime
+    ) -> dict[str, Any]:
+        """One flight row covering the whole booking window.
+
+        The platform splits a line item's pacing into flights; AdCP buys have
+        a single flight, so the row mirrors the line item's own window, budget
+        and impression cap.
+        """
+        return {
+            "start_time": self._format_datetime(start_time),
+            "end_time": self._format_datetime(end_time),
+            "budget": budget,
+            "budget_is_daily": False,
+            "impression_cap": impressions,
+            "impression_cap_daily": False,
+        }
 
     def _product_config_from_package(self, package: MediaPackage) -> dict[str, Any]:
         impl = getattr(package, "implementation_config", None) or {}

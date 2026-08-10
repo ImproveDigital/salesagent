@@ -1047,6 +1047,31 @@ def _improvedigital_rows(payload, *keys: str) -> list:
     return []
 
 
+def _improvedigital_buyer_options(payload) -> list[dict]:
+    """Normalize 360Yield buyer rows into ``{id, name}`` picker options.
+
+    Buyers surface as a ``buyers`` list on ``/lookup/v1/user-details`` and on
+    buying-entity office rows. ``BuyerDto`` carries both a numeric ``id`` and
+    a string ``buyer_id`` (the platform's external reference) — the line item
+    field is an integer, so the numeric id wins and a non-numeric fallback is
+    dropped rather than sent as garbage.
+    """
+    rows = payload.get("buyers") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    options: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        identifier = row.get("id")
+        if identifier is None and str(row.get("buyer_id") or "").isdigit():
+            identifier = int(row["buyer_id"])
+        if not isinstance(identifier, int):
+            continue
+        options.append({"id": identifier, "name": row.get("name") or row.get("buyer_name") or str(identifier)})
+    return options
+
+
 def _improvedigital_paginate(fetch_page, envelope_key: str, page_size: int = 100, max_rows: int = 10000) -> list:
     """Exhaust a 360Yield offset/limit-paginated list endpoint.
 
@@ -1127,8 +1152,11 @@ def test_improvedigital_connection(tenant_id, **kwargs):
                 "business_unit": details.get("business_unit_name"),
                 # Campaign booking requires a business_unit_id (layer-2 rule,
                 # not in the create schema) — the API user's own unit is the
-                # right default, so the UI auto-fills it from here.
+                # right default, so the UI auto-fills it from here. The
+                # user_id doubles as the improve_demand_contact_id, and the
+                # buyer list backs the Buyer ID picker.
                 "business_unit_id": details.get("business_unit_id"),
+                "buyers": _improvedigital_buyer_options(details),
             }
         except ImproveDigitalError:
             pass  # identity display is optional — credentials are already verified
@@ -1174,6 +1202,9 @@ def discover_improvedigital_buying_entities(tenant_id, **kwargs):
                         "improve_demand_contact_id": row.get("improve_demand_contact_id"),
                         "billing_currency_code": row.get("billing_currency_code"),
                         "buying_types": row.get("buying_types") or [],
+                        # Offices that pin a buyer let the picker fill Buyer ID
+                        # from the office selection instead of a second lookup.
+                        "buyers": _improvedigital_buyer_options(row),
                     }
                     for row in rows
                     if row.get("active") and "Classic" in (row.get("buying_types") or [])

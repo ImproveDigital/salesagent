@@ -51,6 +51,12 @@ def main() -> int:
         required=True,
         help="Business unit ID for Classic line items (33 = Azerion on the dev platform)",
     )
+    parser.add_argument(
+        "--buyer-id",
+        type=int,
+        default=None,
+        help="Buyer ID sent on Classic line items (omitted when unset)",
+    )
     parser.add_argument("--currency", default="EUR")
     parser.add_argument("--timezone", default="Europe/Amsterdam")
     args = parser.parse_args()
@@ -71,6 +77,7 @@ def main() -> int:
         buying_entity_id=args.buying_entity_id,
         buying_entity_office_id=args.buying_entity_office_id,
         business_unit_id=args.business_unit_id,
+        buyer_id=args.buyer_id,
         currency=args.currency,
         timezone=args.timezone,
     )

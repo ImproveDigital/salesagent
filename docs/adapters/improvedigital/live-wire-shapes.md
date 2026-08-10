@@ -18,6 +18,20 @@ incomplete in several places.
   "Active"`, `business_unit_id` (33 = Azerion on dev),
   `improve_demand_contact_id`, and `goal` for CPM items
   (`IMPRESSION`/`BUDGET`). `pricing_model: "CPM"` confirmed (gap G2 closed).
+- **Line item create — platform-parity fields** (from a payload captured on
+  `api-alpha.360yielddev.com`, not yet re-validated on `api.360yielddev.com`):
+  the platform's own create sends the money figure as `budget` plus a
+  `flight_details[]` row (`start_time`, `end_time`, `budget`,
+  `budget_is_daily`, `impression_cap`, `impression_cap_daily`) alongside
+  `buyer_id`, `invoice_type: "on_actuals"`, `pricing_model_type: "First Bid"`,
+  `delivery_schedule: "Evenly"`, `third_party_inventory`, `is_optimised` and
+  the compliance flags (`track_viewability`, `is_consentless`,
+  `is_coppa_compliant`, `conversion_tracking_enabled`, `keep_on_delivering`,
+  `optout_mechanism`). `flight_details` is absent from the committed
+  rtb-v3 OpenAPI spec, and `dynamic_optimization_kpi_value` is typed `string`
+  there but sent as `0` — both are alpha-side divergences.
+- `frequency_interval_type` is a lowercase enum
+  (`months`/`weeks`/`days`/`hours`/`minutes`) — product configs must match.
 - **improve_demand_contact_id == the API user's user_id** (from
   `GET /lookup/v1/user-details`) — every recent dev campaign follows this.
 - **Advertiser is optional** on Classic campaigns (`advertiserId` is null on
