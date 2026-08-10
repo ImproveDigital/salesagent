@@ -93,6 +93,16 @@ class ImproveDigitalInventoryRepository:
         stmt = select(func.max(ImproveDigitalInventory.last_synced_at)).filter_by(tenant_id=self._tenant_id)
         return self._session.scalar(stmt)
 
+    def counts_by_type(self) -> dict[str, int]:
+        """Row counts per entity_type — feeds the browse page's quick stats
+        without materializing tens of thousands of rows."""
+        stmt = (
+            select(ImproveDigitalInventory.entity_type, func.count())
+            .filter_by(tenant_id=self._tenant_id)
+            .group_by(ImproveDigitalInventory.entity_type)
+        )
+        return dict(self._session.execute(stmt).tuples().all())
+
     def delete_all(self) -> int:
         """Wipe the tenant's inventory cache. Used when an operator triggers
         a full resync via the admin UI."""
