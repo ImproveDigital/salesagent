@@ -444,6 +444,19 @@ def inventory_browser(tenant_id):
             "is_embedded": False,
         }
 
+    # Capability-driven sync support for non-GAM adapters: the generic sync
+    # card renders whenever the adapter declares supports_inventory_sync
+    # (posts to /api/tenant/<id>/adapters/<type>/sync-inventory, the shared
+    # execute_adapter_sync orchestration).
+    from src.adapters import get_adapter_schemas
+    from src.admin.utils.helpers import ADAPTER_LABELS
+
+    schemas = get_adapter_schemas(adapter_type)
+    capabilities = schemas.capabilities if schemas else None
+    supports_inventory_sync = bool(capabilities and capabilities.supports_inventory_sync)
+    inventory_entity_label = (capabilities.inventory_entity_label if capabilities else None) or "Inventory"
+    adapter_label = ADAPTER_LABELS.get(adapter_type, adapter_type)
+
     return render_template(
         "sync_inventory.html",
         tenant=tenant_dict,
@@ -451,6 +464,9 @@ def inventory_browser(tenant_id):
         tenant_name=tenant_dict["name"],
         is_gam=is_gam,
         adapter_type=adapter_type,
+        adapter_label=adapter_label,
+        supports_inventory_sync=supports_inventory_sync,
+        inventory_entity_label=inventory_entity_label,
     )
 
 
@@ -474,6 +490,18 @@ def inventory_browse(tenant_id):
         return not_found
 
     inventory_type = request.args.get("type", "all")
+
+    if adapter_type == "improvedigital":
+        # 360Yield inventory browser — publishers→placements tree plus
+        # packages and sizes, backed by the improvedigital_inventory cache
+        # (see /api/tenant/<id>/adapters/improvedigital/inventory).
+        return render_template(
+            "inventory_browser_improvedigital.html",
+            tenant=tenant_dict,
+            tenant_id=tenant_id,
+            tenant_name=tenant_dict["name"],
+            adapter_type=adapter_type,
+        )
 
     return render_template(
         "inventory_browser.html",
@@ -989,13 +1017,19 @@ def sync_inventory(tenant_id):
             if not tenant:
                 return jsonify({"error": "Tenant not found"}), 404
 
-            # Check adapter type - inventory sync is only for GAM
+            # This endpoint drives the GAM sync pipeline specifically. Other
+            # adapters sync through the shared orchestration at
+            # /api/tenant/<id>/adapters/<type>/sync-inventory — point callers
+            # there instead of (wrongly) claiming they need no sync.
             adapter_type = tenant.ad_server or "mock"
             if adapter_type != "google_ad_manager":
                 return (
                     jsonify(
                         {
-                            "error": f"Inventory sync is only available for Google Ad Manager. Your tenant is using the '{adapter_type}' adapter which does not require inventory sync."
+                            "error": (
+                                f"This endpoint syncs Google Ad Manager inventory only. The '{adapter_type}' "
+                                f"adapter syncs via /api/tenant/{tenant_id}/adapters/{adapter_type}/sync-inventory."
+                            )
                         }
                     ),
                     400,

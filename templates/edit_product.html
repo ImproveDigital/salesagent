@@ -152,14 +152,22 @@
            so a double-quoted value= truncates at the first key — same pattern as add_product_gam.html #}
         <input type="hidden" id="targeting-data" name="targeting_template" value='{{ product.targeting_template | tojson if product.targeting_template else "{}" }}'>
 
-        <!-- Channel Selection (AdCP 2.5) -->
+        <!-- Channel & Geographic Targeting (AdCP 2.5) -->
         <h3 style="margin-top: 2rem;">
-            <i class="fas fa-broadcast-tower"></i> Advertising Channels
+            <i class="fas fa-broadcast-tower"></i> Channel & Geographic Targeting
         </h3>
-        <div class="form-group">
-            <label for="channels">Channels</label>
-            {% set selected_channels = product.channels if product.channels else [] %}
-            {% include 'components/channel_selector.html' %}
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+            <div class="form-group">
+                <label for="channels">Advertising Channels</label>
+                {% set selected_channels = product.channels if product.channels else [] %}
+                {% include 'components/channel_selector.html' %}
+            </div>
+
+            <div class="form-group">
+                <label for="countries">Target Countries</label>
+                {% set selected_countries = product.countries if product.countries else [] %}
+                {% include 'components/country_selector.html' %}
+            </div>
         </div>
 
         <!-- Principal Access Control -->
@@ -507,6 +515,26 @@ document.addEventListener('DOMContentLoaded', function() {
         // Add initial empty pricing option
         addPricingOption();
     }
+
+    // Handle country selection ("All Countries" is mutually exclusive with specific countries)
+    const countriesSelect = document.getElementById('countries');
+    countriesSelect.addEventListener('change', function() {
+        const selectedOptions = Array.from(this.selectedOptions).map(opt => opt.value);
+
+        // If "ALL" is selected, deselect all others
+        if (selectedOptions.includes('ALL') && selectedOptions.length > 1) {
+            Array.from(this.options).forEach(opt => opt.selected = false);
+            this.options[0].selected = true; // Select "All Countries"
+        }
+        // If specific countries are selected, deselect ALL
+        else if (!selectedOptions.includes('ALL') && selectedOptions.length > 0) {
+            this.options[0].selected = false; // Deselect "All Countries"
+        }
+        // If nothing is selected, select ALL by default
+        else if (selectedOptions.length === 0) {
+            this.options[0].selected = true; // Select "All Countries"
+        }
+    });
 
     // Initialize format template picker with existing formats
     window.formatPicker = new FormatTemplatePicker({
