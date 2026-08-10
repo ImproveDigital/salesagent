@@ -72,14 +72,27 @@ from adcp.server.mcp_tools import (
 )
 from adcp.server.spec_compat import _spec_compat_hooks_impl
 
-from src.core.slim_schemas import CREATE_MEDIA_BUY_SLIM_SCHEMA, UPDATE_MEDIA_BUY_SLIM_SCHEMA
+from src.core.slim_schemas import (
+    CREATE_MEDIA_BUY_SLIM_SCHEMA,
+    GET_PRODUCTS_SLIM_SCHEMA,
+    SYNC_CREATIVES_SLIM_SCHEMA,
+    UPDATE_MEDIA_BUY_SLIM_SCHEMA,
+)
 
 # Optionally replace large tool inputSchemas with compact versions.
 #
-# adcp's _generate_pydantic_schemas() inlines all $refs, turning the
-# CreateMediaBuyRequest schema into ~93 000 lines of JSON (~2.2 MB) and the
-# UpdateMediaBuyRequest schema into an even larger blob (~4.2 MB).  Either
-# volume fills an LLM context window on tools/list, making the tool unusable.
+# adcp's _generate_pydantic_schemas() inlines all $refs, so every model that
+# carries creative assets explodes.  Inlined size for the tools that make up
+# one booking flow (~4 chars/token):
+#
+#   update_media_buy  ~4.2 MB  (~1 045 000 tokens)
+#   create_media_buy  ~2.2 MB  (~547 000 tokens)
+#   sync_creatives    ~1.9 MB  (~480 000 tokens)
+#   get_products      ~184 kB  (~46 000 tokens)
+#
+# Any one of these fills an LLM context window on tools/list, making the tool
+# unusable.  Slimming all four takes the flow from ~1 092 000 to ~20 000
+# served tokens.
 #
 # Set ADCP_COMPACT_TOOL_SCHEMAS=true to activate the slim schemas.
 # When unset or false, the full adcp-generated schema is used (default).
@@ -96,6 +109,8 @@ if os.environ.get("ADCP_COMPACT_TOOL_SCHEMAS", "").lower() == "true":
     _SLIM_SCHEMAS = {
         "create_media_buy": CREATE_MEDIA_BUY_SLIM_SCHEMA,
         "update_media_buy": UPDATE_MEDIA_BUY_SLIM_SCHEMA,
+        "sync_creatives": SYNC_CREATIVES_SLIM_SCHEMA,
+        "get_products": GET_PRODUCTS_SLIM_SCHEMA,
     }
     for _tool in ADCP_TOOL_DEFINITIONS:
         _slim = _SLIM_SCHEMAS.get(_tool["name"])
