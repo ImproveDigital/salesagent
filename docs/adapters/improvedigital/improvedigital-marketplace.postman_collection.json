@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Improve Digital Marketplace — Direct (Classic) Campaign Booking",
-    "description": "End-to-end direct-campaign booking against the 360Yield Marketplace API (beta-deals.360yielddev.com / direct-campaigns).\n\nEvery request in this collection was validated live against the dev platform (2026-08-04) — the payloads encode wire requirements the OpenAPI spec gets wrong or omits (see docs/adapters/improvedigital/live-wire-shapes.md in the salesagent repo).\n\nSETUP\n1. Set collection variables `client_id` and `client_secret` (OAuth2 client credentials issued by Improve Digital).\n2. Confirm the account variables (`demand_contact_id`, `buying_entity_id`, `buying_entity_office_id`, `business_unit_id`) — the defaults are the dev-platform values for the 'AdCP API Acceptance' client. On another account, run `0.2 Who am I` and copy the values from an existing campaign (`2.4 List campaigns`).\n3. Run the folders top to bottom: 1 auth → 2 discovery → 3 booking → 4 lifecycle → 5 reporting → 6 cleanup. Requests chain automatically: campaign_id, line_item_id, placement_id and creative_id are captured into collection variables by test scripts.\n\nAUTH\nBearer tokens live ~30 minutes and there is NO refresh token. A collection-level pre-request script re-mints automatically when the cached token is missing or expiring, so you normally never need to run the token request by hand.\n\nRATE LIMIT\nThe API allows 100 read requests per 60s — heavy pagination (placement sweeps) will hit 429; wait out the window.",
+    "description": "End-to-end direct-campaign booking against the 360Yield Marketplace API (beta-deals.360yielddev.com / direct-campaigns).\n\nThis collection mirrors what the salesagent Improve Digital adapter sends — every endpoint it calls has a request here, and the booking bodies are the adapter's own payloads. The full request inventory with field-by-field sources lives at docs/adapters/improvedigital/api-requests.md; wire quirks the OpenAPI spec gets wrong are catalogued in docs/adapters/improvedigital/live-wire-shapes.md.\n\nSETUP\n1. Set collection variables `client_id` and `client_secret` (OAuth2 client credentials issued by Improve Digital).\n2. Confirm the account variables (`demand_contact_id`, `buying_entity_id`, `buying_entity_office_id`, `business_unit_id`, `buyer_id`) — the defaults are the dev-platform values for the 'AdCP API Acceptance' client. On another account, run `2.1 Who am I`, or discover them with `2.10` / `2.11`, or copy them from a working campaign (`2.4 List campaigns`).\n3. Run the folders top to bottom: 1 auth → 2 discovery → 3 booking → 4 lifecycle → 5 reporting → 6 cleanup. Requests chain automatically: campaign_id, line_item_id, placement_id, package_id and creative_id are captured into collection variables by test scripts.\n4. In folder 3, steps 3.4 (packages) and 3.5 (geo targeting) are optional — the adapter sends them only when the product config asks for them. 3.3 or 3.4 is mandatory: a line item with no inventory serves nowhere.\n\nAUTH\nBearer tokens live ~30 minutes and there is NO refresh token. A collection-level pre-request script re-mints automatically when the cached token is missing or expiring, so you normally never need to run the token request by hand.\n\nRATE LIMIT\nThe API allows 100 read requests per 60s — heavy pagination (placement sweeps) will hit 429; wait out the window.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -51,13 +51,17 @@
     { "key": "buying_entity_id", "value": "421", "type": "string", "description": "421 = 'Improve Digital Marketplace' on dev" },
     { "key": "buying_entity_office_id", "value": "5068", "type": "string", "description": "Buyer seat — at least one office is required on campaigns" },
     { "key": "business_unit_id", "value": "33", "type": "string", "description": "33 = Azerion on dev; required on line items" },
+    { "key": "buyer_id", "value": "30", "type": "string", "description": "Buyer the line items book under (see 2.1 Who am I)" },
     { "key": "campaign_name", "value": "postman-demo-campaign", "type": "string" },
     { "key": "cpm_bid", "value": "2.5", "type": "string" },
     { "key": "impression_cap", "value": "10000", "type": "string" },
+    { "key": "budget", "value": "25", "type": "string", "description": "impression_cap x cpm_bid / 1000 — keep the two consistent" },
     { "key": "campaign_id", "value": "", "type": "string", "description": "Auto-filled by 3.1" },
     { "key": "line_item_id", "value": "", "type": "string", "description": "Auto-filled by 3.2" },
     { "key": "placement_id", "value": "", "type": "string", "description": "Auto-filled by 2.2 (first 300x250-capable placement)" },
-    { "key": "creative_id", "value": "", "type": "string", "description": "Auto-filled by 3.4" }
+    { "key": "package_id", "value": "", "type": "string", "description": "Auto-filled by 2.6 (first reusable placement package)" },
+    { "key": "region_name", "value": "EMEA", "type": "string", "description": "Geo region for 2.8 / 3.5 — see 2.7" },
+    { "key": "creative_id", "value": "", "type": "string", "description": "Auto-filled by 3.6" }
   ],
   "item": [
     {
@@ -175,6 +179,117 @@
             "url": { "raw": "{{base_url}}/common/v1/i18n/creative_type", "host": ["{{base_url}}"], "path": ["common", "v1", "i18n", "creative_type"] },
             "description": "Canonical creative type names: Third Party Tag, Image (PNG, GIF, JPG), Html5, VAST, VAST_VPAID, Video File, Native, Ad Builder, Raw Video, VAST Audio. Creative create resolves types by exact name."
           }
+        },
+        {
+          "name": "2.6 List placement packages",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const rows = pm.response.json().packages || [];",
+                  "if (rows.length) {",
+                  "    pm.collectionVariables.set('package_id', String(rows[0].id));",
+                  "    console.log('package_id =', rows[0].id, rows[0].name);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/packages?limit=10&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "packages"],
+              "query": [
+                { "key": "limit", "value": "10" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Reusable placement groupings — an alternative to pinning individual placements. The salesagent inventory sync sweeps this endpoint at limit=1000. Saves {{package_id}} for 3.4."
+          }
+        },
+        {
+          "name": "2.7 Peek inside a package",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/packages/{{package_id}}/placements?limit=20&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "packages", "{{package_id}}", "placements"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Live membership of one package. Deliberately NOT part of the inventory sync — 2k+ packages x one request each would exhaust the 100-reads/60s quota; salesagent fetches it on demand when an operator expands a package in the product config UI."
+          }
+        },
+        {
+          "name": "2.8 List geo regions",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/regions?limit=100&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "regions"],
+              "query": [
+                { "key": "limit", "value": "100" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Geo region dictionary (`{\"regions\": [{\"name\": ...}]}`). The platform's region dimension is continental (EMEA / APAC / ...), NOT ISO 3166-2 subdivisions. Needed because every geo-targeting entry must carry its region (3.5)."
+          }
+        },
+        {
+          "name": "2.9 List countries in a region",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/regions/{{region_name}}/countries?limit=100&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "regions", "{{region_name}}", "countries"],
+              "query": [
+                { "key": "limit", "value": "100" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Country dictionary per region (`{\"countries\": [{\"name\": ...}]}`). Geo targeting matches on the platform's exact display names, so ISO alpha-2 codes from buyers must be resolved through 2.8 + 2.9 before they can be sent."
+          }
+        },
+        {
+          "name": "2.10 List buying entities (admin scope)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/admin/v1/buying-entities-combo?limit=100&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "v1", "buying-entities-combo"],
+              "query": [
+                { "key": "limit", "value": "100" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Lightweight {id, name} rows backing the Buying Entity picker in the salesagent adapter settings page. Requires admin-scoped credentials — 403 otherwise, in which case the IDs are entered manually."
+          }
+        },
+        {
+          "name": "2.11 List buying entity offices (admin scope)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/admin/v1/buying-entities/{{buying_entity_id}}/buying-entity-offices?limit=100&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "v1", "buying-entities", "{{buying_entity_id}}", "buying-entity-offices"],
+              "query": [
+                { "key": "limit", "value": "100" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Office rows carry `improve_demand_contact_id`, `billing_currency_code` and `buying_types`. Only offices with `active: true` and 'Classic' in `buying_types` can host a direct campaign — that is the filter the salesagent office picker applies."
+          }
         }
       ]
     },
@@ -254,14 +369,14 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"{{campaign_name}}-li\",\n  \"type\": \"Standard\",\n  \"line_item_status\": \"Active\",\n  \"goal\": \"IMPRESSION\",\n  \"start_date\": \"{{start_date}}\",\n  \"end_date\": \"{{end_date}}\",\n  \"time_zone\": \"Europe/Amsterdam\",\n  \"pricing_model\": \"CPM\",\n  \"cpm_bid\": {{cpm_bid}},\n  \"impression_cap\": {{impression_cap}},\n  \"improve_demand_contact_id\": {{demand_contact_id}},\n  \"business_unit_id\": {{business_unit_id}}\n}"
+              "raw": "{\n  \"name\": \"{{campaign_name}}-li\",\n  \"type\": \"Standard\",\n  \"line_item_status\": \"Active\",\n  \"goal\": \"BUDGET\",\n  \"start_date\": \"{{start_date}}\",\n  \"end_date\": \"{{end_date}}\",\n  \"time_zone\": \"Europe/Amsterdam\",\n  \"cpm_bid\": {{cpm_bid}},\n  \"pricing_model\": \"CPM\",\n  \"pricing_model_type\": \"First Bid\",\n  \"impression_cap\": {{impression_cap}},\n  \"impression_cap_daily\": false,\n  \"budget\": {{budget}},\n  \"budget_is_daily\": false,\n  \"flight_details\": [\n    {\n      \"start_time\": \"{{start_date}}\",\n      \"end_time\": \"{{end_date}}\",\n      \"budget\": {{budget}},\n      \"budget_is_daily\": false,\n      \"impression_cap\": {{impression_cap}},\n      \"impression_cap_daily\": false\n    }\n  ],\n  \"invoice_type\": \"on_actuals\",\n  \"delivery_schedule\": \"Evenly\",\n  \"third_party_inventory\": true,\n  \"is_optimised\": true,\n  \"is_dynamic_optimization\": false,\n  \"dynamic_optimization_kpi_type\": \"\",\n  \"dynamic_optimization_kpi_value\": 0,\n  \"conversion_tracking_enabled\": false,\n  \"keep_on_delivering\": false,\n  \"track_viewability\": false,\n  \"is_consentless\": false,\n  \"is_coppa_compliant\": false,\n  \"optout_mechanism\": [],\n  \"reference_number\": \"{{campaign_name}}-pkg\",\n  \"improve_demand_contact_id\": {{demand_contact_id}},\n  \"business_unit_id\": {{business_unit_id}},\n  \"buyer_id\": {{buyer_id}}\n}"
             },
             "url": {
               "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items",
               "host": ["{{base_url}}"],
               "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items"]
             },
-            "description": "Required (validated live): `type: \"Standard\"`, `line_item_status: \"Active\"`, `goal` for CPM items (IMPRESSION or BUDGET), `business_unit_id`, `improve_demand_contact_id`. Do NOT send `currency` — it must match the campaign owner's default and 400s otherwise; it inherits from the campaign when omitted. Saves {{line_item_id}}."
+            "description": "This is the exact body the salesagent adapter sends (src/adapters/improvedigital/adapter.py::_line_item_payload) — see docs/adapters/improvedigital/api-requests.md.\n\nRequired (validated live): `type: \"Standard\"`, `line_item_status: \"Active\"`, `goal` (BUDGET or IMPRESSION), `business_unit_id`, `improve_demand_contact_id`.\n\nBUDGET pacing needs `budget` plus a `flight_details` row spanning the flight; both the money figure and the impression cap are sent either way, and they must stay consistent (budget = impression_cap x cpm_bid / 1000).\n\nDo NOT send `currency` — it must match the campaign owner's default and 400s otherwise; it inherits from the campaign when omitted.\n\nThe delivery/compliance block (pricing_model_type, invoice_type, third_party_inventory, is_optimised, keep_on_delivering, track_viewability, is_consentless, is_coppa_compliant, conversion_tracking_enabled, optout_mechanism, dynamic_optimization_*) mirrors the platform's own create payload; the API leaves these unset rather than defaulted when omitted.\n\nCaveats to verify against the API docs: `flight_details` is absent from the committed rtb-v3 OpenAPI spec (which documents `custom_budgets` / `daily_impression_caps` instead), and `dynamic_optimization_kpi_value` is typed string there but sent as the number 0. `frequency_interval_type`, when used, must be lowercase (months/weeks/days/hours/minutes).\n\nSaves {{line_item_id}}."
           }
         },
         {
@@ -287,11 +402,63 @@
               "host": ["{{base_url}}"],
               "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}", "placements"]
             },
-            "description": "Explicit placement assignment — envelope `{\"line_item_placements\": [{id, assigned: true}]}`. Add more entries for more placements. (Reusable packages use the same pattern at `.../packages` with `line_item_packages`.)"
+            "description": "Explicit placement assignment — envelope `{\"line_item_placements\": [{id, assigned: true}]}`. Add more entries for more placements. A line item with neither placements (3.3) nor packages (3.4) serves nowhere, and the salesagent adapter treats that as a hard product-config error."
           }
         },
         {
-          "name": "3.4 Create creative (Third Party Tag)",
+          "name": "3.4 Assign packages to line item (optional)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('packages assigned (2xx)', () => pm.expect(pm.response.code).to.be.within(200, 299));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"line_item_packages\": [\n    { \"id\": {{package_id}}, \"assigned\": true }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items/{{line_item_id}}/packages",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}", "packages"]
+            },
+            "description": "Reusable placement packages, same envelope shape as 3.3 but keyed `line_item_packages`. Run 2.6 first to fill {{package_id}}. Products can pin placements, packages, or both — the adapter sends whichever the product config lists."
+          }
+        },
+        {
+          "name": "3.5 Set geo targeting (optional)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('geo targeting set (2xx)', () => pm.expect(pm.response.code).to.be.within(200, 299));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": true,\n  \"geo_targeting\": [\n    { \"country\": \"Netherlands\", \"region\": \"{{region_name}}\", \"exclude\": false }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items/{{line_item_id}}/geo-targeting",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}", "geo-targeting"]
+            },
+            "description": "Geo travels on its own endpoint, never in the line-item create body. Live-validated: `exclude` AND `region` are required on EVERY entry — includes too — despite the spec marking all Geo fields optional (400 'object has missing required properties [\"exclude\",\"region\"]'). Country values must be the platform's own display names from 2.9, not ISO codes. Location targeting reaches city level; there is no postal-code support."
+          }
+        },
+        {
+          "name": "3.6 Create creative (Third Party Tag)",
           "event": [
             {
               "listen": "test",
@@ -325,7 +492,7 @@
           }
         },
         {
-          "name": "3.5 Bind creative to line item",
+          "name": "3.7 Bind creative to line item",
           "event": [
             {
               "listen": "test",
@@ -403,20 +570,20 @@
           }
         },
         {
-          "name": "4.5 Update line item (impression cap)",
+          "name": "4.5 Update line item (budget / impression cap)",
           "request": {
             "method": "PUT",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"{{campaign_name}}-li\",\n  \"type\": \"Standard\",\n  \"line_item_status\": \"Active\",\n  \"goal\": \"IMPRESSION\",\n  \"pricing_model\": \"CPM\",\n  \"cpm_bid\": {{cpm_bid}},\n  \"impression_cap\": 20000,\n  \"improve_demand_contact_id\": {{demand_contact_id}},\n  \"business_unit_id\": {{business_unit_id}}\n}"
+              "raw": "{\n  \"name\": \"{{campaign_name}}-li\",\n  \"type\": \"Standard\",\n  \"line_item_status\": \"Active\",\n  \"goal\": \"BUDGET\",\n  \"pricing_model\": \"CPM\",\n  \"cpm_bid\": {{cpm_bid}},\n  \"budget\": 50,\n  \"budget_is_daily\": false,\n  \"impression_cap\": 20000,\n  \"impression_cap_daily\": false,\n  \"improve_demand_contact_id\": {{demand_contact_id}},\n  \"business_unit_id\": {{business_unit_id}},\n  \"buyer_id\": {{buyer_id}}\n}"
             },
             "url": {
               "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/line-items/{{line_item_id}}",
               "host": ["{{base_url}}"],
               "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items", "{{line_item_id}}"]
             },
-            "description": "PUT expects the full DTO — read-modify-write: GET the line item (4.2), change the field, PUT it back. This body is a minimal example; safest is to echo everything 4.2 returned with your change applied."
+            "description": "PUT expects the full DTO — read-modify-write: GET the line item (4.2), change the field, PUT it back. That is exactly what the adapter does for update_package_budget (`budget`) and update_package_impressions (`impression_cap`): it echoes the GET response with the one field replaced. This body is a minimal illustration; echoing everything 4.2 returned is safer."
           }
         }
       ]
@@ -444,10 +611,87 @@
       ]
     },
     {
-      "name": "6. Cleanup",
+      "name": "6. Reference & probes",
       "item": [
         {
-          "name": "6.1 Delete campaign (hard)",
+          "name": "6.1 Permission probe — classic line items",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/line-items?limit=1",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "line-items"],
+              "query": [{ "key": "limit", "value": "1" }]
+            },
+            "description": "Account-wide line-item read. One of the five endpoints salesagent probes in check_permissions (with /rtb/v1/classic/campaigns, /rtb/v3/placements, /schema/rtb/v1/classic/campaigns/campaign and /rtb/v1/sizes-all) to report which adapter concerns the credentials can actually serve."
+          }
+        },
+        {
+          "name": "6.2 Campaign create schema",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/schema/rtb/v1/classic/campaigns/campaign",
+              "host": ["{{base_url}}"],
+              "path": ["schema", "rtb", "v1", "classic", "campaigns", "campaign"]
+            },
+            "description": "The server-side JSON schema for campaign create — the authority when the OpenAPI spec and the API disagree. Probed by check_permissions as the create_media_buy readiness signal."
+          }
+        },
+        {
+          "name": "6.3 List campaign creatives",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/creatives",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "creatives"]
+            },
+            "description": "Used as a recovery path: when a creative create returns 200 with no usable id in the body, the adapter re-finds the creative here by name (highest id wins) so it can still be bound to a line item."
+          }
+        },
+        {
+          "name": "6.4 Create creative (multipart — non-tag types)",
+          "request": {
+            "method": "POST",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "body",
+                  "type": "text",
+                  "contentType": "application/json",
+                  "value": "{\n  \"name\": \"{{campaign_name}}-vast\",\n  \"type\": \"VAST\",\n  \"size\": \"300x250 (Medium Rectangle)\",\n  \"size_id\": 4,\n  \"width\": 300,\n  \"height\": 250,\n  \"status\": \"Active\",\n  \"tag\": \"https://example.com/vast.xml\",\n  \"advertiser_domain\": \"example.com\"\n}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/rtb/v1/classic/campaigns/{{campaign_id}}/creatives",
+              "host": ["{{base_url}}"],
+              "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "creatives"]
+            },
+            "description": "Single-create is a multipart servlet: the CreativeDto travels as a `body` part with content type application/json (binary image parts would ride alongside). Plain JSON to this path returns 500 'Failed to parse multipart servlet request'. Tag creatives should use 3.6 instead. Do not set Content-Type by hand — Postman writes the multipart boundary."
+          }
+        },
+        {
+          "name": "6.5 Logout (invalidate bearer)",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/oauth/logout/{{access_token}}",
+              "host": ["{{base_url}}"],
+              "path": ["oauth", "logout", "{{access_token}}"]
+            },
+            "description": "Best-effort server-side token invalidation, called when the adapter closes its client. Tokens expire on their own within minutes, so failures here are ignored. Running this invalidates {{access_token}}; the collection pre-request script mints a fresh one on the next call."
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Cleanup",
+      "item": [
+        {
+          "name": "7.1 Delete campaign (hard)",
           "request": {
             "method": "DELETE",
             "url": {
@@ -455,11 +699,11 @@
               "host": ["{{base_url}}"],
               "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}"]
             },
-            "description": "Refused with 400 once the campaign has served impressions (the dev platform attributes simulated impressions within seconds of activation) — use 6.2 then."
+            "description": "Refused with 400 once the campaign has served impressions (the dev platform attributes simulated impressions within seconds of activation) — use 7.2 then. This is exactly the adapter's cleanup path when a booking fails part-way: delete, then archive."
           }
         },
         {
-          "name": "6.2 Archive campaign (soft)",
+          "name": "7.2 Archive campaign (soft)",
           "request": {
             "method": "PUT",
             "url": {

@@ -366,7 +366,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 product_config = self._product_config_from_package(package)
                 if product_config.get("placement_ids") or product_config.get("package_ids"):
                     self.log(
-                        "Would call: PUT .../line-items/<new>/placements/assign "
+                        "Would call: PUT .../line-items/<new>/placements + .../packages "
                         f"placement_ids={product_config.get('placement_ids', [])} "
                         f"package_ids={product_config.get('package_ids', [])}"
                     )
@@ -671,7 +671,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
         payload: dict[str, Any] = {
             "name": package.name or package.package_id,
             "type": "Standard",
-            "line_item_status": "Active",
+            "line_item_status": "Inactive",
             "goal": goal,
             "start_date": self._format_datetime(start_time),
             "end_date": self._format_datetime(end_time),
