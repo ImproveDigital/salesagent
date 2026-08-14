@@ -465,6 +465,44 @@
           }
         },
         {
+          "name": "3.1b Attach campaign metadata",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// CampaignMetadataDto takes ISO-8601 UTC strings, unlike the",
+                  "// booking API's 'YYYY-MM-DD HH:MM:SS' local strings.",
+                  "pm.variables.set('start_iso', new Date(Date.now() + 60 * 60 * 1000).toISOString());",
+                  "pm.variables.set('end_iso', new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('metadata attached (2xx)', () => pm.expect(pm.response.code).to.be.within(200, 299));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"campaignId\": \"{{campaign_id}}\",\n  \"campaignName\": \"{{campaign_name}}\",\n  \"campaignStartDate\": \"{{start_iso}}\",\n  \"campaignEndDate\": \"{{end_iso}}\",\n  \"currencyCode\": \"EUR\",\n  \"entityType\": \"c\",\n  \"completed\": true,\n  \"isCompleted\": true,\n  \"advertiserUuid\": \"{{advertiser_uuid}}\",\n  \"advertiserName\": \"{{advertiser_name}}\",\n  \"agencyId\": {{agency_id}},\n  \"agencyName\": \"{{agency_name}}\",\n  \"businessUnitId\": {{business_unit_id}},\n  \"buyerId\": {{buyer_id}},\n  \"integrationPlatformId\": {{integration_platform_id}},\n  \"seatId\": \"{{seat_id}}\",\n  \"adOpsPersonId\": {{adops_person_id}},\n  \"salesPersonId\": \"{{sales_person_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/metadata-campaigns",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-campaigns"]
+            },
+            "description": "Commercial attribution for a booked campaign — brand, agency, business unit, buyer, DSP seat and the ad-ops / sales owners. A surface PARALLEL to booking: camelCase (booking is snake_case), ISO-8601 UTC dates (booking uses 'YYYY-MM-DD HH:MM:SS' local strings), `campaignId` as a string even though the Classic id is an integer, and only `campaignId` schema-required.\n\nsalesagent posts this immediately after 3.1 so a rejection cleans up the campaign before any line item exists. Read it back with 6.6.\n\nPick the advertiser and agency with 2.12 / 2.13. `entityType: \"c\"`, `completed` and `isCompleted` are fixed values pending confirmation of what the platform derives itself."
+          }
+        },
+        {
           "name": "3.3 Assign placements to line item",
           "event": [
             {
@@ -756,6 +794,18 @@
               "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "creatives"]
             },
             "description": "Single-create is a multipart servlet: the CreativeDto travels as a `body` part with content type application/json (binary image parts would ride alongside). Plain JSON to this path returns 500 'Failed to parse multipart servlet request'. Tag creatives should use 3.6 instead. Do not set Content-Type by hand — Postman writes the multipart boundary."
+          }
+        },
+        {
+          "name": "6.6 Read campaign metadata back",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-campaigns/integration-platform/{{integration_platform_id}}/campaign/{{campaign_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-campaigns", "integration-platform", "{{integration_platform_id}}", "campaign", "{{campaign_id}}"]
+            },
+            "description": "Verify what 3.1b stored. The metadata record has its own `id` distinct from `campaignId` — it points at the Classic campaign rather than being part of it."
           }
         },
         {

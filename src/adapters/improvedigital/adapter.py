@@ -639,6 +639,14 @@ class ImproveDigitalAdapter(AdServerAdapter):
         moment = (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC)
         return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond // 1000:03d}Z"
 
+    @staticmethod
+    def _format_iso_datetime(value: datetime) -> str:
+        """Metadata API datetime format — ISO-8601 UTC with milliseconds
+        (``2026-08-14T14:45:18.407Z``). Naive values are read as UTC rather
+        than the host's local zone, which would silently shift the flight."""
+        moment = (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC)
+        return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond // 1000:03d}Z"
+
     def _campaign_payload(self, buy_name: str, start_time: datetime, end_time: datetime) -> dict[str, Any]:
         """Build a ``CampaignDto`` body.
 
@@ -667,6 +675,67 @@ class ImproveDigitalAdapter(AdServerAdapter):
             payload["buying_entity_office_ids"] = [int(self.buying_entity_office_id)]
         if self.agency_id:
             payload["agencyId"] = int(self.agency_id)
+        return payload
+
+    def _has_campaign_metadata(self) -> bool:
+        """Whether this tenant configured any campaign-metadata attribution.
+
+        Metadata is required for production bookings but not for the
+        Classic API itself, so an unconfigured tenant (dev, smoke tests)
+        books without it rather than failing.
+        """
+        return any(
+            (
+                self.advertiser_uuid,
+                self.agency_id,
+                self.adops_person_id,
+                self.sales_person_id,
+                self.integration_platform_id,
+            )
+        )
+
+    def _campaign_metadata_payload(
+        self, campaign_id: int, buy_name: str, start_time: datetime, end_time: datetime
+    ) -> dict[str, Any]:
+        """Build the ``CampaignMetadataDto`` for a freshly created campaign.
+
+        The metadata API is a surface parallel to booking: the record is
+        keyed by ``campaignId`` and carries the commercial attribution
+        (brand, agency, owners, DSP seat) that the Classic ``CampaignDto``
+        has no room for. Only ``campaignId`` is schema-required; everything
+        else comes from tenant config and is omitted when unset.
+
+        Wire notes: the DTO is camelCase where booking is snake_case, and
+        its dates are ISO-8601 UTC strings (``2026-08-14T14:45:18.407Z``)
+        where booking uses ``YYYY-MM-DD HH:MM:SS`` in the campaign's own
+        timezone. ``campaignId`` is a string here even though the Classic
+        campaign id is an integer.
+        ``entityType``/``completed``/``isCompleted`` are fixed values pending
+        confirmation of what else the platform derives.
+        """
+        payload: dict[str, Any] = {
+            "campaignId": str(campaign_id),
+            "campaignName": buy_name,
+            "campaignStartDate": self._format_iso_datetime(start_time),
+            "campaignEndDate": self._format_iso_datetime(end_time),
+            "currencyCode": self.currency,
+            "entityType": "c",
+            "completed": True,
+            "isCompleted": True,
+        }
+        optional: dict[str, Any] = {
+            "advertiserUuid": self.advertiser_uuid,
+            "advertiserName": self.advertiser_name,
+            "agencyId": int(self.agency_id) if self.agency_id else None,
+            "agencyName": self.agency_name,
+            "businessUnitId": int(self.business_unit_id) if self.business_unit_id else None,
+            "buyerId": int(self.buyer_id) if self.buyer_id else None,
+            "integrationPlatformId": (int(self.integration_platform_id) if self.integration_platform_id else None),
+            "seatId": self.seat_id,
+            "adOpsPersonId": int(self.adops_person_id) if self.adops_person_id else None,
+            "salesPersonId": self.sales_person_id,
+        }
+        payload.update({key: value for key, value in optional.items() if value is not None})
         return payload
 
     def _has_campaign_metadata(self) -> bool:
