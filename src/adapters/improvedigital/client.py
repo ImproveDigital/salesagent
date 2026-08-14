@@ -10,6 +10,7 @@ surface. Composes per-resource sub-clients over a shared OAuth2 transport:
   assignment, VAST validation
 - ``client.inventory`` — buy-side placement search + packages
 - ``client.lookups``   — dimension lookups (sizes, geo, creative types)
+- ``client.metadata``  — campaign metadata API (brand / agency / owners)
 - ``client.reporting`` — Report API (preview / async generation / status)
 
 Endpoint paths come from the committed OpenAPI spec
@@ -307,6 +308,54 @@ class ImproveDigitalAdminClient:
         return self._transport.get_json(f"/admin/v1/buying-entities/{buying_entity_id}/buying-entity-offices", **params)
 
 
+class ImproveDigitalMetadataClient:
+    """Campaign metadata API (``/api/metadata-*``).
+
+    A surface parallel to the booking API: ``CampaignMetadataDto`` records
+    are keyed by ``campaignId`` and carry the commercial attribution a
+    booked campaign needs in production — brand (``advertiserUuid``),
+    agency, business unit, buyer, DSP seat, and the ad-ops / sales owners.
+    The dimension endpoints back the pickers in the adapter settings page.
+    """
+
+    def __init__(self, transport: ImproveDigitalTransport):
+        self._transport = transport
+
+    def list_advertisers(self, search: str | None = None) -> Any:
+        """``GET /api/metadata-advertisers`` — ``MetadataAdvertiser`` rows
+        (``id`` is a UUID string, not an integer)."""
+        return self._transport.get_json("/api/metadata-advertisers", **({"search": search} if search else {}))
+
+    def list_agencies(self, search: str | None = None) -> Any:
+        """``GET /api/metadata-agencies`` — ``AgencyDto`` rows (integer ``id``)."""
+        return self._transport.get_json("/api/metadata-agencies", **({"search": search} if search else {}))
+
+    def list_sales_persons(self, search: str | None = None) -> Any:
+        """``GET /api/metadata-sales-persons`` — sales owners (UUID ``id``)."""
+        return self._transport.get_json("/api/metadata-sales-persons", **({"search": search} if search else {}))
+
+    def list_integration_platforms(self, **params: Any) -> Any:
+        """``GET /api/metadata-integration-platforms`` — ``MetadataDSPDto``
+        rows (the DSP behind ``integrationPlatformId``)."""
+        return self._transport.get_json("/api/metadata-integration-platforms", **params)
+
+    def list_platform_seats(self, platform_id: int) -> Any:
+        """``GET /api/metadata-integration-platforms/{id}/seats`` —
+        ``MetadataDSPSeatDto`` rows (``seatId`` is a string, e.g. "default")."""
+        return self._transport.get_json(f"/api/metadata-integration-platforms/{platform_id}/seats")
+
+    def get_campaign_metadata(self, integration_platform_id: int, campaign_id: str) -> dict[str, Any]:
+        """``GET /api/metadata-campaigns/integration-platform/{ipId}/campaign/{campaignId}``."""
+        return self._transport.get_json(
+            f"/api/metadata-campaigns/integration-platform/{integration_platform_id}/campaign/{campaign_id}"
+        )
+
+    def upsert_campaign_metadata(self, payload: dict[str, Any]) -> Any:
+        """``POST /api/metadata-campaigns`` — ``CampaignMetadataDto``;
+        ``campaignId`` is the only schema-required field."""
+        return self._transport.post_json("/api/metadata-campaigns", payload)
+
+
 class ImproveDigitalReportingClient:
     """Improve Marketplace Report API (definitive delivery metrics)."""
 
@@ -353,6 +402,7 @@ class ImproveDigitalClient:
         self.lookups = ImproveDigitalLookupsClient(self._transport)
         self.reporting = ImproveDigitalReportingClient(self._transport)
         self.admin = ImproveDigitalAdminClient(self._transport)
+        self.metadata = ImproveDigitalMetadataClient(self._transport)
 
     def probe(self, method: str, path: str) -> tuple[int, str]:
         """Non-raising permission probe — see :meth:`ImproveDigitalTransport.probe`."""

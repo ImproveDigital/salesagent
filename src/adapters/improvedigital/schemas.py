@@ -88,11 +88,53 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
     )
     agency_id: int | None = Field(
         default=None,
-        description=(
-            "Default agency ID — NOT part of the Classic campaign create schema; retained "
-            "pending the buyer-attribution decision"
-        ),
+        description="Metadata agency booking the campaign — CampaignMetadataDto.agencyId (pick via /api/metadata-agencies)",
         json_schema_extra={"ui_order": 9},
+    )
+    agency_name: str | None = Field(
+        default=None,
+        description="Display name of the selected agency — CampaignMetadataDto.agencyName",
+        json_schema_extra={"ui_order": 9.1},
+    )
+    advertiser_uuid: str | None = Field(
+        default=None,
+        description=(
+            "Metadata advertiser (brand) UUID — CampaignMetadataDto.advertiserUuid. "
+            "Distinct from default_advertiser_id: the metadata surface keys brands by "
+            "UUID, while CampaignDto.advertiserId is an integer"
+        ),
+        json_schema_extra={"ui_order": 9.2},
+    )
+    advertiser_name: str | None = Field(
+        default=None,
+        description="Display name of the selected advertiser — CampaignMetadataDto.advertiserName",
+        json_schema_extra={"ui_order": 9.3},
+    )
+    integration_platform_id: int | None = Field(
+        default=None,
+        description=(
+            "DSP the metadata record books under — CampaignMetadataDto.integrationPlatformId "
+            "(pick via /api/metadata-integration-platforms; 1 = Improve Digital)"
+        ),
+        json_schema_extra={"ui_order": 9.35},
+    )
+    seat_id: str | None = Field(
+        default=None,
+        description=(
+            "DSP seat on the metadata record — CampaignMetadataDto.seatId "
+            "(string, e.g. 'default'; see /api/metadata-integration-platforms/{id}/seats)"
+        ),
+        json_schema_extra={"ui_order": 9.36},
+    )
+    adops_person_id: int | None = Field(
+        default=None,
+        description="Ad-ops owner for booked campaigns — CampaignMetadataDto.adOpsPersonId (integer)",
+        json_schema_extra={"ui_order": 9.4},
+    )
+    sales_person_id: str | None = Field(
+        default=None,
+        description="Sales owner for booked campaigns — CampaignMetadataDto.salesPersonId (UUID string, not an integer)",
+        json_schema_extra={"ui_order": 9.5},
     )
     business_unit_id: int | None = Field(
         default=None,
