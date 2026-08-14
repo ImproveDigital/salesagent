@@ -143,6 +143,20 @@ class ImproveDigitalAdapter(AdServerAdapter):
         self.improve_demand_contact_id = self.config.get("improve_demand_contact_id")
         self.agency_id = self.config.get("agency_id")
 
+        # Campaign-metadata attribution (CampaignMetadataDto). Tenant-level
+        # for now, so every buy books under the same brand/agency/owners.
+        # TODO(H2): make these per-buyer — resolve from the principal's
+        # improvedigital platform mapping (and later the buyer-routing rules)
+        # with this config as the fallback default, the same way GAM routes
+        # buyer agents to advertisers.
+        self.advertiser_uuid = self.config.get("advertiser_uuid")
+        self.advertiser_name = self.config.get("advertiser_name")
+        self.agency_name = self.config.get("agency_name")
+        self.integration_platform_id = self.config.get("integration_platform_id")
+        self.seat_id = self.config.get("seat_id")
+        self.adops_person_id = self.config.get("adops_person_id")
+        self.sales_person_id = self.config.get("sales_person_id")
+
         self.client_id = self.config.get("client_id")
         self.client_secret = self.config.get("client_secret")
         self.base_url = (self.config.get("api_base_url") or "https://api.360yield.com").rstrip("/")
@@ -358,6 +372,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
             campaign_payload = self._campaign_payload(buy_name, start_time, end_time)
             self.log(f"Would call: POST {self.base_url}/rtb/v1/classic/campaigns")
             self.log(f"  Campaign: {campaign_payload}")
+            if self._has_campaign_metadata():
+                self.log(f"Would call: POST {self.base_url}/api/metadata-campaigns")
+                self.log(f"  Metadata: {self._campaign_metadata_payload(0, buy_name, start_time, end_time)}")
             for package in packages:
                 rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
                 payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
@@ -394,6 +411,12 @@ class ImproveDigitalAdapter(AdServerAdapter):
         try:
             campaign = self._client.campaigns.create_campaign(self._campaign_payload(buy_name, start_time, end_time))
             campaign_id = int(campaign["id"])
+            # Commercial attribution rides on its own record, posted before
+            # the line items so a rejection cleans up the campaign alone.
+            if self._has_campaign_metadata():
+                self._client.metadata.upsert_campaign_metadata(
+                    self._campaign_metadata_payload(campaign_id, buy_name, start_time, end_time)
+                )
             platform_line_item_ids: dict[str, str] = {}
             package_responses: list[ResponsePackage] = []
             for package in packages:
@@ -636,6 +659,65 @@ class ImproveDigitalAdapter(AdServerAdapter):
             payload["buying_entity_office_ids"] = [int(self.buying_entity_office_id)]
         if self.agency_id:
             payload["agencyId"] = int(self.agency_id)
+        return payload
+
+    def _has_campaign_metadata(self) -> bool:
+        """Whether this tenant configured any campaign-metadata attribution.
+
+        Metadata is required for production bookings but not for the
+        Classic API itself, so an unconfigured tenant (dev, smoke tests)
+        books without it rather than failing.
+        """
+        return any(
+            (
+                self.advertiser_uuid,
+                self.agency_id,
+                self.adops_person_id,
+                self.sales_person_id,
+                self.integration_platform_id,
+            )
+        )
+
+    def _campaign_metadata_payload(
+        self, campaign_id: int, buy_name: str, start_time: datetime, end_time: datetime
+    ) -> dict[str, Any]:
+        """Build the ``CampaignMetadataDto`` for a freshly created campaign.
+
+        The metadata API is a surface parallel to booking: the record is
+        keyed by ``campaignId`` and carries the commercial attribution
+        (brand, agency, owners, DSP seat) that the Classic ``CampaignDto``
+        has no room for. Only ``campaignId`` is schema-required; everything
+        else comes from tenant config and is omitted when unset.
+
+        Wire notes: the DTO is camelCase (booking is snake_case), and dates
+        go out as epoch milliseconds to match the platform's own records —
+        the OpenAPI spec types them ``string``, which live records contradict.
+        ``entityType``/``completed``/``isCompleted`` are fixed values pending
+        confirmation of what else the platform derives.
+        """
+        payload: dict[str, Any] = {
+            "campaignId": str(campaign_id),
+            "campaignName": buy_name,
+            "campaignStartDate": int(start_time.timestamp() * 1000),
+            "campaignEndDate": int(end_time.timestamp() * 1000),
+            "currencyCode": self.currency,
+            "entityType": "c",
+            "completed": True,
+            "isCompleted": True,
+        }
+        optional: dict[str, Any] = {
+            "advertiserUuid": self.advertiser_uuid,
+            "advertiserName": self.advertiser_name,
+            "agencyId": int(self.agency_id) if self.agency_id else None,
+            "agencyName": self.agency_name,
+            "businessUnitId": int(self.business_unit_id) if self.business_unit_id else None,
+            "buyerId": int(self.buyer_id) if self.buyer_id else None,
+            "integrationPlatformId": (int(self.integration_platform_id) if self.integration_platform_id else None),
+            "seatId": self.seat_id,
+            "adOpsPersonId": int(self.adops_person_id) if self.adops_person_id else None,
+            "salesPersonId": self.sales_person_id,
+        }
+        payload.update({key: value for key, value in optional.items() if value is not None})
         return payload
 
     def _line_item_payload(

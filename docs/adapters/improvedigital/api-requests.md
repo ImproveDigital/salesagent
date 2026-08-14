@@ -83,6 +83,8 @@ DELETE /oauth/logout/{token}
 | **Test Connection** | `GET /rtb/v1/classic/campaigns?limit=1`, then `GET /lookup/v1/user-details` |
 | **Discover from API** (entities) | `GET /admin/v1/buying-entities-combo?limit=100&offset=N` (paginated) |
 | **Discover from API** (offices) | `GET /admin/v1/buying-entities/{buying_entity_id}/buying-entity-offices?limit=100&offset=N` |
+| **Campaign Metadata** (advertiser picker) | `GET /api/metadata-advertisers?search=<term>` |
+| **Campaign Metadata** (agency picker) | `GET /api/metadata-agencies?search=<term>` |
 | **Expand a package** (product config) | `GET /rtb/v1/packages/{package_id}/placements` |
 
 `user-details` supplies `user_id` (→ `improve_demand_contact_id`),
@@ -125,6 +127,54 @@ POST /rtb/v1/classic/campaigns
   numeric — metadata-advertiser UUIDs are sent as `null`.
 - The response `id` becomes the media buy's external ID
   (`improvedigital_<campaign_id>`).
+
+### 4.1b Attach campaign metadata (when configured)
+
+```
+POST /api/metadata-campaigns
+```
+```json
+{
+  "campaignId": "370306",
+  "campaignName": "adcp_PO-12345",
+  "campaignStartDate": 1786335628000,
+  "campaignEndDate": 1789063199000,
+  "currencyCode": "EUR",
+  "entityType": "c",
+  "completed": true,
+  "isCompleted": true,
+  "advertiserUuid": "b0edd0c5-3fc7-4029-96f0-02e9ff6dca62",
+  "advertiserName": "Other",
+  "agencyId": 182,
+  "agencyName": "Other",
+  "businessUnitId": 33,
+  "buyerId": 30,
+  "integrationPlatformId": 1,
+  "seatId": "default",
+  "adOpsPersonId": 17373,
+  "salesPersonId": "f1b6846f-659b-426a-be89-c2c0b99be27c"
+}
+```
+
+A surface parallel to booking: `CampaignMetadataDto` carries the commercial
+attribution the Classic `CampaignDto` has no room for. Posted right after
+campaign create so a rejection cleans up the campaign before any line item
+exists. Skipped entirely when the tenant configured no metadata fields.
+
+Notes for cross-checking:
+
+- **camelCase**, unlike the snake_case booking API.
+- Dates go out as **epoch milliseconds**, matching live platform records —
+  the OpenAPI spec types `campaignStartDate` / `campaignEndDate` as `string`.
+- `campaignId` is the only schema-required field; everything else is omitted
+  when unset.
+- `entityType: "c"`, `completed` and `isCompleted` are fixed values pending
+  confirmation of what the platform derives on its own.
+- Attribution is tenant-level today — every buy books under the same brand,
+  agency and owners. Per-buyer routing is plan item H2.
+
+Read the record back with
+`GET /api/metadata-campaigns/integration-platform/{integrationPlatformId}/campaign/{campaignId}`.
 
 ### 4.2 Create one line item per package
 

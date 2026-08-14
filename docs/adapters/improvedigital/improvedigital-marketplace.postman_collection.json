@@ -61,6 +61,14 @@
     { "key": "placement_id", "value": "", "type": "string", "description": "Auto-filled by 2.2 (first 300x250-capable placement)" },
     { "key": "package_id", "value": "", "type": "string", "description": "Auto-filled by 2.6 (first reusable placement package)" },
     { "key": "region_name", "value": "EMEA", "type": "string", "description": "Geo region for 2.8 / 3.5 — see 2.7" },
+    { "key": "advertiser_uuid", "value": "", "type": "string", "description": "Metadata brand UUID for 3.1b — pick with 2.12" },
+    { "key": "advertiser_name", "value": "Other", "type": "string" },
+    { "key": "agency_id", "value": "182", "type": "string", "description": "Metadata agency (integer id) — pick with 2.13" },
+    { "key": "agency_name", "value": "Other", "type": "string" },
+    { "key": "integration_platform_id", "value": "1", "type": "string", "description": "1 = Improve Digital — see 2.14" },
+    { "key": "seat_id", "value": "default", "type": "string", "description": "String, not a number" },
+    { "key": "adops_person_id", "value": "", "type": "string", "description": "Integer ad-ops owner id" },
+    { "key": "sales_person_id", "value": "", "type": "string", "description": "UUID string sales owner id" },
     { "key": "creative_id", "value": "", "type": "string", "description": "Auto-filled by 3.6" }
   ],
   "item": [
@@ -290,6 +298,45 @@
             },
             "description": "Office rows carry `improve_demand_contact_id`, `billing_currency_code` and `buying_types`. Only offices with `active: true` and 'Classic' in `buying_types` can host a direct campaign — that is the filter the salesagent office picker applies."
           }
+        },
+        {
+          "name": "2.12 Search metadata advertisers (brands)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-advertisers?search=",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-advertisers"],
+              "query": [{ "key": "search", "value": "", "description": "Free-text filter; empty returns everything" }]
+            },
+            "description": "The brand dimension for campaign metadata (3.1b). Rows are `MetadataAdvertiser`: `id` is a **UUID string**, not an integer — this is why CampaignDto.advertiserId (integer) cannot hold a metadata advertiser. Backs the Advertiser picker in the salesagent adapter settings page."
+          }
+        },
+        {
+          "name": "2.13 Search metadata agencies",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-agencies?search=",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-agencies"],
+              "query": [{ "key": "search", "value": "", "description": "Free-text filter; empty returns everything" }]
+            },
+            "description": "The agency dimension for campaign metadata (3.1b). Rows are `AgencyDto` with an **integer** `id` — the opposite of advertisers, so ids are never coerced between the two."
+          }
+        },
+        {
+          "name": "2.14 List integration platforms (DSPs) and seats",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-integration-platforms?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-integration-platforms"],
+              "query": [{ "key": "limit", "value": "50" }]
+            },
+            "description": "`MetadataDSPDto` rows behind `integrationPlatformId` (1 = Improve Digital). Seats for one platform: `GET /api/metadata-integration-platforms/{id}/seats` — `MetadataDSPSeatDto.id` is a string (e.g. 'default'), which is why `seatId` is quoted in 3.1b."
+          }
         }
       ]
     },
@@ -377,6 +424,44 @@
               "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "line-items"]
             },
             "description": "This is the exact body the salesagent adapter sends (src/adapters/improvedigital/adapter.py::_line_item_payload) — see docs/adapters/improvedigital/api-requests.md.\n\nRequired (validated live): `type: \"Standard\"`, `line_item_status: \"Active\"`, `goal` (BUDGET or IMPRESSION), `business_unit_id`, `improve_demand_contact_id`.\n\nBUDGET pacing needs `budget` plus a `flight_details` row spanning the flight; both the money figure and the impression cap are sent either way, and they must stay consistent (budget = impression_cap x cpm_bid / 1000).\n\nDo NOT send `currency` — it must match the campaign owner's default and 400s otherwise; it inherits from the campaign when omitted.\n\nThe delivery/compliance block (pricing_model_type, invoice_type, third_party_inventory, is_optimised, keep_on_delivering, track_viewability, is_consentless, is_coppa_compliant, conversion_tracking_enabled, optout_mechanism, dynamic_optimization_*) mirrors the platform's own create payload; the API leaves these unset rather than defaulted when omitted.\n\nCaveats to verify against the API docs: `flight_details` is absent from the committed rtb-v3 OpenAPI spec (which documents `custom_budgets` / `daily_impression_caps` instead), and `dynamic_optimization_kpi_value` is typed string there but sent as the number 0. `frequency_interval_type`, when used, must be lowercase (months/weeks/days/hours/minutes).\n\nSaves {{line_item_id}}."
+          }
+        },
+        {
+          "name": "3.1b Attach campaign metadata",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// CampaignMetadataDto takes epoch milliseconds, unlike the",
+                  "// booking API's 'YYYY-MM-DD HH:MM:SS' strings.",
+                  "pm.variables.set('start_ms', String(Date.now() + 60 * 60 * 1000));",
+                  "pm.variables.set('end_ms', String(Date.now() + 7 * 24 * 60 * 60 * 1000));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('metadata attached (2xx)', () => pm.expect(pm.response.code).to.be.within(200, 299));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"campaignId\": \"{{campaign_id}}\",\n  \"campaignName\": \"{{campaign_name}}\",\n  \"campaignStartDate\": {{start_ms}},\n  \"campaignEndDate\": {{end_ms}},\n  \"currencyCode\": \"EUR\",\n  \"entityType\": \"c\",\n  \"completed\": true,\n  \"isCompleted\": true,\n  \"advertiserUuid\": \"{{advertiser_uuid}}\",\n  \"advertiserName\": \"{{advertiser_name}}\",\n  \"agencyId\": {{agency_id}},\n  \"agencyName\": \"{{agency_name}}\",\n  \"businessUnitId\": {{business_unit_id}},\n  \"buyerId\": {{buyer_id}},\n  \"integrationPlatformId\": {{integration_platform_id}},\n  \"seatId\": \"{{seat_id}}\",\n  \"adOpsPersonId\": {{adops_person_id}},\n  \"salesPersonId\": \"{{sales_person_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/metadata-campaigns",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-campaigns"]
+            },
+            "description": "Commercial attribution for a booked campaign — brand, agency, business unit, buyer, DSP seat and the ad-ops / sales owners. A surface PARALLEL to booking: camelCase (booking is snake_case), epoch-millisecond dates (booking uses 'YYYY-MM-DD HH:MM:SS' strings), and only `campaignId` is schema-required.\n\nsalesagent posts this immediately after 3.1 so a rejection cleans up the campaign before any line item exists. Read it back with 6.6.\n\nPick the advertiser and agency with 2.12 / 2.13. `entityType: \"c\"`, `completed` and `isCompleted` are fixed values pending confirmation of what the platform derives itself."
           }
         },
         {
@@ -671,6 +756,18 @@
               "path": ["rtb", "v1", "classic", "campaigns", "{{campaign_id}}", "creatives"]
             },
             "description": "Single-create is a multipart servlet: the CreativeDto travels as a `body` part with content type application/json (binary image parts would ride alongside). Plain JSON to this path returns 500 'Failed to parse multipart servlet request'. Tag creatives should use 3.6 instead. Do not set Content-Type by hand — Postman writes the multipart boundary."
+          }
+        },
+        {
+          "name": "6.6 Read campaign metadata back",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-campaigns/integration-platform/{{integration_platform_id}}/campaign/{{campaign_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-campaigns", "integration-platform", "{{integration_platform_id}}", "campaign", "{{campaign_id}}"]
+            },
+            "description": "Verify what 3.1b stored. The metadata record has its own `id` distinct from `campaignId` — it points at the Classic campaign rather than being part of it."
           }
         },
         {
