@@ -69,6 +69,14 @@
     { "key": "seat_id", "value": "default", "type": "string", "description": "String, not a number" },
     { "key": "adops_person_id", "value": "", "type": "string", "description": "Integer ad-ops owner id" },
     { "key": "sales_person_id", "value": "", "type": "string", "description": "UUID string sales owner id" },
+    { "key": "advertiser_uuid", "value": "", "type": "string", "description": "Metadata brand UUID for 3.1b — pick with 2.12" },
+    { "key": "advertiser_name", "value": "Other", "type": "string" },
+    { "key": "agency_id", "value": "182", "type": "string", "description": "Metadata agency (integer id) — pick with 2.13" },
+    { "key": "agency_name", "value": "Other", "type": "string" },
+    { "key": "integration_platform_id", "value": "1", "type": "string", "description": "1 = Improve Digital — see 2.14" },
+    { "key": "seat_id", "value": "default", "type": "string", "description": "String, not a number" },
+    { "key": "adops_person_id", "value": "", "type": "string", "description": "Integer ad-ops owner id" },
+    { "key": "sales_person_id", "value": "", "type": "string", "description": "UUID string sales owner id" },
     { "key": "creative_id", "value": "", "type": "string", "description": "Auto-filled by 3.6" }
   ],
   "item": [
@@ -297,6 +305,45 @@
               ]
             },
             "description": "Office rows carry `improve_demand_contact_id`, `billing_currency_code` and `buying_types`. Only offices with `active: true` and 'Classic' in `buying_types` can host a direct campaign — that is the filter the salesagent office picker applies."
+          }
+        },
+        {
+          "name": "2.12 Search metadata advertisers (brands)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-advertisers?search=",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-advertisers"],
+              "query": [{ "key": "search", "value": "", "description": "Free-text filter; empty returns everything" }]
+            },
+            "description": "The brand dimension for campaign metadata (3.1b). Rows are `MetadataAdvertiser`: `id` is a **UUID string**, not an integer — this is why CampaignDto.advertiserId (integer) cannot hold a metadata advertiser. Backs the Advertiser picker in the salesagent adapter settings page."
+          }
+        },
+        {
+          "name": "2.13 Search metadata agencies",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-agencies?search=",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-agencies"],
+              "query": [{ "key": "search", "value": "", "description": "Free-text filter; empty returns everything" }]
+            },
+            "description": "The agency dimension for campaign metadata (3.1b). Rows are `AgencyDto` with an **integer** `id` — the opposite of advertisers, so ids are never coerced between the two."
+          }
+        },
+        {
+          "name": "2.14 List integration platforms (DSPs) and seats",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/metadata-integration-platforms?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "metadata-integration-platforms"],
+              "query": [{ "key": "limit", "value": "50" }]
+            },
+            "description": "`MetadataDSPDto` rows behind `integrationPlatformId` (1 = Improve Digital). Seats for one platform: `GET /api/metadata-integration-platforms/{id}/seats` — `MetadataDSPSeatDto.id` is a string (e.g. 'default'), which is why `seatId` is quoted in 3.1b."
           }
         },
         {

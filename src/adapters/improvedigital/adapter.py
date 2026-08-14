@@ -157,6 +157,20 @@ class ImproveDigitalAdapter(AdServerAdapter):
         self.adops_person_id = self.config.get("adops_person_id")
         self.sales_person_id = self.config.get("sales_person_id")
 
+        # Campaign-metadata attribution (CampaignMetadataDto). Tenant-level
+        # for now, so every buy books under the same brand/agency/owners.
+        # TODO(H2): make these per-buyer — resolve from the principal's
+        # improvedigital platform mapping (and later the buyer-routing rules)
+        # with this config as the fallback default, the same way GAM routes
+        # buyer agents to advertisers.
+        self.advertiser_uuid = self.config.get("advertiser_uuid")
+        self.advertiser_name = self.config.get("advertiser_name")
+        self.agency_name = self.config.get("agency_name")
+        self.integration_platform_id = self.config.get("integration_platform_id")
+        self.seat_id = self.config.get("seat_id")
+        self.adops_person_id = self.config.get("adops_person_id")
+        self.sales_person_id = self.config.get("sales_person_id")
+
         self.client_id = self.config.get("client_id")
         self.client_secret = self.config.get("client_secret")
         self.base_url = (self.config.get("api_base_url") or "https://api.360yield.com").rstrip("/")
@@ -375,6 +389,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
             if self._has_campaign_metadata():
                 self.log(f"Would call: POST {self.base_url}/api/metadata-campaigns")
                 self.log(f"  Metadata: {self._campaign_metadata_payload(0, buy_name, start_time, end_time)}")
+            if self._has_campaign_metadata():
+                self.log(f"Would call: POST {self.base_url}/api/metadata-campaigns")
+                self.log(f"  Metadata: {self._campaign_metadata_payload(0, buy_name, start_time, end_time)}")
             for package in packages:
                 rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
                 payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
@@ -411,6 +428,12 @@ class ImproveDigitalAdapter(AdServerAdapter):
         try:
             campaign = self._client.campaigns.create_campaign(self._campaign_payload(buy_name, start_time, end_time))
             campaign_id = int(campaign["id"])
+            # Commercial attribution rides on its own record, posted before
+            # the line items so a rejection cleans up the campaign alone.
+            if self._has_campaign_metadata():
+                self._client.metadata.upsert_campaign_metadata(
+                    self._campaign_metadata_payload(campaign_id, buy_name, start_time, end_time)
+                )
             # Commercial attribution rides on its own record, posted before
             # the line items so a rejection cleans up the campaign alone.
             if self._has_campaign_metadata():
