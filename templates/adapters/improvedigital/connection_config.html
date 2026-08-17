@@ -113,10 +113,10 @@ Expected context:
             <label for="improvedigital_demand_contact_id">Improve Demand Contact ID</label>
             <input type="number" id="improvedigital_demand_contact_id" name="improvedigital_demand_contact_id"
                    value="{{ adapter_config.get('improve_demand_contact_id', '') if adapter_config else '' }}"
-                   placeholder="Optional — office default applies when empty"
-                   {% if adapter_config and adapter_config.get('improve_demand_contact_id') %}readonly{% endif %}>
+                   placeholder="Your API user's user_id — office default applies when empty">
             <small class="form-text text-muted">
-                Optional override — the selected office carries a default demand contact.
+                Editable. Test Connection fills it from your API user, and picking an office
+                overwrites it with that office's default contact — type over either.
             </small>
         </div>
 
@@ -147,22 +147,104 @@ Expected context:
             </small>
         </div>
 
+        <hr style="margin: 2rem 0 1rem 0;">
+
+        <h4>Campaign Metadata</h4>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Which brand and agency the campaign belongs to, and who owns it internally.
+        </p>
+
         <div class="form-group">
-            <label for="improvedigital_default_advertiser_id">Default Advertiser ID</label>
-            <input type="number" id="improvedigital_default_advertiser_id" name="improvedigital_default_advertiser_id"
-                   value="{{ adapter_config.get('default_advertiser_id', '') if adapter_config else '' }}"
-                   placeholder="Optional — used when principal has no improvedigital mapping">
+            <label for="improvedigital_advertiser_uuid">Advertiser (brand)</label>
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                <input type="text" id="improvedigital_advertiser_search" class="form-control"
+                       placeholder="Search advertisers…" style="flex: 1;"
+                       onkeydown="if (event.key === 'Enter') { event.preventDefault(); searchImproveDigitalMetadata('advertisers'); }">
+                <button type="button" onclick="searchImproveDigitalMetadata('advertisers')" class="btn btn-secondary">
+                    Search
+                </button>
+            </div>
+            <select id="improvedigital_advertiser_picker" class="form-control" style="display: none; margin-bottom: 0.5rem;"
+                    onchange="onImproveDigitalMetadataPicked('advertiser')">
+                <option value="">Select an advertiser…</option>
+            </select>
+            <div style="display: flex; gap: 0.5rem;">
+                <input type="text" id="improvedigital_advertiser_uuid" name="improvedigital_advertiser_uuid"
+                       value="{{ adapter_config.get('advertiser_uuid', '') if adapter_config else '' }}"
+                       placeholder="advertiserUuid" style="flex: 2;">
+                <input type="text" id="improvedigital_advertiser_name" name="improvedigital_advertiser_name"
+                       value="{{ adapter_config.get('advertiser_name', '') if adapter_config else '' }}"
+                       placeholder="advertiserName" style="flex: 1;">
+            </div>
             <small class="form-text text-muted">
-                Fallback advertiser ID for principals without explicit platform mappings.
+                Brands are keyed by UUID on the metadata API — this is not the numeric
+                Default Advertiser ID below.
             </small>
         </div>
 
         <div class="form-group">
-            <label for="improvedigital_agency_id">Agency ID</label>
-            <input type="number" id="improvedigital_agency_id" name="improvedigital_agency_id"
-                   value="{{ adapter_config.get('agency_id', '') if adapter_config else '' }}"
-                   placeholder="Optional — default agency applied to campaigns">
+            <label for="improvedigital_agency_id">Agency</label>
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                <input type="text" id="improvedigital_agency_search" class="form-control"
+                       placeholder="Search agencies…" style="flex: 1;"
+                       onkeydown="if (event.key === 'Enter') { event.preventDefault(); searchImproveDigitalMetadata('agencies'); }">
+                <button type="button" onclick="searchImproveDigitalMetadata('agencies')" class="btn btn-secondary">
+                    Search
+                </button>
+            </div>
+            <select id="improvedigital_agency_picker" class="form-control" style="display: none; margin-bottom: 0.5rem;"
+                    onchange="onImproveDigitalMetadataPicked('agency')">
+                <option value="">Select an agency…</option>
+            </select>
+            <div style="display: flex; gap: 0.5rem;">
+                <input type="number" id="improvedigital_agency_id" name="improvedigital_agency_id"
+                       value="{{ adapter_config.get('agency_id', '') if adapter_config else '' }}"
+                       placeholder="agencyId" style="flex: 2;">
+                <input type="text" id="improvedigital_agency_name" name="improvedigital_agency_name"
+                       value="{{ adapter_config.get('agency_name', '') if adapter_config else '' }}"
+                       placeholder="agencyName" style="flex: 1;">
+            </div>
         </div>
+
+        <div class="form-group" style="display: flex; gap: 1rem;">
+            <div style="flex: 1;">
+                <label for="improvedigital_integration_platform_id">Integration Platform ID (DSP)</label>
+                <input type="number" id="improvedigital_integration_platform_id" name="improvedigital_integration_platform_id"
+                       value="{{ adapter_config.get('integration_platform_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. 1 (Improve Digital)">
+                <small class="form-text text-muted">
+                    <code>integrationPlatformId</code> — see <code>/api/metadata-integration-platforms</code>.
+                </small>
+            </div>
+            <div style="flex: 1;">
+                <label for="improvedigital_seat_id">Seat ID</label>
+                <input type="text" id="improvedigital_seat_id" name="improvedigital_seat_id"
+                       value="{{ adapter_config.get('seat_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. default">
+                <small class="form-text text-muted">
+                    <code>seatId</code> — a string, not a number.
+                </small>
+            </div>
+        </div>
+
+        <div class="form-group" style="display: flex; gap: 1rem;">
+            <div style="flex: 1;">
+                <label for="improvedigital_adops_person_id">Ad Ops Person ID</label>
+                <input type="number" id="improvedigital_adops_person_id" name="improvedigital_adops_person_id"
+                       value="{{ adapter_config.get('adops_person_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. 17373">
+                <small class="form-text text-muted">Integer — <code>adOpsPersonId</code>.</small>
+            </div>
+            <div style="flex: 1;">
+                <label for="improvedigital_sales_person_id">Sales Person ID</label>
+                <input type="text" id="improvedigital_sales_person_id" name="improvedigital_sales_person_id"
+                       value="{{ adapter_config.get('sales_person_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. f1b6846f-659b-426a-be89-c2c0b99be27c">
+                <small class="form-text text-muted">UUID string — <code>salesPersonId</code>.</small>
+            </div>
+        </div>
+
+        <span id="improvedigital-metadata-status" style="display: block; margin-bottom: 1rem;"></span>
 
         <div class="form-group">
             <label for="improvedigital_currency">Default Currency</label>
@@ -252,7 +334,6 @@ function _improvedigitalPayload() {
     const demandContactEl = document.getElementById('improvedigital_demand_contact_id');
     const businessUnitEl = document.getElementById('improvedigital_business_unit_id');
     const buyerEl = document.getElementById('improvedigital_buyer_id');
-    const advertiserEl = document.getElementById('improvedigital_default_advertiser_id');
     const agencyEl = document.getElementById('improvedigital_agency_id');
     const baseUrlEl = document.getElementById('improvedigital_api_base_url');
     const config = {
@@ -262,7 +343,15 @@ function _improvedigitalPayload() {
         improve_demand_contact_id: demandContactEl.value ? parseInt(demandContactEl.value, 10) : null,
         business_unit_id: businessUnitEl.value ? parseInt(businessUnitEl.value, 10) : null,
         buyer_id: buyerEl.value ? parseInt(buyerEl.value, 10) : null,
-        default_advertiser_id: advertiserEl.value ? parseInt(advertiserEl.value, 10) : null,
+        advertiser_uuid: document.getElementById('improvedigital_advertiser_uuid').value.trim() || null,
+        advertiser_name: document.getElementById('improvedigital_advertiser_name').value.trim() || null,
+        agency_name: document.getElementById('improvedigital_agency_name').value.trim() || null,
+        adops_person_id: document.getElementById('improvedigital_adops_person_id').value
+            ? parseInt(document.getElementById('improvedigital_adops_person_id').value, 10) : null,
+        sales_person_id: document.getElementById('improvedigital_sales_person_id').value.trim() || null,
+        integration_platform_id: document.getElementById('improvedigital_integration_platform_id').value
+            ? parseInt(document.getElementById('improvedigital_integration_platform_id').value, 10) : null,
+        seat_id: document.getElementById('improvedigital_seat_id').value.trim() || null,
         agency_id: agencyEl.value ? parseInt(agencyEl.value, 10) : null,
         currency: document.getElementById('improvedigital_currency').value,
         timezone: document.getElementById('improvedigital_timezone').value || 'UTC',
@@ -344,6 +433,67 @@ function _renderImproveDigitalBuyerOptions(buyers) {
     return buyers.length;
 }
 
+// Campaign metadata dimensions. Advertiser ids are UUID strings and agency
+// ids are integers, so option values stay verbatim — never parsed.
+const _improvedigitalMetadata = {advertisers: [], agencies: []};
+
+function searchImproveDigitalMetadata(kind) {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('improvedigital-metadata-status');
+    const singular = kind === 'advertisers' ? 'advertiser' : 'agency';
+    const searchEl = document.getElementById('improvedigital_' + singular + '_search');
+    const picker = document.getElementById('improvedigital_' + singular + '_picker');
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Searching ' + kind + '…</span>';
+
+    const payload = _improvedigitalCredsPayload();
+    payload.kind = kind;
+    payload.search = searchEl.value.trim();
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/discover-metadata', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Lookup failed') + '</span>';
+            return;
+        }
+        _improvedigitalMetadata[kind] = data.items || [];
+        picker.innerHTML = '<option value="">Select an ' + singular + '…</option>';
+        _improvedigitalMetadata[kind].forEach(item => {
+            const opt = document.createElement('option');
+            opt.value = item.id;
+            opt.textContent = (item.name || item.id) + ' (' + item.id + ')';
+            picker.appendChild(opt);
+        });
+        picker.style.display = _improvedigitalMetadata[kind].length ? 'block' : 'none';
+        statusEl.innerHTML = '<span style="color: #10b981;">✓ ' + _improvedigitalMetadata[kind].length +
+            ' ' + kind + ' found</span>';
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function onImproveDigitalMetadataPicked(singular) {
+    const kind = singular === 'advertiser' ? 'advertisers' : 'agencies';
+    const picker = document.getElementById('improvedigital_' + singular + '_picker');
+    if (!picker.value) return;
+    const item = _improvedigitalMetadata[kind].find(row => String(row.id) === picker.value);
+    if (!item) return;
+    const idField = singular === 'advertiser' ? 'improvedigital_advertiser_uuid' : 'improvedigital_agency_id';
+    document.getElementById(idField).value = item.id;
+    document.getElementById('improvedigital_' + singular + '_name').value = item.name || '';
+    document.getElementById('improvedigital-metadata-status').innerHTML =
+        '<span style="color: #10b981;">✓ ' + singular + ' set to "' + (item.name || item.id) +
+        '" — remember to Save</span>';
+}
+
 function onImproveDigitalBuyerPicked() {
     const picker = document.getElementById('improvedigital_buyer_picker');
     if (!picker.value) return;
@@ -351,9 +501,11 @@ function onImproveDigitalBuyerPicked() {
     updateImproveDigitalReadiness();
 }
 
+// Entity and office are locked once discovered so a stray keystroke can't
+// desync them from each other. The demand contact stays editable — it is a
+// deliberate override of the office default.
 function _setImproveDigitalIdsReadonly(readonly) {
-    ['improvedigital_buying_entity_id', 'improvedigital_buying_entity_office_id',
-     'improvedigital_demand_contact_id'].forEach(id => {
+    ['improvedigital_buying_entity_id', 'improvedigital_buying_entity_office_id'].forEach(id => {
         document.getElementById(id).readOnly = readonly;
     });
 }
@@ -591,7 +743,6 @@ function testImproveDigitalConnection() {
             }
             const contactEl = document.getElementById('improvedigital_demand_contact_id');
             if (contactEl && !contactEl.value && data.user && data.user.user_id) {
-                contactEl.readOnly = false;
                 contactEl.value = data.user.user_id;
                 filled.push('Demand Contact ID (' + data.user.user_id + ')');
             }

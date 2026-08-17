@@ -222,7 +222,19 @@ def get_adapter(
                             "agency_id": impd_validated.agency_id,
                             "buying_entity_id": impd_validated.buying_entity_id,
                             "buying_entity_office_id": impd_validated.buying_entity_office_id,
+                            "campaign_type": impd_validated.campaign_type,
                             "business_unit_id": impd_validated.business_unit_id,
+                            "buyer_id": impd_validated.buyer_id,
+                            # Campaign-metadata attribution (CampaignMetadataDto) —
+                            # dropping any of these silently disables the
+                            # POST /api/metadata-campaigns step in create_media_buy.
+                            "agency_name": impd_validated.agency_name,
+                            "advertiser_uuid": impd_validated.advertiser_uuid,
+                            "advertiser_name": impd_validated.advertiser_name,
+                            "integration_platform_id": impd_validated.integration_platform_id,
+                            "seat_id": impd_validated.seat_id,
+                            "adops_person_id": impd_validated.adops_person_id,
+                            "sales_person_id": impd_validated.sales_person_id,
                             "currency": impd_validated.currency,
                             "timezone": impd_validated.timezone,
                             "manual_approval_required": impd_validated.manual_approval_required,
