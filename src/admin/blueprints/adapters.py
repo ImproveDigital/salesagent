@@ -1236,6 +1236,66 @@ def discover_improvedigital_buying_entities(tenant_id, **kwargs):
         return jsonify({"success": False, "error": "Discovery failed (see server logs)"}), 500
 
 
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/discover-metadata", methods=["POST"])
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
+def discover_improvedigital_metadata(tenant_id, **kwargs):
+    """Search the campaign-metadata dimensions (advertisers / agencies).
+
+    Backs the Campaign Metadata pickers in the adapter connection UI. Both
+    endpoints take a free-text ``search`` and return ``{id, name}`` rows —
+    advertiser ids are UUID strings, agency ids are integers, so ids are
+    passed through verbatim rather than coerced.
+
+    Read-only — never writes to AdapterConfig — so it opts into the
+    embedded-write gate.
+    """
+    try:
+        data = request.get_json() or {}
+        kind = str(data.get("kind") or "advertisers")
+        if kind not in ("advertisers", "agencies"):
+            return jsonify({"success": False, "error": f"Unknown metadata kind {kind!r}"}), 400
+
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client = ImproveDigitalClient(**client_kwargs)
+        search = (data.get("search") or "").strip() or None
+        try:
+            fetch = client.metadata.list_advertisers if kind == "advertisers" else client.metadata.list_agencies
+            rows = _improvedigital_rows(fetch(search), kind, "content", "data")
+        except ImproveDigitalError as exc:
+            if exc.status_code == 403:
+                return jsonify(
+                    {
+                        "success": False,
+                        "discovery_available": False,
+                        "error": "Credentials lack metadata API scope — enter the values manually",
+                    }
+                )
+            logger.warning(
+                "Improve Digital metadata discovery failed: tenant_id=%s kind=%s status=%s error=%s body_excerpt=%s",
+                tenant_id,
+                kind,
+                exc.status_code,
+                exc,
+                safe_upstream_body_excerpt(exc.body),
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the metadata lookup"}), 200
+
+        items = [
+            {"id": row.get("id"), "name": row.get("name")}
+            for row in rows
+            if isinstance(row, dict) and row.get("id") is not None
+        ]
+        return jsonify({"success": True, "kind": kind, "items": items})
+    except Exception as e:
+        logger.error(f"Improve Digital metadata discovery failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Metadata discovery failed (see server logs)"}), 500
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory", methods=["GET"])
 @require_tenant_access()
 def list_improvedigital_inventory(tenant_id, **kwargs):
