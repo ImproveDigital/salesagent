@@ -676,7 +676,7 @@ function syncImproveDigitalInventory() {
     const tenantId = '{{ tenant_id }}';
     const statusEl = document.getElementById('improvedigital-inventory-sync-status');
 
-    statusEl.innerHTML = '<span style="color: #6b7280;">Syncing… (this can take 15-30s)</span>';
+    statusEl.innerHTML = '<span style="color: #6b7280;">Starting sync…</span>';
 
     fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/sync-inventory', {
         method: 'POST',
@@ -685,17 +685,52 @@ function syncImproveDigitalInventory() {
     })
     .then(response => response.json())
     .then(data => {
-        if (data.success) {
-            const summary = Object.entries(data.counts || {})
-                .map(([k, v]) => k + '=' + v)
-                .join(', ');
-            statusEl.innerHTML = '<span style="color: #10b981;">✓ Synced ' + data.total_synced + ' items (' + summary + ')</span>';
-        } else if (data.counts && Object.keys(data.counts).length > 0) {
-            const counts = Object.entries(data.counts).map(([k, v]) => k + '=' + v).join(', ');
-            const errors = Object.entries(data.errors || {}).map(([k, v]) => k + ': ' + v).join('; ');
-            statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Partial: synced ' + counts + ' but failed: ' + errors + '</span>';
+        if (data.success && data.sync_id) {
+            _pollImproveDigitalSync(scriptRoot, tenantId, data.sync_id, statusEl, Date.now());
         } else {
-            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Sync failed') + '</span>';
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Sync failed to start') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function _pollImproveDigitalSync(scriptRoot, tenantId, syncId, statusEl, startedMs) {
+    // The sync runs in a background thread server-side; pages commit as they
+    // are fetched, so the live cache total is real progress, not a spinner.
+    if (Date.now() - startedMs > 10 * 60 * 1000) {
+        statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Sync still running in the background — refresh later for the result</span>';
+        return;
+    }
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/sync-status/' + syncId, {
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(job => {
+        if (job.status !== 'completed' && job.status !== 'failed') {
+            fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/inventory-stats', {
+                credentials: 'same-origin',
+            })
+            .then(r => r.json())
+            .then(stats => {
+                statusEl.innerHTML = '<span style="color: #6b7280;">Syncing… ' + (stats.total || 0) + ' rows cached so far</span>';
+            })
+            .catch(() => {});
+            setTimeout(() => _pollImproveDigitalSync(scriptRoot, tenantId, syncId, statusEl, startedMs), 2000);
+            return;
+        }
+        const counts = job.counts || {};
+        const errors = job.errors || {};
+        const summary = Object.entries(counts).map(([k, v]) => k + '=' + v).join(', ');
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        if (job.status === 'completed' && Object.keys(errors).length === 0) {
+            statusEl.innerHTML = '<span style="color: #10b981;">✓ Synced ' + total + ' items (' + summary + ')</span>';
+        } else if (Object.keys(counts).length > 0) {
+            const errorText = Object.entries(errors).map(([k, v]) => k + ': ' + v).join('; ');
+            statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Partial: synced ' + summary + ' but failed: ' + errorText + '</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (job.error_message || 'Sync failed') + '</span>';
         }
     })
     .catch(error => {

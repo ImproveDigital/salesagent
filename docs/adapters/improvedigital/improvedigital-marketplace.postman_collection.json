@@ -196,7 +196,9 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "const rows = pm.response.json().packages || [];",
+                  "// Envelope key renamed upstream ~2026-08: line_item_packages (was packages).",
+                  "const body = pm.response.json();",
+                  "const rows = body.line_item_packages || body.packages || [];",
                   "if (rows.length) {",
                   "    pm.collectionVariables.set('package_id', String(rows[0].id));",
                   "    console.log('package_id =', rows[0].id, rows[0].name);",

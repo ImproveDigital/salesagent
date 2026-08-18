@@ -270,7 +270,7 @@ class ImproveDigitalTransport:
                 status_code=response.status_code,
                 body=response.text,
             )
-        expires_in = float(body.get("expiresIn", 10 * 60))
+        expires_in = float(body.get("expiresIn", 100 * 60))
         logger.info("Improve Digital: minted bearer (expires_in=%s)", int(expires_in))
         return token, expires_in
 

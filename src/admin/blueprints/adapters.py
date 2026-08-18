@@ -1407,57 +1407,67 @@ def peek_improvedigital_package_placements(tenant_id, package_id, **kwargs):
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-inventory", methods=["POST"])
-@require_tenant_access(role=("admin",))
+@require_tenant_access(api_mode=True, role=("admin",))
 def sync_improvedigital_inventory(tenant_id, **kwargs):
-    """Sweep the 360Yield buy-side inventory and refresh the local cache.
+    """Enqueue a 360Yield buy-side inventory sweep and return immediately.
 
-    Runs through the shared sync orchestration (adapter construction from
-    stored config, SyncJob bookkeeping). Returns per-entity-type counts +
-    any partial-failure errors.
+    The sweep runs in a background thread via the shared sync orchestration
+    (adapter construction from stored config, SyncJob bookkeeping); rows
+    are committed page-by-page so the cache fills progressively. Returns
+    202 with the ``sync_id`` — the UI polls ``sync-status/<sync_id>`` for
+    the outcome. Enqueueing is idempotent: if a sweep is already in flight
+    its ``sync_id`` is returned instead of starting a duplicate.
 
     The cache feeds the Improve Digital product setup UI; it's not exposed
     to AdCP buyers (property discovery goes through AAO lookup).
     """
-    from src.services.adapter_sync_orchestration import SyncAlreadyRunning, execute_adapter_sync
+    from src.services.adapter_sync_orchestration import enqueue_adapter_sync
 
     try:
-        result = execute_adapter_sync(
+        sync_id = enqueue_adapter_sync(
             tenant_id=tenant_id,
             adapter_type="improvedigital",
             sync_kind="inventory",
             triggered_by="admin_button",
         )
-        if result is None:
+        if sync_id is None:
             return (
                 jsonify({"success": False, "error": "Improve Digital adapter is not configured for this tenant"}),
                 400,
             )
-        return jsonify(
-            {
-                "success": result.succeeded,
-                "sync_id": result.sync_id,
-                "counts": result.counts,
-                "errors": result.errors,
-                "total_synced": sum(result.counts.values()),
-                "started_at": result.started_at.isoformat() if result.started_at else None,
-                "finished_at": result.finished_at.isoformat() if result.finished_at else None,
-            }
-        )
-    except SyncAlreadyRunning as exc:
-        return (
-            jsonify(
-                {
-                    "success": False,
-                    "error": f"An inventory sync is already running ({exc.sync_id}) — wait for it to finish",
-                }
-            ),
-            409,
-        )
-    except ValidationError as exc:
-        return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400
+        return jsonify({"success": True, "sync_id": sync_id, "status": "queued"}), 202
     except Exception as e:
-        logger.error(f"Improve Digital inventory sync failed: {e}", exc_info=True)
-        return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
+        logger.error(f"Improve Digital inventory sync enqueue failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed to start (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-status/<sync_id>", methods=["GET"])
+@require_tenant_access(api_mode=True)
+def improvedigital_sync_status(tenant_id, sync_id, **kwargs):
+    """Poll one sync job's state — feeds the async Sync Inventory button.
+
+    Counts/errors come from ``SyncJob.progress`` (stamped by the
+    orchestrator when the run finishes); while the job is still running
+    the UI shows live cache growth via ``inventory-stats`` instead.
+    """
+    from src.core.database.repositories.sync_job import SyncJobRepository
+
+    with get_db_session() as session:
+        job = SyncJobRepository(session, tenant_id).find_by_sync_id(sync_id)
+        if job is None:
+            return jsonify({"success": False, "error": "Unknown sync job"}), 404
+        progress = job.progress or {}
+        payload = {
+            "success": True,
+            "sync_id": job.sync_id,
+            "status": job.status,
+            "counts": progress.get("counts", {}),
+            "errors": progress.get("errors", {}),
+            "error_message": job.error_message,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        }
+    return jsonify(payload)
 
 
 def _improvedigital_reporting_payload(stat_rows, buys_by_campaign: dict, currency: str) -> dict:
