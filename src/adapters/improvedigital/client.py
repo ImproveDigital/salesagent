@@ -376,6 +376,11 @@ class ImproveDigitalReportingClient:
     def allowed_filters(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._transport.post_json("/report/allowed-filters", payload or {})
 
+    def available_currencies(self) -> Any:
+        """``GET /report/ext/currency/available`` — ``ReportCurrencyForDisplay``
+        rows (``{id, code}``; 15 currencies on dev, EUR=1 / USD=2 / GBP=3 …)."""
+        return self._transport.get_json("/report/ext/currency/available")
+
 
 class ImproveDigitalClient:
     """Facade over the 360Yield Marketplace API — composes the sub-clients."""

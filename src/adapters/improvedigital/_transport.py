@@ -51,6 +51,7 @@ _REFRESH_LEEWAY_SECONDS = 2 * 60
 _RATE_LIMIT_RETRY_DELAYS = (20.0, 65.0)
 _RATE_LIMIT_SLEEP_SECONDS = 61.0
 
+
 class ImproveDigitalError(Exception):
     """Base exception for Improve Digital API errors.
 

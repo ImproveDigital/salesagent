@@ -1463,6 +1463,7 @@ def improvedigital_sync_status(tenant_id, sync_id, **kwargs):
             "status": job.status,
             "counts": progress.get("counts", {}),
             "errors": progress.get("errors", {}),
+            "metadata": progress.get("metadata", {}),
             "error_message": job.error_message,
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
@@ -1470,24 +1471,56 @@ def improvedigital_sync_status(tenant_id, sync_id, **kwargs):
     return jsonify(payload)
 
 
-def _improvedigital_reporting_payload(stat_rows, buys_by_campaign: dict, currency: str) -> dict:
+def _improvedigital_reporting_payload(
+    stat_rows,
+    buys_by_campaign: dict,
+    currency: str,
+    *,
+    campaign_id: str | None = None,
+    media_buy_id: str | None = None,
+    q: str | None = None,
+) -> dict:
     """Shape line-item stats cache rows into the reporting-page JSON.
 
     ``buys_by_campaign`` maps Classic campaign IDs to MediaBuy rows so each
     stats row can carry the buy it belongs to; rows whose campaign has no
     matching buy (e.g. booked outside salesagent) still render, unattributed.
     Spend is stored as micros — converted to currency units here, once.
+
+    Filters apply per row *before* totals, so the summary cards always
+    match the visible table: ``campaign_id`` / ``media_buy_id`` are exact
+    matches, ``q`` is a case-insensitive substring across the buy's order
+    name, advertiser and the campaign / line-item / media-buy ids.
     """
+    needle = (q or "").strip().lower()
     rows = []
     total_impressions = 0
     total_clicks = 0
     total_spend = 0.0
     total_completed = 0
     for stat in stat_rows:
+        buy = buys_by_campaign.get(str(stat.campaign_id)) if stat.campaign_id else None
+        if campaign_id and str(stat.campaign_id or "") != str(campaign_id):
+            continue
+        if media_buy_id and (buy is None or buy.media_buy_id != media_buy_id):
+            continue
+        if needle:
+            haystack = " ".join(
+                str(value)
+                for value in (
+                    stat.campaign_id,
+                    stat.line_item_id,
+                    buy.media_buy_id if buy else None,
+                    buy.order_name if buy else None,
+                    buy.advertiser_name if buy else None,
+                )
+                if value
+            ).lower()
+            if needle not in haystack:
+                continue
         impressions = int(stat.impressions or 0)
         clicks = int(stat.clicks) if stat.clicks is not None else None
         spend = round((stat.spend_micros or 0) / 1_000_000, 2)
-        buy = buys_by_campaign.get(str(stat.campaign_id)) if stat.campaign_id else None
         rows.append(
             {
                 "campaign_id": stat.campaign_id,
@@ -1521,25 +1554,147 @@ def _improvedigital_reporting_payload(stat_rows, buys_by_campaign: dict, currenc
     }
 
 
+# Quick ranges the reporting page may request live from the Report API
+# (subset of ReportGenerationRequestDateRange.quick the UI exposes).
+_IMPROVEDIGITAL_REPORT_RANGES = {
+    "TODAY",
+    "YESTERDAY",
+    "LAST_7_DAYS",
+    "LAST_31_DAYS",
+    "LAST_90_DAYS",
+    "THIS_MONTH",
+    "LAST_MONTH",
+    "LAST_3_MONTHS",
+}
+# Mirrors the GAM reporting page's timezone picker (+ UTC).
+_IMPROVEDIGITAL_REPORT_TIMEZONES = {
+    "Europe/Amsterdam",
+    "Europe/London",
+    "Europe/Lisbon",
+    "Europe/Helsinki",
+    "UTC",
+}
+
+
+def _improvedigital_live_stat_rows(client, campaign_ids: list[int], quick_range: str, timezone: str, currency: str):
+    """Query the Report API live for a date-filtered reporting-page view.
+
+    The stats cache holds one aggregate row per line item with no time
+    dimension, so date filters can't slice it — a live preview scoped to
+    the tenant's campaigns answers instead (same request vocabulary as the
+    reporting sync). Returns stat-row-shaped objects so
+    :func:`_improvedigital_reporting_payload` treats both sources alike.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from src.adapters.improvedigital.reporting_sync import (
+        PREVIEW_ROW_LIMIT,
+        ImproveDigitalReportingSync,
+        _as_float,
+        _as_int,
+        build_report_request,
+        quick_date_range,
+        resolve_currency_id,
+    )
+
+    if not campaign_ids:
+        return []
+    # Shared request builder + currency resolver — one wire contract with
+    # the reporting sync, so the live view can never drift from it.
+    # quick_date_range translates TODAY (500s upstream) to a relative range.
+    request_body = build_report_request(
+        currency_id=resolve_currency_id(client, currency),
+        date_range=quick_date_range(quick_range),
+        campaign_ids=campaign_ids,
+        timezone=timezone,
+    )
+    payload = {
+        "rows": PREVIEW_ROW_LIMIT,
+        "report_generation_request": {**request_body, "action": "PREVIEW_REPORT"},
+    }
+    logger.info(
+        "Improve Digital live report view: POST /report/ext/preview window=%s timezone=%s campaigns=%s",
+        quick_range,
+        timezone,
+        campaign_ids,
+    )
+    import time as _time
+
+    started = _time.monotonic()
+    rows = ImproveDigitalReportingSync._parse_rows(client.reporting.preview(payload))
+    logger.info(
+        "Improve Digital live report view: %d line-item row(s) in %.1fs",
+        len(rows),
+        _time.monotonic() - started,
+    )
+    as_of = datetime.now(UTC)
+    stat_rows = []
+    for row in rows:
+        spend = _as_float(row.get("advertiser_payout"))
+        stat_rows.append(
+            SimpleNamespace(
+                campaign_id=str(row["campaign_id"]) if row.get("campaign_id") not in (None, "") else None,
+                line_item_id=str(row["line_item_id"]),
+                impressions=_as_int(row.get("impressions")),
+                clicks=_as_int(row.get("clicks")),
+                completed_views=_as_int(row.get("complete")),
+                spend_micros=int(round(spend * 1_000_000)) if spend is not None else 0,
+                currency=currency,
+                as_of=as_of,
+            )
+        )
+    return stat_rows
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/reporting", methods=["GET"])
 @require_tenant_access(api_mode=True)
 def get_improvedigital_reporting(tenant_id, **kwargs):
-    """Serve the Report-API stats cache for the reporting page.
+    """Serve reporting-page data — cached by default, live when date-filtered.
 
-    Reads ``improvedigital_line_item_stats`` (populated by the reporting
-    sync — no upstream call here, so the page loads instantly) and joins
-    campaigns to media buys via the ``improvedigital_<campaign_id>``
-    reference on ``external_id`` / ``media_buy_id``.
+    Without ``date_range``, reads ``improvedigital_line_item_stats``
+    (populated by the reporting sync — no upstream call, instant load).
+    With ``date_range=<quick>`` (e.g. TODAY, LAST_7_DAYS) plus optional
+    ``timezone``, runs a live Report API preview scoped to the tenant's
+    campaigns instead — the cache has no time dimension to slice.
+    Campaigns are joined to media buys via the
+    ``improvedigital_<campaign_id>`` reference on ``external_id`` /
+    ``media_buy_id``; ``campaign_id`` / ``media_buy_id`` / ``q`` filter
+    either source identically.
     """
+    from src.adapters.improvedigital.client import ImproveDigitalError
     from src.core.database.models import MediaBuy
     from src.core.database.repositories.improvedigital_line_item_stats import (
         ImproveDigitalLineItemStatsRepository,
     )
 
+    date_range = (request.args.get("date_range") or "").strip().upper() or None
+    timezone_arg = (request.args.get("timezone") or "").strip() or "Europe/Amsterdam"
+    if date_range and date_range not in _IMPROVEDIGITAL_REPORT_RANGES:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": f"Unsupported date_range — pick one of {sorted(_IMPROVEDIGITAL_REPORT_RANGES)}",
+                }
+            ),
+            400,
+        )
+    if timezone_arg not in _IMPROVEDIGITAL_REPORT_TIMEZONES:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": f"Unsupported timezone — pick one of {sorted(_IMPROVEDIGITAL_REPORT_TIMEZONES)}",
+                }
+            ),
+            400,
+        )
+
     with get_db_session() as session:
         repo = ImproveDigitalLineItemStatsRepository(session, tenant_id)
-        stat_rows = repo.list_all()
         last_synced_at = repo.latest_sync_at()
+        stat_rows = [] if date_range else repo.list_all()
 
         buys_by_campaign: dict = {}
         for buy in session.scalars(select(MediaBuy).filter_by(tenant_id=tenant_id)).all():
@@ -1554,9 +1709,38 @@ def get_improvedigital_reporting(tenant_id, **kwargs):
         config_row = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
         currency = str((config_row.config_json or {}).get("currency") or "EUR") if config_row else "EUR"
 
-        payload = _improvedigital_reporting_payload(stat_rows, buys_by_campaign, currency)
+    if date_range:
+        # Live path — only campaigns booked via salesagent are queried
+        # (unattributed cache rows have no known campaign list to scope by).
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, {})
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+        from src.adapters.improvedigital import ImproveDigitalClient
 
+        client = ImproveDigitalClient(timeout=90.0, **client_kwargs)
+        try:
+            stat_rows = _improvedigital_live_stat_rows(
+                client,
+                sorted(int(cid) for cid in buys_by_campaign),
+                date_range,
+                timezone_arg,
+                currency,
+            )
+        except ImproveDigitalError as exc:
+            logger.warning("Improve Digital live reporting query failed for tenant %s: %s", tenant_id, exc)
+            return jsonify({"success": False, "error": f"Report API query failed: {exc}"}), 502
+
+    payload = _improvedigital_reporting_payload(
+        stat_rows,
+        buys_by_campaign,
+        currency,
+        campaign_id=(request.args.get("campaign_id") or "").strip() or None,
+        media_buy_id=(request.args.get("media_buy_id") or "").strip() or None,
+        q=(request.args.get("q") or "").strip() or None,
+    )
     payload["success"] = True
+    payload["source"] = "live" if date_range else "cache"
+    payload["date_range"] = date_range
     payload["last_synced_at"] = last_synced_at.isoformat() if last_synced_at else None
     return jsonify(payload)
 
@@ -1564,63 +1748,53 @@ def get_improvedigital_reporting(tenant_id, **kwargs):
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-reporting", methods=["POST"])
 @require_tenant_access(role=("admin",), api_mode=True)
 def sync_improvedigital_reporting(tenant_id, **kwargs):
-    """Pull fresh delivery metrics from the 360Yield Report API and upsert
-    the ``improvedigital_line_item_stats`` cache feeding the reporting page
-    and ``get_media_buy_delivery``.
+    """Pull fresh delivery metrics from the 360Yield Report API (generation
+    job + preview) and upsert the ``improvedigital_line_item_stats`` cache
+    feeding the reporting page and ``get_media_buy_delivery``; totals also
+    roll up to the media buys' ``delivered_*`` columns.
 
-    Returns 503 when the Report API scope is still pending for this OAuth2
-    client (mirrors the FreeWheel sync-reporting contract).
+    Async: enqueues the sync in a background thread and returns 202 with
+    the ``sync_id`` — the UI polls ``sync-status/<sync_id>`` for the
+    outcome (a generation job + preview can take many seconds, and holding
+    the request thread open serves nobody). Enqueueing is idempotent: a
+    sync already in flight returns its existing ``sync_id``. A pending
+    Report API scope grant surfaces via the status endpoint's metadata.
+
+    Optional JSON body narrows the sync to the reporting page's selected
+    campaign: ``{"campaign_id": "<id>"}`` (date filters stay view-only —
+    a partial-window sync would clobber the lifetime cache).
     """
-    from src.services.adapter_sync_orchestration import SyncAlreadyRunning, execute_adapter_sync
+    from src.services.adapter_sync_orchestration import enqueue_adapter_sync
+
+    # Only the campaign filter narrows the sync. Date-range/timezone are
+    # deliberately NOT forwarded: the cache and delivered_* columns hold
+    # lifetime totals, and syncing a partial window would overwrite them
+    # with window-only counts. Date-filtered views use the live GET path.
+    data = request.get_json(silent=True) or {}
+    run_kwargs: dict = {}
+    campaign_id = str(data.get("campaign_id") or "").strip()
+    if campaign_id:
+        if not campaign_id.isdigit():
+            return jsonify({"success": False, "error": "campaign_id must be numeric"}), 400
+        run_kwargs["campaign_ids"] = [campaign_id]
 
     try:
-        result = execute_adapter_sync(
+        sync_id = enqueue_adapter_sync(
             tenant_id=tenant_id,
             adapter_type="improvedigital",
             sync_kind="reporting",
             triggered_by="admin_button",
+            run_kwargs=run_kwargs or None,
         )
-        if result is None:
+        if sync_id is None:
             return (
                 jsonify({"success": False, "error": "Improve Digital adapter is not configured for this tenant"}),
                 400,
             )
-        if result.scope_pending:
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "scope_pending": True,
-                        "sync_id": result.sync_id,
-                        "error": result.errors.get("scope", "Report API scope grant pending"),
-                    }
-                ),
-                503,
-            )
-        return jsonify(
-            {
-                "success": result.succeeded,
-                "sync_id": result.sync_id,
-                "line_items_updated": result.counts.get("line_items", 0),
-                "campaigns_covered": result.counts.get("campaigns", 0),
-                "error": next(iter(result.errors.values()), None) if result.errors else None,
-            }
-        )
-    except SyncAlreadyRunning as exc:
-        return (
-            jsonify(
-                {
-                    "success": False,
-                    "error": f"A reporting sync is already running ({exc.sync_id}) — wait for it to finish",
-                }
-            ),
-            409,
-        )
-    except ValidationError as exc:
-        return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400
+        return jsonify({"success": True, "sync_id": sync_id, "status": "queued"}), 202
     except Exception as e:
-        logger.error(f"Improve Digital reporting sync failed: {e}", exc_info=True)
-        return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
+        logger.error(f"Improve Digital reporting sync enqueue failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed to start (see server logs)"}), 500
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/springserve/inventory", methods=["GET"])

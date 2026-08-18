@@ -730,7 +730,7 @@
               "host": ["{{base_url}}"],
               "path": ["report", "ext", "preview"]
             },
-            "description": "Synchronous report, <=500 rows as JSON. CRITICAL: the body is snake_case (`report_generation_request`, `report_type`, `date_range`) — the camelCase in the OpenAPI spec 500s with 'request is null'. `advertiser_payout` = spend; `complete` = video completions. currency_id: 1=EUR, 2=USD. A fresh campaign returns 0 rows until it has delivered. For >500 rows use POST /report/ext/generation + GET /report/ext/generation-status/{id}."
+            "description": "Synchronous report, <=2000 rows as JSON (ReportPreviewRequest.rows max per the OpenAPI spec, validated live). CRITICAL: the body is snake_case (`report_generation_request`, `report_type`, `date_range`) — the camelCase in the OpenAPI spec 500s with 'request is null'. `advertiser_payout` = spend; `complete` = video completions. currency_id per GET /report/ext/currency/available (1=EUR, 2=USD, 3=GBP, …). date_range accepts `quick` and `relative` ({from_count, from_unit: DAY, to_count: 0, to_unit: DAY}); `fixed` is broken on the dev platform (400 'Failed to read request' in every format tried; /report/ext/convert-to-fixed-date-range 500s too). A fresh campaign returns 0 rows until it has delivered. For >2000 rows use POST /report/ext/generation + GET /report/ext/generation-status/{id}."
           }
         }
       ]

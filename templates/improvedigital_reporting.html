@@ -13,11 +13,64 @@
         </div>
     </div>
     <p class="text-muted">
-        Definitive delivery metrics from the 360Yield Report API (last 31 days), refreshed by the
-        reporting sync. Numbers update when the sync runs — not in real time.
+        Definitive delivery metrics from the 360Yield Report API. The default view reads the cache
+        refreshed by the reporting sync (covering the full active flight window); picking a Date Range
+        queries the Report API live for that period.
     </p>
 
     <div id="sync-status" class="alert" style="display: none;"></div>
+
+    <!-- Controls (mirrors the GAM reporting page) — applied server-side,
+         so the summary cards always match the table -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-2">
+                    <label for="filter-range">Date Range</label>
+                    <select id="filter-range" class="form-control">
+                        <option value="" selected>Cached (last sync)</option>
+                        <option value="TODAY">Today</option>
+                        <option value="YESTERDAY">Yesterday</option>
+                        <option value="LAST_7_DAYS">Last 7 Days</option>
+                        <option value="LAST_31_DAYS">Last 31 Days</option>
+                        <option value="LAST_90_DAYS">Last 90 Days</option>
+                        <option value="THIS_MONTH">This Month</option>
+                        <option value="LAST_MONTH">Last Month</option>
+                        <option value="LAST_3_MONTHS">Last 3 Months</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label for="filter-timezone">Timezone</label>
+                    <select id="filter-timezone" class="form-control" disabled
+                            title="Applies to live date-range queries; the cache uses the sync's timezone">
+                        <option value="Europe/Amsterdam" selected>Amsterdam (CET/CEST)</option>
+                        <option value="Europe/London">London (GMT/BST)</option>
+                        <option value="Europe/Lisbon">Lisbon (WET/WEST)</option>
+                        <option value="Europe/Helsinki">Helsinki (EET/EEST)</option>
+                        <option value="UTC">UTC</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label for="filter-q">Search</label>
+                    <input type="text" id="filter-q" class="form-control"
+                           placeholder="Order, advertiser, campaign or line item…">
+                </div>
+                <div class="col-md-3">
+                    <label for="filter-campaign">Campaign</label>
+                    <select id="filter-campaign" class="form-control">
+                        <option value="">All campaigns</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label>&nbsp;</label>
+                    <div class="d-flex" style="gap: 6px;">
+                        <button class="btn btn-primary" onclick="exportData()">Export Data</button>
+                        <button class="btn btn-outline-secondary" onclick="clearFilters()">Clear</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Summary Cards -->
     <div class="row mb-4">
@@ -40,16 +93,16 @@
         <div class="col-md-3">
             <div class="card">
                 <div class="card-body">
-                    <h5 class="card-title">Clicks / CTR</h5>
-                    <h2 id="total-clicks">-</h2>
+                    <h5 class="card-title">Average CPM</h5>
+                    <h2 id="avg-cpm">-</h2>
                 </div>
             </div>
         </div>
         <div class="col-md-3">
             <div class="card">
                 <div class="card-body">
-                    <h5 class="card-title">Completed Views</h5>
-                    <h2 id="total-completed">-</h2>
+                    <h5 class="card-title">Clicks / CTR</h5>
+                    <h2 id="total-clicks">-</h2>
                 </div>
             </div>
         </div>
@@ -95,31 +148,106 @@ function fmtMoney(v) { return v === null || v === undefined ? '—' : currencySy
 function fmtPct(v) { return v === null || v === undefined ? '—' : Number(v).toFixed(2) + '%'; }
 function esc(v) { const d = document.createElement('div'); d.textContent = v ?? ''; return d.innerHTML; }
 
+const seenCampaigns = new Set();
+let currentRows = [];
+let loadSeq = 0;
+
+function currentFilterParams() {
+    const params = new URLSearchParams();
+    const q = document.getElementById('filter-q').value.trim();
+    const campaign = document.getElementById('filter-campaign').value;
+    const range = document.getElementById('filter-range').value;
+    if (q) params.set('q', q);
+    if (campaign) params.set('campaign_id', campaign);
+    if (range) {
+        params.set('date_range', range);
+        params.set('timezone', document.getElementById('filter-timezone').value);
+    }
+    return params;
+}
+
+function addCampaignOption(campaignId, label) {
+    if (!campaignId || seenCampaigns.has(campaignId)) return;
+    seenCampaigns.add(campaignId);
+    const opt = document.createElement('option');
+    opt.value = campaignId;
+    opt.textContent = label || campaignId;
+    document.getElementById('filter-campaign').appendChild(opt);
+}
+
+function clearFilters() {
+    document.getElementById('filter-q').value = '';
+    document.getElementById('filter-campaign').value = '';
+    document.getElementById('filter-range').value = '';
+    document.getElementById('filter-timezone').disabled = true;
+    loadReporting();
+}
+
+function exportData() {
+    if (!currentRows.length) return;
+    const header = ['Media Buy', 'Order', 'Advertiser', 'Campaign', 'Line Item',
+                    'Impressions', 'Clicks', 'CTR %', 'Completed Views', 'Spend'];
+    const csvCell = (v) => {
+        let s = v === null || v === undefined ? '' : String(v);
+        // Neutralize spreadsheet formula injection — order/advertiser names
+        // are buyer-supplied and a leading =+-@ executes on open in Excel.
+        if (/^[=+\-@]/.test(s)) s = "'" + s;
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const csv = [header.join(',')].concat(currentRows.map(row => [
+        row.media_buy_id, row.order_name, row.advertiser_name, row.campaign_id, row.line_item_id,
+        row.impressions, row.clicks, row.ctr, row.completed_views, row.spend
+    ].map(csvCell).join(','))).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.setAttribute('hidden', '');
+    a.setAttribute('href', url);
+    const range = document.getElementById('filter-range').value || 'cached';
+    a.setAttribute('download', `improvedigital-reporting-${range.toLowerCase()}.csv`);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+}
+
 async function loadReporting() {
+    // Sequence token: a slow live query resolving after a newer request
+    // (e.g. Clear during a 90-day fetch) must not overwrite fresher data.
+    const seq = ++loadSeq;
     document.getElementById('table-loading').style.display = '';
     document.getElementById('report-table').style.display = 'none';
     document.getElementById('table-empty').style.display = 'none';
     try {
-        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/improvedigital/reporting`, {
+        const params = currentFilterParams();
+        const query = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/improvedigital/reporting${query}`, {
             headers: {'Accept': 'application/json'}
         });
         const data = await response.json();
+        if (seq !== loadSeq) return;
         if (!response.ok || data.success === false) {
             throw new Error(data.error || `HTTP ${response.status}`);
         }
 
+        currentRows = data.rows || [];
         document.getElementById('total-impressions').textContent = fmtInt(data.totals.impressions);
         document.getElementById('total-spend').textContent = fmtMoney(data.totals.spend);
+        document.getElementById('avg-cpm').textContent = data.totals.impressions
+            ? fmtMoney(data.totals.spend / data.totals.impressions * 1000)
+            : '—';
         document.getElementById('total-clicks').textContent =
             `${fmtInt(data.totals.clicks)}${data.totals.ctr !== null ? ' (' + fmtPct(data.totals.ctr) + ')' : ''}`;
-        document.getElementById('total-completed').textContent = fmtInt(data.totals.completed_views);
-        document.getElementById('last-synced').textContent = data.last_synced_at
-            ? `Last synced: ${new Date(data.last_synced_at).toLocaleString()}`
-            : 'Never synced';
+        document.getElementById('last-synced').textContent = data.source === 'live'
+            ? `Live Report API query (${data.date_range})`
+            : (data.last_synced_at
+                ? `Last synced: ${new Date(data.last_synced_at).toLocaleString()}`
+                : 'Never synced');
 
         const tbody = document.getElementById('report-rows');
         tbody.innerHTML = '';
         for (const row of data.rows) {
+            addCampaignOption(row.campaign_id, row.order_name ? `${row.campaign_id} — ${row.order_name}` : row.campaign_id);
             const buyCell = row.media_buy_id
                 ? `<a href="${scriptRoot}/tenant/${tenantId}/media-buy/${encodeURIComponent(row.media_buy_id)}">${esc(row.order_name || row.media_buy_id)}</a>`
                 : '<span class="text-muted">not booked via salesagent</span>';
@@ -140,7 +268,11 @@ async function loadReporting() {
         if (data.rows.length) {
             document.getElementById('report-table').style.display = '';
         } else {
-            document.getElementById('table-empty').style.display = '';
+            const emptyEl = document.getElementById('table-empty');
+            emptyEl.textContent = params.toString()
+                ? 'No rows match the current filters.'
+                : 'No delivery data in the reporting cache yet. Book a media buy, let it deliver, then press Sync Reporting Now.';
+            emptyEl.style.display = '';
         }
     } catch (err) {
         document.getElementById('table-loading').style.display = 'none';
@@ -159,28 +291,101 @@ async function syncReporting() {
     const btn = document.getElementById('sync-btn');
     btn.disabled = true;
     btn.textContent = 'Syncing…';
-    showStatus('info', 'Pulling fresh metrics from the 360Yield Report API…');
+    showStatus('info', 'Starting reporting sync…');
     try {
+        // Only the campaign filter narrows the sync — date filters stay
+        // view-only (a partial-window sync would overwrite the lifetime
+        // cache and delivered_* columns with window-only totals).
+        const syncBody = {};
+        const campaign = document.getElementById('filter-campaign').value;
+        if (campaign) syncBody.campaign_id = campaign;
         const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/improvedigital/sync-reporting`, {
             method: 'POST',
-            headers: {'Accept': 'application/json'}
+            headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+            body: JSON.stringify(syncBody)
         });
         const data = await response.json();
-        if (response.status === 503 && data.scope_pending) {
-            showStatus('warning', data.error);
-        } else if (!data.success) {
-            showStatus('danger', data.error || 'Sync failed');
+        if (!data.success || !data.sync_id) {
+            showStatus('danger', data.error || 'Sync failed to start');
+            resetSyncButton();
+            return;
+        }
+        showStatus('info', 'Sync running — pulling fresh metrics from the 360Yield Report API…');
+        pollReportingSync(data.sync_id, Date.now());
+    } catch (err) {
+        showStatus('danger', `Sync request failed: ${err.message}`);
+        resetSyncButton();
+    }
+}
+
+function resetSyncButton() {
+    const btn = document.getElementById('sync-btn');
+    btn.disabled = false;
+    btn.textContent = 'Sync Reporting Now';
+}
+
+async function pollReportingSync(syncId, startedMs) {
+    // The sync runs in a background thread server-side; poll the job row.
+    if (Date.now() - startedMs > 5 * 60 * 1000) {
+        showStatus('warning', 'Sync is still running in the background — refresh later for the result.');
+        resetSyncButton();
+        return;
+    }
+    try {
+        const response = await fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/improvedigital/sync-status/${encodeURIComponent(syncId)}`, {
+            headers: {'Accept': 'application/json'},
+            credentials: 'same-origin'
+        });
+        const job = await response.json();
+        if (job.status !== 'completed' && job.status !== 'failed') {
+            setTimeout(() => pollReportingSync(syncId, startedMs), 2000);
+            return;
+        }
+        if ((job.metadata || {}).scope_pending) {
+            showStatus('warning', (job.errors || {}).scope || 'Report API scope grant pending');
+        } else if (job.status === 'failed') {
+            showStatus('danger', job.error_message || 'Sync failed');
         } else {
-            showStatus('success', `Synced ${data.line_items_updated} line items across ${data.campaigns_covered} campaigns.`);
+            const counts = job.counts || {};
+            showStatus('success', `Synced ${counts.line_items ?? 0} line items across ${counts.campaigns ?? 0} campaigns.`);
             await loadReporting();
         }
     } catch (err) {
-        showStatus('danger', `Sync request failed: ${err.message}`);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = 'Sync Reporting Now';
+        showStatus('danger', `Sync status check failed: ${err.message}`);
     }
+    resetSyncButton();
 }
+
+// Deep links: ?q=…&campaign_id=… pre-fill the filters (e.g. from a media
+// buy details page linking to its campaign's reporting rows).
+const initParams = new URLSearchParams(location.search);
+document.getElementById('filter-q').value = initParams.get('q') || '';
+const initCampaign = (initParams.get('campaign_id') || '').trim();
+if (initCampaign) {
+    addCampaignOption(initCampaign, initCampaign);
+    document.getElementById('filter-campaign').value = initCampaign;
+}
+// Match against the option list directly — interpolating the raw URL param
+// into a querySelector string throws on quotes/brackets and would abort the
+// whole script (dead controls, permanent spinner).
+const initRange = (initParams.get('date_range') || '').trim().toUpperCase();
+const rangeSelect = document.getElementById('filter-range');
+if (initRange && Array.from(rangeSelect.options).some(opt => opt.value === initRange)) {
+    rangeSelect.value = initRange;
+    document.getElementById('filter-timezone').disabled = false;
+}
+
+let filterDebounce = null;
+document.getElementById('filter-q').addEventListener('input', () => {
+    clearTimeout(filterDebounce);
+    filterDebounce = setTimeout(loadReporting, 300);
+});
+document.getElementById('filter-campaign').addEventListener('change', loadReporting);
+document.getElementById('filter-range').addEventListener('change', () => {
+    document.getElementById('filter-timezone').disabled = !document.getElementById('filter-range').value;
+    loadReporting();
+});
+document.getElementById('filter-timezone').addEventListener('change', loadReporting);
 
 loadReporting();
 </script>

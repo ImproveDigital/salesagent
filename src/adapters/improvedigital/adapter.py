@@ -1221,23 +1221,53 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 completion_rate=0.7,
                 currency=self.currency,
             )
-        # Definitive metrics come from the Report API cache populated by
-        # run_reporting_sync. Raising (rather than returning zeros) while the
-        # cache is empty tells the delivery webhook scheduler to skip this
-        # buy instead of reporting false zeros.
+        # Primary source: the Classic campaign's own inline lifetime counters
+        # (impressions/clicks/completes/spent ride on GET campaigns/{id} and
+        # its line items) — a live per-view read, exactly like the GAM details
+        # page. The Report API cache and a targeted report pull remain the
+        # fallbacks when the campaign read fails (e.g. a buy booked on a
+        # different environment than the current base_url). Raising (rather
+        # than returning zeros) when every source is dry tells the delivery
+        # webhook scheduler to skip this buy instead of reporting false zeros.
         from src.core.database.database_session import get_db_session
         from src.core.database.repositories.improvedigital_line_item_stats import (
             ImproveDigitalLineItemStatsRepository,
         )
 
         campaign_id = self._resolve_campaign_id(media_buy_id)
+        # The Classic counters are LIFETIME figures — only answer with them
+        # when the caller effectively asked for lifetime delivery (the
+        # details page requests a 3-year span). Windowed requests (delivery
+        # webhooks asking for yesterday) go to the report-backed cache, so
+        # lifetime numbers are never mislabeled as a period's delivery —
+        # the same guard GAM applies to its delivered_* snapshot.
+        window_days = (
+            (date_range.end - date_range.start).days
+            if date_range is not None and date_range.start and date_range.end
+            else 0
+        )
+        if window_days >= 365:
+            try:
+                return self._live_campaign_delivery(media_buy_id, campaign_id, date_range)
+            except (ImproveDigitalError, AttributeError, KeyError, TypeError, ValueError) as exc:
+                # AttributeError/ImproveDigitalError = client surface or
+                # upstream unavailable (expected for cross-environment buys);
+                # the rest signal a wire-shape change and deserve a warning.
+                log = logger.info if isinstance(exc, ImproveDigitalError | AttributeError) else logger.warning
+                log(
+                    "Improve Digital live campaign delivery unavailable for %s — falling back to reporting cache: %s",
+                    campaign_id,
+                    exc,
+                )
         with get_db_session() as session:
             repo = ImproveDigitalLineItemStatsRepository(session, self.tenant_id or "default")
             stat_rows = repo.list_by_campaign(campaign_id)
         if not stat_rows:
+            stat_rows = self._pull_delivery_into_cache(campaign_id, date_range)
+        if not stat_rows:
             raise DeliveryDataUnavailable(
                 media_buy_id,
-                reason="Improve Digital reporting cache has no rows for this buy yet (reporting sync pending)",
+                reason="Improve Digital has no delivery reported for this buy yet",
             )
         return self._aggregate_stat_rows_to_delivery_response(
             media_buy_id,
@@ -1247,14 +1277,105 @@ class ImproveDigitalAdapter(AdServerAdapter):
             default_currency=self.currency,
         )
 
+    def _live_campaign_delivery(
+        self, media_buy_id: str, campaign_id: str, date_range: ReportingPeriod
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        """Lifetime delivery straight off the Classic campaign entity.
+
+        ``GET /rtb/v1/classic/campaigns/{id}`` and its line-item listing
+        carry inline counters (``impressions``, ``clicks``, ``completes``,
+        ``spent`` in campaign currency) — validated live on production.
+        Zeros from here are real zeros (the campaign exists and simply
+        hasn't delivered), unlike a missing cache row. Raises on any read
+        failure so the caller can fall back to the reporting cache.
+        """
+        from types import SimpleNamespace
+
+        assert self._client is not None
+        campaign = self._client.campaigns.get_campaign(int(campaign_id))
+        currency = str(campaign.get("currency") or self.currency)
+        line_items = self._client.campaigns.list_line_items(int(campaign_id)).get("line_items") or []
+        rows = []
+        for item in line_items:
+            if item.get("id") is None:
+                continue
+            spent = float(item.get("spent") or 0)
+            rows.append(
+                SimpleNamespace(
+                    line_item_id=str(item["id"]),
+                    impressions=int(item.get("impressions") or 0),
+                    clicks=int(item["clicks"]) if item.get("clicks") is not None else None,
+                    completed_views=int(item["completes"]) if item.get("completes") is not None else None,
+                    spend_micros=int(round(spent * 1_000_000)),
+                    currency=str(item.get("currency") or currency),
+                )
+            )
+        if not rows:
+            raise ValueError(f"campaign {campaign_id} has no line items to read delivery from")
+        return self._aggregate_stat_rows_to_delivery_response(
+            media_buy_id,
+            date_range,
+            rows,
+            package_id_attr="line_item_id",
+            default_currency=currency,
+        )
+
+    def _pull_delivery_into_cache(self, campaign_id: str, date_range: ReportingPeriod) -> list[Any]:
+        """Cache-miss fallback: targeted Report API pull for one campaign.
+
+        Mirrors the GAM details page (live ad-server query per view), but
+        writes through the reporting cache so the details page, the
+        reporting UI and the delivery webhooks all read the same rows.
+        Returns ``[]`` — never raises — when the Report API scope is still
+        pending, the client exposes no reporting surface (older fakes), or
+        the campaign simply hasn't delivered.
+        """
+        from src.adapters.improvedigital.reporting_sync import (
+            ImproveDigitalReportingSync,
+            ReportingScopeNotGranted,
+        )
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.improvedigital_line_item_stats import (
+            ImproveDigitalLineItemStatsRepository,
+        )
+
+        if self._client is None or getattr(self._client, "reporting", None) is None:
+            return []
+        if not str(campaign_id).isdigit():
+            return []
+        earliest_start = date_range.start.date() if date_range is not None and date_range.start else None
+        with get_db_session() as session:
+            syncer = ImproveDigitalReportingSync(
+                client=self._client,
+                tenant_id=self.tenant_id or "default",
+                session=session,
+                currency=self.currency,
+                timezone=self.timezone,
+            )
+            try:
+                # update_media_buys=False: a delivery *read* warms the cache
+                # but must not mutate publisher-facing delivered_* columns.
+                syncer.run(campaign_ids=[campaign_id], earliest_start=earliest_start, update_media_buys=False)
+            except (ReportingScopeNotGranted, ImproveDigitalError) as exc:
+                logger.info("Improve Digital targeted delivery pull failed for campaign %s: %s", campaign_id, exc)
+                return []
+            return ImproveDigitalLineItemStatsRepository(session, self.tenant_id or "default").list_by_campaign(
+                campaign_id
+            )
+
     # ----- reporting sync -----
 
-    def run_reporting_sync(self) -> AdapterSyncResult:
+    def run_reporting_sync(self, campaign_ids: list[str] | None = None) -> AdapterSyncResult:
         """Refresh the ``improvedigital_line_item_stats`` cache from the
-        Report API (preview, ≤500 rows) for this tenant's active buys.
+        Report API (generation job + preview) for this tenant's active buys,
+        then roll totals up to the buys' ``delivered_*`` columns.
 
-        Called by the shared adapter reporting-sync scheduler and the admin
-        "Sync Reporting Now" button.
+        Called by the shared adapter reporting-sync scheduler (no kwargs)
+        and the admin "Sync Reporting Now" button, which may narrow to the
+        campaign selected on the reporting page. The window is always
+        flight-aware — never a UI-picked date range — because the cache and
+        ``delivered_*`` columns hold lifetime totals that a partial window
+        would clobber; date-filtered *views* use the live GET path instead.
         """
         from src.adapters.improvedigital.reporting_sync import (
             ImproveDigitalReportingSync,
@@ -1281,7 +1402,10 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 timezone=self.timezone,
             )
             try:
-                inner = syncer.run()
+                # Targeted runs derive the window from the selected buys'
+                # own flight starts — same flight-aware window as a full run.
+                earliest = syncer.earliest_start_for(campaign_ids) if campaign_ids else None
+                inner = syncer.run(campaign_ids=campaign_ids, earliest_start=earliest)
             except ReportingScopeNotGranted as exc:
                 return AdapterSyncResult(
                     sync_kind="reporting",
