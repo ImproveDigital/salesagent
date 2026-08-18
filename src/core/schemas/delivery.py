@@ -406,6 +406,10 @@ class AdapterPackageDelivery(SalesAgentBaseModel):
     package_id: str
     impressions: int
     spend: float
+    # Audio/video completions surfaced from in-stream VAST inventory.
+    # None when the platform's reporting doesn't break completions out
+    # per package.
+    completed_views: int | None = None
     by_placement: list[dict[str, Any]] | None = None
     by_geo: list[dict[str, Any]] | None = None
     by_device_type: list[dict[str, Any]] | None = None

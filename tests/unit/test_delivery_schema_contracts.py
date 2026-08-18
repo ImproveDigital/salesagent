@@ -329,6 +329,7 @@ class TestAdapterPackageDelivery:
             "package_id",
             "impressions",
             "spend",
+            "completed_views",
             "by_placement",
             "by_geo",
             "by_device_type",

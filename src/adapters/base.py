@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, TypeVar
 
 if TYPE_CHECKING:
     from src.core.schemas import Snapshot, Targeting
@@ -12,9 +13,15 @@ from adcp.types.aliases import Package as ResponsePackage
 from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
+from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
 from src.core.audit_logger import get_audit_logger
 from src.core.enum_helpers import enum_value
-from src.core.exceptions import AdCPConfigurationError
+from src.core.exceptions import (
+    AdCPAdapterError,
+    AdCPCapabilityNotSupportedError,
+    AdCPConfigurationError,
+    AdCPValidationError,
+)
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
     AssetStatus,
@@ -134,6 +141,12 @@ class AdapterCapabilities:
     supports_inventory_profiles: bool = False  # Supports inventory profile configuration
     inventory_entity_label: str = "Items"  # UI label for inventory entities (e.g., "Zones", "Ad Units")
 
+    # Reporting sync — populates the per-adapter delivery cache that feeds
+    # get_media_buy_delivery. Different from supports_realtime_reporting
+    # (a buyer-facing capability flag); this controls whether
+    # adapter.run_reporting_sync() may be triggered for this adapter.
+    supports_reporting_sync: bool = False
+
     # Targeting
     supports_custom_targeting: bool = False  # Supports custom key-value targeting
     supports_geo_targeting: bool = True  # Supports geographic targeting
@@ -147,6 +160,93 @@ class AdapterCapabilities:
     # Reporting and webhooks
     supports_webhooks: bool = False  # Supports webhook notifications
     supports_realtime_reporting: bool = False  # Supports real-time delivery reporting
+
+
+@dataclass
+class PermissionCheck:
+    """Result of probing one permission an adapter needs.
+
+    Used by ``AdServerAdapter.check_permissions()`` so operators (and embedders)
+    can see at-connect time whether the upstream credentials have the scopes
+    every AdCP feature path depends on — rather than discovering a missing
+    permission mid-campaign.
+    """
+
+    name: str  # short, machine-stable identifier (e.g. "read_creative_resources")
+    description: str  # human-readable, "Read creative resources"
+    granted: bool
+    required: bool = True  # True = blocks a core flow; False = nice-to-have
+    feature: str | None = None  # AdCP feature this enables (e.g. "creative_trafficking")
+    probe_target: str | None = None  # endpoint/method probed, for operator debugging
+    detail: str | None = None  # human-readable reason when not granted
+
+
+class DeliveryDataUnavailable(Exception):
+    """Adapter signals it has no delivery data for this media buy *yet*.
+
+    Distinct from a hard adapter error: the integration is healthy, we
+    just don't have data to report. Surfaces as an AdCP error with code
+    ``data_unavailable`` so the delivery-webhook scheduler can skip
+    firing a webhook (instead of pushing misleading zero-delivery
+    signals) and so buyers polling delivery see a clear "no data yet"
+    response rather than fake zeros.
+
+    Typical causes: the reporting sync hasn't run yet, or the upstream
+    Reporting API scope is still pending. Both are expected states that
+    should fail soft, not loud.
+    """
+
+    def __init__(self, media_buy_id: str, reason: str | None = None) -> None:
+        self.media_buy_id = media_buy_id
+        self.reason = reason
+        super().__init__(f"Delivery data not yet available for {media_buy_id}" + (f": {reason}" if reason else ""))
+
+
+@dataclass
+class AdapterSyncResult:
+    """Uniform outcome of one adapter sync run (inventory or reporting).
+
+    Returned by ``AdServerAdapter.run_inventory_sync()`` and
+    ``run_reporting_sync()``. The shared sync orchestration persists
+    these into the ``sync_jobs`` table.
+
+    ``counts`` is a free-form per-kind tally (entity_type for inventory,
+    placement-style breakdowns for reporting). ``errors`` captures
+    partial failures so a sync that succeeded for some entity types
+    but failed others isn't reported as a total wash.
+    """
+
+    sync_kind: str  # "inventory" | "reporting"
+    started_at: datetime
+    finished_at: datetime
+    succeeded: bool
+    counts: dict[str, int] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
+    # Free-form per-sync metadata: reporting carries job_id +
+    # placements_updated; inventory carries cache-refresh timestamps,
+    # etc. Surfaced by the admin UI; not used by orchestration logic.
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def total_count(self) -> int:
+        return sum(self.counts.values())
+
+
+@dataclass
+class PermissionsReport:
+    """Adapter's view of which upstream permissions are currently granted.
+
+    Returned by ``AdServerAdapter.check_permissions()``. ``fully_operational``
+    rolls up to True only when every ``required`` check passes; surface this in
+    admin UIs so operators see one-glance status.
+    """
+
+    adapter: str
+    tenant_id: str | None
+    checked_at: datetime
+    fully_operational: bool
+    checks: list[PermissionCheck]
+    error: str | None = None  # set when the probe itself couldn't run (e.g. bad creds)
 
 
 class BaseConnectionConfig(BaseModel):
@@ -254,6 +354,174 @@ class AdServerAdapter(ABC):
             self.console.print(f"[dim](dry-run)[/dim] {message}")
         else:
             self.console.print(message)
+
+    def _audit_create_media_buy(self, request: CreateMediaBuyRequest, start_time: datetime, end_time: datetime) -> None:
+        """Emit the standard create_media_buy audit log entry.
+
+        Adapters use this to record the operation against the principal +
+        adapter advertiser ID. Centralised here so adapters share one shape
+        instead of redeclaring the kwargs.
+        """
+        adapter_id = getattr(self, "advertiser_id", None) or "unknown"
+        self.audit_logger.log_operation(
+            operation="create_media_buy",
+            principal_name=self.principal.name,
+            principal_id=self.principal.principal_id,
+            adapter_id=adapter_id,
+            success=True,
+            details={"po_number": request.po_number, "flight_dates": f"{start_time.date()} to {end_time.date()}"},
+        )
+
+    @staticmethod
+    def _raise_unsupported_action(action: str) -> NoReturn:
+        """Raise the standard typed error for an update action we don't recognise.
+
+        ``REQUIRED_UPDATE_ACTIONS`` is the canonical list every adapter validates
+        against; the error message stays consistent across adapters. The boundary
+        translator turns the raise into the ``UNSUPPORTED_FEATURE`` wire envelope.
+        """
+        raise AdCPCapabilityNotSupportedError(
+            f"Action '{action}' not supported. Supported actions: {REQUIRED_UPDATE_ACTIONS}"
+        )
+
+    def _simulated_delivery_response(
+        self,
+        media_buy_id: str,
+        reporting_period: ReportingPeriod,
+        today: datetime,
+        *,
+        target_impressions: int,
+        cpm: float,
+        completion_rate: float = 0.0,
+        flight_days: int = 14,
+        currency: str = "USD",
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        """Build a synthetic delivery response for dry-run mode.
+
+        Computes elapsed-flight progress from ``today`` vs ``reporting_period``,
+        scales impressions by 95% delivery, and derives spend from CPM. Used by
+        adapters whose live-mode reporting flow isn't yet wired — gives buyers
+        useful numbers in dry-run without committing to a real reporting call.
+        """
+        from src.core.schemas import DeliveryTotals
+
+        days_elapsed = max(0, (today.date() - reporting_period.start.date()).days)
+        progress = min(days_elapsed / float(flight_days), 1.0)
+        impressions = int(target_impressions * progress * 0.95)
+        spend = impressions * cpm / 1000
+        return AdapterGetMediaBuyDeliveryResponse(
+            media_buy_id=media_buy_id,
+            reporting_period=reporting_period,
+            totals=DeliveryTotals(
+                impressions=impressions,
+                spend=spend,
+                clicks=0,
+                ctr=0.0,
+                completed_views=int(impressions * completion_rate) if completion_rate else 0,
+                completion_rate=completion_rate,
+            ),
+            by_package=[],
+            currency=currency,
+        )
+
+    @staticmethod
+    def _aggregate_stat_rows_to_delivery_response(
+        media_buy_id: str,
+        reporting_period: ReportingPeriod,
+        stat_rows: list[Any],
+        *,
+        package_id_attr: str,
+        default_currency: str = "USD",
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        """Aggregate platform stat rows into an AdCP delivery response.
+
+        Shared across reporting-cache adapters (those whose reporting sync
+        persists per-line-item stat rows locally). Each row is expected to
+        expose ``impressions``, ``spend_micros``, ``completed_views``, and
+        ``currency`` attributes; the per-row identifier comes from
+        ``getattr(row, package_id_attr)``.
+        """
+        from src.core.schemas import AdapterPackageDelivery, DeliveryTotals
+
+        total_impressions = sum(getattr(row, "impressions", 0) or 0 for row in stat_rows)
+        total_spend = sum(getattr(row, "spend_micros", 0) or 0 for row in stat_rows) / 1_000_000.0
+        total_completed = sum(getattr(row, "completed_views", 0) or 0 for row in stat_rows)
+        currency = next((row.currency for row in stat_rows if row.currency), default_currency)
+        totals = DeliveryTotals(
+            impressions=float(total_impressions),
+            spend=total_spend,
+            completed_views=float(total_completed) if total_completed else None,
+            completion_rate=(total_completed / total_impressions) if total_impressions else None,
+        )
+        by_package = [
+            AdapterPackageDelivery(
+                package_id=getattr(row, package_id_attr),
+                impressions=int(getattr(row, "impressions", 0) or 0),
+                spend=(getattr(row, "spend_micros", 0) or 0) / 1_000_000.0,
+                completed_views=int(row.completed_views) if row.completed_views is not None else None,
+            )
+            for row in stat_rows
+        ]
+        return AdapterGetMediaBuyDeliveryResponse(
+            media_buy_id=media_buy_id,
+            reporting_period=reporting_period,
+            totals=totals,
+            by_package=by_package,
+            currency=currency,
+        )
+
+    @staticmethod
+    def _resolve_pricing_rate(
+        package: MediaPackage,
+        package_pricing_info: dict[str, dict] | None,
+        *,
+        default_rate_type: str = "CPM",
+    ) -> tuple[float, str]:
+        """Return ``(rate, rate_type)`` for a package from validated pricing info.
+
+        Adapters use this when translating a ``MediaPackage`` into their ad
+        server's flight/line-item payload. ``package_pricing_info`` (AdCP PR #88)
+        carries ``{rate, is_fixed, bid_price, pricing_model}`` per package and
+        is populated by ``media_buy_create`` before adapter dispatch.
+        """
+        if not package_pricing_info or package.package_id not in package_pricing_info:
+            raise AdCPAdapterError(
+                f"Missing pricing info for package {package.package_id!r}; "
+                "media_buy_create must populate package_pricing_info before adapter dispatch."
+            )
+        pricing = package_pricing_info[package.package_id]
+        if pricing.get("is_fixed"):
+            rate = pricing["rate"]
+        else:
+            rate = pricing.get("bid_price")
+            if rate is None:
+                raise AdCPValidationError(f"Package {package.package_id!r} uses auction pricing but has no bid_price.")
+        rate_type = "FLAT_RATE" if str(pricing.get("pricing_model", "")).lower() == "flat_rate" else default_rate_type
+        return float(rate), rate_type
+
+    @staticmethod
+    def _validate_targeting_or_raise(
+        packages: list[MediaPackage],
+        validator: Callable[[Any], list[str]],
+        *,
+        adapter_name: str,
+    ) -> None:
+        """Apply a per-package targeting validator; raise on unsupported targeting.
+
+        Iterates each package, collects messages from ``validator``, and raises a
+        single ``AdCPCapabilityNotSupportedError`` with the union — surfaced as the
+        standard ``UNSUPPORTED_FEATURE`` wire code (correctable: the buyer can
+        remove the unsupported targeting). Returning means validation passed and
+        the adapter should proceed.
+        """
+        unsupported_features: list[str] = []
+        for package in packages:
+            if package.targeting_overlay:
+                unsupported_features.extend(validator(package.targeting_overlay))
+        if unsupported_features:
+            raise AdCPCapabilityNotSupportedError(
+                f"Unsupported targeting for {adapter_name}: {'; '.join(unsupported_features)}"
+            )
 
     def _build_package_responses(
         self,
@@ -529,6 +797,141 @@ class AdServerAdapter(ABC):
         """
         # Default implementation returns empty inventory
         return {"placements": [], "ad_units": [], "targeting_options": {}, "creative_specs": [], "properties": {}}
+
+    def run_inventory_sync(self) -> AdapterSyncResult:
+        """Pull this adapter's inventory taxonomy into a local cache.
+
+        Adapters that declare ``capabilities.supports_inventory_sync=True``
+        MUST override this method. Operators trigger a run via the
+        per-adapter "Sync Inventory" admin action.
+
+        Implementations should return a non-raising :class:`AdapterSyncResult`
+        — partial failures captured in ``errors`` rather than thrown.
+        The shared sync orchestration persists the result to the
+        ``sync_jobs`` table.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} declared supports_inventory_sync but did not "
+            "implement run_inventory_sync(). Override it, or flip the capability flag off."
+        )
+
+    def run_reporting_sync(self) -> AdapterSyncResult:
+        """Pull delivery metrics into this adapter's stats cache.
+
+        Adapters that declare ``capabilities.supports_reporting_sync=True``
+        MUST override this method. Populates whatever cache backs
+        :meth:`get_media_buy_delivery`.
+
+        When the upstream API isn't yet authorised (e.g. scope grant
+        pending), return a failed-but-non-raising :class:`AdapterSyncResult`
+        so callers can keep retrying without flooding the logs with
+        stack traces.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} declared supports_reporting_sync but did not "
+            "implement run_reporting_sync(). Override it, or flip the capability flag off."
+        )
+
+    def latest_inventory_sync_at(self) -> datetime | None:
+        """When this adapter's inventory was last refreshed, or ``None`` if
+        never. Used by freshness displays and stale-cache banners. Adapters
+        with inventory caches override this to surface their own
+        ``last_synced_at`` column."""
+        return None
+
+    def latest_reporting_sync_at(self) -> datetime | None:
+        """When this adapter's reporting cache was last refreshed.
+        Same shape + same role as :meth:`latest_inventory_sync_at`."""
+        return None
+
+    def check_permissions(self) -> PermissionsReport:
+        """Probe the upstream API for the scopes this adapter needs.
+
+        Returns a :class:`PermissionsReport` listing each permission this
+        adapter depends on along with whether the configured credentials
+        currently have it. Operators see this in the admin UI; embedders
+        can read it via the tenant-management API.
+
+        Default implementation reports zero checks — adapters with real
+        upstream APIs should override and probe their actual endpoints.
+        Probes should be cheap (single GET with a 1-row page filter is
+        ideal) and should NOT mutate upstream state.
+        """
+        return PermissionsReport(
+            adapter=getattr(self.__class__, "adapter_name", self.__class__.__name__),
+            tenant_id=self.tenant_id,
+            checked_at=datetime.now(UTC),
+            fully_operational=True,  # no checks declared → no failures
+            checks=[],
+        )
+
+    def _new_permissions_report(self, *, dry_run_message: str | None = None) -> PermissionsReport:
+        """Build an empty :class:`PermissionsReport` scaffold for this adapter.
+
+        ``check_permissions`` subclass implementations call this to get a
+        consistently-populated report shell; when ``dry_run_message`` is
+        supplied and dry-run is active, the report is returned pre-set with
+        ``error`` and ``fully_operational=False`` so the caller can return
+        it immediately without further setup.
+        """
+        report = PermissionsReport(
+            adapter=getattr(self.__class__, "adapter_name", self.__class__.__name__),
+            tenant_id=self.tenant_id,
+            checked_at=datetime.now(UTC),
+            fully_operational=False,
+            checks=[],
+        )
+        if dry_run_message is not None and self.dry_run:
+            report.error = dry_run_message
+        return report
+
+    def _walk_permission_probes(
+        self,
+        report: PermissionsReport,
+        probes: list[tuple[str, str, str, str, bool, str]],
+        probe_fn: Callable[[str, str], tuple[int, str]],
+        *,
+        auth_error_types: tuple[type[Exception], ...] = (),
+    ) -> None:
+        """Run a permission probe matrix into ``report.checks``.
+
+        Each entry in ``probes`` is ``(name, description, method, path,
+        required, feature)``. ``probe_fn(method, path)`` must return
+        ``(status_code, body_snippet)`` without raising on non-2xx; if it
+        does raise an instance of ``auth_error_types`` (e.g. the adapter's
+        auth-error class) the walk stops early and ``report.error`` is
+        populated. The final ``fully_operational`` rollup is set on the
+        report after all probes complete.
+
+        4xx validation errors (400/404/422) count as granted because they
+        prove the endpoint accepts the call -- granted is determined by
+        status NOT in (401, 403).
+        """
+        for name, description, method, path, required, feature in probes:
+            try:
+                status, body = probe_fn(method, path)
+            except auth_error_types as exc:
+                report.error = f"Authentication failed: {exc}"
+                return
+
+            granted = status not in (401, 403)
+            detail: str | None = None
+            if not granted:
+                snippet = body.strip().replace("\n", " ")[:120]
+                detail = f"{status}: {snippet}" if snippet else f"HTTP {status}"
+
+            report.checks.append(
+                PermissionCheck(
+                    name=name,
+                    description=description,
+                    granted=granted,
+                    required=required,
+                    feature=feature,
+                    probe_target=f"{method} {path.split('?', 1)[0]}",
+                    detail=detail,
+                )
+            )
+        report.fully_operational = all(c.granted for c in report.checks if c.required)
 
     def get_creative_formats(self) -> list[dict[str, Any]]:
         """Return creative formats provided by this adapter.
