@@ -32,6 +32,7 @@ from src.adapters.improvedigital.client import (
     ImproveDigitalClient,
     ImproveDigitalError,
     ImproveDigitalForbiddenError,
+    ImproveDigitalNotFoundError,
 )
 from src.core.database.repositories.improvedigital_line_item_stats import (
     ImproveDigitalLineItemStatsRepository,
@@ -113,6 +114,55 @@ def resolve_currency_id(client: Any, currency: str | None) -> int:
             logger.warning("Improve Digital currency dictionary lookup failed for %r: %s", code, exc)
     logger.warning("Improve Digital Report API has no currency %r — falling back to EUR (id 1)", code)
     return 1
+
+
+# In-process campaign-existence verdicts: (tenant_id, campaign_id) ->
+# (exists, checked_at_monotonic). Campaign ids are a global sequence and
+# never reused, so verdicts are stable; the TTL only bounds staleness for
+# campaigns deleted upstream after a positive verdict.
+_EXISTENCE_TTL_SECONDS = 3600.0
+_campaign_existence: dict[tuple[str, str], tuple[bool, float]] = {}
+
+
+def filter_to_existing_campaigns(client: Any, tenant_id: str, campaign_ids: list[str]) -> list[str]:
+    """Drop campaign ids the current environment's Classic API doesn't know.
+
+    The Report API warehouse is NOT environment-scoped (observed live
+    2026-08-18: prod ``/report/ext/preview`` returns delivery for dev
+    campaign ids that prod's own Classic API 404s), so a buy booked
+    against a different ``api_base_url`` would leak foreign metrics into
+    the cache and UI. The Classic campaign GET *is* scoped — use it as the
+    gate. Verdicts are cached in-process for an hour; transient upstream
+    errors (or clients without a campaigns surface, e.g. test fakes) keep
+    the campaign — better a retry next run than silently dropped data.
+    """
+    kept: list[str] = []
+    now = time.monotonic()
+    for campaign_id in campaign_ids:
+        key = (tenant_id, str(campaign_id))
+        cached = _campaign_existence.get(key)
+        if cached is not None and now - cached[1] < _EXISTENCE_TTL_SECONDS:
+            exists = cached[0]
+        else:
+            try:
+                client.campaigns.get_campaign(int(campaign_id))
+                exists = True
+            except ImproveDigitalNotFoundError:
+                exists = False
+            except (ImproveDigitalError, AttributeError, TypeError, ValueError):
+                kept.append(campaign_id)
+                continue
+            _campaign_existence[key] = (exists, now)
+        if exists:
+            kept.append(campaign_id)
+        else:
+            logger.warning(
+                "Improve Digital: campaign %s does not exist on this environment — excluded from reporting "
+                "(tenant %s; the buy was likely booked against a different api_base_url — close it out)",
+                campaign_id,
+                tenant_id,
+            )
+    return kept
 
 
 def quick_date_range(quick: str) -> dict[str, Any]:
@@ -260,6 +310,16 @@ class ImproveDigitalReportingSync:
             )
         if not ids:
             logger.info("Improve Digital reporting sync tenant=%s: no active campaigns, nothing to do", self._tenant_id)
+            return ReportingSyncResult(rows_updated=0, campaigns_covered=0)
+
+        # Environment gate: never ask the (unscoped) Report API about
+        # campaigns this environment's Classic API doesn't know.
+        ids = filter_to_existing_campaigns(self._client, self._tenant_id, ids)
+        if not ids:
+            logger.info(
+                "Improve Digital reporting sync tenant=%s: no campaigns exist on this environment, nothing to do",
+                self._tenant_id,
+            )
             return ReportingSyncResult(rows_updated=0, campaigns_covered=0)
 
         date_range = self._report_date_range(earliest_start)

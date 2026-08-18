@@ -393,6 +393,55 @@ class TestMediaBuyDeliveryRollup:
         buy_repo_cls.return_value.update_fields.assert_not_called()
 
 
+class TestEnvironmentGate:
+    """The Report API warehouse serves foreign-environment campaign ids
+    (observed live); the Classic campaign GET is env-scoped and gates
+    which campaigns any report query may ask about."""
+
+    def _client(self, existing: set[int]):
+        from src.adapters.improvedigital.client import ImproveDigitalNotFoundError
+
+        calls: list[int] = []
+
+        def get_campaign(cid):
+            calls.append(cid)
+            if cid in existing:
+                return {"id": cid}
+            raise ImproveDigitalNotFoundError("Unknown Classic Campaign")
+
+        return SimpleNamespace(campaigns=SimpleNamespace(get_campaign=get_campaign)), calls
+
+    def test_foreign_campaigns_are_dropped(self):
+        from src.adapters.improvedigital.reporting_sync import filter_to_existing_campaigns
+
+        client, _ = self._client(existing={370320})
+        kept = filter_to_existing_campaigns(client, "t-gate-1", ["314446", "370320"])
+        assert kept == ["370320"]
+
+    def test_verdicts_are_cached(self):
+        from src.adapters.improvedigital.reporting_sync import filter_to_existing_campaigns
+
+        client, calls = self._client(existing={370320})
+        filter_to_existing_campaigns(client, "t-gate-2", ["314446", "370320"])
+        filter_to_existing_campaigns(client, "t-gate-2", ["314446", "370320"])
+        assert calls == [314446, 370320]  # second pass answered from cache
+
+    def test_transient_errors_keep_the_campaign(self):
+        from src.adapters.improvedigital.reporting_sync import filter_to_existing_campaigns
+
+        def get_campaign(cid):
+            raise ImproveDigitalError("upstream hiccup")
+
+        client = SimpleNamespace(campaigns=SimpleNamespace(get_campaign=get_campaign))
+        assert filter_to_existing_campaigns(client, "t-gate-3", ["370320"]) == ["370320"]
+
+    def test_clients_without_campaign_surface_keep_everything(self):
+        from src.adapters.improvedigital.reporting_sync import filter_to_existing_campaigns
+
+        client = SimpleNamespace(reporting=object())  # test fakes
+        assert filter_to_existing_campaigns(client, "t-gate-4", ["101", "102"]) == ["101", "102"]
+
+
 class TestCurrencyResolution:
     def test_static_map_answers_known_codes_without_a_lookup(self):
         reporting = CapturingReporting(currencies=ImproveDigitalError("must not be called"))

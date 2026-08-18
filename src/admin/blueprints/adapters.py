@@ -1576,7 +1576,9 @@ _IMPROVEDIGITAL_REPORT_TIMEZONES = {
 }
 
 
-def _improvedigital_live_stat_rows(client, campaign_ids: list[int], quick_range: str, timezone: str, currency: str):
+def _improvedigital_live_stat_rows(
+    client, tenant_id: str, campaign_ids: list[int], quick_range: str, timezone: str, currency: str
+):
     """Query the Report API live for a date-filtered reporting-page view.
 
     The stats cache holds one aggregate row per line item with no time
@@ -1594,10 +1596,14 @@ def _improvedigital_live_stat_rows(client, campaign_ids: list[int], quick_range:
         _as_float,
         _as_int,
         build_report_request,
+        filter_to_existing_campaigns,
         quick_date_range,
         resolve_currency_id,
     )
 
+    # Environment gate — the Report API warehouse serves foreign-environment
+    # campaign ids; only query campaigns this environment actually knows.
+    campaign_ids = [int(cid) for cid in filter_to_existing_campaigns(client, tenant_id, [str(c) for c in campaign_ids])]
     if not campaign_ids:
         return []
     # Shared request builder + currency resolver — one wire contract with
@@ -1721,6 +1727,7 @@ def get_improvedigital_reporting(tenant_id, **kwargs):
         try:
             stat_rows = _improvedigital_live_stat_rows(
                 client,
+                tenant_id,
                 sorted(int(cid) for cid in buys_by_campaign),
                 date_range,
                 timezone_arg,

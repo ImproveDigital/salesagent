@@ -108,7 +108,7 @@ class TestLiveDateFilteredRows:
                 }
             ]
         )
-        rows = _improvedigital_live_stat_rows(client, [314446, 314450], "LAST_7_DAYS", "UTC", "EUR")
+        rows = _improvedigital_live_stat_rows(client, "t1", [314446, 314450], "LAST_7_DAYS", "UTC", "EUR")
 
         request = captured["payload"]["report_generation_request"]
         assert request["date_range"] == {"quick": "LAST_7_DAYS"}
@@ -130,7 +130,7 @@ class TestLiveDateFilteredRows:
         from src.admin.blueprints.adapters import _improvedigital_live_stat_rows
 
         client, captured = self._client([])
-        _improvedigital_live_stat_rows(client, [314446], "TODAY", "UTC", "EUR")
+        _improvedigital_live_stat_rows(client, "t1", [314446], "TODAY", "UTC", "EUR")
         assert captured["payload"]["report_generation_request"]["date_range"] == {
             "relative": {"from_count": 1, "from_unit": "DAY", "to_count": 0, "to_unit": "DAY"}
         }
@@ -139,7 +139,7 @@ class TestLiveDateFilteredRows:
         from src.admin.blueprints.adapters import _improvedigital_live_stat_rows
 
         client, captured = self._client([])
-        assert _improvedigital_live_stat_rows(client, [], "TODAY", "UTC", "EUR") == []
+        assert _improvedigital_live_stat_rows(client, "t1", [], "TODAY", "UTC", "EUR") == []
         assert "payload" not in captured
 
     def test_live_rows_flow_through_the_shared_payload_builder(self):
@@ -157,7 +157,7 @@ class TestLiveDateFilteredRows:
                 }
             ]
         )
-        rows = _improvedigital_live_stat_rows(client, [314446], "TODAY", "UTC", "EUR")
+        rows = _improvedigital_live_stat_rows(client, "t1", [314446], "TODAY", "UTC", "EUR")
         payload = _improvedigital_reporting_payload(rows, BUYS, "EUR")
         assert payload["rows"][0]["order_name"] == "Acme Summer Push"
         assert payload["totals"]["spend"] == 0.25
