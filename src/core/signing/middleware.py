@@ -221,6 +221,127 @@ def _extract_operation(path: str, body: bytes) -> str | None:
     return None
 
 
+# Headers whose values must never be logged. Presence is logged instead.
+_REDACTED_HEADERS = frozenset({"authorization", "x-adcp-auth", "cookie", "x-api-key"})
+
+# Request headers that materially affect signature-base reconstruction —
+# logged verbatim so a failing base can be diffed against what the buyer signed.
+_DIAGNOSTIC_HEADERS = (
+    "host",
+    "x-forwarded-proto",
+    "x-forwarded-host",
+    "x-forwarded-for",
+    "x-forwarded-port",
+    "forwarded",
+    "signature-input",
+    "content-digest",
+    "content-type",
+    "content-length",
+)
+
+
+def _log_verify_failure(
+    scope: dict,
+    body: bytes,
+    exc: SignatureVerificationError,
+    *,
+    tenant_id: str | None,
+    principal_id: str | None,
+) -> None:
+    """TEMPORARY DIAGNOSTIC (remove once signature failures are resolved).
+
+    On any verify failure, emit one structured WARNING containing everything
+    needed to diff our reconstructed signature base against what the buyer
+    signed: the URL as this process sees it (scheme/host/path — the usual
+    mismatch source behind proxies), the raw ``Signature-Input`` header, the
+    recomputed signature base, and our own digest of the received body.
+
+    Never raises — diagnostics must not alter the 401 path. Credentials are
+    redacted; the ``Signature`` header is truncated (it's not secret, but
+    it's noise).
+    """
+    try:
+        payload: dict[str, Any] = {
+            "verify_error_code": exc.code,
+            "verify_error_step": exc.step,
+            "verify_error_message": str(exc),
+            "tenant_id": tenant_id,
+            "principal_id": principal_id,
+        }
+
+        # -- URL as the app reconstructs it (what @target-uri is built from).
+        from starlette.requests import Request
+
+        request: Request = Request(scope)
+        url = str(request.url)
+        payload["reconstructed_url"] = url
+        payload["asgi_scheme"] = scope.get("scheme")
+        payload["asgi_server"] = list(scope.get("server") or ())
+        payload["asgi_root_path"] = scope.get("root_path", "")
+        payload["asgi_path"] = scope.get("path", "")
+        payload["asgi_raw_query"] = (scope.get("query_string") or b"").decode("latin-1")
+        payload["asgi_client"] = list(scope.get("client") or ())
+
+        # -- Headers relevant to base reconstruction (credentials redacted).
+        headers = _decode_scope_headers(scope)
+        lower = {k.lower(): v for k, v in headers.items()}
+        seen_headers: dict[str, str] = {}
+        for name in _DIAGNOSTIC_HEADERS:
+            if name in lower:
+                seen_headers[name] = lower[name]
+        for name in _REDACTED_HEADERS:
+            if name in lower:
+                seen_headers[name] = "<redacted, present>"
+        sig = lower.get("signature")
+        if sig is not None:
+            seen_headers["signature"] = sig[:32] + "…" if len(sig) > 32 else sig
+        payload["headers"] = seen_headers
+
+        # -- Recompute the signature base exactly as the verifier did, so the
+        #    log shows the byte-level input to the failed crypto check.
+        raw_sig_input = lower.get("signature-input")
+        if raw_sig_input:
+            try:
+                from adcp.signing.canonical import build_signature_base
+
+                labels = parse_signature_input_header(raw_sig_input)
+                for label, parsed in labels.items():
+                    base = build_signature_base(
+                        method=str(scope.get("method", "")),
+                        url=url,
+                        headers=headers,
+                        parsed=parsed,
+                    )
+                    base_lines = []
+                    for line in base.split("\n"):
+                        header_name = line.split(":", 1)[0].strip('"')
+                        if header_name in _REDACTED_HEADERS:
+                            base_lines.append(f'"{header_name}": <redacted>')
+                        else:
+                            base_lines.append(line)
+                    payload[f"computed_base[{label}]"] = base_lines
+                    payload[f"covered_components[{label}]"] = list(parsed.components)
+                    payload[f"signature_params[{label}]"] = {k: v for k, v in parsed.params.items() if k != "nonce"} | {
+                        "nonce": "<present>" if "nonce" in parsed.params else "<absent>"
+                    }
+            except Exception as base_exc:  # noqa: BLE001 — diagnostic only
+                payload["computed_base_error"] = f"{type(base_exc).__name__}: {base_exc}"
+
+        # -- Our digest of the received body, in Content-Digest wire format,
+        #    to diff against the Content-Digest header the buyer signed.
+        import base64
+        import hashlib
+
+        payload["body_len"] = len(body)
+        payload["body_sha256_digest_header_format"] = (
+            "sha-256=:" + base64.b64encode(hashlib.sha256(body).digest()).decode("ascii") + ":"
+        )
+
+        logger.warning("SIGNING-DIAG signature verify failed: %s", json.dumps(payload, default=str))
+    except Exception:  # noqa: BLE001 — diagnostics must never break the 401 path
+        logger.exception("SIGNING-DIAG logging itself failed")
+
+
 class SigningVerifyMiddleware:
     """Verify RFC 9421 signatures on inbound buyer-protocol requests.
 
@@ -351,6 +472,7 @@ class SigningVerifyMiddleware:
         try:
             verified = await self._verify(scope, body, tenant_id, principal_id, brand_domain, agent_url, operation)
         except SignatureVerificationError as exc:
+            _log_verify_failure(scope, body, exc, tenant_id=tenant_id, principal_id=principal_id)
             await self._send_401(send, exc)
             return
         except Exception:
