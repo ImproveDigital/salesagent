@@ -429,3 +429,43 @@ UPDATE_MEDIA_BUY_SLIM_SCHEMA: dict = {
         },
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Tool-definition compaction
+# ---------------------------------------------------------------------------
+
+# tool name → slim replacement for its adcp-generated inputSchema.
+SLIM_INPUT_SCHEMAS: dict[str, dict] = {
+    "create_media_buy": CREATE_MEDIA_BUY_SLIM_SCHEMA,
+    "update_media_buy": UPDATE_MEDIA_BUY_SLIM_SCHEMA,
+    "sync_creatives": SYNC_CREATIVES_SLIM_SCHEMA,
+    "get_products": GET_PRODUCTS_SLIM_SCHEMA,
+}
+
+
+def compact_tool_schemas(tool_defs: list[dict]) -> None:
+    """Compact adcp tool definitions in place for ``tools/list``.
+
+    Two reductions, applied to the mutable ``ADCP_TOOL_DEFINITIONS`` list:
+
+    * ``inputSchema`` — replaced with the hand-written slim schema for the
+      tools in ``SLIM_INPUT_SCHEMAS`` (the asset-bearing booking-flow tools
+      whose inlined schemas run to megabytes).
+    * ``outputSchema`` — dropped from **every** tool.  The inlined output
+      schemas total ~4.7 MB across the advertised tools — 92% of the
+      ``tools/list`` payload — which pushed the response past buyer-agent
+      size caps (Scope3 rejects responses over 5 MB, blocking catalog
+      discovery entirely).  ``outputSchema`` is optional in MCP; without a
+      spec schema, adcp's ``_register_tool`` falls back to the generic
+      object schema derived from the wrapper's ``-> dict[str, Any]`` return
+      annotation, so ``structuredContent`` is still populated on responses.
+
+    Runtime request validation is unchanged — tools still validate against
+    the full Pydantic request models.
+    """
+    for tool in tool_defs:
+        slim = SLIM_INPUT_SCHEMAS.get(tool["name"])
+        if slim is not None:
+            tool["inputSchema"] = slim
+        tool.pop("outputSchema", None)

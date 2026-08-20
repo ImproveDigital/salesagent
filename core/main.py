@@ -72,35 +72,41 @@ from adcp.server.mcp_tools import (
 )
 from adcp.server.spec_compat import _spec_compat_hooks_impl
 
-from src.core.slim_schemas import CREATE_MEDIA_BUY_SLIM_SCHEMA, UPDATE_MEDIA_BUY_SLIM_SCHEMA
+from src.core.slim_schemas import compact_tool_schemas
 
-# Optionally replace large tool inputSchemas with compact versions.
+# Optionally compact the adcp tool definitions served on tools/list.
 #
-# adcp's _generate_pydantic_schemas() inlines all $refs, turning the
-# CreateMediaBuyRequest schema into ~93 000 lines of JSON (~2.2 MB) and the
-# UpdateMediaBuyRequest schema into an even larger blob (~4.2 MB).  Either
-# volume fills an LLM context window on tools/list, making the tool unusable.
+# adcp's _generate_pydantic_schemas() inlines all $refs, so every model that
+# carries creative assets explodes.  Inlined size for the tools that make up
+# one booking flow (~4 chars/token):
 #
-# Set ADCP_COMPACT_TOOL_SCHEMAS=true to activate the slim schemas.
-# When unset or false, the full adcp-generated schema is used (default).
+#   update_media_buy  ~4.2 MB  (~1 045 000 tokens)
+#   create_media_buy  ~2.2 MB  (~547 000 tokens)
+#   sync_creatives    ~1.9 MB  (~480 000 tokens)
+#   get_products      ~184 kB  (~46 000 tokens)
+#
+# Any one of these fills an LLM context window on tools/list, making the tool
+# unusable.  The inlined outputSchemas are just as bad in aggregate (~4.7 MB
+# across the 13 advertised tools — 92% of the remaining payload) and pushed
+# the tools/list response past buyer-agent size caps (Scope3 caps at 5 MB),
+# blocking catalog discovery.  compact_tool_schemas() slims the four booking
+# inputSchemas and strips outputSchema from every tool — see its docstring.
+#
+# Set ADCP_COMPACT_TOOL_SCHEMAS=true to activate.
+# When unset or false, the full adcp-generated schemas are used (default).
 #
 # Strategy: call _ensure_pydantic_schemas_applied() eagerly so it sets
 # _schemas_applied=True.  Subsequent lazy calls on tools/list become
-# no-ops.  We then overwrite each tool's inputSchema with our slim
-# version — it sticks for the lifetime of the process.
+# no-ops.  We then compact each tool definition in place — it sticks for
+# the lifetime of the process.
 #
 # Runtime validation is unchanged: the functions still validate the
 # incoming request against the full Pydantic request models.
 _ensure_pydantic_schemas_applied()
+
 if os.environ.get("ADCP_COMPACT_TOOL_SCHEMAS", "").lower() == "true":
-    _SLIM_SCHEMAS = {
-        "create_media_buy": CREATE_MEDIA_BUY_SLIM_SCHEMA,
-        "update_media_buy": UPDATE_MEDIA_BUY_SLIM_SCHEMA,
-    }
-    for _tool in ADCP_TOOL_DEFINITIONS:
-        _slim = _SLIM_SCHEMAS.get(_tool["name"])
-        if _slim is not None:
-            _tool["inputSchema"] = _slim
+    compact_tool_schemas(ADCP_TOOL_DEFINITIONS)
+
 from sqlalchemy import select
 
 # Import for side-effect: registers the SQLAlchemy session listener that
