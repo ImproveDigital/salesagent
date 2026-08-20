@@ -429,3 +429,288 @@ UPDATE_MEDIA_BUY_SLIM_SCHEMA: dict = {
         },
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# sync_creatives
+# ---------------------------------------------------------------------------
+# Required fields (3):  account, creatives, idempotency_key
+# (see src.core.schemas.creative.SyncCreativesRequest — creatives is re-typed
+# against the local CreativeAsset but the required set matches the library)
+# ---------------------------------------------------------------------------
+
+SYNC_CREATIVES_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "required": ["account", "creatives", "idempotency_key"],
+    "properties": {
+        # ── required ──────────────────────────────────────────────────────
+        "account": {
+            "type": "object",
+            "description": (
+                "Account that owns these creatives. Either {account_id: str} or "
+                "{brand: {domain: str}, operator: str, sandbox?: bool}."
+            ),
+        },
+        "idempotency_key": {
+            "type": "string",
+            "description": (
+                "Client-generated unique key (16-255 chars, alphanumeric + _.:-). "
+                "Re-send the same key to safely retry without applying the sync twice."
+            ),
+        },
+        "creatives": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "description": (
+                "Creative assets to create or update.\n"
+                "format_id vs format_kind: use format_id {agent_url, id} to reference "
+                "a named format from a specific creative agent. Always call "
+                "list_creative_formats first to discover the correct agent_url "
+                "(returned in creative_agents[].agent_url — typically "
+                "'https://creative.adcontextprotocol.org/'). "
+                "Use format_kind (enum string) for the simpler canonical-format path. "
+                "format_id and format_kind are mutually exclusive.\n"
+                "assets keys are slot names from the format (e.g. banner_image, click_url). "
+                "banner_image: {asset_type:'image', url, width, height}. "
+                "click_url: {asset_type:'url', url, url_type:'clickthrough'}."
+            ),
+            "items": {
+                "type": "object",
+                "required": ["creative_id", "name", "assets"],
+                "properties": {
+                    "creative_id": {
+                        "type": "string",
+                        "description": "Buyer-chosen stable ID for this creative.",
+                    },
+                    "name": {"type": "string"},
+                    "format_id": {
+                        "type": "object",
+                        "description": (
+                            "Named-format path. Always {agent_url, id}. "
+                            "agent_url MUST be discovered from list_creative_formats "
+                            "response's creative_agents[].agent_url. "
+                            "Mutually exclusive with format_kind."
+                        ),
+                        "properties": {
+                            "agent_url": {
+                                "type": "string",
+                                "description": (
+                                    "URL of the agent that owns this format. "
+                                    "Discover via list_creative_formats creative_agents[].agent_url."
+                                ),
+                            },
+                            "id": {
+                                "type": "string",
+                                "description": "Format ID, e.g. 'display_300x250'.",
+                            },
+                        },
+                        "required": ["agent_url", "id"],
+                    },
+                    "format_kind": {
+                        "type": "string",
+                        "description": "Canonical format name. Mutually exclusive with format_id.",
+                        "enum": [
+                            "image",
+                            "html5",
+                            "display_tag",
+                            "video_hosted",
+                            "video_vast",
+                            "audio_hosted",
+                            "native_in_feed",
+                        ],
+                    },
+                    "assets": {
+                        "type": "object",
+                        "description": (
+                            "Slot values keyed by slot name from the format. "
+                            "banner_image: {asset_type:'image', url, width, height}. "
+                            "click_url: {asset_type:'url', url, url_type:'clickthrough'}."
+                        ),
+                    },
+                },
+            },
+        },
+        # ── common optional ─────────────────────────────────────────────────
+        "assignments": {
+            "type": "array",
+            "description": ("Bulk assignment of creatives to packages. Each entry maps one creative to one package."),
+            "items": {
+                "type": "object",
+                "required": ["creative_id", "package_id"],
+                "properties": {
+                    "creative_id": {"type": "string"},
+                    "package_id": {"type": "string"},
+                    "weight": {
+                        "type": "number",
+                        "description": "Relative rotation weight within the package.",
+                    },
+                },
+            },
+        },
+        "creative_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Optional filter to limit sync scope to these creative IDs. Invalid together with delete_missing."
+            ),
+        },
+        "delete_missing": {
+            "type": "boolean",
+            "description": (
+                "When true, creatives not included in this sync are archived "
+                "(full library replacement — use with caution)."
+            ),
+        },
+        "dry_run": {
+            "type": "boolean",
+            "description": "Preview changes without applying them.",
+        },
+        "validation_mode": {
+            "type": "string",
+            "enum": ["strict", "lenient"],
+            "description": (
+                "'strict' fails the entire sync on any validation error; "
+                "'lenient' processes valid creatives and reports errors."
+            ),
+        },
+        "push_notification_config": {
+            "type": "object",
+            "description": (
+                "Webhook for async sync-completion notifications. "
+                "Provide {url, authentication: {schemes, credentials}}."
+            ),
+            "properties": {
+                "url": {"type": "string", "format": "uri"},
+                "authentication": {"type": "object"},
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# get_products
+# ---------------------------------------------------------------------------
+# Required fields (1):  buying_mode
+# brief is conditionally required (buying_mode='brief') and must be absent for
+# 'wholesale', so it stays optional here — the Pydantic model enforces the
+# cross-field rule at runtime.
+# ---------------------------------------------------------------------------
+
+GET_PRODUCTS_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "required": ["buying_mode"],
+    "properties": {
+        # ── required ──────────────────────────────────────────────────────
+        "buying_mode": {
+            "type": "string",
+            "enum": ["brief", "wholesale", "refine"],
+            "description": (
+                "Buyer intent. 'brief': publisher curates recommendations from the "
+                "provided brief (brief is required). 'wholesale': full catalog with "
+                "rate-card pricing (brief must be omitted). 'refine': iterate on a "
+                "previous response via the refine array."
+            ),
+        },
+        # ── common optional ─────────────────────────────────────────────────
+        "brief": {
+            "type": "string",
+            "description": (
+                "Natural-language campaign requirements. Required when "
+                "buying_mode='brief'; must be omitted for 'wholesale'."
+            ),
+        },
+        "brand": {
+            "type": "object",
+            "description": "Brand reference for discovery context. Provide {domain: 'example.com'}.",
+        },
+        "account": {
+            "type": "object",
+            "description": (
+                "Account for product lookup — returns pricing from this account's "
+                "rate card. Either {account_id: str} or "
+                "{brand: {domain: str}, operator: str, sandbox?: bool}."
+            ),
+        },
+        "filters": {
+            "type": "object",
+            "description": "Structured product filters — non-matching products are excluded.",
+            "properties": {
+                "delivery_type": {
+                    "type": "string",
+                    "enum": ["guaranteed", "non_guaranteed"],
+                },
+                "format_ids": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Restrict to products supporting these format IDs ({agent_url, id}).",
+                },
+                "is_fixed_price": {"type": "boolean"},
+                "countries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "ISO 3166-1 alpha-2 country codes, e.g. ['NL', 'DE'].",
+                },
+                "channels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Inventory channels, e.g. ['display', 'video', 'ctv'].",
+                },
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+        },
+        "pagination": {
+            "type": "object",
+            "description": "Cursor pagination: {limit: int, offset: int}.",
+            "properties": {
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"},
+            },
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Tool-definition compaction
+# ---------------------------------------------------------------------------
+
+# tool name → slim replacement for its adcp-generated inputSchema.
+SLIM_INPUT_SCHEMAS: dict[str, dict] = {
+    "create_media_buy": CREATE_MEDIA_BUY_SLIM_SCHEMA,
+    "update_media_buy": UPDATE_MEDIA_BUY_SLIM_SCHEMA,
+    "sync_creatives": SYNC_CREATIVES_SLIM_SCHEMA,
+    "get_products": GET_PRODUCTS_SLIM_SCHEMA,
+}
+
+
+def compact_tool_schemas(tool_defs: list[dict]) -> None:
+    """Compact adcp tool definitions in place for ``tools/list``.
+
+    Two reductions, applied to the mutable ``ADCP_TOOL_DEFINITIONS`` list:
+
+    * ``inputSchema`` — replaced with the hand-written slim schema for the
+      tools in ``SLIM_INPUT_SCHEMAS`` (the asset-bearing booking-flow tools
+      whose inlined schemas run to megabytes).
+    * ``outputSchema`` — dropped from **every** tool.  The inlined output
+      schemas total ~4.7 MB across the advertised tools — 92% of the
+      ``tools/list`` payload — which pushed the response past buyer-agent
+      size caps (Scope3 rejects responses over 5 MB, blocking catalog
+      discovery entirely).  ``outputSchema`` is optional in MCP; without a
+      spec schema, adcp's ``_register_tool`` falls back to the generic
+      object schema derived from the wrapper's ``-> dict[str, Any]`` return
+      annotation, so ``structuredContent`` is still populated on responses.
+
+    Runtime request validation is unchanged — tools still validate against
+    the full Pydantic request models.
+    """
+    for tool in tool_defs:
+        slim = SLIM_INPUT_SCHEMAS.get(tool["name"])
+        if slim is not None:
+            tool["inputSchema"] = slim
+        tool.pop("outputSchema", None)
