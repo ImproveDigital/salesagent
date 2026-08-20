@@ -1071,6 +1071,17 @@ def main() -> None:
     """
     logging.basicConfig(level=logging.INFO)
 
+    # Trust X-Forwarded-Proto/-For from any upstream by default. The app is
+    # only reachable through the nginx/ingress proxy layer (never directly),
+    # and the proxy connects from the container network — not loopback — so
+    # uvicorn's default (trust 127.0.0.1 only) silently ignores the forwarded
+    # headers. That leaves request.url with scheme "http" and breaks RFC 9421
+    # @target-uri reconstruction: buyers sign "https://..." and inbound
+    # signature verification fails with request_signature_invalid.
+    # ``setdefault`` so an explicit FORWARDED_ALLOW_IPS (e.g. a CIDR for the
+    # proxy subnet) still takes precedence when set on the deployment.
+    os.environ.setdefault("FORWARDED_ALLOW_IPS", "*")
+
     kwargs = _serve_kwargs(include_scheduler=True)
     router = kwargs.pop("router")
     serve(router, **kwargs)
