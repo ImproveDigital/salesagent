@@ -35,11 +35,12 @@ class PlatformMappingModel(BaseModel):
 
     google_ad_manager: dict[str, Any] | None = None
     kevel: dict[str, Any] | None = None
+    improvedigital: dict[str, Any] | None = None
     mock: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def at_least_one_platform(self):
-        if not any([self.google_ad_manager, self.kevel, self.mock]):
+        if not any([self.google_ad_manager, self.kevel, self.improvedigital, self.mock]):
             raise ValueError("At least one platform mapping is required")
         return self
 

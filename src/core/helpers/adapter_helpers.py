@@ -76,6 +76,7 @@ def raise_mapped_adcp_error(exc: ADCPError, *, agent_label: str, logger: logging
 
 
 from src.adapters.google_ad_manager import GoogleAdManager
+from src.adapters.improvedigital import ImproveDigitalAdapter
 from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
 from src.adapters.triton_digital import TritonDigital
@@ -85,7 +86,7 @@ from src.core.schemas import Principal
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
+) -> MockAdServerAdapter | GoogleAdManager | ImproveDigitalAdapter | Kevel | TritonDigital:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
@@ -178,6 +179,43 @@ def get_adapter(
             elif adapter_type == "triton":
                 adapter_config["station_id"] = config_row.triton_station_id or ""
                 adapter_config["api_key"] = config_row.triton_api_key or ""
+            elif adapter_type == "improvedigital":
+                # Improve Digital credentials live in config_json. Rehydrate
+                # via the connection-config class with plaintext ATTRIBUTE
+                # access, never model_dump() — the dump serializer re-encrypts
+                # client_secret, which would ship ciphertext to the OAuth2
+                # token mint and 401.
+                stored = config_row.config_json or {}
+                if stored:
+                    impd_validated = ImproveDigitalAdapter.connection_config_class(**stored)
+                    adapter_config.update(
+                        {
+                            "client_id": impd_validated.client_id,
+                            "client_secret": impd_validated.client_secret,
+                            "api_base_url": impd_validated.api_base_url,
+                            "improve_demand_contact_id": impd_validated.improve_demand_contact_id,
+                            "default_advertiser_id": impd_validated.default_advertiser_id,
+                            "agency_id": impd_validated.agency_id,
+                            "buying_entity_id": impd_validated.buying_entity_id,
+                            "buying_entity_office_id": impd_validated.buying_entity_office_id,
+                            "campaign_type": impd_validated.campaign_type,
+                            "business_unit_id": impd_validated.business_unit_id,
+                            "buyer_id": impd_validated.buyer_id,
+                            # Campaign-metadata attribution (CampaignMetadataDto) —
+                            # dropping any of these silently disables the
+                            # POST /api/metadata-campaigns step in create_media_buy.
+                            "agency_name": impd_validated.agency_name,
+                            "advertiser_uuid": impd_validated.advertiser_uuid,
+                            "advertiser_name": impd_validated.advertiser_name,
+                            "integration_platform_id": impd_validated.integration_platform_id,
+                            "seat_id": impd_validated.seat_id,
+                            "adops_person_id": impd_validated.adops_person_id,
+                            "sales_person_id": impd_validated.sales_person_id,
+                            "currency": impd_validated.currency,
+                            "timezone": impd_validated.timezone,
+                            "manual_approval_required": impd_validated.manual_approval_required,
+                        }
+                    )
 
     if not selected_adapter:
         # Default to mock if no adapter specified
@@ -217,6 +255,8 @@ def get_adapter(
         return Kevel(adapter_config, principal, dry_run, tenant_id=tenant_id)
     elif selected_adapter in ["triton", "triton_digital"]:
         return TritonDigital(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "improvedigital":
+        return ImproveDigitalAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
         # Default to mock for unsupported adapters
         return MockAdServerAdapter(
