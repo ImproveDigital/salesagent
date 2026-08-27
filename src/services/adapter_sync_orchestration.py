@@ -1,0 +1,629 @@
+"""Shared adapter sync orchestration.
+
+One place where "run a sync" gets executed — regardless of adapter or
+sync kind, so per-adapter button endpoints don't each invent their own
+logging + result shape. Writes to the ``sync_jobs`` table for a uniform
+sync-history feed.
+
+Flow:
+    1. Resolve tenant + adapter via the existing get_adapter helper
+       (same path the AdCP buyer-facing calls use, so adapter_config /
+       tenant-mappings stay consistent).
+    2. Create a SyncJob row with status="running".
+    3. Call ``adapter.run_inventory_sync()`` or ``run_reporting_sync()``
+       based on the requested ``sync_kind``.
+    4. Persist the AdapterSyncResult into the SyncJob (status="completed"
+       or "failed", counts + errors stamped into the JSON ``progress``
+       field for the UI, ``error_message`` for the failure summary).
+    5. Return a :class:`SyncExecutionResult` for the immediate caller
+       (admin endpoint, scheduler).
+
+GAM's async inventory sync is NOT routed here — its existing
+``background_sync_service`` writes SyncJob rows directly and runs on a
+threaded pattern that doesn't fit this synchronous orchestration. The two
+patterns coexist and write to the same SyncJob table so admin surfaces see
+everything uniformly.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from src.adapters.base import AdapterSyncResult, AdServerAdapter
+from src.core.database.database_session import get_db_session
+from src.core.database.models import SyncJob
+from src.core.database.repositories.sync_job import SyncJobRepository
+
+logger = logging.getLogger(__name__)
+
+
+# Supported sync_kind values; the SyncJob.sync_type column is generic
+# but we pin the set to make orchestration explicit.
+SyncKind = str
+KIND_INVENTORY: SyncKind = "inventory"
+KIND_REPORTING: SyncKind = "reporting"
+SUPPORTED_SYNC_KINDS: frozenset[SyncKind] = frozenset({KIND_INVENTORY, KIND_REPORTING})
+
+_SYNC_CAPABILITY_ATTRS: dict[SyncKind, str] = {
+    KIND_INVENTORY: "supports_inventory_sync",
+    KIND_REPORTING: "supports_reporting_sync",
+}
+
+_SYNC_METHODS: dict[SyncKind, str] = {
+    KIND_INVENTORY: "run_inventory_sync",
+    KIND_REPORTING: "run_reporting_sync",
+}
+
+# Max length for ``SyncJob.error_message``. The column is TEXT so the DB
+# doesn't truncate, but the field can render on admin surfaces — bounding
+# it both prevents pathological full-traceback strings from breaking the
+# UI AND limits the size of any accidental credential bleed.
+_MAX_ERROR_MESSAGE_LEN = 500
+
+
+@dataclass
+class SyncExecutionResult:
+    """Summary returned by :func:`execute_sync` to its caller."""
+
+    sync_id: str
+    sync_kind: SyncKind
+    succeeded: bool
+    counts: dict[str, int] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @property
+    def scope_pending(self) -> bool:
+        """True when the failure was specifically an upstream scope-grant
+        gap (e.g. a reporting role still pending). The admin UI renders
+        this state with the "awaiting scope" copy rather than a generic
+        failure."""
+        return bool(self.metadata.get("scope_pending"))
+
+    def to_json_payload(self) -> dict[str, Any]:
+        """Canonical JSON body for HTTP endpoints that dispatch a sync.
+
+        Shared by the per-adapter sync buttons so the shape stays
+        consistent as new adapter buttons get added (and the admin JS
+        doesn't need adapter-specific branches).
+        """
+        return {
+            "sync_id": self.sync_id,
+            "sync_kind": self.sync_kind,
+            "succeeded": self.succeeded,
+            "counts": dict(self.counts),
+            "errors": dict(self.errors),
+            "metadata": dict(self.metadata),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "scope_pending": self.scope_pending,
+        }
+
+
+class AdapterDoesNotSupportSyncKind(RuntimeError):
+    """Raised when ``execute_sync`` is called with a sync_kind the
+    adapter hasn't declared support for. Distinct from a generic
+    failure — caller (admin endpoint, scheduler) returns a 4xx-shaped
+    response rather than a 5xx, since the request itself is invalid."""
+
+    def __init__(self, adapter_type: str, sync_kind: SyncKind) -> None:
+        self.adapter_type = adapter_type
+        self.sync_kind = sync_kind
+        super().__init__(
+            f"Adapter {adapter_type!r} does not declare supports_{sync_kind}_sync=True. "
+            "Either enable the capability + override the method, or stop calling "
+            f"execute_sync(sync_kind={sync_kind!r}) for this adapter."
+        )
+
+
+def _validate_sync_kind(sync_kind: SyncKind) -> None:
+    if sync_kind not in SUPPORTED_SYNC_KINDS:
+        raise ValueError(f"sync_kind must be one of {sorted(SUPPORTED_SYNC_KINDS)}; got {sync_kind!r}")
+
+
+def adapter_supports_sync_kind(caps: Any, sync_kind: SyncKind) -> bool:
+    """Return whether an AdapterCapabilities-like object supports a kind."""
+    _validate_sync_kind(sync_kind)
+    return bool(getattr(caps, _SYNC_CAPABILITY_ATTRS[sync_kind], False))
+
+
+def _rehydrate_connection_config(adapter_class: Any, config_dict: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    """Decrypt stored connection secrets before adapter construction.
+
+    ``config_json`` holds Fernet ciphertext for fields the adapter's
+    connection schema marks secret (e.g. client_secret). Passing the raw
+    row to the adapter ships ciphertext to the upstream auth endpoint
+    (observed live: Improve Digital /oauth/token 401). Validating through
+    ``connection_config_class`` runs the field validators that decrypt;
+    attribute access (not ``model_dump()``, which would re-encrypt) yields
+    plaintext values — the same round-trip ``get_adapter()`` uses. Keys
+    outside the schema are preserved untouched.
+    """
+    connection_cls = getattr(adapter_class, "connection_config_class", None)
+    if connection_cls is None or not config_dict:
+        return config_dict
+    try:
+        validated = connection_cls(**config_dict)
+    except Exception:
+        # Legacy rows (e.g. GAM per-column configs) may not match the
+        # schema — keep the raw dict, matching pre-existing behaviour.
+        logger.warning(
+            "Adapter config for tenant=%s did not validate against %s; passing raw config_json",
+            tenant_id,
+            connection_cls.__name__,
+        )
+        return config_dict
+    return {**config_dict, **{name: getattr(validated, name) for name in type(validated).model_fields}}
+
+
+class SyncAlreadyRunning(Exception):
+    """A sync of this kind is already in flight for the tenant + adapter.
+
+    Concurrent runs of the same stream race each other on upstream rate
+    limits (e.g. 360Yield's 100 reads/60s) and duplicate work — callers
+    should surface "already running" instead of starting a second sweep.
+    """
+
+    def __init__(self, sync_id: str):
+        self.sync_id = sync_id
+        super().__init__(f"sync already in progress: {sync_id}")
+
+
+# In-flight rows older than this are treated as crashed (a stuck row must
+# not block syncs forever). Rate-limited inventory sweeps legitimately run
+# for many minutes, so the window is generous.
+_ACTIVE_SYNC_MAX_AGE = timedelta(minutes=60)
+
+
+def _find_active_sync(
+    tenant_id: str,
+    adapter_type: str,
+    sync_kind: str,
+    *,
+    exclude_sync_id: str | None = None,
+) -> str | None:
+    """Return the sync_id of a fresh in-flight run for this stream, if any."""
+    with get_db_session() as session:
+        job = SyncJobRepository(session, tenant_id).latest_running_for_stream(
+            adapter_type=adapter_type, sync_type=sync_kind
+        )
+        if job is None or job.sync_id == exclude_sync_id:
+            return None
+        started = job.started_at
+        if started is not None:
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            if datetime.now(UTC) - started > _ACTIVE_SYNC_MAX_AGE:
+                return None
+        return job.sync_id
+
+
+def execute_adapter_sync(
+    *,
+    tenant_id: str,
+    adapter_type: str,
+    sync_kind: SyncKind,
+    triggered_by: str,
+    triggered_by_id: str | None = None,
+    run_kwargs: dict[str, Any] | None = None,
+    sync_id: str | None = None,
+) -> SyncExecutionResult | None:
+    """Resolve the tenant's adapter, then orchestrate a sync run end-to-end.
+
+    Returns ``None`` when the tenant has no AdapterConfig row matching
+    ``adapter_type`` — caller maps that to a 400. Distinguishes
+    "tenant isn't configured for this adapter" from "the sync itself
+    failed" (which is a :class:`SyncExecutionResult` with
+    ``succeeded=False``).
+
+    This is the entry point the per-adapter sync buttons go through; it
+    owns the AdapterConfig lookup + adapter
+    construction so callers don't need to duplicate that boilerplate.
+    """
+    from src.adapters import get_adapter_class
+    from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+    with get_db_session() as session:
+        existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+        if not existing or existing.adapter_type != adapter_type:
+            return None
+        config_dict = dict(existing.config_json or {})
+
+    # A concurrent run of the same stream (scheduler startup sweep + admin
+    # button is the classic race) doubles upstream read traffic and trips
+    # rate limits. When resuming a pre-created queued row, sync_id is our
+    # own job and must not block itself.
+    active_sync_id = _find_active_sync(tenant_id, adapter_type, sync_kind, exclude_sync_id=sync_id)
+    if active_sync_id:
+        raise SyncAlreadyRunning(active_sync_id)
+
+    adapter_class = get_adapter_class(adapter_type)
+    config_dict = _rehydrate_connection_config(adapter_class, config_dict, tenant_id=tenant_id)
+
+    # Stub principal — sync runs operate at the tenant level, not on
+    # behalf of a specific principal. Adapters that need an advertiser
+    # context for buyer-facing operations don't use it during sync.
+    from src.core.schemas import Principal
+
+    stub_principal = Principal(
+        principal_id="__sync_orchestrator__",
+        name="sync-orchestrator",
+        platform_mappings={adapter_type: {"advertiser_id": "0"}},
+    )
+
+    adapter = adapter_class(
+        config=config_dict,
+        principal=stub_principal,
+        dry_run=False,
+        tenant_id=tenant_id,
+    )
+
+    return execute_sync(
+        adapter=adapter,
+        tenant_id=tenant_id,
+        sync_kind=sync_kind,
+        triggered_by=triggered_by,
+        triggered_by_id=triggered_by_id,
+        run_kwargs=run_kwargs,
+        sync_id=sync_id,
+    )
+
+
+class _EnqueueValidationError(RuntimeError):
+    """Raised by :func:`enqueue_adapter_sync` when the synchronous
+    pre-checks fail (tenant unconfigured, capability missing). Distinct
+    type so the Flask wrapper can map ``None``/exception to the right
+    HTTP status without leaking the SyncJob.queued row."""
+
+    def __init__(self, http_status: int, message: str) -> None:
+        self.http_status = http_status
+        super().__init__(message)
+
+
+def enqueue_adapter_sync(
+    *,
+    tenant_id: str,
+    adapter_type: str,
+    sync_kind: SyncKind,
+    triggered_by: str,
+    triggered_by_id: str | None = None,
+    run_kwargs: dict[str, Any] | None = None,
+) -> str | None:
+    """Validate + enqueue a sync run, return the new ``sync_id`` immediately.
+
+    Splits the cheap synchronous parts from the expensive adapter call:
+      1. Resolve AdapterConfig + check capability (fast — DB lookup).
+      2. Create a SyncJob row with ``status='queued'``.
+      3. Spawn a daemon thread that runs the actual sync via
+         :func:`execute_adapter_sync` with the pre-generated ``sync_id``;
+         the orchestrator transitions ``queued`` → ``running`` → terminal.
+      4. Return the ``sync_id`` so the HTTP caller can respond with 202
+         and the UI can poll for status.
+
+    Returns ``None`` if the tenant has no AdapterConfig matching
+    ``adapter_type`` (caller maps to 400). Raises
+    :class:`AdapterDoesNotSupportSyncKind` if the capability is off.
+
+    Used by the per-adapter async sync endpoints so a long-running
+    inventory sweep doesn't hold a Flask request thread open past nginx's
+    idle timeout.
+    """
+    import threading
+
+    from src.adapters import get_adapter_class
+    from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+    _validate_sync_kind(sync_kind)
+
+    with get_db_session() as session:
+        cfg = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+        if not cfg or cfg.adapter_type != adapter_type:
+            return None
+
+    adapter_class = get_adapter_class(adapter_type)
+    caps = getattr(adapter_class, "capabilities", None)
+    if caps is None:
+        raise AdapterDoesNotSupportSyncKind(adapter_type=adapter_type, sync_kind=sync_kind)
+    if not adapter_supports_sync_kind(caps, sync_kind):
+        raise AdapterDoesNotSupportSyncKind(adapter_type=adapter_type, sync_kind=sync_kind)
+
+    if sync_kind == KIND_INVENTORY and adapter_type == "google_ad_manager":
+        from src.services.background_sync_service import start_inventory_sync_background
+
+        # NOTE: the GAM background path predates the orchestration and does
+        # not record triggered_by attribution — parity is a follow-up there.
+        kwargs = run_kwargs or {}
+        return start_inventory_sync_background(
+            tenant_id=tenant_id,
+            sync_mode=kwargs.get("sync_mode", "incremental"),
+            sync_types=kwargs.get("sync_types"),
+            custom_targeting_limit=kwargs.get("custom_targeting_limit"),
+            audience_segment_limit=kwargs.get("audience_segment_limit"),
+        )
+
+    # Idempotent under concurrency: if a run of this stream is already in
+    # flight, hand back its sync_id instead of enqueuing a duplicate.
+    active_sync_id = _find_active_sync(tenant_id, adapter_type, sync_kind)
+    if active_sync_id:
+        logger.info(
+            "enqueue_adapter_sync: %s/%s %s sync already in flight (%s) — not enqueuing a duplicate",
+            tenant_id,
+            adapter_type,
+            sync_kind,
+            active_sync_id,
+        )
+        return active_sync_id
+
+    sync_id = f"sync_{uuid.uuid4().hex[:16]}"
+    with get_db_session() as session:
+        SyncJobRepository(session, tenant_id).create_job(
+            sync_id=sync_id,
+            adapter_type=adapter_type,
+            sync_type=sync_kind,
+            status="queued",
+            triggered_by=triggered_by,
+            triggered_by_id=triggered_by_id,
+        )
+        session.commit()
+
+    def _runner() -> None:
+        try:
+            execute_adapter_sync(
+                tenant_id=tenant_id,
+                adapter_type=adapter_type,
+                sync_kind=sync_kind,
+                triggered_by=triggered_by,
+                triggered_by_id=triggered_by_id,
+                run_kwargs=run_kwargs,
+                sync_id=sync_id,
+            )
+        except Exception:
+            # Mirror the orchestrator's defensive logging — daemon thread
+            # exceptions otherwise vanish silently. The SyncJob row will
+            # remain ``queued`` if execute_adapter_sync didn't transition
+            # it; surface that via a follow-up update so the admin UI
+            # doesn't show a stuck row indefinitely.
+            logger.exception(
+                "enqueue_adapter_sync runner crashed for sync_id=%s tenant=%s adapter=%s",
+                sync_id,
+                tenant_id,
+                adapter_type,
+            )
+            _mark_runner_crash(sync_id, tenant_id)
+
+    threading.Thread(target=_runner, daemon=True, name=f"sync-{sync_id}").start()
+    return sync_id
+
+
+def _mark_runner_crash(sync_id: str, tenant_id: str) -> None:
+    """Best-effort failure stamp when the async runner thread crashes
+    before :func:`execute_sync` ran. Lookup the queued row and mark it
+    failed so the UI doesn't show a stuck-forever ``queued`` row."""
+    try:
+        with get_db_session() as session:
+            job = SyncJobRepository(session, tenant_id).find_by_sync_id(sync_id)
+            if job is None:
+                return
+            if job.status not in ("queued", "running"):
+                return
+            job.status = "failed"
+            job.completed_at = datetime.now(UTC)
+            job.error_message = "runner thread crashed before sync started"
+            session.commit()
+    except Exception:
+        logger.exception("Failed to mark crashed runner state for sync_id=%s", sync_id)
+
+
+def execute_sync(
+    *,
+    adapter: AdServerAdapter,
+    tenant_id: str,
+    sync_kind: SyncKind,
+    triggered_by: str,
+    triggered_by_id: str | None = None,
+    session: Session | None = None,
+    run_kwargs: dict[str, Any] | None = None,
+    sync_id: str | None = None,
+) -> SyncExecutionResult:
+    """Run one sync end-to-end and persist a SyncJob row for it.
+
+    Args:
+        adapter: A live (non-dry-run) :class:`AdServerAdapter`. Caller
+            constructs it via the usual ``get_adapter()`` helper so
+            tenant config + principal mapping stay consistent with the
+            buyer-facing call path.
+        tenant_id: Tenant the sync targets — stamped onto the SyncJob.
+        sync_kind: ``"inventory"`` or ``"reporting"`` — picks which
+            ``run_*_sync()`` method to call.
+        triggered_by: Free-form provenance string for the SyncJob
+            row (``"admin_button"``, ``"manual_api"`` etc).
+        triggered_by_id: Optional principal_id / user_id for audit lineage.
+        session: Optional existing DB session. When omitted, the function
+            opens its own session and commits at the end.
+
+    Raises:
+        AdapterDoesNotSupportSyncKind: when the adapter's capabilities
+            flag for the requested sync_kind is False. Better to fail
+            fast at the boundary than to surface a base-class
+            NotImplementedError from inside the orchestration.
+    """
+    adapter_type = getattr(adapter.__class__, "adapter_name", adapter.__class__.__name__)
+    _validate_sync_kind(sync_kind)
+
+    if not adapter_supports_sync_kind(adapter.capabilities, sync_kind):
+        raise AdapterDoesNotSupportSyncKind(adapter_type=adapter_type, sync_kind=sync_kind)
+
+    if session is not None:
+        return _execute_sync_with_session(
+            session,
+            adapter=adapter,
+            adapter_type=adapter_type,
+            tenant_id=tenant_id,
+            sync_kind=sync_kind,
+            triggered_by=triggered_by,
+            triggered_by_id=triggered_by_id,
+            run_kwargs=run_kwargs,
+            own_session=False,
+            sync_id=sync_id,
+        )
+
+    with get_db_session() as db:
+        return _execute_sync_with_session(
+            db,
+            adapter=adapter,
+            adapter_type=adapter_type,
+            tenant_id=tenant_id,
+            sync_kind=sync_kind,
+            triggered_by=triggered_by,
+            triggered_by_id=triggered_by_id,
+            run_kwargs=run_kwargs,
+            own_session=True,
+            sync_id=sync_id,
+        )
+
+
+def _execute_sync_with_session(
+    db: Session,
+    *,
+    adapter: AdServerAdapter,
+    adapter_type: str,
+    tenant_id: str,
+    sync_kind: SyncKind,
+    triggered_by: str,
+    triggered_by_id: str | None,
+    run_kwargs: dict[str, Any] | None,
+    own_session: bool,
+    sync_id: str | None = None,
+) -> SyncExecutionResult:
+    """Body of :func:`execute_sync`, separated so the caller can decide
+    whether to wrap it in a ``with get_db_session()`` block (own_session=True)
+    or reuse a caller-supplied session.
+
+    When ``sync_id`` is provided, the function looks for an existing
+    SyncJob row with that ID (the ``enqueue_adapter_sync`` async path
+    pre-creates one with ``status='queued'`` so it can return the ID
+    to the HTTP caller immediately). If the row exists, transition it
+    queued → running. Otherwise create a new row with the supplied ID.
+    """
+    if sync_id is None:
+        sync_id = f"sync_{uuid.uuid4().hex[:16]}"
+    started_at = datetime.now(UTC)
+
+    repo = SyncJobRepository(db, tenant_id)
+    existing = repo.find_by_sync_id(sync_id)
+    if existing is not None:
+        job = existing
+        job.status = "running"
+        job.started_at = started_at
+    else:
+        job = repo.create_job(
+            sync_id=sync_id,
+            adapter_type=adapter_type,
+            sync_type=sync_kind,
+            status="running",
+            started_at=started_at,
+            triggered_by=triggered_by,
+            triggered_by_id=triggered_by_id,
+        )
+    db.flush()
+
+    kwargs = run_kwargs or {}
+    try:
+        result = getattr(adapter, _SYNC_METHODS[sync_kind])(**kwargs)
+    except Exception as exc:
+        logger.exception("Adapter %s %s sync raised unexpectedly for tenant=%s", adapter_type, sync_kind, tenant_id)
+        job.status = "failed"
+        job.completed_at = datetime.now(UTC)
+        job.error_message = _sanitize_error_message(f"{type(exc).__name__}: {exc}")
+        db.flush()
+        if own_session:
+            db.commit()
+        return SyncExecutionResult(
+            sync_id=sync_id,
+            sync_kind=sync_kind,
+            succeeded=False,
+            errors={"adapter": _sanitize_error_message(str(exc))},
+            started_at=started_at,
+            finished_at=job.completed_at,
+        )
+
+    return _finalize(job, result, db, own_session, started_at, sync_id)
+
+
+def _finalize(
+    job: SyncJob,
+    result: AdapterSyncResult,
+    db: Session,
+    own_session: bool,
+    started_at: datetime,
+    sync_id: str,
+) -> SyncExecutionResult:
+    """Stamp the AdapterSyncResult onto the SyncJob row and return the
+    caller-facing SyncExecutionResult."""
+    job.completed_at = result.finished_at or datetime.now(UTC)
+    job.status = "completed" if result.succeeded else "failed"
+    job.progress = {
+        "counts": dict(result.counts),
+        "errors": dict(result.errors),
+        "metadata": dict(result.metadata),
+    }
+    if not result.succeeded and result.errors:
+        # Pick the first error message as the human-readable summary;
+        # full per-kind errors live in ``progress`` for the UI.
+        first_key = next(iter(result.errors))
+        job.error_message = _sanitize_error_message(f"{first_key}: {result.errors[first_key]}")
+    job.summary = (
+        f"{result.sync_kind} sync — total={result.total_count} succeeded={result.succeeded} errors={len(result.errors)}"
+    )
+    db.flush()
+    if own_session:
+        db.commit()
+
+    return SyncExecutionResult(
+        sync_id=sync_id,
+        sync_kind=result.sync_kind,
+        succeeded=result.succeeded,
+        counts=dict(result.counts),
+        errors=dict(result.errors),
+        metadata=dict(result.metadata),
+        started_at=started_at,
+        finished_at=job.completed_at,
+    )
+
+
+# Patterns most likely to leak secrets into adapter exception strings.
+# Conservative — false positives are fine (visible as ``[redacted]``),
+# false negatives leak across the cross-tenant scheduling view.
+_SECRET_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.DOTALL),  # PEM blocks
+    re.compile(r"eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),  # JWT
+    re.compile(r"(?i)(refresh_token|access_token|api_key|password|secret)[\"'=:\s]+[^\s,\"'}]{8,}"),
+)
+
+
+def _sanitize_error_message(msg: str) -> str:
+    """Strip likely secrets out of an adapter exception string and bound
+    the length before persisting to ``SyncJob.error_message``.
+
+    The row is read by super-admins across all tenants — a stray refresh
+    token or service-account JSON in a Python traceback would otherwise
+    bleed cross-tenant. We can't promise to catch every secret shape, so
+    the length cap is the second line of defense (no full credential
+    payload fits in 500 chars after the prefix).
+    """
+    if not msg:
+        return msg
+    for pattern in _SECRET_PATTERNS:
+        msg = pattern.sub("[redacted]", msg)
+    if len(msg) > _MAX_ERROR_MESSAGE_LEN:
+        msg = msg[: _MAX_ERROR_MESSAGE_LEN - 1] + "…"
+    return msg
