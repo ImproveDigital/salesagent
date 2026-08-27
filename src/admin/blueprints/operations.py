@@ -81,13 +81,23 @@ def reporting(tenant_id):
             "is_active": tenant_obj.is_active,
         }
 
+        # Improve Digital tenants get the Report-API-cache dashboard.
+        if tenant_obj.ad_server == "improvedigital":
+            from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+            adapter_config = AdapterConfigRepository(db_session, tenant_id).find_by_tenant()
+            currency = "EUR"
+            if adapter_config and (adapter_config.config_json or {}).get("currency"):
+                currency = str(adapter_config.config_json["currency"])
+            return render_template("improvedigital_reporting.html", tenant=tenant, currency=currency)
+
         # Check if tenant is using Google Ad Manager
         if tenant_obj.ad_server != "google_ad_manager":
             return (
                 render_template(
                     "error.html",
-                    error_title="GAM Reporting Not Available",
-                    error_message=f"This tenant is currently using {tenant_obj.ad_server or 'no ad server'}. GAM Reporting is only available for tenants using Google Ad Manager.",
+                    error_title="Reporting Not Available",
+                    error_message=f"This tenant is currently using {tenant_obj.ad_server or 'no ad server'}. Reporting is only available for tenants using Google Ad Manager or Improve Digital.",
                     back_url=f"{request.script_root}/tenant/{tenant_id}",
                 ),
                 400,

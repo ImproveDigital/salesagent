@@ -283,6 +283,17 @@ def tenant_settings(tenant_id, section=None):
                     "secondary_currencies": adapter_config_obj.gam_secondary_currencies or [],
                     "network_timezone": adapter_config_obj.gam_network_timezone or "",
                 }
+                # Non-GAM adapters (improvedigital, broadstreet, …) keep their
+                # settings in config_json — merge them so their templates can
+                # re-render saved values. Secret values are reduced to a
+                # boolean so ciphertext never reaches the page source (templates
+                # only truth-test them, e.g. "leave blank to keep existing").
+                if adapter_config_obj.config_json:
+                    for key, value in adapter_config_obj.config_json.items():
+                        if any(marker in key for marker in ("secret", "password", "token", "api_key")):
+                            adapter_config_dict[key] = bool(value)
+                        else:
+                            adapter_config_dict[key] = value
 
             # Get environment info for URL generation
             is_production = os.environ.get("PRODUCTION") == "true"

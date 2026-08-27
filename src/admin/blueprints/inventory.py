@@ -326,6 +326,18 @@ def inventory_browser(tenant_id):
     # Get inventory type from query param
     inventory_type = request.args.get("type", "all")
 
+    if adapter_type == "improvedigital":
+        # 360Yield inventory browser — publishers→placements tree plus
+        # packages and sizes, backed by the improvedigital_inventory cache
+        # (see /api/tenant/<id>/adapters/improvedigital/inventory).
+        return render_template(
+            "inventory_browser_improvedigital.html",
+            tenant=tenant_dict,
+            tenant_id=tenant_id,
+            tenant_name=row[1],
+            adapter_type=adapter_type,
+        )
+
     return render_template(
         "inventory_unified.html",
         tenant=tenant_dict,

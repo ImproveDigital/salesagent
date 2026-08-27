@@ -1,0 +1,797 @@
+{#
+Improve Digital Adapter Connection Configuration Template
+
+Included in the settings page when the Improve Digital adapter is selected.
+Auth is OAuth2 client_credentials only (client_id + client_secret) against
+the 360Yield Marketplace API. Phase 1 targets Classic (direct) campaigns —
+every campaign books under a buying entity + office (discoverable via the
+Admin API when the credentials carry admin scope); the office's default
+demand contact applies unless overridden.
+
+Expected context:
+- adapter_config: dict with current adapter configuration
+- tenant_id: current tenant ID
+#}
+
+<div class="adapter-connection-config" data-adapter-type="improvedigital">
+    <div class="form-section">
+        <h3>Improve Digital 360Yield Configuration</h3>
+
+        <p class="text-muted" style="margin-bottom: 1.5rem;">
+            Connect to the Improve Digital 360Yield Marketplace API. Provide the OAuth2
+            client credentials issued by Improve Digital — the adapter mints short-lived
+            bearer tokens (~11 min) and refreshes them automatically. The adapter runs
+            Classic (direct) campaigns: creatives are hosted and served by the Improve adserver.
+        </p>
+
+        <div class="form-group">
+            <label for="improvedigital_client_id">Client ID</label>
+            <input type="text" id="improvedigital_client_id" name="improvedigital_client_id"
+                   value="{{ adapter_config.get('client_id', '') if adapter_config else '' }}"
+                   placeholder="OAuth2 client ID issued by Improve Digital">
+            <small class="form-text text-muted">
+                Issued per client application by Improve Digital — request via the platform team.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_client_secret">Client Secret</label>
+            <input type="password" id="improvedigital_client_secret" name="improvedigital_client_secret"
+                   value=""
+                   placeholder="{% if adapter_config and adapter_config.get('client_id') %}(leave blank to keep existing){% else %}Enter client secret{% endif %}">
+            <small class="form-text text-muted">
+                Stored encrypted at rest. Leave blank to keep the previously saved secret.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_api_base_url">API Base URL <span style="color: #ef4444;">*</span></label>
+            <input type="text" id="improvedigital_api_base_url" name="improvedigital_api_base_url"
+                   list="improvedigital_api_hosts" class="form-control"
+                   value="{{ adapter_config.get('api_base_url', '') if adapter_config else '' }}"
+                   placeholder="https://api.360yield.com">
+            <datalist id="improvedigital_api_hosts">
+                <option value="https://api.360yield.com">Production</option>
+            </datalist>
+            <small class="form-text text-muted">
+                Every call — discovery, Test Connection, inventory sync, reporting and
+                booking — goes to this host, so set it before discovering anything.
+                Must be https; leave blank to use production.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label>Buying Entity &amp; Office</label>
+            <div style="display: flex; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem;">
+                <button type="button" onclick="discoverImproveDigitalEntities()" class="btn btn-secondary">
+                    Discover from API
+                </button>
+                <span id="improvedigital-discovery-status"></span>
+            </div>
+            <div id="improvedigital-discovery-pickers" style="display: none; margin-bottom: 0.75rem;">
+                <input type="text" id="improvedigital_entity_search" class="form-control"
+                       style="margin-bottom: 0.5rem;" placeholder="Search buying entities…"
+                       oninput="renderImproveDigitalEntityOptions()">
+                <select id="improvedigital_entity_picker" class="form-control" style="margin-bottom: 0.5rem;"
+                        onchange="onImproveDigitalEntityPicked()">
+                    <option value="">Select a buying entity…</option>
+                </select>
+                <select id="improvedigital_office_picker" class="form-control" style="display: none;"
+                        onchange="onImproveDigitalOfficePicked()">
+                    <option value="">Select an office…</option>
+                </select>
+            </div>
+            <small class="form-text text-muted">
+                Discovery needs admin-scoped credentials; otherwise
+                <a href="#" onclick="unlockImproveDigitalIds(); return false;">enter the IDs below manually</a>
+                (ask your Improve Digital account team).
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_buying_entity_id">Buying Entity ID</label>
+            <input type="number" id="improvedigital_buying_entity_id" name="improvedigital_buying_entity_id"
+                   value="{{ adapter_config.get('buying_entity_id', '') if adapter_config else '' }}"
+                   placeholder="Required — entity Classic campaigns book under"
+                   {% if adapter_config and adapter_config.get('buying_entity_id') %}readonly{% endif %}>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_buying_entity_office_id">Buying Entity Office ID</label>
+            <input type="number" id="improvedigital_buying_entity_office_id" name="improvedigital_buying_entity_office_id"
+                   value="{{ adapter_config.get('buying_entity_office_id', '') if adapter_config else '' }}"
+                   placeholder="Required — currency-specific office of the buying entity"
+                   {% if adapter_config and adapter_config.get('buying_entity_office_id') %}readonly{% endif %}>
+            <small class="form-text text-muted">
+                Offices are per-currency — pick the one matching the default currency below.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_demand_contact_id">Improve Demand Contact ID</label>
+            <input type="number" id="improvedigital_demand_contact_id" name="improvedigital_demand_contact_id"
+                   value="{{ adapter_config.get('improve_demand_contact_id', '') if adapter_config else '' }}"
+                   placeholder="Your API user's user_id — office default applies when empty">
+            <small class="form-text text-muted">
+                Editable. Test Connection fills it from your API user, and picking an office
+                overwrites it with that office's default contact — type over either.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_business_unit_id">Business Unit ID</label>
+            <input type="number" id="improvedigital_business_unit_id" name="improvedigital_business_unit_id"
+                   value="{{ adapter_config.get('business_unit_id', '') if adapter_config else '' }}"
+                   placeholder="Required for booking — auto-filled by Test Connection">
+            <small class="form-text text-muted">
+                The Improve Digital business unit campaigns book under (your API user's own
+                unit — <strong>Test Connection</strong> fills it in automatically).
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_buyer_id">Buyer ID</label>
+            <select id="improvedigital_buyer_picker" class="form-control" style="display: none; margin-bottom: 0.5rem;"
+                    onchange="onImproveDigitalBuyerPicked()">
+                <option value="">Select a buyer…</option>
+            </select>
+            <input type="number" id="improvedigital_buyer_id" name="improvedigital_buyer_id"
+                   value="{{ adapter_config.get('buyer_id', '') if adapter_config else '' }}"
+                   placeholder="Optional — sent on Classic line items">
+            <small class="form-text text-muted">
+                Sent as <code>buyer_id</code> on every Classic line item. The picker fills
+                from <strong>Test Connection</strong> (your API user's buyers) or from the
+                selected office; leave empty to let the platform derive it from the campaign.
+            </small>
+        </div>
+
+        <hr style="margin: 2rem 0 1rem 0;">
+
+        <h4>Campaign Metadata</h4>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Which brand and agency the campaign belongs to, and who owns it internally.
+        </p>
+
+        <div class="form-group">
+            <label for="improvedigital_advertiser_uuid">Advertiser (brand)</label>
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                <input type="text" id="improvedigital_advertiser_search" class="form-control"
+                       placeholder="Search advertisers…" style="flex: 1;"
+                       onkeydown="if (event.key === 'Enter') { event.preventDefault(); searchImproveDigitalMetadata('advertisers'); }">
+                <button type="button" onclick="searchImproveDigitalMetadata('advertisers')" class="btn btn-secondary">
+                    Search
+                </button>
+            </div>
+            <select id="improvedigital_advertiser_picker" class="form-control" style="display: none; margin-bottom: 0.5rem;"
+                    onchange="onImproveDigitalMetadataPicked('advertiser')">
+                <option value="">Select an advertiser…</option>
+            </select>
+            <div style="display: flex; gap: 0.5rem;">
+                <input type="text" id="improvedigital_advertiser_uuid" name="improvedigital_advertiser_uuid"
+                       value="{{ adapter_config.get('advertiser_uuid', '') if adapter_config else '' }}"
+                       placeholder="advertiserUuid" style="flex: 2;">
+                <input type="text" id="improvedigital_advertiser_name" name="improvedigital_advertiser_name"
+                       value="{{ adapter_config.get('advertiser_name', '') if adapter_config else '' }}"
+                       placeholder="advertiserName" style="flex: 1;">
+            </div>
+            <small class="form-text text-muted">
+                Brands are keyed by UUID on the metadata API — this is not the numeric
+                Default Advertiser ID below.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_agency_id">Agency</label>
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                <input type="text" id="improvedigital_agency_search" class="form-control"
+                       placeholder="Search agencies…" style="flex: 1;"
+                       onkeydown="if (event.key === 'Enter') { event.preventDefault(); searchImproveDigitalMetadata('agencies'); }">
+                <button type="button" onclick="searchImproveDigitalMetadata('agencies')" class="btn btn-secondary">
+                    Search
+                </button>
+            </div>
+            <select id="improvedigital_agency_picker" class="form-control" style="display: none; margin-bottom: 0.5rem;"
+                    onchange="onImproveDigitalMetadataPicked('agency')">
+                <option value="">Select an agency…</option>
+            </select>
+            <div style="display: flex; gap: 0.5rem;">
+                <input type="number" id="improvedigital_agency_id" name="improvedigital_agency_id"
+                       value="{{ adapter_config.get('agency_id', '') if adapter_config else '' }}"
+                       placeholder="agencyId" style="flex: 2;">
+                <input type="text" id="improvedigital_agency_name" name="improvedigital_agency_name"
+                       value="{{ adapter_config.get('agency_name', '') if adapter_config else '' }}"
+                       placeholder="agencyName" style="flex: 1;">
+            </div>
+        </div>
+
+        <div class="form-group" style="display: flex; gap: 1rem;">
+            <div style="flex: 1;">
+                <label for="improvedigital_integration_platform_id">Integration Platform ID (DSP)</label>
+                <input type="number" id="improvedigital_integration_platform_id" name="improvedigital_integration_platform_id"
+                       value="{{ adapter_config.get('integration_platform_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. 1 (Improve Digital)">
+                <small class="form-text text-muted">
+                    <code>integrationPlatformId</code> — see <code>/api/metadata-integration-platforms</code>.
+                </small>
+            </div>
+            <div style="flex: 1;">
+                <label for="improvedigital_seat_id">Seat ID</label>
+                <input type="text" id="improvedigital_seat_id" name="improvedigital_seat_id"
+                       value="{{ adapter_config.get('seat_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. default">
+                <small class="form-text text-muted">
+                    <code>seatId</code> — a string, not a number.
+                </small>
+            </div>
+        </div>
+
+        <div class="form-group" style="display: flex; gap: 1rem;">
+            <div style="flex: 1;">
+                <label for="improvedigital_adops_person_id">Ad Ops Person ID</label>
+                <input type="number" id="improvedigital_adops_person_id" name="improvedigital_adops_person_id"
+                       value="{{ adapter_config.get('adops_person_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. 17373">
+                <small class="form-text text-muted">Integer — <code>adOpsPersonId</code>.</small>
+            </div>
+            <div style="flex: 1;">
+                <label for="improvedigital_sales_person_id">Sales Person ID</label>
+                <input type="text" id="improvedigital_sales_person_id" name="improvedigital_sales_person_id"
+                       value="{{ adapter_config.get('sales_person_id', '') if adapter_config else '' }}"
+                       placeholder="e.g. f1b6846f-659b-426a-be89-c2c0b99be27c">
+                <small class="form-text text-muted">UUID string — <code>salesPersonId</code>.</small>
+            </div>
+        </div>
+
+        <span id="improvedigital-metadata-status" style="display: block; margin-bottom: 1rem;"></span>
+
+        <div class="form-group">
+            <label for="improvedigital_currency">Default Currency</label>
+            <select id="improvedigital_currency" name="improvedigital_currency" class="form-control">
+                {% set currencies = ['EUR', 'USD', 'GBP', 'DKK', 'SEK', 'AUD', 'CZK', 'HUF', 'CHF', 'NOK', 'SGD', 'HKD', 'MYR', 'CAD', 'TRY'] %}
+                {% set current_currency = adapter_config.get('currency', 'EUR') if adapter_config else 'EUR' %}
+                {% for currency in currencies %}
+                <option value="{{ currency }}" {% if current_currency == currency %}selected{% endif %}>{{ currency }}</option>
+                {% endfor %}
+            </select>
+            <small class="form-text text-muted">
+                Applied to new Classic campaigns (360Yield currency catalog).
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="improvedigital_timezone">Default Timezone</label>
+            {% set current_timezone = adapter_config.get('timezone', 'UTC') if adapter_config else 'UTC' %}
+            {% set timezones = ['UTC', 'Europe/Amsterdam', 'Europe/London', 'Europe/Berlin', 'Europe/Paris',
+                                'Europe/Madrid', 'Europe/Rome', 'Europe/Stockholm', 'Europe/Warsaw',
+                                'Europe/Istanbul', 'America/New_York', 'America/Chicago', 'America/Denver',
+                                'America/Los_Angeles', 'America/Sao_Paulo', 'Asia/Dubai', 'Asia/Singapore',
+                                'Asia/Hong_Kong', 'Asia/Tokyo', 'Australia/Sydney'] %}
+            <select id="improvedigital_timezone" name="improvedigital_timezone" class="form-control">
+                {% if current_timezone and current_timezone not in timezones %}
+                <option value="{{ current_timezone }}" selected>{{ current_timezone }}</option>
+                {% endif %}
+                {% for tz in timezones %}
+                <option value="{{ tz }}" {% if current_timezone == tz %}selected{% endif %}>{{ tz }}</option>
+                {% endfor %}
+            </select>
+            <small class="form-text text-muted">
+                IANA timezone applied to campaign flight dates and line-item pacing.
+            </small>
+        </div>
+
+        <div class="form-group" style="margin-top: 1rem;">
+            <label for="improvedigital_manual_approval_required">
+                <input type="checkbox" id="improvedigital_manual_approval_required" name="improvedigital_manual_approval_required"
+                       {% if adapter_config and adapter_config.get('manual_approval_required') %}checked{% endif %}>
+                Require Manual Approval
+            </label>
+            <small class="form-text text-muted">
+                When enabled, media buy operations require human approval before execution.
+            </small>
+        </div>
+
+        <div id="improvedigital-readiness" style="margin-top: 1.5rem; padding: 0.75rem 1rem; border-radius: 6px;
+             background: #f9fafb; border: 1px solid #e5e7eb;">
+            <strong style="display: block; margin-bottom: 0.5rem;">Booking readiness</strong>
+            <div id="improvedigital-readiness-items" style="font-size: 0.875rem; line-height: 1.6;"></div>
+        </div>
+
+        <div style="margin-top: 1.5rem; display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="saveImproveDigitalConfig()" class="btn btn-primary">
+                Save Configuration
+            </button>
+            <button type="button" onclick="testImproveDigitalConnection()" class="btn btn-secondary">
+                Test Connection
+            </button>
+            <span id="improvedigital-connection-status"></span>
+        </div>
+
+        <hr style="margin: 2rem 0 1rem 0;">
+
+        <h4>Inventory Sync</h4>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Pull 360Yield buy-side inventory (publishers, placements, packages,
+            creative sizes) into the local cache. The product setup UI uses this
+            cache so you can pin line items to placements without round-tripping
+            to the 360Yield API on every page render.
+        </p>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="syncImproveDigitalInventory()" class="btn btn-secondary">
+                Sync Inventory Now
+            </button>
+            <span id="improvedigital-inventory-sync-status"></span>
+        </div>
+    </div>
+</div>
+
+<script>
+function _improvedigitalPayload() {
+    const clientSecretEl = document.getElementById('improvedigital_client_secret');
+    const buyingEntityEl = document.getElementById('improvedigital_buying_entity_id');
+    const officeEl = document.getElementById('improvedigital_buying_entity_office_id');
+    const demandContactEl = document.getElementById('improvedigital_demand_contact_id');
+    const businessUnitEl = document.getElementById('improvedigital_business_unit_id');
+    const buyerEl = document.getElementById('improvedigital_buyer_id');
+    const agencyEl = document.getElementById('improvedigital_agency_id');
+    const baseUrlEl = document.getElementById('improvedigital_api_base_url');
+    const config = {
+        client_id: document.getElementById('improvedigital_client_id').value || null,
+        buying_entity_id: buyingEntityEl.value ? parseInt(buyingEntityEl.value, 10) : null,
+        buying_entity_office_id: officeEl.value ? parseInt(officeEl.value, 10) : null,
+        improve_demand_contact_id: demandContactEl.value ? parseInt(demandContactEl.value, 10) : null,
+        business_unit_id: businessUnitEl.value ? parseInt(businessUnitEl.value, 10) : null,
+        buyer_id: buyerEl.value ? parseInt(buyerEl.value, 10) : null,
+        advertiser_uuid: document.getElementById('improvedigital_advertiser_uuid').value.trim() || null,
+        advertiser_name: document.getElementById('improvedigital_advertiser_name').value.trim() || null,
+        agency_name: document.getElementById('improvedigital_agency_name').value.trim() || null,
+        adops_person_id: document.getElementById('improvedigital_adops_person_id').value
+            ? parseInt(document.getElementById('improvedigital_adops_person_id').value, 10) : null,
+        sales_person_id: document.getElementById('improvedigital_sales_person_id').value.trim() || null,
+        integration_platform_id: document.getElementById('improvedigital_integration_platform_id').value
+            ? parseInt(document.getElementById('improvedigital_integration_platform_id').value, 10) : null,
+        seat_id: document.getElementById('improvedigital_seat_id').value.trim() || null,
+        agency_id: agencyEl.value ? parseInt(agencyEl.value, 10) : null,
+        currency: document.getElementById('improvedigital_currency').value,
+        timezone: document.getElementById('improvedigital_timezone').value || 'UTC',
+        manual_approval_required: document.getElementById('improvedigital_manual_approval_required').checked
+    };
+    if (clientSecretEl.value) config.client_secret = clientSecretEl.value;
+    // Always explicit: discovery, reads and booking must all agree on the host,
+    // so the saved config carries it rather than relying on the schema default.
+    config.api_base_url = (baseUrlEl.value || '').trim();
+    return config;
+}
+
+function _improvedigitalCredsPayload() {
+    const payload = {};
+    const clientId = document.getElementById('improvedigital_client_id').value;
+    const clientSecret = document.getElementById('improvedigital_client_secret').value;
+    const baseUrl = document.getElementById('improvedigital_api_base_url').value;
+    if (clientId) payload.client_id = clientId;
+    if (clientSecret) payload.client_secret = clientSecret;
+    if (baseUrl) payload.api_base_url = baseUrl;
+    return payload;
+}
+
+let _improvedigitalEntities = [];
+
+// Every field the Classic booking APIs need before create_media_buy can run,
+// mirroring ImproveDigitalAdapter.__init__ + _missing_booking_config(). The
+// panel makes it obvious which ones discovery already answered.
+const _IMPROVEDIGITAL_REQUIRED = [
+    {id: 'improvedigital_client_id', label: 'Client ID', how: 'issued by Improve Digital'},
+    {id: 'improvedigital_api_base_url', label: 'API Base URL', how: 'pick the 360Yield host'},
+    {id: 'improvedigital_buying_entity_id', label: 'Buying Entity ID', how: 'Discover from API'},
+    {id: 'improvedigital_buying_entity_office_id', label: 'Buying Entity Office ID', how: 'Discover from API'},
+    {id: 'improvedigital_demand_contact_id', label: 'Demand Contact ID', how: 'Test Connection or office pick'},
+    {id: 'improvedigital_business_unit_id', label: 'Business Unit ID', how: 'Test Connection'}
+];
+
+function updateImproveDigitalReadiness() {
+    const container = document.getElementById('improvedigital-readiness-items');
+    if (!container) return;
+    const hasStoredSecret = {{ 'true' if adapter_config and adapter_config.get('client_secret') else 'false' }};
+    const rows = _IMPROVEDIGITAL_REQUIRED.map(field => {
+        const el = document.getElementById(field.id);
+        return {label: field.label, how: field.how, filled: !!(el && el.value)};
+    });
+    rows.splice(1, 0, {
+        label: 'Client Secret',
+        how: 'issued by Improve Digital',
+        filled: hasStoredSecret || !!document.getElementById('improvedigital_client_secret').value
+    });
+    container.innerHTML = rows.map(row => row.filled
+        ? '<div style="color: #10b981;">✓ ' + row.label + '</div>'
+        : '<div style="color: #ef4444;">✗ ' + row.label +
+          ' <span style="color: #6b7280;">— ' + row.how + '</span></div>'
+    ).join('');
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    _IMPROVEDIGITAL_REQUIRED.concat([{id: 'improvedigital_client_secret'}]).forEach(field => {
+        const el = document.getElementById(field.id);
+        if (el) el.addEventListener('input', updateImproveDigitalReadiness);
+    });
+    updateImproveDigitalReadiness();
+});
+
+function _renderImproveDigitalBuyerOptions(buyers) {
+    const picker = document.getElementById('improvedigital_buyer_picker');
+    if (!picker || !buyers || !buyers.length) return 0;
+    const current = document.getElementById('improvedigital_buyer_id').value;
+    picker.innerHTML = '<option value="">Select a buyer…</option>';
+    buyers.forEach(buyer => {
+        const opt = document.createElement('option');
+        opt.value = buyer.id;
+        opt.textContent = buyer.name + ' (' + buyer.id + ')';
+        if (String(buyer.id) === current) opt.selected = true;
+        picker.appendChild(opt);
+    });
+    picker.style.display = 'block';
+    return buyers.length;
+}
+
+// Campaign metadata dimensions. Advertiser ids are UUID strings and agency
+// ids are integers, so option values stay verbatim — never parsed.
+const _improvedigitalMetadata = {advertisers: [], agencies: []};
+
+function searchImproveDigitalMetadata(kind) {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('improvedigital-metadata-status');
+    const singular = kind === 'advertisers' ? 'advertiser' : 'agency';
+    const searchEl = document.getElementById('improvedigital_' + singular + '_search');
+    const picker = document.getElementById('improvedigital_' + singular + '_picker');
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Searching ' + kind + '…</span>';
+
+    const payload = _improvedigitalCredsPayload();
+    payload.kind = kind;
+    payload.search = searchEl.value.trim();
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/discover-metadata', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Lookup failed') + '</span>';
+            return;
+        }
+        _improvedigitalMetadata[kind] = data.items || [];
+        picker.innerHTML = '<option value="">Select an ' + singular + '…</option>';
+        _improvedigitalMetadata[kind].forEach(item => {
+            const opt = document.createElement('option');
+            opt.value = item.id;
+            opt.textContent = (item.name || item.id) + ' (' + item.id + ')';
+            picker.appendChild(opt);
+        });
+        picker.style.display = _improvedigitalMetadata[kind].length ? 'block' : 'none';
+        statusEl.innerHTML = '<span style="color: #10b981;">✓ ' + _improvedigitalMetadata[kind].length +
+            ' ' + kind + ' found</span>';
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function onImproveDigitalMetadataPicked(singular) {
+    const kind = singular === 'advertiser' ? 'advertisers' : 'agencies';
+    const picker = document.getElementById('improvedigital_' + singular + '_picker');
+    if (!picker.value) return;
+    const item = _improvedigitalMetadata[kind].find(row => String(row.id) === picker.value);
+    if (!item) return;
+    const idField = singular === 'advertiser' ? 'improvedigital_advertiser_uuid' : 'improvedigital_agency_id';
+    document.getElementById(idField).value = item.id;
+    document.getElementById('improvedigital_' + singular + '_name').value = item.name || '';
+    document.getElementById('improvedigital-metadata-status').innerHTML =
+        '<span style="color: #10b981;">✓ ' + singular + ' set to "' + (item.name || item.id) +
+        '" — remember to Save</span>';
+}
+
+function onImproveDigitalBuyerPicked() {
+    const picker = document.getElementById('improvedigital_buyer_picker');
+    if (!picker.value) return;
+    document.getElementById('improvedigital_buyer_id').value = picker.value;
+    updateImproveDigitalReadiness();
+}
+
+// Entity and office are locked once discovered so a stray keystroke can't
+// desync them from each other. The demand contact stays editable — it is a
+// deliberate override of the office default.
+function _setImproveDigitalIdsReadonly(readonly) {
+    ['improvedigital_buying_entity_id', 'improvedigital_buying_entity_office_id'].forEach(id => {
+        document.getElementById(id).readOnly = readonly;
+    });
+}
+
+function unlockImproveDigitalIds() {
+    _setImproveDigitalIdsReadonly(false);
+    const statusEl = document.getElementById('improvedigital-discovery-status');
+    statusEl.innerHTML = '<span style="color: #6b7280;">ID fields unlocked for manual editing</span>';
+}
+
+function renderImproveDigitalEntityOptions() {
+    const entityPicker = document.getElementById('improvedigital_entity_picker');
+    const query = (document.getElementById('improvedigital_entity_search').value || '').toLowerCase();
+    const matches = _improvedigitalEntities.filter(entity =>
+        !query || (entity.name || '').toLowerCase().includes(query) || String(entity.id).includes(query));
+    entityPicker.innerHTML = '<option value="">Select a buying entity… (' + matches.length + ')</option>';
+    matches.forEach(entity => {
+        const opt = document.createElement('option');
+        opt.value = entity.id;
+        opt.textContent = entity.name + ' (' + entity.id + ')';
+        entityPicker.appendChild(opt);
+    });
+}
+
+function discoverImproveDigitalEntities() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('improvedigital-discovery-status');
+    const pickersEl = document.getElementById('improvedigital-discovery-pickers');
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Discovering buying entities…</span>';
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/discover-buying-entities', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify(_improvedigitalCredsPayload())
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Discovery failed') + '</span>';
+            return;
+        }
+        _improvedigitalEntities = data.buying_entities || [];
+        document.getElementById('improvedigital_entity_search').value = '';
+        renderImproveDigitalEntityOptions();
+        pickersEl.style.display = 'block';
+        statusEl.innerHTML = '<span style="color: #10b981;">✓ ' + _improvedigitalEntities.length + ' entities found</span>';
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+let _improvedigitalOffices = [];
+
+function onImproveDigitalEntityPicked() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('improvedigital-discovery-status');
+    const entityPicker = document.getElementById('improvedigital_entity_picker');
+    const officePicker = document.getElementById('improvedigital_office_picker');
+    if (!entityPicker.value) { officePicker.style.display = 'none'; return; }
+
+    const entityIdEl = document.getElementById('improvedigital_buying_entity_id');
+    entityIdEl.readOnly = false;
+    entityIdEl.value = entityPicker.value;
+    entityIdEl.readOnly = true;
+    updateImproveDigitalReadiness();
+    statusEl.innerHTML = '<span style="color: #6b7280;">Loading offices…</span>';
+
+    const payload = _improvedigitalCredsPayload();
+    payload.buying_entity_id = parseInt(entityPicker.value, 10);
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/discover-buying-entities', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Office lookup failed') + '</span>';
+            return;
+        }
+        _improvedigitalOffices = data.offices || [];
+        officePicker.innerHTML = '<option value="">Select an office…</option>';
+        _improvedigitalOffices.forEach(office => {
+            const opt = document.createElement('option');
+            opt.value = office.id;
+            opt.textContent = office.office + ' — ' + (office.billing_currency_code || '?') + ' (' + office.id + ')';
+            officePicker.appendChild(opt);
+        });
+        officePicker.style.display = 'block';
+        statusEl.innerHTML = '<span style="color: #10b981;">✓ ' + _improvedigitalOffices.length + ' Classic offices</span>';
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function onImproveDigitalOfficePicked() {
+    const statusEl = document.getElementById('improvedigital-discovery-status');
+    const officePicker = document.getElementById('improvedigital_office_picker');
+    if (!officePicker.value) return;
+    const office = _improvedigitalOffices.find(o => String(o.id) === officePicker.value);
+    if (!office) return;
+
+    _setImproveDigitalIdsReadonly(false);
+    document.getElementById('improvedigital_buying_entity_office_id').value = office.id;
+    if (office.improve_demand_contact_id) {
+        document.getElementById('improvedigital_demand_contact_id').value = office.improve_demand_contact_id;
+    }
+    _setImproveDigitalIdsReadonly(true);
+    // An office that pins buyers narrows the Buyer ID choice to those rows.
+    if (_renderImproveDigitalBuyerOptions(office.buyers) === 1) {
+        document.getElementById('improvedigital_buyer_id').value = office.buyers[0].id;
+    }
+    updateImproveDigitalReadiness();
+    const currency = document.getElementById('improvedigital_currency').value;
+    if (office.billing_currency_code && office.billing_currency_code !== currency) {
+        statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Office bills in ' + office.billing_currency_code +
+            ' but the default currency is ' + currency + '</span>';
+    } else {
+        statusEl.innerHTML = '<span style="color: #10b981;">✓ IDs filled from office "' + office.office + '"</span>';
+    }
+}
+
+function saveImproveDigitalConfig() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const config = _improvedigitalPayload();
+
+    const hasStoredSecret = {{ 'true' if adapter_config and adapter_config.get('client_secret') else 'false' }};
+    if (!config.client_id || !(config.client_secret || hasStoredSecret)) {
+        showNotification('Provide the OAuth2 Client ID and Client Secret', 'error');
+        return;
+    }
+    if (!config.api_base_url.startsWith('https://')) {
+        showNotification('Pick the API Base URL — the 360Yield host every call goes to (must be https)', 'error');
+        return;
+    }
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapter-config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({adapter_type: 'improvedigital', config: config})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showNotification('Configuration saved successfully', 'success');
+            document.getElementById('improvedigital_client_secret').value = '';
+        } else {
+            showNotification('Failed to save: ' + (data.error || 'Unknown error'), 'error');
+        }
+    })
+    .catch(error => {
+        showNotification('Error saving configuration: ' + error.message, 'error');
+    });
+}
+
+function syncImproveDigitalInventory() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('improvedigital-inventory-sync-status');
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Starting sync…</span>';
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/sync-inventory', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.sync_id) {
+            _pollImproveDigitalSync(scriptRoot, tenantId, data.sync_id, statusEl, Date.now());
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Sync failed to start') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function _pollImproveDigitalSync(scriptRoot, tenantId, syncId, statusEl, startedMs) {
+    // The sync runs in a background thread server-side; pages commit as they
+    // are fetched, so the live cache total is real progress, not a spinner.
+    if (Date.now() - startedMs > 10 * 60 * 1000) {
+        statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Sync still running in the background — refresh later for the result</span>';
+        return;
+    }
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/sync-status/' + syncId, {
+        credentials: 'same-origin',
+    })
+    .then(response => response.json())
+    .then(job => {
+        if (job.status !== 'completed' && job.status !== 'failed') {
+            fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/inventory-stats', {
+                credentials: 'same-origin',
+            })
+            .then(r => r.json())
+            .then(stats => {
+                statusEl.innerHTML = '<span style="color: #6b7280;">Syncing… ' + (stats.total || 0) + ' rows cached so far</span>';
+            })
+            .catch(() => {});
+            setTimeout(() => _pollImproveDigitalSync(scriptRoot, tenantId, syncId, statusEl, startedMs), 2000);
+            return;
+        }
+        const counts = job.counts || {};
+        const errors = job.errors || {};
+        const summary = Object.entries(counts).map(([k, v]) => k + '=' + v).join(', ');
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        if (job.status === 'completed' && Object.keys(errors).length === 0) {
+            statusEl.innerHTML = '<span style="color: #10b981;">✓ Synced ' + total + ' items (' + summary + ')</span>';
+        } else if (Object.keys(counts).length > 0) {
+            const errorText = Object.entries(errors).map(([k, v]) => k + ': ' + v).join('; ');
+            statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Partial: synced ' + summary + ' but failed: ' + errorText + '</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (job.error_message || 'Sync failed') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+
+function testImproveDigitalConnection() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const statusEl = document.getElementById('improvedigital-connection-status');
+    const clientId = document.getElementById('improvedigital_client_id').value;
+    const clientSecret = document.getElementById('improvedigital_client_secret').value;
+    const baseUrl = document.getElementById('improvedigital_api_base_url').value;
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Testing...</span>';
+
+    const payload = {};
+    if (clientId) payload.client_id = clientId;
+    if (clientSecret) payload.client_secret = clientSecret;
+    if (baseUrl) payload.api_base_url = baseUrl;
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/test-connection', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const who = data.user && data.user.name ? ' as ' + data.user.name +
+                (data.user.business_unit ? ' (' + data.user.business_unit + ')' : '') : '';
+            statusEl.innerHTML = '<span style="color: #10b981;">✓ Authenticated' + who + ' against ' +
+                (data.base_url || '360Yield') + '</span>';
+            // Booking needs business_unit_id and a demand contact; the API
+            // user's own unit and user_id are the right values, so fill in
+            // whichever the operator hasn't set. The office pick (when
+            // discovery runs) overrides the demand contact afterwards.
+            const filled = [];
+            const buEl = document.getElementById('improvedigital_business_unit_id');
+            if (buEl && !buEl.value && data.user && data.user.business_unit_id) {
+                buEl.value = data.user.business_unit_id;
+                filled.push('Business Unit ID (' + data.user.business_unit_id + ')');
+            }
+            const contactEl = document.getElementById('improvedigital_demand_contact_id');
+            if (contactEl && !contactEl.value && data.user && data.user.user_id) {
+                contactEl.value = data.user.user_id;
+                filled.push('Demand Contact ID (' + data.user.user_id + ')');
+            }
+            const buyerCount = _renderImproveDigitalBuyerOptions(data.user && data.user.buyers);
+            if (buyerCount) filled.push(buyerCount + ' buyer(s) available');
+            if (filled.length) {
+                statusEl.innerHTML += '<span style="color: #6b7280;"> — ' + filled.join(', ') +
+                    '; remember to Save</span>';
+            }
+            updateImproveDigitalReadiness();
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Connection failed') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
+    });
+}
+</script>

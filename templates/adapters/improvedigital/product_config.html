@@ -1,0 +1,585 @@
+{#
+Improve Digital Product Configuration Template
+
+Included by add_product.html / edit_product.html when the tenant's adapter
+is improvedigital. Renders Classic line-item inventory pickers backed by the
+synced improvedigital_inventory cache (run "Sync Inventory Now" on the
+Ad Server settings page first) plus line-item delivery defaults.
+
+The pickers are chip-based: attached rows render as removable chips and the
+selection is submitted through hidden inputs, so the form posts the same
+impl_<field> lists that _improvedigital_implementation_config() reads via
+request.form.getlist() in src/admin/blueprints/products.py.
+
+Expected context:
+- tenant_id: current tenant ID
+- product (edit page only): dict with implementation_config
+#}
+
+{% set impl = (product.implementation_config if product is defined and product and product.implementation_config else {}) %}
+{# Dimensions of the product's creative formats — drives the derived-sizes
+   hint. Format entries are dicts (DB JSONB) or Pydantic models; Jinja's
+   attribute-then-item lookup handles both. #}
+{% set format_dims = [] %}
+{% if product is defined and product and product.formats %}
+    {% for fmt in product.formats %}
+        {% if fmt.width and fmt.height %}
+            {% set _ = format_dims.append(fmt.width ~ 'x' ~ fmt.height) %}
+        {% endif %}
+    {% endfor %}
+{% endif %}
+{% set format_dims = format_dims | unique | list %}
+
+<style>
+.impd-picker { margin-bottom: 1.5rem; }
+.impd-picker__head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 0.4rem; }
+.impd-picker__head label { margin: 0; font-weight: 600; }
+.impd-picker__count { font-size: 0.8rem; color: #6b7280; }
+.impd-picker__count--active { color: #047857; font-weight: 600; }
+.impd-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.5rem; }
+.impd-chip { display: inline-flex; align-items: center; gap: 0.4rem; max-width: 100%;
+             padding: 0.2rem 0.4rem 0.2rem 0.6rem; border-radius: 999px;
+             background: #e0f2fe; border: 1px solid #bae6fd; color: #075985; font-size: 0.82rem; }
+.impd-chip__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34rem; }
+.impd-chip__id { color: #0369a1; opacity: 0.65; font-variant-numeric: tabular-nums; }
+.impd-chip__remove { border: none; background: transparent; cursor: pointer; color: #0369a1;
+                     font-size: 1rem; line-height: 1; padding: 0 0.15rem; border-radius: 999px; }
+.impd-chip__remove:hover { background: #bae6fd; color: #0c4a6e; }
+.impd-chips__empty { font-size: 0.82rem; color: #9ca3af; font-style: italic; }
+.impd-search-row { display: flex; gap: 0.5rem; align-items: center; }
+.impd-search { flex: 1; }
+.impd-clear { border: none; background: transparent; color: #6b7280; cursor: pointer;
+              font-size: 0.8rem; text-decoration: underline; white-space: nowrap; }
+.impd-clear:hover { color: #b91c1c; }
+.impd-results { border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 6px 6px;
+                max-height: 15rem; overflow-y: auto; background: #fff; }
+.impd-result { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem;
+               padding: 0.4rem 0.6rem; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-size: 0.86rem; }
+.impd-result:last-child { border-bottom: none; }
+.impd-result:hover, .impd-result--active { background: #f0f9ff; }
+.impd-result__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.impd-result__id { color: #9ca3af; font-size: 0.78rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.impd-result__add { color: #0369a1; font-size: 0.78rem; white-space: nowrap; }
+.impd-note { padding: 0.5rem 0.6rem; font-size: 0.8rem; color: #6b7280; }
+.impd-note--warn { color: #b45309; }
+.impd-badge { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+              background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0;
+              border-radius: 4px; padding: 0.1rem 0.35rem; vertical-align: middle; }
+.impd-derived { padding: 0.45rem 0.6rem; background: #f9fafb; border: 1px dashed #d1d5db;
+                border-radius: 6px; font-size: 0.85rem; color: #374151; }
+.impd-derived__dim { display: inline-block; margin-left: 0.35rem; padding: 0.05rem 0.45rem;
+                     background: #eef2ff; border: 1px solid #c7d2fe; color: #3730a3;
+                     border-radius: 999px; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.impd-advanced { margin: 1.25rem 0; border: 1px solid #e5e7eb; border-radius: 8px; padding: 0 0.9rem; }
+.impd-advanced > summary { cursor: pointer; font-weight: 600; padding: 0.6rem 0; color: #4b5563; }
+.impd-advanced[open] { padding-bottom: 0.9rem; }
+.impd-advanced .impd-picker:first-of-type { margin-top: 0.75rem; }
+.impd-chip__peek { border: none; background: transparent; cursor: pointer; color: #0369a1;
+                   font-size: 0.78rem; padding: 0 0.15rem; border-radius: 999px; text-decoration: underline; }
+.impd-chip__peek:hover { background: #bae6fd; color: #0c4a6e; }
+.impd-peek { margin: 0.25rem 0 0.6rem; border: 1px solid #e0f2fe; border-radius: 6px;
+             background: #f8fafc; font-size: 0.82rem; }
+.impd-peek__head { display: flex; justify-content: space-between; align-items: center;
+                   padding: 0.4rem 0.6rem; border-bottom: 1px solid #e5e7eb; color: #075985; font-weight: 600; }
+.impd-peek__close { border: none; background: transparent; cursor: pointer; color: #6b7280; font-size: 0.95rem; }
+.impd-peek__list { max-height: 11rem; overflow-y: auto; margin: 0; padding: 0.35rem 0.6rem; list-style: none; }
+.impd-peek__list li { padding: 0.15rem 0; display: flex; justify-content: space-between; gap: 0.75rem; }
+.impd-peek__site { color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 18rem; }
+</style>
+
+<div class="form-section" data-adapter-type="improvedigital">
+    <h3>Improve Digital Configuration</h3>
+    <p class="text-muted" style="margin-bottom: 1.5rem;">
+        Pin this product's Classic line items to 360Yield inventory. Search to find
+        inventory, click a result to attach it, and use the <strong>×</strong> on a chip
+        to detach. Pickers read the synced inventory cache — if they're empty, run
+        <strong>Sync Inventory Now</strong> on the Ad Server settings page.
+    </p>
+
+    <div class="impd-picker" data-field="impl_package_ids" data-entity-type="package"
+         data-noun="package" data-placeholder="Search packages…"
+         data-selected="{{ impl.get('package_ids', [])|tojson }}">
+        <div class="impd-picker__head">
+            <label>Placement Packages <span class="impd-badge">Recommended</span></label>
+            <span class="impd-picker__count"></span>
+        </div>
+        <small class="form-text text-muted">
+            Reusable placement groupings maintained by Improve Digital — membership
+            stays current on their side, so packages don't go stale like pinned
+            placement lists.
+        </small>
+    </div>
+
+    <div class="impd-picker" data-field="impl_placement_ids" data-entity-type="placement"
+         data-noun="placement" data-placeholder="Search placements by name or site…"
+         data-selected="{{ impl.get('placement_ids', [])|tojson }}">
+        <div class="impd-picker__head">
+            <label>Placements</label>
+            <span class="impd-picker__count"></span>
+        </div>
+        <small class="form-text text-muted">
+            Individual placements to pin — for precision products (e.g. a homepage
+            takeover). Prefer packages for anything broader.
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label>Creative Sizes</label>
+        <div class="impd-derived">
+            {% if format_dims %}
+            Derived from this product's creative formats:
+            {% for dim in format_dims %}<span class="impd-derived__dim">{{ dim }}</span>{% endfor %}
+            {% else %}
+            Derived automatically from the creative formats selected above once the product is saved.
+            {% endif %}
+        </div>
+        <small class="form-text text-muted">
+            Line-item size targeting follows the product's formats so the two can't
+            diverge. Use the Advanced section below only to override.
+        </small>
+    </div>
+
+    <details class="impd-advanced" {% if impl.get('excluded_placement_ids') or impl.get('size_ids') %}open{% endif %}>
+        <summary>Advanced targeting</summary>
+
+        <div class="impd-picker" data-field="impl_excluded_placement_ids" data-entity-type="placement"
+             data-noun="placement" data-placeholder="Search placements to exclude…"
+             data-selected="{{ impl.get('excluded_placement_ids', [])|tojson }}">
+            <div class="impd-picker__head">
+                <label>Excluded Placements</label>
+                <span class="impd-picker__count"></span>
+            </div>
+            <small class="form-text text-muted">
+                Carve-outs on top of broad targeting — e.g. everything in a package
+                except these. Pointless when placements are pinned individually.
+            </small>
+        </div>
+
+        <div class="impd-picker" data-field="impl_size_ids" data-entity-type="size"
+             data-noun="size" data-placeholder="Search sizes, e.g. 300x250…"
+             data-selected="{{ impl.get('size_ids', [])|tojson }}">
+            <div class="impd-picker__head">
+                <label>Creative Size Override</label>
+                <span class="impd-picker__count"></span>
+            </div>
+            <small class="form-text text-muted">
+                Overrides the format-derived sizes above. Leave empty unless line-item
+                size targeting must deliberately differ from the sellable formats.
+            </small>
+        </div>
+    </details>
+
+    <h4 style="margin-top: 1.5rem;">Line-item Defaults</h4>
+
+    <div class="form-group">
+        <label for="impl_pricing_model">Pricing Model</label>
+        <select id="impl_pricing_model" name="impl_pricing_model" class="form-control">
+            <option value="" {% if not impl.get('pricing_model') %}selected{% endif %}>Platform default</option>
+            <option value="CPM" {% if impl.get('pricing_model') == 'CPM' %}selected{% endif %}>CPM</option>
+        </select>
+        <small class="form-text text-muted">
+            CPM is confirmed; further models are pending platform confirmation (gap G2).
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_goal">Delivery Goal</label>
+        <select id="impl_goal" name="impl_goal" class="form-control">
+            {% set current_goal = impl.get('goal') or 'BUDGET' %}
+            <option value="BUDGET" {% if current_goal == 'BUDGET' %}selected{% endif %}>Budget</option>
+            <option value="IMPRESSION" {% if current_goal == 'IMPRESSION' %}selected{% endif %}>Impressions</option>
+        </select>
+        <small class="form-text text-muted">
+            What the line item paces against. Budget uses the package budget; Impressions
+            uses the cap derived from budget ÷ rate. Both figures are sent either way.
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_frequency_cap">Frequency Cap</label>
+        <input type="number" id="impl_frequency_cap" name="impl_frequency_cap" min="1"
+               value="{{ impl.get('frequency_cap', '') }}"
+               placeholder="Impressions per user per interval">
+    </div>
+
+    <div class="form-group" style="display: flex; gap: 1rem;">
+        <div style="flex: 1;">
+            <label for="impl_frequency_interval">Frequency Interval</label>
+            <input type="number" id="impl_frequency_interval" name="impl_frequency_interval" min="1" step="any"
+                   value="{{ impl.get('frequency_interval', '') }}"
+                   placeholder="e.g. 1">
+        </div>
+        <div style="flex: 1;">
+            <label for="impl_frequency_interval_type">Interval Unit</label>
+            <select id="impl_frequency_interval_type" name="impl_frequency_interval_type" class="form-control">
+                <option value="" {% if not impl.get('frequency_interval_type') %}selected{% endif %}>—</option>
+                {% for unit in ['months', 'weeks', 'days', 'hours', 'minutes'] %}
+                <option value="{{ unit }}" {% if impl.get('frequency_interval_type') == unit %}selected{% endif %}>{{ unit }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label for="impl_delivery_schedule">Delivery Schedule</label>
+        <input type="text" id="impl_delivery_schedule" name="impl_delivery_schedule"
+               value="{{ impl.get('delivery_schedule', '') }}"
+               placeholder="Optional — defaults to Evenly">
+        <small class="form-text text-muted">
+            Line-item pacing. Left blank, line items book with the platform's
+            <code>Evenly</code> schedule.
+        </small>
+    </div>
+</div>
+
+<script>
+(function() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const apiBase = scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/inventory';
+    const settingsUrl = scriptRoot + '/tenant/' + tenantId + '/settings#adserver';
+
+    // The placement cache runs to tens of thousands of rows and two pickers
+    // share it — fetch each entity type once and hand the same array to both.
+    const inventoryCache = {};
+    function loadInventory(entityType) {
+        if (!inventoryCache[entityType]) {
+            inventoryCache[entityType] = fetch(apiBase + '?entity_type=' + encodeURIComponent(entityType),
+                                               {credentials: 'same-origin'})
+                .then(response => response.json())
+                .then(data => (data.success && data.items ? data.items : []).slice().sort(
+                    (a, b) => String(a.name || a.entity_id).localeCompare(String(b.name || b.entity_id))))
+                .catch(() => []);
+        }
+        return inventoryCache[entityType];
+    }
+
+    // Results are capped so a 25k-row cache can't stall the page; the count
+    // line tells the operator when a search still hides matches.
+    const RESULT_LIMIT = 200;
+
+    function initPicker(root) {
+        const field = root.dataset.field;
+        const noun = root.dataset.noun;
+        let selected = [];
+        try {
+            selected = JSON.parse(root.dataset.selected || '[]').map(String);
+        } catch (e) { /* leave empty */ }
+
+        const head = root.querySelector('.impd-picker__head');
+        const countEl = root.querySelector('.impd-picker__count');
+        const helper = root.querySelector('.form-text');
+
+        const chips = document.createElement('div');
+        chips.className = 'impd-chips';
+
+        const searchRow = document.createElement('div');
+        searchRow.className = 'impd-search-row';
+        const search = document.createElement('input');
+        search.type = 'search';
+        search.className = 'form-control impd-search';
+        search.placeholder = root.dataset.placeholder || 'Search…';
+        search.setAttribute('aria-label', root.querySelector('label').textContent + ' search');
+        const clearAll = document.createElement('button');
+        clearAll.type = 'button';
+        clearAll.className = 'impd-clear';
+        clearAll.textContent = 'Clear all';
+        searchRow.appendChild(search);
+        searchRow.appendChild(clearAll);
+
+        const results = document.createElement('div');
+        results.className = 'impd-results';
+        results.hidden = true;
+
+        const hidden = document.createElement('div');
+
+        // Package-membership peek panel (packages picker only).
+        const peek = document.createElement('div');
+        peek.className = 'impd-peek';
+        peek.hidden = true;
+
+        head.insertAdjacentElement('afterend', chips);
+        chips.insertAdjacentElement('afterend', peek);
+        peek.insertAdjacentElement('afterend', searchRow);
+        searchRow.insertAdjacentElement('afterend', results);
+        results.insertAdjacentElement('afterend', hidden);
+
+        let items = [];
+        let activeIndex = -1;
+
+        function byId(id) {
+            return items.find(item => String(item.entity_id) === String(id));
+        }
+
+        function labelFor(id) {
+            const item = byId(id);
+            return item ? (item.name || item.entity_id) : id;
+        }
+
+        function syncHiddenInputs() {
+            hidden.innerHTML = '';
+            selected.forEach(id => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = field;
+                input.value = id;
+                hidden.appendChild(input);
+            });
+        }
+
+        function renderChips() {
+            chips.innerHTML = '';
+            if (!selected.length) {
+                const empty = document.createElement('span');
+                empty.className = 'impd-chips__empty';
+                empty.textContent = 'None attached — search below to add ' + noun + 's.';
+                chips.appendChild(empty);
+            } else {
+                selected.forEach(id => {
+                    const chip = document.createElement('span');
+                    chip.className = 'impd-chip';
+                    const label = document.createElement('span');
+                    label.className = 'impd-chip__label';
+                    label.textContent = labelFor(id);
+                    const idTag = document.createElement('span');
+                    idTag.className = 'impd-chip__id';
+                    idTag.textContent = id;
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'impd-chip__remove';
+                    remove.textContent = '×';
+                    remove.title = 'Detach this ' + noun;
+                    remove.setAttribute('aria-label', 'Detach ' + labelFor(id));
+                    remove.addEventListener('click', () => detach(id));
+                    chip.appendChild(label);
+                    chip.appendChild(idTag);
+                    if (root.dataset.entityType === 'package') {
+                        const peekBtn = document.createElement('button');
+                        peekBtn.type = 'button';
+                        peekBtn.className = 'impd-chip__peek';
+                        peekBtn.textContent = 'peek';
+                        peekBtn.title = 'Show the placements inside this package (live lookup)';
+                        peekBtn.addEventListener('click', () => peekPackage(id));
+                        chip.appendChild(peekBtn);
+                    }
+                    chip.appendChild(remove);
+                    chips.appendChild(chip);
+                });
+            }
+            countEl.textContent = selected.length
+                ? selected.length + ' attached'
+                : 'none attached';
+            countEl.classList.toggle('impd-picker__count--active', selected.length > 0);
+            clearAll.style.display = selected.length ? '' : 'none';
+        }
+
+        function currentMatches() {
+            const needle = search.value.trim().toLowerCase();
+            return items.filter(item => {
+                if (selected.includes(String(item.entity_id))) return false;
+                if (!needle) return true;
+                return String(item.name || item.entity_id).toLowerCase().includes(needle)
+                    || String(item.entity_id).includes(needle);
+            });
+        }
+
+        function renderResults() {
+            const matches = currentMatches();
+            const shown = matches.slice(0, RESULT_LIMIT);
+            activeIndex = -1;
+            results.innerHTML = '';
+
+            if (!items.length) {
+                results.innerHTML = '<div class="impd-note impd-note--warn">No ' + noun +
+                    's in the inventory cache — run <a href="' + settingsUrl + '">Sync Inventory Now</a>.</div>';
+                return;
+            }
+            if (!shown.length) {
+                results.innerHTML = '<div class="impd-note">No ' + noun + 's match “' +
+                    search.value.replace(/</g, '&lt;') + '”.</div>';
+                return;
+            }
+
+            shown.forEach(item => {
+                const row = document.createElement('div');
+                row.className = 'impd-result';
+                row.setAttribute('role', 'button');
+                row.tabIndex = -1;
+                const name = document.createElement('span');
+                name.className = 'impd-result__name';
+                name.textContent = item.name || item.entity_id;
+                const meta = document.createElement('span');
+                meta.className = 'impd-result__id';
+                meta.textContent = item.entity_id;
+                const add = document.createElement('span');
+                add.className = 'impd-result__add';
+                add.textContent = '+ attach';
+                const right = document.createElement('span');
+                right.style.display = 'flex';
+                right.style.gap = '0.6rem';
+                right.appendChild(meta);
+                right.appendChild(add);
+                row.appendChild(name);
+                row.appendChild(right);
+                row.addEventListener('mousedown', event => {
+                    // mousedown (not click) so the row survives the input's blur.
+                    event.preventDefault();
+                    attach(item.entity_id);
+                });
+                results.appendChild(row);
+            });
+
+            const hiddenCount = matches.length - shown.length;
+            if (hiddenCount > 0) {
+                const note = document.createElement('div');
+                note.className = 'impd-note';
+                note.textContent = 'Showing ' + shown.length + ' of ' + matches.length +
+                    ' matches — keep typing to narrow the remaining ' + hiddenCount + '.';
+                results.appendChild(note);
+            }
+        }
+
+        function openResults() {
+            renderResults();
+            results.hidden = false;
+        }
+
+        function closeResults() {
+            results.hidden = true;
+        }
+
+        function attach(id) {
+            const key = String(id);
+            if (!selected.includes(key)) selected.push(key);
+            syncHiddenInputs();
+            renderChips();
+            search.value = '';
+            renderResults();
+            search.focus();
+        }
+
+        function detach(id) {
+            selected = selected.filter(value => value !== String(id));
+            syncHiddenInputs();
+            renderChips();
+            if (!results.hidden) renderResults();
+            if (peek.dataset.packageId === String(id)) peek.hidden = true;
+        }
+
+        const peekCache = {};
+
+        function renderPeek(id, data) {
+            peek.dataset.packageId = String(id);
+            peek.innerHTML = '';
+            const headRow = document.createElement('div');
+            headRow.className = 'impd-peek__head';
+            const title = document.createElement('span');
+            title.textContent = 'Inside “' + labelFor(id) + '” — ' +
+                (data.error ? 'lookup failed' : data.count + ' placement' + (data.count === 1 ? '' : 's'));
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'impd-peek__close';
+            close.textContent = '×';
+            close.setAttribute('aria-label', 'Close package contents');
+            close.addEventListener('click', () => { peek.hidden = true; });
+            headRow.appendChild(title);
+            headRow.appendChild(close);
+            peek.appendChild(headRow);
+
+            const list = document.createElement('ul');
+            list.className = 'impd-peek__list';
+            if (data.error) {
+                const li = document.createElement('li');
+                li.textContent = data.error;
+                list.appendChild(li);
+            } else if (!data.placements.length) {
+                const li = document.createElement('li');
+                li.textContent = 'This package is currently empty.';
+                list.appendChild(li);
+            } else {
+                data.placements.forEach(p => {
+                    const li = document.createElement('li');
+                    const name = document.createElement('span');
+                    name.textContent = p.name || p.id;
+                    const site = document.createElement('span');
+                    site.className = 'impd-peek__site';
+                    site.textContent = p.site || p.publisher || '';
+                    li.appendChild(name);
+                    li.appendChild(site);
+                    list.appendChild(li);
+                });
+            }
+            peek.appendChild(list);
+            peek.hidden = false;
+        }
+
+        function peekPackage(id) {
+            // Second click on the same open package folds the panel.
+            if (!peek.hidden && peek.dataset.packageId === String(id)) {
+                peek.hidden = true;
+                return;
+            }
+            if (peekCache[id]) {
+                renderPeek(id, peekCache[id]);
+                return;
+            }
+            renderPeek(id, {count: '…', placements: [], error: null});
+            peek.querySelector('.impd-peek__head span').textContent = 'Loading “' + labelFor(id) + '”…';
+            fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/packages/' +
+                  encodeURIComponent(id) + '/placements', {credentials: 'same-origin'})
+                .then(response => response.json())
+                .then(data => {
+                    const payload = data.success
+                        ? {count: data.count, placements: data.placements, error: null}
+                        : {count: 0, placements: [], error: data.error || 'Lookup failed'};
+                    peekCache[id] = payload;
+                    renderPeek(id, payload);
+                })
+                .catch(() => renderPeek(id, {count: 0, placements: [], error: 'Lookup failed — is the API reachable?'}));
+        }
+
+        clearAll.addEventListener('click', () => {
+            selected = [];
+            syncHiddenInputs();
+            renderChips();
+            if (!results.hidden) renderResults();
+        });
+
+        search.addEventListener('focus', openResults);
+        search.addEventListener('input', openResults);
+        search.addEventListener('blur', () => setTimeout(closeResults, 120));
+        search.addEventListener('keydown', event => {
+            const rows = Array.from(results.querySelectorAll('.impd-result'));
+            if (event.key === 'Escape') { closeResults(); return; }
+            if (!rows.length) return;
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                activeIndex = event.key === 'ArrowDown'
+                    ? Math.min(activeIndex + 1, rows.length - 1)
+                    : Math.max(activeIndex - 1, 0);
+                rows.forEach((row, index) => row.classList.toggle('impd-result--active', index === activeIndex));
+                rows[activeIndex].scrollIntoView({block: 'nearest'});
+            } else if (event.key === 'Enter') {
+                // Enter adds the highlighted (or first) match instead of
+                // submitting the surrounding product form.
+                event.preventDefault();
+                rows[activeIndex >= 0 ? activeIndex : 0].dispatchEvent(new MouseEvent('mousedown'));
+            }
+        });
+
+        syncHiddenInputs();
+        renderChips();
+
+        loadInventory(root.dataset.entityType).then(loaded => {
+            items = loaded;
+            renderChips();  // chip labels resolve once names are known
+            if (!items.length) {
+                helper.insertAdjacentHTML('beforeend',
+                    ' <span class="impd-note--warn">Cache empty — run Sync Inventory Now.</span>');
+            }
+        });
+    }
+
+    document.querySelectorAll('.impd-picker').forEach(initPicker);
+})();
+</script>

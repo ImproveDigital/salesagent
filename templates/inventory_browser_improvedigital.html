@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+
+{% block title %}Browse Inventory - {{ tenant.name }} Sales Agent{% endblock %}
+
+{% block content %}
+<style>
+.impd-inv { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+.impd-inv__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.impd-inv__head h2 { margin: 0 0 0.25rem 0; }
+.impd-inv__meta { color: #6b7280; font-size: 0.9rem; }
+.impd-inv__actions { display: flex; gap: 0.5rem; align-items: center; }
+.impd-inv__stats { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 1rem 0 1.25rem; }
+.impd-stat { border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.6rem 1rem; min-width: 8.5rem; background: #fff; }
+.impd-stat__n { font-size: 1.35rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.impd-stat__label { font-size: 0.78rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
+.impd-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid #e5e7eb; margin-bottom: 1rem; }
+.impd-tab { border: none; background: transparent; padding: 0.55rem 1rem; cursor: pointer; font-weight: 550;
+            color: #6b7280; border-bottom: 2px solid transparent; }
+.impd-tab--active { color: #111827; border-bottom-color: #111827; }
+.impd-pane { display: none; }
+.impd-pane--active { display: block; }
+.impd-cols { display: grid; grid-template-columns: 320px 1fr; gap: 1rem; align-items: start; }
+.impd-panel { border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; overflow: hidden; }
+.impd-panel__head { padding: 0.55rem 0.75rem; border-bottom: 1px solid #f3f4f6; font-weight: 600; font-size: 0.88rem;
+                    display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+.impd-panel__count { color: #9ca3af; font-weight: 400; font-size: 0.78rem; white-space: nowrap; }
+.impd-panel__search { padding: 0.5rem 0.75rem; border-bottom: 1px solid #f3f4f6; }
+.impd-panel__search input { width: 100%; }
+.impd-list { list-style: none; margin: 0; padding: 0; max-height: 30rem; overflow-y: auto; }
+.impd-list li { padding: 0.45rem 0.75rem; border-bottom: 1px solid #f9fafb; font-size: 0.88rem;
+                display: flex; justify-content: space-between; gap: 0.75rem; }
+.impd-list li:last-child { border-bottom: none; }
+.impd-list__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.impd-list__id { color: #9ca3af; font-size: 0.78rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.impd-list li.impd-list__row--click { cursor: pointer; }
+.impd-list li.impd-list__row--click:hover, .impd-list li.impd-list__row--selected { background: #f0f9ff; }
+.impd-list__note { padding: 0.6rem 0.75rem; color: #6b7280; font-size: 0.82rem; }
+.impd-empty { border: 1px dashed #d1d5db; border-radius: 8px; padding: 2.25rem; text-align: center; color: #6b7280; }
+</style>
+
+<div class="impd-inv">
+    <div class="impd-inv__head">
+        <div>
+            <h2>Browse Inventory</h2>
+            <div class="impd-inv__meta">
+                Improve Digital 360Yield inventory for {{ tenant.name }} —
+                <span id="impd-last-synced">checking last sync…</span>
+            </div>
+        </div>
+        <div class="impd-inv__actions">
+            <button class="btn btn-primary" id="impd-sync-btn" onclick="impdSyncNow()">Sync Now</button>
+            <span id="impd-sync-status" class="impd-inv__meta"></span>
+        </div>
+    </div>
+
+    <div class="impd-inv__stats" id="impd-stats">
+        <div class="impd-stat"><div class="impd-stat__n" id="impd-stat-publisher">–</div><div class="impd-stat__label">Publishers</div></div>
+        <div class="impd-stat"><div class="impd-stat__n" id="impd-stat-placement">–</div><div class="impd-stat__label">Placements</div></div>
+        <div class="impd-stat"><div class="impd-stat__n" id="impd-stat-package">–</div><div class="impd-stat__label">Packages</div></div>
+        <div class="impd-stat"><div class="impd-stat__n" id="impd-stat-size">–</div><div class="impd-stat__label">Creative Sizes</div></div>
+    </div>
+
+    <div id="impd-empty" class="impd-empty" style="display: none;">
+        No inventory in the local cache yet. Hit <strong>Sync Now</strong> above (or Settings → Ad Server →
+        Sync Inventory Now) to pull placements, packages, and sizes from 360Yield.
+    </div>
+
+    <div id="impd-browser" style="display: none;">
+        <div class="impd-tabs" role="tablist">
+            <button class="impd-tab impd-tab--active" data-pane="placements" role="tab">Placements</button>
+            <button class="impd-tab" data-pane="packages" role="tab">Packages</button>
+            <button class="impd-tab" data-pane="sizes" role="tab">Creative Sizes</button>
+        </div>
+
+        {# Placements: publisher rail on the left, that publisher's placements on the right.
+           A search on the right side searches ACROSS all placements (publisher selection clears). #}
+        <div class="impd-pane impd-pane--active" id="impd-pane-placements">
+            <div class="impd-cols">
+                <div class="impd-panel">
+                    <div class="impd-panel__head">Publishers <span class="impd-panel__count" id="impd-pub-count"></span></div>
+                    <div class="impd-panel__search"><input type="search" id="impd-pub-search" class="form-control" placeholder="Filter publishers…"></div>
+                    <ul class="impd-list" id="impd-pub-list"></ul>
+                </div>
+                <div class="impd-panel">
+                    <div class="impd-panel__head"><span id="impd-plc-title">Placements</span> <span class="impd-panel__count" id="impd-plc-count"></span></div>
+                    <div class="impd-panel__search"><input type="search" id="impd-plc-search" class="form-control" placeholder="Search all placements by name or site…"></div>
+                    <ul class="impd-list" id="impd-plc-list"><li class="impd-list__note">Pick a publisher on the left, or search across everything.</li></ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="impd-pane" id="impd-pane-packages">
+            <div class="impd-panel">
+                <div class="impd-panel__head">Placement Packages <span class="impd-panel__count" id="impd-pkg-count"></span></div>
+                <div class="impd-panel__search"><input type="search" id="impd-pkg-search" class="form-control" placeholder="Search packages…"></div>
+                <ul class="impd-list" id="impd-pkg-list"></ul>
+            </div>
+        </div>
+
+        <div class="impd-pane" id="impd-pane-sizes">
+            <div class="impd-panel">
+                <div class="impd-panel__head">Creative Sizes <span class="impd-panel__count" id="impd-size-count"></span></div>
+                <div class="impd-panel__search"><input type="search" id="impd-size-search" class="form-control" placeholder="Search sizes, e.g. 300x250…"></div>
+                <ul class="impd-list" id="impd-size-list"></ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const apiBase = scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital';
+    const LIMIT = 300;
+
+    function fmtDate(iso) {
+        if (!iso) return 'never synced';
+        try { return 'last synced ' + new Date(iso).toLocaleString(); } catch (e) { return iso; }
+    }
+
+    function renderRows(listEl, items, total, clickHandler) {
+        listEl.innerHTML = '';
+        if (!items.length) {
+            const li = document.createElement('li');
+            li.className = 'impd-list__note';
+            li.textContent = 'No matches.';
+            listEl.appendChild(li);
+            return;
+        }
+        items.forEach(item => {
+            const li = document.createElement('li');
+            const name = document.createElement('span');
+            name.className = 'impd-list__name';
+            name.textContent = item.name || item.entity_id;
+            name.title = item.name || item.entity_id;
+            const id = document.createElement('span');
+            id.className = 'impd-list__id';
+            id.textContent = item.entity_id;
+            li.appendChild(name);
+            li.appendChild(id);
+            if (clickHandler) {
+                li.className = 'impd-list__row--click';
+                li.addEventListener('click', () => clickHandler(item, li));
+            }
+            listEl.appendChild(li);
+        });
+        if (total > items.length) {
+            const li = document.createElement('li');
+            li.className = 'impd-list__note';
+            li.textContent = 'Showing ' + items.length + ' of ' + total + ' — refine the search to see the rest.';
+            listEl.appendChild(li);
+        }
+    }
+
+    function fetchInventory(params) {
+        const qs = new URLSearchParams(params).toString();
+        return fetch(apiBase + '/inventory?' + qs, {credentials: 'same-origin'}).then(r => r.json());
+    }
+
+    // ---- stats + empty state ----
+    function loadStats() {
+        return fetch(apiBase + '/inventory-stats', {credentials: 'same-origin'})
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) return;
+                for (const type of ['publisher', 'placement', 'package', 'size']) {
+                    const el = document.getElementById('impd-stat-' + type);
+                    if (el) el.textContent = (data.counts[type] || 0).toLocaleString();
+                }
+                document.getElementById('impd-last-synced').textContent = fmtDate(data.last_synced_at);
+                const empty = (data.total || 0) === 0;
+                document.getElementById('impd-empty').style.display = empty ? '' : 'none';
+                document.getElementById('impd-browser').style.display = empty ? 'none' : '';
+                return data;
+            });
+    }
+
+    // ---- placements tab ----
+    let publishers = [];
+    let selectedPublisher = null;
+
+    function renderPublishers() {
+        const q = (document.getElementById('impd-pub-search').value || '').toLowerCase();
+        const matches = publishers.filter(p => !q || String(p.name || p.entity_id).toLowerCase().includes(q));
+        document.getElementById('impd-pub-count').textContent = matches.length + ' of ' + publishers.length;
+        renderRows(document.getElementById('impd-pub-list'), matches.slice(0, LIMIT), matches.length, (pub, li) => {
+            selectedPublisher = pub;
+            document.getElementById('impd-plc-search').value = '';
+            document.querySelectorAll('#impd-pub-list li').forEach(el => el.classList.remove('impd-list__row--selected'));
+            li.classList.add('impd-list__row--selected');
+            loadPlacements({parent_id: pub.entity_id}, 'Placements — ' + (pub.name || pub.entity_id));
+        });
+    }
+
+    function loadPlacements(params, title) {
+        document.getElementById('impd-plc-title').textContent = title;
+        const listEl = document.getElementById('impd-plc-list');
+        listEl.innerHTML = '<li class="impd-list__note">Loading…</li>';
+        fetchInventory({entity_type: 'placement', limit: LIMIT, ...params})
+            .then(data => {
+                if (!data.success) return;
+                document.getElementById('impd-plc-count').textContent =
+                    Math.min(LIMIT, data.items.length) + ' of ' + data.count;
+                renderRows(listEl, data.items, data.count, null);
+            });
+    }
+
+    let placementSearchTimer = null;
+    document.getElementById('impd-plc-search').addEventListener('input', event => {
+        clearTimeout(placementSearchTimer);
+        const q = event.target.value.trim();
+        placementSearchTimer = setTimeout(() => {
+            selectedPublisher = null;
+            document.querySelectorAll('#impd-pub-list li').forEach(el => el.classList.remove('impd-list__row--selected'));
+            if (q) {
+                loadPlacements({q: q}, 'Placements matching “' + q + '”');
+            } else {
+                document.getElementById('impd-plc-title').textContent = 'Placements';
+                document.getElementById('impd-plc-count').textContent = '';
+                document.getElementById('impd-plc-list').innerHTML =
+                    '<li class="impd-list__note">Pick a publisher on the left, or search across everything.</li>';
+            }
+        }, 250);
+    });
+    document.getElementById('impd-pub-search').addEventListener('input', renderPublishers);
+
+    // ---- packages + sizes tabs (full list cached client-side, filtered locally) ----
+    function initFlatPane(entityType, searchId, listId, countId) {
+        let items = null;
+        function render() {
+            const q = (document.getElementById(searchId).value || '').toLowerCase();
+            const matches = items.filter(item =>
+                !q || String(item.name || item.entity_id).toLowerCase().includes(q) || String(item.entity_id).includes(q));
+            document.getElementById(countId).textContent = matches.length + ' of ' + items.length;
+            renderRows(document.getElementById(listId), matches.slice(0, LIMIT), matches.length, null);
+        }
+        document.getElementById(searchId).addEventListener('input', render);
+        return function load() {
+            if (items !== null) return;
+            items = [];
+            fetchInventory({entity_type: entityType}).then(data => {
+                if (data.success) items = data.items;
+                render();
+            });
+        };
+    }
+    const loadPackages = initFlatPane('package', 'impd-pkg-search', 'impd-pkg-list', 'impd-pkg-count');
+    const loadSizes = initFlatPane('size', 'impd-size-search', 'impd-size-list', 'impd-size-count');
+
+    // ---- tabs ----
+    document.querySelectorAll('.impd-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            document.querySelectorAll('.impd-tab').forEach(t => t.classList.toggle('impd-tab--active', t === tab));
+            document.querySelectorAll('.impd-pane').forEach(pane =>
+                pane.classList.toggle('impd-pane--active', pane.id === 'impd-pane-' + tab.dataset.pane));
+            if (tab.dataset.pane === 'packages') loadPackages();
+            if (tab.dataset.pane === 'sizes') loadSizes();
+        });
+    });
+
+    // ---- sync ----
+    window.impdSyncNow = function() {
+        const btn = document.getElementById('impd-sync-btn');
+        const status = document.getElementById('impd-sync-status');
+        btn.disabled = true;
+        status.textContent = 'Syncing… (can take a minute — rate-limited at 100 requests/min)';
+        fetch(apiBase + '/sync-inventory', {method: 'POST', headers: {'Content-Type': 'application/json'}, credentials: 'same-origin'})
+            .then(r => r.json().then(data => ({status: r.status, data})))
+            .then(({status, data}) => {
+                if (data.success) {
+                    status.textContent = '✓ Synced ' + (data.total_synced || 0).toLocaleString() + ' items';
+                    publishers = [];
+                    loadAll();
+                } else if (status === 409) {
+                    status.textContent = data.error || 'A sync is already running';
+                } else {
+                    status.textContent = '✗ ' + (data.error || JSON.stringify(data.errors || 'sync failed'));
+                }
+            })
+            .catch(err => { status.textContent = '✗ ' + err.message; })
+            .finally(() => { btn.disabled = false; });
+    };
+
+    // ---- boot ----
+    function loadAll() {
+        loadStats().then(data => {
+            if (!data || (data.total || 0) === 0) return;
+            fetchInventory({entity_type: 'publisher'}).then(pubData => {
+                if (pubData.success) { publishers = pubData.items; renderPublishers(); }
+            });
+        });
+    }
+    loadAll();
+})();
+</script>
+{% endblock %}
