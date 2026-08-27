@@ -252,6 +252,25 @@ class MediaBuyRepository:
             return None
         return result[0], result[1]
 
+    def find_by_platform_line_item_id(self, platform_line_item_id: str) -> MediaBuy | None:
+        """Resolve the media buy owning the package whose ``package_config``
+        carries this ad-server line-item reference.
+
+        Deliberately no status filter — creative binding must resolve buys
+        that haven't started serving yet (``pending_start``, HITL approval
+        states), not just active ones.
+        """
+        rows = self._session.execute(
+            select(MediaPackage, MediaBuy)
+            .join(MediaBuy, MediaPackage.media_buy_id == MediaBuy.media_buy_id)
+            .where(MediaBuy.tenant_id == self._tenant_id)
+        ).all()
+        for package, buy in rows:
+            platform_id = (package.package_config or {}).get("platform_line_item_id")
+            if platform_id is not None and str(platform_id) == str(platform_line_item_id):
+                return buy
+        return None
+
     # ------------------------------------------------------------------
     # Tenant-wide list queries (for admin/dashboard)
     # ------------------------------------------------------------------

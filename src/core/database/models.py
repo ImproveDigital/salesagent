@@ -2264,3 +2264,81 @@ class WebhookDeliveryLog(Base):
         Index("idx_webhook_log_status", "status"),
         Index("idx_webhook_log_created_at", "created_at"),
     )
+
+
+class ImproveDigitalInventory(Base, JSONValidatorMixin):
+    """Local cache of Improve Digital 360Yield buy-side inventory.
+
+    Stores publishers, placements, reusable packages, and creative sizes as
+    JSON-blob rows keyed by ``(tenant_id, entity_type, entity_id)``.
+    Placements carry their publisher as ``parent_id``; the other entity
+    types are flat. The cache is used by the Improve Digital adapter's
+    product configuration UI so operators can pick placements from synced
+    inventory without round-tripping to the 360Yield API on every render.
+
+    NOT exposed to AdCP buyers — buyer-facing property discovery goes
+    through the AAO lookup path (adagents.json + brand.json). This is a
+    private adapter-side cache.
+
+    Refreshed on demand via the adapter settings "Sync Inventory" button.
+    """
+
+    __tablename__ = "improvedigital_inventory"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False, primary_key=True)
+    entity_type: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        primary_key=True,
+        comment="360Yield entity kind: publisher, placement, package, size",
+    )
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False, primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    raw_json: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Relationships
+    tenant = relationship("Tenant", backref="improvedigital_inventory")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+        Index("idx_improvedigital_inventory_tenant_type", "tenant_id", "entity_type"),
+        Index("idx_improvedigital_inventory_parent", "tenant_id", "parent_id"),
+    )
+
+
+class ImproveDigitalLineItemStats(Base):
+    """Per-line-item delivery stats cache for the Improve Digital adapter.
+
+    Populated by the Report API reporting sync (``POST /report/ext/preview``
+    with dimensions campaign_id/line_item_id). Read by
+    ``ImproveDigitalAdapter.get_media_buy_delivery`` so AdCP delivery
+    surfaces serve results without round-tripping to 360Yield on every
+    request.
+
+    Spend is stored as currency-minor-unit micros (1 EUR = 1_000_000
+    micros, from the Report API ``advertiser_payout`` metric) to avoid
+    floating-point precision loss when aggregating.
+    """
+
+    __tablename__ = "improvedigital_line_item_stats"
+
+    tenant_id: Mapped[str] = mapped_column(String(50), nullable=False, primary_key=True)
+    line_item_id: Mapped[str] = mapped_column(String(64), nullable=False, primary_key=True)
+    campaign_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    impressions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    clicks: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    completed_views: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    tenant = relationship("Tenant", backref="improvedigital_line_item_stats")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.tenant_id"], ondelete="CASCADE"),
+        Index("idx_impd_li_stats_tenant_campaign", "tenant_id", "campaign_id"),
+    )

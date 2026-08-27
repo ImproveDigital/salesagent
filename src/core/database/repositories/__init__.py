@@ -20,6 +20,8 @@ from src.core.database.repositories.adapter_config import AdapterConfigRepositor
 from src.core.database.repositories.currency_limit import CurrencyLimitRepository
 from src.core.database.repositories.delivery_simulation import DeliverySimulationConfigRepository
 from src.core.database.repositories.idempotency_attempt import IdempotencyAttemptRepository
+from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+from src.core.database.repositories.improvedigital_line_item_stats import ImproveDigitalLineItemStatsRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification_config import PushNotificationConfigRepository
@@ -42,6 +44,8 @@ __all__ = [
     "CurrencyLimitRepository",
     "DeliverySimulationConfigRepository",
     "IdempotencyAttemptRepository",
+    "ImproveDigitalInventoryRepository",
+    "ImproveDigitalLineItemStatsRepository",
     "MediaBuyRepository",
     "MediaBuyUoW",
     "ProductRepository",

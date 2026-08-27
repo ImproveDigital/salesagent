@@ -108,6 +108,7 @@ _ENTITY_PATTERNS: dict[str, list[str]] = {
         "adapter",
         "gam_",
         "broadstreet",
+        "improvedigital",
         "mock_adapter",
     ],
     "inventory": [
