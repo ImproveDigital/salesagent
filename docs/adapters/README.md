@@ -15,6 +15,17 @@ Connect to Google Ad Manager to create and manage line items programmatically.
 
 [Get started with GAM](gam/)
 
+### [Improve Digital](improvedigital/)
+
+Connect to the Improve Digital 360Yield Marketplace to book Classic (direct) campaigns.
+
+- OAuth2 client-credentials authentication
+- Classic campaign, line-item and creative lifecycle
+- Inventory sync (placements, packages, sizes) with an admin browser
+- Report API delivery metrics cache
+
+[Get started with Improve Digital](improvedigital/)
+
 ### [Mock Adapter](mock/)
 
 A simulated ad server for testing and development.
@@ -31,6 +42,7 @@ A simulated ad server for testing and development.
 | Adapter | Use Case |
 |---------|----------|
 | **GAM** | Production deployments with Google Ad Manager |
+| **Improve Digital** | Direct-sold campaigns on the 360Yield Marketplace |
 | **Mock** | Testing, demos, development |
 
 ## Multi-Tenant Considerations

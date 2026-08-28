@@ -293,13 +293,13 @@ class TestFindByPlatformLineItemId:
             buy = MediaBuyFactory(tenant=tenant, principal=principal)
             MediaPackageFactory(
                 media_buy=buy,
-                package_config={"package_id": "pkg_1", "platform_line_item_id": 314455},
+                package_config={"package_id": "pkg_1", "platform_line_item_id": 555455},
             )
 
             repo = MediaBuyRepository(env.get_session(), "impd_t1")
 
             # int-stored platform IDs resolve from string input (str coercion both sides)
-            found = repo.find_by_platform_line_item_id("314455")
+            found = repo.find_by_platform_line_item_id("555455")
             assert found is not None
             assert found.media_buy_id == buy.media_buy_id
 
@@ -326,9 +326,9 @@ class TestFindByPlatformLineItemId:
             buy_b = MediaBuyFactory(tenant=tenant_b, principal=principal_b)
             MediaPackageFactory(
                 media_buy=buy_b,
-                package_config={"package_id": "pkg_1", "platform_line_item_id": "314455"},
+                package_config={"package_id": "pkg_1", "platform_line_item_id": "555455"},
             )
             TenantFactory(tenant_id="impd_t1")
 
             repo_a = MediaBuyRepository(env.get_session(), "impd_t1")
-            assert repo_a.find_by_platform_line_item_id("314455") is None
+            assert repo_a.find_by_platform_line_item_id("555455") is None
