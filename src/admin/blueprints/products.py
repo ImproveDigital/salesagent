@@ -943,18 +943,15 @@ def add_product(tenant_id):
                         base_config["priority"] = int(form_data["priority"])
 
                     implementation_config = base_config
-                elif adapter_type == "improvedigital":
-                    # Start from the generic default config, then layer the
-                    # Improve Digital picker fields (placements/packages/sizes
-                    # + line-item defaults) from the form.
-                    gam_config_service = GAMProductConfigService()
-                    implementation_config = _improvedigital_implementation_config(
-                        gam_config_service.generate_default_config(delivery_type, formats)
-                    )
                 else:
                     # For other adapters, use simple config
                     gam_config_service = GAMProductConfigService()
                     implementation_config = gam_config_service.generate_default_config(delivery_type, formats)
+                    if adapter_type == "improvedigital":
+                        # Layer the Improve Digital picker fields
+                        # (placements/packages/sizes + line-item defaults)
+                        # from the form onto the generic default config.
+                        implementation_config = _improvedigital_implementation_config(implementation_config)
 
                 # Parse targeting template from form (includes custom targeting key-value pairs)
                 targeting_template_json = form_data.get("targeting_template", "{}")

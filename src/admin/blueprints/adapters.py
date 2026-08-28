@@ -137,6 +137,34 @@ def _preserve_omitted_secret_fields(config_data: dict, existing_config: dict, *,
             config_data[field_name] = existing_value
 
 
+def _apply_secret_field_rules(tenant_id: str, connection_config, config_data: dict) -> str | None:
+    """Enforce the two secret-field rules on a submitted adapter config:
+
+    (a) reject any submitted ciphertext on the wire — a tenant admin must
+        not be able to authenticate a session by replaying another tenant's
+        leaked DB-row ciphertext (cross-tenant credential smuggling),
+    (b) preserve the previously-stored value when the caller omits the
+        field (UX: leave password blank to keep existing credential).
+
+    Mutates ``config_data`` in place; returns an error message for (a),
+    ``None`` otherwise.
+    """
+    from src.core.database.repositories.adapter_config import AdapterConfigRepository
+    from src.core.utils.encryption import is_encrypted
+
+    secret_fields = _secret_fields_for_connection_schema(connection_config)
+    for field_name in secret_fields:
+        submitted = config_data.get(field_name)
+        if submitted and is_encrypted(submitted):
+            return f"{field_name} must be plaintext (encrypted-token replay rejected)"
+    if secret_fields and any(not config_data.get(f) for f in secret_fields):
+        with get_db_session() as session:
+            existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+            if existing and existing.config_json:
+                _preserve_omitted_secret_fields(config_data, existing.config_json, secret_fields=secret_fields)
+    return None
+
+
 @adapters_bp.route("/adapter/<adapter_name>/inventory_schema", methods=["GET"])
 @require_tenant_access()
 def adapter_adapter_name_inventory_schema(tenant_id, **kwargs):
@@ -181,35 +209,12 @@ def save_adapter_config(tenant_id, **kwargs):
         if not adapter_type:
             return jsonify({"success": False, "error": "adapter_type is required"}), 400
 
-        # For adapters whose schemas mark a field as `secret`, two rules:
-        # (a) reject any submitted ciphertext on the wire — a tenant admin must
-        #     not be able to authenticate a session by replaying another tenant's
-        #     leaked DB-row ciphertext (cross-tenant credential smuggling),
-        # (b) preserve the previously-stored value when the caller omits the
-        #     field (UX: leave password blank to keep existing credential).
-        from src.core.utils.encryption import is_encrypted
-
+        # Secret-field rules (ciphertext-replay reject + preserve-when-omitted).
         schemas = get_adapter_schemas(adapter_type)
         if schemas and schemas.connection_config:
-            secret_fields = _secret_fields_for_connection_schema(schemas.connection_config)
-            for field_name in secret_fields:
-                submitted = config_data.get(field_name)
-                if submitted and is_encrypted(submitted):
-                    return (
-                        jsonify(
-                            {
-                                "success": False,
-                                "error": f"{field_name} must be plaintext (encrypted-token replay rejected)",
-                            }
-                        ),
-                        400,
-                    )
-            if secret_fields and any(not config_data.get(f) for f in secret_fields):
-                with get_db_session() as session:
-                    stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
-                    existing = session.scalars(stmt).first()
-                    if existing and existing.config_json:
-                        _preserve_omitted_secret_fields(config_data, existing.config_json, secret_fields=secret_fields)
+            secret_error = _apply_secret_field_rules(tenant_id, schemas.connection_config, config_data)
+            if secret_error:
+                return jsonify({"success": False, "error": secret_error}), 400
 
         # Validate config against adapter schema (keeps Pydantic model flowing)
         validated_config = None
@@ -567,6 +572,7 @@ def test_improvedigital_connection(tenant_id, **kwargs):
         client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
         if cred_error:
             return jsonify({"success": False, "error": cred_error}), 400
+        assert client_kwargs is not None  # narrowed by the cred_error check
 
         from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
 
@@ -627,6 +633,7 @@ def discover_improvedigital_buying_entities(tenant_id, **kwargs):
         client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
         if cred_error:
             return jsonify({"success": False, "error": cred_error}), 400
+        assert client_kwargs is not None  # narrowed by the cred_error check
 
         from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
 
@@ -701,6 +708,7 @@ def discover_improvedigital_metadata(tenant_id, **kwargs):
         client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
         if cred_error:
             return jsonify({"success": False, "error": cred_error}), 400
+        assert client_kwargs is not None  # narrowed by the cred_error check
 
         from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
 
@@ -816,6 +824,7 @@ def peek_improvedigital_package_placements(tenant_id, package_id, **kwargs):
         client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, {})
         if cred_error:
             return jsonify({"success": False, "error": cred_error}), 400
+        assert client_kwargs is not None  # narrowed by the cred_error check
 
         from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
 
