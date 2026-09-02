@@ -81,6 +81,48 @@ class TestSuccessfulRunPersistsSyncJob:
             assert row.error_message is None
 
 
+class TestRunningTransitionIsVisibleMidSweep:
+    """The queued→running transition must be COMMITTED before the adapter
+    call, not just flushed: the sync-status poll endpoint reads from its own
+    session, and an inventory sweep can run for minutes. Regression: an
+    uncommitted transition showed "queued" for the whole run and rolled back
+    to a stuck-forever queued row when the process died mid-sweep."""
+
+    def test_observer_session_sees_running_while_adapter_runs(self, integration_db):
+        with BareIntegrationEnv() as env:
+            TenantFactory(tenant_id="t_sync_vis")
+            observed: dict = {}
+
+            def _spy_run(**_kwargs):
+                # Mid-run observer — the same read the poll endpoint does.
+                session = env.get_session()
+                session.expire_all()
+                row = SyncJobRepository(session, "t_sync_vis").find_by_sync_id("sync_visibility_test")
+                observed["status"] = row.status if row else None
+                return AdapterSyncResult(
+                    sync_kind="inventory",
+                    started_at=datetime.now(UTC),
+                    finished_at=datetime.now(UTC),
+                    succeeded=True,
+                    counts={"placement": 1},
+                )
+
+            adapter = _mock_adapter(supports_inventory=True)
+            adapter.run_inventory_sync.side_effect = _spy_run
+
+            result = execute_sync(
+                adapter=adapter,
+                tenant_id="t_sync_vis",
+                sync_kind=KIND_INVENTORY,
+                triggered_by="test",
+                sync_id="sync_visibility_test",
+            )
+
+            assert observed["status"] == "running"
+            assert result.succeeded is True
+            assert _job(env, "t_sync_vis", "sync_visibility_test").status == "completed"
+
+
 class TestFailedRunMarksJobFailed:
     def test_failed_result_persists_first_error_to_error_message(self, integration_db):
         with BareIntegrationEnv() as env:
@@ -191,6 +233,52 @@ class TestEnqueueAdapterSyncReturnsImmediately:
             session.expire_all()
             repo = SyncJobRepository(session, "t_no_cfg")
             assert repo.latest_running_for_stream(adapter_type="improvedigital", sync_type="reporting") is None
+
+
+class TestStaleQueuedRowsDoNotBlockEnqueue:
+    """A queued row whose runner thread died (killed process) must stop
+    blocking re-enqueues after _QUEUED_SYNC_MAX_AGE — the queued→running
+    transition commits within milliseconds, so an old queued row is a
+    corpse, never a slow sweep. Regression: a corpse blocked every click
+    of "Sync Inventory Now" for a full hour with zero feedback."""
+
+    def test_old_queued_corpse_is_bypassed(self, integration_db):
+        from datetime import timedelta
+
+        from src.services.adapter_sync_orchestration import _find_active_sync
+
+        with BareIntegrationEnv() as env:
+            TenantFactory(tenant_id="t_corpse")
+            session = env.get_session()
+            SyncJobRepository(session, "t_corpse").create_job(
+                sync_id="sync_corpse",
+                adapter_type="improvedigital",
+                sync_type="inventory",
+                status="queued",
+                triggered_by="admin_button",
+                started_at=datetime.now(UTC) - timedelta(minutes=5),
+            )
+            session.commit()
+
+            assert _find_active_sync("t_corpse", "improvedigital", "inventory") is None
+
+    def test_fresh_queued_row_still_blocks_duplicates(self, integration_db):
+        from src.services.adapter_sync_orchestration import _find_active_sync
+
+        with BareIntegrationEnv() as env:
+            TenantFactory(tenant_id="t_fresh")
+            session = env.get_session()
+            SyncJobRepository(session, "t_fresh").create_job(
+                sync_id="sync_fresh",
+                adapter_type="improvedigital",
+                sync_type="inventory",
+                status="queued",
+                triggered_by="admin_button",
+                started_at=datetime.now(UTC),
+            )
+            session.commit()
+
+            assert _find_active_sync("t_fresh", "improvedigital", "inventory") == "sync_fresh"
 
 
 class TestAdapterRaisingIsCaughtAndPersisted:

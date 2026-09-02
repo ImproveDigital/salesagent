@@ -125,6 +125,7 @@ class ImproveDigitalInventorySync:
             return
         self._repo.bulk_upsert(rows)
         self._session.commit()
+        logger.info("Improve Digital inventory sync: upserted + committed %d rows", len(rows))
 
     def run(self) -> SyncResult:
         """Sync every entity family; record per-family errors, never raise."""

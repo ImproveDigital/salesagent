@@ -183,6 +183,13 @@ class SyncAlreadyRunning(Exception):
 # for many minutes, so the window is generous.
 _ACTIVE_SYNC_MAX_AGE = timedelta(minutes=60)
 
+# A row still ``queued`` after this long never got its runner thread: the
+# queued→running transition is committed within milliseconds of the thread
+# starting, so a lingering queued row is a corpse from a killed process
+# (dev reload, restart) — not a slow sweep. Without the shorter window, a
+# corpse blocks every re-enqueue of its stream for the full hour.
+_QUEUED_SYNC_MAX_AGE = timedelta(minutes=2)
+
 
 def _find_active_sync(
     tenant_id: str,
@@ -202,7 +209,8 @@ def _find_active_sync(
         if started is not None:
             if started.tzinfo is None:
                 started = started.replace(tzinfo=UTC)
-            if datetime.now(UTC) - started > _ACTIVE_SYNC_MAX_AGE:
+            max_age = _QUEUED_SYNC_MAX_AGE if job.status == "queued" else _ACTIVE_SYNC_MAX_AGE
+            if datetime.now(UTC) - started > max_age:
                 return None
         return job.sync_id
 
@@ -376,6 +384,9 @@ def enqueue_adapter_sync(
         session.commit()
 
     def _runner() -> None:
+        logger.info(
+            "adapter sync runner thread started: sync_id=%s tenant=%s adapter=%s", sync_id, tenant_id, adapter_type
+        )
         try:
             execute_adapter_sync(
                 tenant_id=tenant_id,
@@ -400,6 +411,13 @@ def enqueue_adapter_sync(
             )
             _mark_runner_crash(sync_id, tenant_id)
 
+    logger.info(
+        "adapter sync enqueued: sync_id=%s tenant=%s adapter=%s kind=%s — spawning runner thread",
+        sync_id,
+        tenant_id,
+        adapter_type,
+        sync_kind,
+    )
     threading.Thread(target=_runner, daemon=True, name=f"sync-{sync_id}").start()
     return sync_id
 
@@ -535,6 +553,15 @@ def _execute_sync_with_session(
             triggered_by_id=triggered_by_id,
         )
     db.flush()
+    if own_session:
+        # Commit the queued→running transition immediately: a long sweep can
+        # run for minutes, and the sync-status poll endpoint reads from its
+        # own session — an uncommitted transition would show "queued" for the
+        # whole run and, if the process died mid-sweep, roll back to a
+        # stuck-forever "queued" row with no error. A committed "running" row
+        # is honest, and a crashed run is bypassed by the 60-minute
+        # staleness window in _find_active_sync.
+        db.commit()
 
     kwargs = run_kwargs or {}
     try:

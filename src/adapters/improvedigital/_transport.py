@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.360yield.com"
 DEFAULT_TIMEOUT = 30.0
 
+# Separate, short connect timeout: an unreachable/black-holed host should
+# fail the request in seconds, not sit out the full read timeout per
+# connection attempt (requests interprets a (connect, read) tuple).
+CONNECT_TIMEOUT = 10.0
+
 # 360Yield bearers live ~11 minutes; a 2-minute leeway re-mints comfortably
 # before expiry. (BearerTokenCache caps leeway at ttl/2, so even shorter
 # observed TTLs stay usable.)
@@ -138,6 +143,8 @@ class ImproveDigitalTransport:
         self._client_secret = client_secret
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # (connect, read) — see CONNECT_TIMEOUT above.
+        self._request_timeout = (CONNECT_TIMEOUT, timeout)
         self._session = session or requests.Session()
         self._token_cache = BearerTokenCache(
             mint_fn=self._mint_token,
@@ -204,7 +211,7 @@ class ImproveDigitalTransport:
         """
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self._current_token()}", "accept": "application/json"}
-        response = self._session.request(method=method, url=url, headers=headers, timeout=self.timeout)
+        response = self._session.request(method=method, url=url, headers=headers, timeout=self._request_timeout)
         return response.status_code, (response.text[:200] if response.text else "")
 
     def logout(self) -> None:
@@ -216,7 +223,7 @@ class ImproveDigitalTransport:
         except (ImproveDigitalError, requests.RequestException):
             return
         try:
-            self._session.delete(f"{self.base_url}/oauth/logout/{token}", timeout=self.timeout)
+            self._session.delete(f"{self.base_url}/oauth/logout/{token}", timeout=self._request_timeout)
         except requests.RequestException:
             logger.info("Improve Digital logout failed (ignored)", exc_info=True)
         finally:
@@ -237,12 +244,13 @@ class ImproveDigitalTransport:
         """
         basic = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode()).decode()
         url = f"{self.base_url}/oauth/token"
+        logger.info("Improve Digital API request: POST %s (token mint)", url)
         try:
             response = self._session.post(
                 url,
                 data={"grant_type": "client_credentials"},
                 headers={"Authorization": f"Basic {basic}"},
-                timeout=self.timeout,
+                timeout=self._request_timeout,
             )
         except requests.RequestException:
             logger.warning("Improve Digital token mint failed: reason=request_exception", exc_info=True)
@@ -341,23 +349,34 @@ class ImproveDigitalTransport:
         }
         if content_type:
             headers["Content-Type"] = content_type
+        logger.info("Improve Digital API request: %s %s", method, url)
+        started = time.monotonic()
         try:
-            return self._session.request(
+            response = self._session.request(
                 method=method,
                 url=url,
                 headers=headers,
                 data=body,
                 files=files,
-                timeout=self.timeout,
+                timeout=self._request_timeout,
             )
         except requests.RequestException:
             logger.warning(
-                "Improve Digital API request failed: method=%s path=%s reason=request_exception",
+                "Improve Digital API request failed: method=%s path=%s elapsed=%.1fs reason=request_exception",
                 method,
                 path,
+                time.monotonic() - started,
                 exc_info=True,
             )
             raise
+        logger.info(
+            "Improve Digital API response: %s %s -> HTTP %s in %.1fs",
+            method,
+            path,
+            response.status_code,
+            time.monotonic() - started,
+        )
+        return response
 
     def _raise_for_status(self, response: requests.Response, method: str, path: str) -> None:
         if response.ok:

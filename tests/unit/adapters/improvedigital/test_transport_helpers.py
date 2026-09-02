@@ -4,6 +4,7 @@ import pytest
 
 from src.adapters.improvedigital._logging import safe_upstream_body_excerpt
 from src.adapters.improvedigital._token_cache import BearerTokenCache
+from src.adapters.improvedigital._transport import CONNECT_TIMEOUT, ImproveDigitalTransport
 
 pytestmark = pytest.mark.unit
 
@@ -100,3 +101,13 @@ class TestSafeUpstreamBodyExcerpt:
 
     def test_plain_body_passes_through(self):
         assert safe_upstream_body_excerpt('{"error": "not found"}') == '{"error": "not found"}'
+
+
+class TestTransportTimeouts:
+    def test_requests_use_split_connect_read_timeout(self):
+        """An unreachable host must fail at CONNECT_TIMEOUT, not sit out the
+        full read timeout per connection attempt — the transport passes a
+        (connect, read) tuple to requests."""
+        transport = ImproveDigitalTransport(client_id="app-1", client_secret="s", timeout=90.0)
+        assert transport._request_timeout == (CONNECT_TIMEOUT, 90.0)
+        assert CONNECT_TIMEOUT <= 10.0
