@@ -72,14 +72,9 @@ from adcp.server.mcp_tools import (
 )
 from adcp.server.spec_compat import _spec_compat_hooks_impl
 
-from src.core.slim_schemas import (
-    CREATE_MEDIA_BUY_SLIM_SCHEMA,
-    GET_PRODUCTS_SLIM_SCHEMA,
-    SYNC_CREATIVES_SLIM_SCHEMA,
-    UPDATE_MEDIA_BUY_SLIM_SCHEMA,
-)
+from src.core.slim_schemas import compact_tool_schemas
 
-# Optionally replace large tool inputSchemas with compact versions.
+# Optionally compact the adcp tool definitions served on tools/list.
 #
 # adcp's _generate_pydantic_schemas() inlines all $refs, so every model that
 # carries creative assets explodes.  Inlined size for the tools that make up
@@ -91,31 +86,27 @@ from src.core.slim_schemas import (
 #   get_products      ~184 kB  (~46 000 tokens)
 #
 # Any one of these fills an LLM context window on tools/list, making the tool
-# unusable.  Slimming all four takes the flow from ~1 092 000 to ~20 000
-# served tokens.
+# unusable.  The inlined outputSchemas are just as bad in aggregate (~4.7 MB
+# across the 13 advertised tools — 92% of the remaining payload) and pushed
+# the tools/list response past buyer-agent size caps (Scope3 caps at 5 MB),
+# blocking catalog discovery.  compact_tool_schemas() slims the four booking
+# inputSchemas and strips outputSchema from every tool — see its docstring.
 #
-# Set ADCP_COMPACT_TOOL_SCHEMAS=true to activate the slim schemas.
-# When unset or false, the full adcp-generated schema is used (default).
+# Set ADCP_COMPACT_TOOL_SCHEMAS=true to activate.
+# When unset or false, the full adcp-generated schemas are used (default).
 #
 # Strategy: call _ensure_pydantic_schemas_applied() eagerly so it sets
 # _schemas_applied=True.  Subsequent lazy calls on tools/list become
-# no-ops.  We then overwrite each tool's inputSchema with our slim
-# version — it sticks for the lifetime of the process.
+# no-ops.  We then compact each tool definition in place — it sticks for
+# the lifetime of the process.
 #
 # Runtime validation is unchanged: the functions still validate the
 # incoming request against the full Pydantic request models.
 _ensure_pydantic_schemas_applied()
+
 if os.environ.get("ADCP_COMPACT_TOOL_SCHEMAS", "").lower() == "true":
-    _SLIM_SCHEMAS = {
-        "create_media_buy": CREATE_MEDIA_BUY_SLIM_SCHEMA,
-        "update_media_buy": UPDATE_MEDIA_BUY_SLIM_SCHEMA,
-        "sync_creatives": SYNC_CREATIVES_SLIM_SCHEMA,
-        "get_products": GET_PRODUCTS_SLIM_SCHEMA,
-    }
-    for _tool in ADCP_TOOL_DEFINITIONS:
-        _slim = _SLIM_SCHEMAS.get(_tool["name"])
-        if _slim is not None:
-            _tool["inputSchema"] = _slim
+    compact_tool_schemas(ADCP_TOOL_DEFINITIONS)
+
 from sqlalchemy import select
 
 # Import for side-effect: registers the SQLAlchemy session listener that
@@ -1079,6 +1070,17 @@ def main() -> None:
     via ``python -m core.main`` is supported for local dev.
     """
     logging.basicConfig(level=logging.INFO)
+
+    # Trust X-Forwarded-Proto/-For from any upstream by default. The app is
+    # only reachable through the nginx/ingress proxy layer (never directly),
+    # and the proxy connects from the container network — not loopback — so
+    # uvicorn's default (trust 127.0.0.1 only) silently ignores the forwarded
+    # headers. That leaves request.url with scheme "http" and breaks RFC 9421
+    # @target-uri reconstruction: buyers sign "https://..." and inbound
+    # signature verification fails with request_signature_invalid.
+    # ``setdefault`` so an explicit FORWARDED_ALLOW_IPS (e.g. a CIDR for the
+    # proxy subnet) still takes precedence when set on the deployment.
+    os.environ.setdefault("FORWARDED_ALLOW_IPS", "*")
 
     kwargs = _serve_kwargs(include_scheduler=True)
     router = kwargs.pop("router")

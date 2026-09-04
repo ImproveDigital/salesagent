@@ -12,7 +12,11 @@ import pytest
 from adcp.types import CreateMediaBuyRequest
 
 from src.core.schemas import UpdateMediaBuyRequest
-from src.core.slim_schemas import CREATE_MEDIA_BUY_SLIM_SCHEMA, UPDATE_MEDIA_BUY_SLIM_SCHEMA
+from src.core.slim_schemas import (
+    CREATE_MEDIA_BUY_SLIM_SCHEMA,
+    UPDATE_MEDIA_BUY_SLIM_SCHEMA,
+    compact_tool_schemas,
+)
 
 # (label, request model, slim schema) — one row per slimmed tool.
 SLIM_SCHEMAS = [
@@ -77,3 +81,43 @@ def test_slim_schema_is_valid_json_schema_object(label, model, schema) -> None:
     assert isinstance(schema["properties"], dict)
     assert isinstance(schema["required"], list)
     assert len(schema["required"]) > 0
+
+
+def test_compact_tool_schemas_replaces_input_and_strips_output() -> None:
+    """compact_tool_schemas swaps oversized inputSchemas for slim ones and
+    removes outputSchema from every tool definition.
+
+    outputSchema is 92% of the tools/list payload (~4.7 MB of ~5 MB) and
+    pushed the response past buyer-agent size caps (Scope3 caps at 5 MB).
+    Without it, adcp falls back to the generic object schema derived from
+    the wrapper's return annotation, and structuredContent keeps working.
+    """
+    tool_defs = [
+        {
+            "name": "create_media_buy",
+            "inputSchema": {"type": "object", "properties": {"huge": {}}},
+            "outputSchema": {"type": "object", "properties": {"huge": {}}},
+        },
+        {
+            "name": "list_creatives",
+            "inputSchema": {"type": "object", "properties": {"kept": {}}},
+            "outputSchema": {"type": "object", "properties": {"huge": {}}},
+        },
+        {
+            "name": "no_output_schema_tool",
+            "inputSchema": {"type": "object", "properties": {"kept": {}}},
+        },
+    ]
+
+    compact_tool_schemas(tool_defs)
+
+    by_name = {t["name"]: t for t in tool_defs}
+    # Tools with a slim replacement get it; others keep their inputSchema.
+    assert by_name["create_media_buy"]["inputSchema"] is CREATE_MEDIA_BUY_SLIM_SCHEMA
+    assert by_name["list_creatives"]["inputSchema"] == {
+        "type": "object",
+        "properties": {"kept": {}},
+    }
+    # outputSchema is stripped everywhere; absence is tolerated.
+    for tool in tool_defs:
+        assert "outputSchema" not in tool
