@@ -69,9 +69,11 @@ Expected context variables:
                 <button onclick="initiateGAMAuth()" class="btn btn-secondary btn-sm" style="margin-left: 0.5rem;">
                     Refresh OAuth Token
                 </button>
+                {% if not adapter_locked %}
                 <button onclick="editGAMConfig()" class="btn btn-warning btn-sm" style="margin-left: 0.5rem;">
                     Edit Configuration
                 </button>
+                {% endif %}
             </div>
         </div>
         {% else %}

@@ -3206,4 +3206,8 @@ class Proposal(Base):
 # guard is imported first, it imports this module, which re-imports the guard
 # mid-load — a bare module binding resolves safely against the partially-loaded
 # module, whereas a name import would raise.
+# adapter_config_lock shares the anchoring rationale: it freezes the ad-server
+# identity columns (Tenant.ad_server, AdapterConfig.adapter_type /
+# gam_network_code) once the tenant has successfully synced inventory.
+from src.core.database import adapter_config_lock as _adapter_config_lock  # noqa: E402,F401
 from src.core.database import embedded_tenant_guard as _embedded_tenant_guard  # noqa: E402,F401

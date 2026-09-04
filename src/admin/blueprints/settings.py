@@ -451,6 +451,24 @@ def update_adapter(tenant_id):
                     flash("No adapter configured", "error")
                     return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="adapter"))
 
+            # Once inventory has been synced, the ad server identity is frozen —
+            # switching adapters (or clearing the GAM config via edit_config)
+            # would orphan synced inventory, products, and media-buy history.
+            from src.core.database.adapter_config_lock import ADAPTER_LOCKED_MESSAGE, is_adapter_config_locked
+
+            adapter_locked = is_adapter_config_locked(db_session, tenant_id)
+            requested_action = request.json.get("action") if request.is_json and request.json else None
+            current_adapter = tenant.ad_server or (
+                tenant.adapter_config.adapter_type if tenant.adapter_config else None
+            )
+            if adapter_locked and (
+                requested_action == "edit_config" or (current_adapter and new_adapter != current_adapter)
+            ):
+                if request.is_json:
+                    return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+                flash(ADAPTER_LOCKED_MESSAGE, "error")
+                return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="adapter"))
+
             # Update or create adapter config
             adapter_config_obj = tenant.adapter_config
             if adapter_config_obj:
@@ -554,6 +572,11 @@ def update_adapter(tenant_id):
                     network_timezone = None
 
                 if network_code:
+                    if adapter_locked and network_code != adapter_config_obj.gam_network_code:
+                        if request.is_json:
+                            return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+                        flash(ADAPTER_LOCKED_MESSAGE, "error")
+                        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="adapter"))
                     adapter_config_obj.gam_network_code = network_code
                 if refresh_token:
                     adapter_config_obj.gam_refresh_token = refresh_token

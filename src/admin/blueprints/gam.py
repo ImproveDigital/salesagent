@@ -413,6 +413,18 @@ def configure_gam(tenant_id):
 
             adapter_config = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
 
+            # Once inventory has been synced, the ad server identity is frozen:
+            # no switching another adapter's tenant onto GAM, and no changing
+            # (or clearing) the GAM network code. Credential rotation for the
+            # same network code stays allowed.
+            from src.core.database.adapter_config_lock import ADAPTER_LOCKED_MESSAGE, is_adapter_config_locked
+
+            if is_adapter_config_locked(db_session, tenant_id):
+                current_adapter = tenant.ad_server or (adapter_config.adapter_type if adapter_config else None)
+                stored_network_code = adapter_config.gam_network_code if adapter_config else None
+                if (current_adapter and current_adapter != "google_ad_manager") or network_code != stored_network_code:
+                    return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+
             if not adapter_config:
                 adapter_config = AdapterConfig(tenant_id=tenant_id, adapter_type="google_ad_manager")
                 db_session.add(adapter_config)

@@ -711,11 +711,22 @@
             </div>
             {% endif %}
 
+            {% if adapter_locked %}
+            <div class="status-card warning">
+                <strong>🔒 Ad Server Configuration Locked</strong>
+                <p style="margin: 0.25rem 0 0 0; font-size: 0.75rem;">
+                    Inventory has been synced with this ad server, so the ad server and
+                    network configuration can no longer be changed. To connect a different
+                    ad server or network, create a new tenant.
+                </p>
+            </div>
+            {% endif %}
+
             <div class="form-section">
                 <h3>Available Ad Servers</h3>
                 <div class="adapter-cards">
-                    <div class="adapter-card {% if active_adapter == 'mock' %}current{% endif %}"
-                         onclick="selectAdapter('mock')">
+                    <div class="adapter-card {% if active_adapter == 'mock' %}current{% endif %}{% if adapter_locked %} disabled{% endif %}"
+                         {% if not adapter_locked %}onclick="selectAdapter('mock')"{% endif %}>
                         {% if active_adapter == 'mock' %}
                         <span class="adapter-badge">Current</span>
                         {% endif %}
@@ -723,8 +734,8 @@
                         <p>Perfect for development and testing. No external setup required.</p>
                     </div>
 
-                    <div id="gam-adapter-card" class="adapter-card {% if active_adapter == 'google_ad_manager' %}current{% endif %}"
-                         onclick="selectGAMAdapter()">
+                    <div id="gam-adapter-card" class="adapter-card {% if active_adapter == 'google_ad_manager' %}current{% endif %}{% if adapter_locked %} disabled{% endif %}"
+                         {% if not adapter_locked %}onclick="selectGAMAdapter()"{% endif %}>
                         {% if active_adapter == 'google_ad_manager' %}
                         <span class="adapter-badge">Current</span>
                         {% endif %}
@@ -735,8 +746,8 @@
                         </div>
                     </div>
 
-                    <div class="adapter-card {% if active_adapter == 'broadstreet' %}current{% endif %}"
-                         onclick="selectAdapter('broadstreet')">
+                    <div class="adapter-card {% if active_adapter == 'broadstreet' %}current{% endif %}{% if adapter_locked %} disabled{% endif %}"
+                         {% if not adapter_locked %}onclick="selectAdapter('broadstreet')"{% endif %}>
                         {% if active_adapter == 'broadstreet' %}
                         <span class="adapter-badge">Current</span>
                         {% endif %}
@@ -747,8 +758,8 @@
                     {# Triton picker hidden — adapter parked while their APIs aren't production-ready.
                        Source remains under src/adapters/triton/; restore the card + registry entry to bring it back. #}
 
-                    <div class="adapter-card {% if active_adapter == 'freewheel' %}current{% endif %}"
-                         onclick="selectAdapter('freewheel')">
+                    <div class="adapter-card {% if active_adapter == 'freewheel' %}current{% endif %}{% if adapter_locked %} disabled{% endif %}"
+                         {% if not adapter_locked %}onclick="selectAdapter('freewheel')"{% endif %}>
                         {% if active_adapter == 'freewheel' %}
                         <span class="adapter-badge">Current</span>
                         {% endif %}
@@ -756,8 +767,8 @@
                         <p>Video and CTV advertising via Comcast/FreeWheel's Publisher API</p>
                     </div>
 
-                    <div class="adapter-card {% if active_adapter == 'springserve' %}current{% endif %}"
-                         onclick="selectAdapter('springserve')">
+                    <div class="adapter-card {% if active_adapter == 'springserve' %}current{% endif %}{% if adapter_locked %} disabled{% endif %}"
+                         {% if not adapter_locked %}onclick="selectAdapter('springserve')"{% endif %}>
                         {% if active_adapter == 'springserve' %}
                         <span class="adapter-badge">Current</span>
                         {% endif %}
@@ -765,8 +776,8 @@
                         <p>Direct-sold CTV, online video, and audio via Magnite SpringServe</p>
                     </div>
 
-                    <div class="adapter-card {% if active_adapter == 'improvedigital' %}current{% endif %}"
-                         onclick="selectAdapter('improvedigital')">
+                    <div class="adapter-card {% if active_adapter == 'improvedigital' %}current{% endif %}{% if adapter_locked %} disabled{% endif %}"
+                         {% if not adapter_locked %}onclick="selectAdapter('improvedigital')"{% endif %}>
                         {% if active_adapter == 'improvedigital' %}
                         <span class="adapter-badge">Current</span>
                         {% endif %}

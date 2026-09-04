@@ -271,6 +271,18 @@ def save_adapter_config(tenant_id, **kwargs):
             stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
             adapter_config = session.scalars(stmt).first()
 
+            # Once inventory has been synced, the adapter identity is frozen —
+            # saving a config for a different adapter_type IS an adapter switch
+            # (it also flips tenant.ad_server below).
+            from src.core.database.adapter_config_lock import ADAPTER_LOCKED_MESSAGE, is_adapter_config_locked
+
+            if (
+                adapter_config
+                and adapter_config.adapter_type != adapter_type
+                and is_adapter_config_locked(session, tenant_id)
+            ):
+                return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+
             if not adapter_config:
                 adapter_config = AdapterConfig(
                     tenant_id=tenant_id,
