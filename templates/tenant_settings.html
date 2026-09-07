@@ -713,11 +713,12 @@
 
             {% if adapter_locked %}
             <div class="status-card warning">
-                <strong>🔒 Ad Server Configuration Locked</strong>
+                <strong>🔒 Ad Server Connection Locked</strong>
                 <p style="margin: 0.25rem 0 0 0; font-size: 0.75rem;">
-                    Inventory has been synced with this ad server, so the ad server and
-                    network configuration can no longer be changed. To connect a different
-                    ad server or network, create a new tenant.
+                    Inventory has been synced with this ad server, so the ad server,
+                    network code, API base URL, and client credentials can no longer be
+                    changed. Other settings remain editable. To connect a different ad
+                    server or network, create a new tenant.
                 </p>
             </div>
             {% endif %}

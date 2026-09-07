@@ -21,6 +21,7 @@ Introduced in PR #1163, redesigned in PR #1171.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -238,3 +239,23 @@ class AdapterConfigRepository:
         """
         config = self.get_by_tenant()  # raises if missing
         config.custom_targeting_keys = keys
+
+    def mark_config_locked(self, locked_at: datetime | None = None) -> bool:
+        """Stamp ``config_locked_at`` on the tenant's first inventory sync.
+
+        While the stamp is set, the ad server configuration is frozen (see
+        ``src/core/database/adapter_config_lock.py``). Idempotent: an
+        already-locked config is left untouched. Missing config rows are
+        tolerated (returns False) — a sync cannot have run without one, but
+        completion paths must not crash on that edge.
+
+        Does not commit — caller handles the transaction boundary (the stamp
+        rides along with the sync-completion write).
+
+        Returns True when the stamp was newly set.
+        """
+        config = self.find_by_tenant()
+        if config is None or config.config_locked_at is not None:
+            return False
+        config.config_locked_at = locked_at or datetime.now(UTC)
+        return True

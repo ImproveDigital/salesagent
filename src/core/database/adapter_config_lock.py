@@ -1,26 +1,42 @@
-"""Model-layer write guard freezing ad server identity after the first inventory sync.
+"""Model-layer write guard freezing the ad server connection identity after the first inventory sync.
 
-Once a tenant has successfully synced inventory with its configured adapter, the
-ad server identity — ``Tenant.ad_server``, ``AdapterConfig.adapter_type``, and
-``AdapterConfig.gam_network_code`` — is locked. Switching adapters or GAM
-networks after a sync would orphan the synced inventory, product implementation
-configs, and media-buy history that reference the old network. A publisher who
-needs a different ad server or network must create a new tenant.
+Once a tenant's first inventory sync completes, the fields that identify the ad
+server connection are locked:
 
-Deliberately NOT locked (still writable after sync): credentials
-(``gam_refresh_token``, service-account JSON, ``gam_auth_method``) so tokens can
-be rotated for the same network, naming templates, approval flags,
-currencies/timezone, AXE keys, and runtime caches (``custom_targeting_keys``,
-``gam_sandbox_advertiser_id``).
+- ``Tenant.ad_server`` and ``AdapterConfig.adapter_type`` — the adapter choice
+- ``AdapterConfig.gam_network_code`` — the GAM network
+- ``client_id`` / ``client_secret`` inside ``config_json`` — the network seat
+  for schema-driven adapters (Improve Digital, FreeWheel API-Access)
+
+Changing any of these after a sync would orphan the synced inventory, product
+implementation configs, and media-buy history that reference the old network. A
+publisher who needs a different ad server or network must create a new tenant.
+Everything else on the adapter configuration (credentials such as the GAM
+refresh token or FreeWheel password, naming templates, AXE keys, approval
+flags, other ``config_json`` fields) stays editable.
+
+Lock state is stored explicitly in ``adapter_config.config_locked_at``
+(adapter-agnostic — every inventory-sync completion path stamps it via
+:meth:`AdapterConfigRepository.mark_config_locked`, and the migration
+backfilled already-synced tenants). ``config_locked_at`` is itself a locked
+column: stamping it on an unlocked tenant is free, but clearing it once set
+requires ``super_admin_override`` — that is the documented unlock procedure.
 
 Enforcement mirrors :mod:`src.core.database.embedded_tenant_guard`: SQLAlchemy
-``before_update`` listeners diff the locked columns and raise
-:class:`AdapterConfigLockedError` when a locked column's value actually changes
-on a synced tenant. Same-value re-assignment (the settings forms resubmit the
-stored network code) passes. Callers holding one of the embedded-guard auth
-flags (``management_api_caller``, ``super_admin_override``,
+``before_update`` listeners compare each locked column's pending value against
+the stored DB value and raise :class:`AdapterConfigLockedError` on a real
+change. Same-value re-assignment (the settings forms resubmit stored values on
+every save) passes. Callers holding one of the embedded-guard auth flags
+(``management_api_caller``, ``super_admin_override``,
 ``platform_background_worker``) bypass the lock — the Tenant Management API and
 platform workers remain the ops escape hatch.
+
+The ``client_id`` / ``client_secret`` keys inside ``config_json`` are enforced
+by the ``save_adapter_config`` route rather than these listeners:
+``client_secret`` is Fernet-encrypted at rest (non-deterministic ciphertext),
+so only the route — which holds the schema that decrypts it — can compare
+values meaningfully. The route is the sole UI write path for ``config_json``;
+non-UI writers (management API, workers) carry auth flags anyway.
 
 Inserts are not guarded: a synced tenant always already has its AdapterConfig
 row, and the only delete-and-recreate path is the management API, which carries
@@ -42,19 +58,25 @@ from sqlalchemy.orm.attributes import get_history
 # embedded_tenant_guard are both imported from the bottom of models.py, so a
 # name import would raise against the partially-loaded sibling module.
 from src.core.database import embedded_tenant_guard as _embedded_guard
-from src.core.database.models import AdapterConfig, GAMInventory, SyncJob, Tenant
+from src.core.database.models import AdapterConfig, Tenant
 
-# Terminal statuses that count as a successful sync — same vocabulary as
-# SyncJobRepository.latest_success_for_stream().
-_SUCCESS_STATUSES = ("completed", "success")
-
-# Ad-server identity columns frozen after the first successful inventory sync.
+# Connection-identity columns frozen while config_locked_at is set. The lock
+# stamp itself is in the set so that clearing it (unlocking) requires
+# super_admin_override; stamping it on an unlocked tenant is unaffected.
 LOCKED_TENANT_FIELDS: frozenset[str] = frozenset({"ad_server"})
-LOCKED_ADAPTER_CONFIG_FIELDS: frozenset[str] = frozenset({"adapter_type", "gam_network_code"})
+LOCKED_ADAPTER_CONFIG_FIELDS: frozenset[str] = frozenset({"adapter_type", "gam_network_code", "config_locked_at"})
+
+# config_json keys enforced by the save_adapter_config route (see module
+# docstring for why these can't be checked at the listener level). api_base_url
+# is the 360Yield host (production vs dev seat) — as much a part of the
+# connection identity as the credentials themselves.
+LOCKED_CONFIG_JSON_FIELDS: tuple[str, ...] = ("client_id", "client_secret", "api_base_url")
 
 ADAPTER_LOCKED_MESSAGE = (
     "Ad server configuration is locked: inventory has already been synced with "
-    "this ad server. To connect a different ad server or network, create a new tenant."
+    "this ad server. The ad server, network code, API base URL, and client "
+    "credentials cannot be changed. To connect a different ad server or network, "
+    "create a new tenant."
 )
 
 
@@ -62,38 +84,27 @@ class AdapterConfigLockedError(Exception):
     """Raised when a locked ad-server identity field is changed on a synced tenant."""
 
 
-def _tenant_has_synced_inventory(connection: Any, tenant_id: str | None) -> bool:
-    """True when the tenant has a successful inventory sync on record.
+def _tenant_is_locked(connection: Any, tenant_id: str | None) -> bool:
+    """True when the tenant's stored lock stamp is set.
 
-    Two signals, matching what the rest of the codebase treats as "synced":
-    a terminal-success ``sync_jobs`` row of ``sync_type='inventory'`` (any
-    adapter), or — for tenants that synced before sync_jobs existed — the
-    presence of ``gam_inventory`` rows (the setup-checklist signal).
+    ``adapter_config.config_locked_at`` is the single source of truth: the
+    inventory-sync completion paths stamp it via
+    :meth:`AdapterConfigRepository.mark_config_locked`, and the migration
+    backfilled tenants that had already synced. Clearing it (platform ops,
+    under ``super_admin_override``) unlocks the tenant.
     """
     if not tenant_id:
         return False
 
-    sync_row = connection.execute(
-        select(SyncJob.sync_id)
-        .where(
-            SyncJob.tenant_id == tenant_id,
-            SyncJob.sync_type == "inventory",
-            SyncJob.status.in_(_SUCCESS_STATUSES),
-        )
-        .limit(1)
-    ).first()
-    if sync_row is not None:
-        return True
-
-    inventory_row = connection.execute(
-        select(GAMInventory.id).where(GAMInventory.tenant_id == tenant_id).limit(1)
-    ).first()
-    return inventory_row is not None
+    locked_at = connection.execute(
+        select(AdapterConfig.config_locked_at).where(AdapterConfig.tenant_id == tenant_id)
+    ).scalar()
+    return locked_at is not None
 
 
 def is_adapter_config_locked(session: Session, tenant_id: str) -> bool:
     """Route/template-layer predicate for the same lock the listeners enforce."""
-    return _tenant_has_synced_inventory(session.connection(), tenant_id)
+    return _tenant_is_locked(session.connection(), tenant_id)
 
 
 def _locked_fields_actually_changed(connection: Any, target: Any, locked: frozenset[str]) -> list[str]:
@@ -131,7 +142,7 @@ def _enforce_lock(connection: Any, target: Any, locked: frozenset[str]) -> None:
     if not changed:
         return
 
-    if not _tenant_has_synced_inventory(connection, getattr(target, "tenant_id", None)):
+    if not _tenant_is_locked(connection, getattr(target, "tenant_id", None)):
         return
 
     if _embedded_guard._caller_is_authorized(target, connection):

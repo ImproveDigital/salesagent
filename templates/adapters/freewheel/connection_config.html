@@ -62,13 +62,15 @@ Expected context:
                 <label for="freewheel_client_id">Client ID</label>
                 <input type="text" id="freewheel_client_id" name="freewheel_client_id"
                        value="{{ adapter_config.get('client_id', '') if adapter_config else '' }}"
-                       placeholder="API-Access OAuth2 client ID">
+                       placeholder="API-Access OAuth2 client ID"
+                       {% if adapter_locked %}readonly style="background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;" title="Locked after inventory sync"{% endif %}>
             </div>
             <div class="form-group">
                 <label for="freewheel_client_secret">Client Secret</label>
                 <input type="password" id="freewheel_client_secret" name="freewheel_client_secret"
                        value=""
-                       placeholder="{% if adapter_config and adapter_config.get('client_id') %}(leave blank to keep existing){% else %}Enter client secret{% endif %}">
+                       placeholder="{% if adapter_locked %}(locked after inventory sync){% elif adapter_config and adapter_config.get('client_id') %}(leave blank to keep existing){% else %}Enter client secret{% endif %}"
+                       {% if adapter_locked %}readonly style="background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;" title="Locked after inventory sync"{% endif %}>
                 <small class="form-text text-muted">
                     Stored encrypted at rest. Leave blank to keep the previously saved secret.
                 </small>

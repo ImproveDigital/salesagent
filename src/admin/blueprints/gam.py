@@ -342,6 +342,12 @@ def detect_gam_network(tenant_id):
 @require_tenant_access(role=("admin",))
 def configure_gam(tenant_id):
     """Save GAM configuration for a tenant."""
+    from src.core.database.adapter_config_lock import (
+        ADAPTER_LOCKED_MESSAGE,
+        AdapterConfigLockedError,
+        is_adapter_config_locked,
+    )
+
     try:
         # Try to get JSON - use force=True to handle potential Content-Type issues
         data = request.get_json(force=True, silent=True)
@@ -413,12 +419,11 @@ def configure_gam(tenant_id):
 
             adapter_config = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
 
-            # Once inventory has been synced, the ad server identity is frozen:
-            # no switching another adapter's tenant onto GAM, and no changing
-            # (or clearing) the GAM network code. Credential rotation for the
-            # same network code stays allowed.
-            from src.core.database.adapter_config_lock import ADAPTER_LOCKED_MESSAGE, is_adapter_config_locked
-
+            # Once inventory has been synced, the ad server configuration is
+            # frozen: no switching another adapter's tenant onto GAM, and no
+            # changing (or clearing) the GAM network code. Credential rotation
+            # for the same network code stays allowed; any other field change
+            # is caught at commit by the model guard (403 in the except below).
             if is_adapter_config_locked(db_session, tenant_id):
                 current_adapter = tenant.ad_server or (adapter_config.adapter_type if adapter_config else None)
                 stored_network_code = adapter_config.gam_network_code if adapter_config else None
@@ -489,6 +494,10 @@ def configure_gam(tenant_id):
                     "message": "GAM configuration saved successfully",
                 }
             )
+
+    except AdapterConfigLockedError as e:
+        logger.info(f"Blocked GAM config change on locked tenant {tenant_id}: {e}")
+        return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
 
     except Exception as e:
         logger.error(f"Error saving GAM configuration for tenant {tenant_id}: {e}")

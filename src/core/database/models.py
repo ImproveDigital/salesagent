@@ -1477,6 +1477,13 @@ class AdapterConfig(Base):
         comment="Schema-validated adapter configuration",
     )
 
+    # Stamped when the tenant's first inventory sync completes; while non-NULL
+    # the ad server configuration is frozen (adapter_config_lock.py) and only
+    # credentials remain editable. Cleared only by platform ops under
+    # super_admin_override — publishers needing a different ad server or
+    # network create a new tenant instead.
+    config_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

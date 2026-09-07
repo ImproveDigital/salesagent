@@ -203,6 +203,13 @@ def save_adapter_config(tenant_id, **kwargs):
         "config": { ... adapter-specific config ... }
     }
     """
+    from src.core.database.adapter_config_lock import (
+        ADAPTER_LOCKED_MESSAGE,
+        LOCKED_CONFIG_JSON_FIELDS,
+        AdapterConfigLockedError,
+        is_adapter_config_locked,
+    )
+
     try:
         data = request.get_json()
         if not data:
@@ -271,17 +278,32 @@ def save_adapter_config(tenant_id, **kwargs):
             stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
             adapter_config = session.scalars(stmt).first()
 
-            # Once inventory has been synced, the adapter identity is frozen —
-            # saving a config for a different adapter_type IS an adapter switch
-            # (it also flips tenant.ad_server below).
-            from src.core.database.adapter_config_lock import ADAPTER_LOCKED_MESSAGE, is_adapter_config_locked
+            # Once inventory has been synced, the connection identity is
+            # frozen: no adapter switch (saving a different adapter_type also
+            # flips tenant.ad_server below), and the client_id/client_secret
+            # keys inside config_json are read-only. Compared post-validation
+            # so both sides are plaintext — the schema's field validator
+            # decrypts stored ciphertext, which is non-deterministic at rest
+            # and useless to compare directly. Other config fields (passwords,
+            # tokens, environment, …) stay editable.
+            if adapter_config and is_adapter_config_locked(session, tenant_id):
+                if adapter_config.adapter_type != adapter_type:
+                    return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
 
-            if (
-                adapter_config
-                and adapter_config.adapter_type != adapter_type
-                and is_adapter_config_locked(session, tenant_id)
-            ):
-                return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+                if validated_config is not None and adapter_config.config_json:
+                    locked_fields = [f for f in LOCKED_CONFIG_JSON_FIELDS if f in type(validated_config).model_fields]
+                    stored_model = None
+                    if locked_fields:
+                        try:
+                            stored_model = type(validated_config).model_validate(adapter_config.config_json)
+                        except ValidationError:
+                            # Legacy/partial stored config that no longer
+                            # validates — nothing comparable to protect.
+                            stored_model = None
+                    if stored_model is not None:
+                        for field_name in locked_fields:
+                            if getattr(validated_config, field_name) != getattr(stored_model, field_name):
+                                return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
 
             if not adapter_config:
                 adapter_config = AdapterConfig(
@@ -338,6 +360,10 @@ def save_adapter_config(tenant_id, **kwargs):
                 logger.info(f"Saved adapter config for tenant {tenant_id}: {adapter_type}")
 
         return jsonify({"success": True, "adapter_type": adapter_type})
+
+    except AdapterConfigLockedError as e:
+        logger.info(f"Blocked adapter config change on locked tenant {tenant_id}: {e}")
+        return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
 
     except Exception as e:
         logger.error(f"Error saving adapter config: {e}", exc_info=True)

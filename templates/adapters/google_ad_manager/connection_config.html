@@ -132,9 +132,11 @@ Expected context variables:
                 <div style="flex: 1;">
                     <input type="text" id="gam_network_code" class="form-control"
                            value="{{ adapter_config.get('network_code', '') if adapter_config else '' }}"
-                           placeholder="Enter network code or click auto-detect">
+                           placeholder="Enter network code or click auto-detect"
+                           {% if adapter_locked %}readonly style="background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;" title="Locked after inventory sync"{% endif %}>
                 </div>
-                <button onclick="detectGAMNetwork()" class="btn btn-primary" id="detect-network-btn">
+                <button onclick="detectGAMNetwork()" class="btn btn-primary" id="detect-network-btn"
+                        {% if adapter_locked %}disabled title="Locked after inventory sync"{% endif %}>
                     Auto-detect Network
                 </button>
             </div>
@@ -192,9 +194,11 @@ Expected context variables:
                     <div style="display: flex; align-items: center; gap: 0.5rem;">
                         <input type="text" id="service_account_network_code"
                                value="{{ adapter_config.get('network_code', '') }}"
-                               style="flex: 1; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 6px; font-family: monospace;"
-                               placeholder="e.g., 12345678">
-                        <button onclick="saveServiceAccountNetworkCode()" class="btn btn-primary btn-sm">
+                               style="flex: 1; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 6px; font-family: monospace;{% if adapter_locked %} background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;{% endif %}"
+                               placeholder="e.g., 12345678"
+                               {% if adapter_locked %}readonly title="Locked after inventory sync"{% endif %}>
+                        <button onclick="saveServiceAccountNetworkCode()" class="btn btn-primary btn-sm"
+                                {% if adapter_locked %}disabled title="Locked after inventory sync"{% endif %}>
                             Save Network Code
                         </button>
                     </div>
@@ -235,8 +239,9 @@ Expected context variables:
                         GAM Network Code <span style="color: #dc2626;">*</span>
                     </label>
                     <input type="text" id="manual_network_code"
-                           style="width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 6px; font-family: monospace;"
-                           placeholder="e.g., 12345678">
+                           style="width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 6px; font-family: monospace;{% if adapter_locked %} background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;{% endif %}"
+                           placeholder="e.g., 12345678"
+                           {% if adapter_locked %}readonly title="Locked after inventory sync"{% endif %}>
                 </div>
 
                 <div style="margin-top: 1.5rem;">

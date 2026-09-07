@@ -623,6 +623,12 @@ def _finalize(
     job.summary = (
         f"{result.sync_kind} sync — total={result.total_count} succeeded={result.succeeded} errors={len(result.errors)}"
     )
+    if result.succeeded and job.sync_type == "inventory":
+        # First successful inventory sync freezes the tenant's ad server
+        # configuration (adapter_config_lock.py).
+        from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+        AdapterConfigRepository(db, job.tenant_id).mark_config_locked()
     db.flush()
     if own_session:
         db.commit()
