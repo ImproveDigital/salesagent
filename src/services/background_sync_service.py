@@ -606,6 +606,7 @@ def _run_sync_thread(
         try:
             from src.services.gam_advertisers_sync import _build_gam_client_for_tenant
             from src.services.gam_orders_service import GAMOrdersService
+
             with _sync_session() as db:
                 GAMOrdersService(db).sync_tenant_orders(tenant_id, _build_gam_client_for_tenant(tenant_id))
         except Exception as _oe:
@@ -651,6 +652,12 @@ def _mark_sync_complete(sync_id: str, summary: dict[str, Any]):
                 sync_job.completed_at = datetime.now(UTC)
                 # Convert summary dict to JSON string (summary field is Text, not JSON)
                 sync_job.summary = json.dumps(summary) if summary else None
+                if sync_job.sync_type == "inventory":
+                    # First successful inventory sync freezes the tenant's ad
+                    # server configuration (adapter_config_lock.py).
+                    from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+                    AdapterConfigRepository(db, sync_job.tenant_id).mark_config_locked()
                 db.commit()
     except Exception as e:
         logger.error(f"Failed to mark sync complete: {e}")

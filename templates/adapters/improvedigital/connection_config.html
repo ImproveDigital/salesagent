@@ -28,7 +28,8 @@ Expected context:
             <label for="improvedigital_client_id">Client ID</label>
             <input type="text" id="improvedigital_client_id" name="improvedigital_client_id"
                    value="{{ adapter_config.get('client_id', '') if adapter_config else '' }}"
-                   placeholder="OAuth2 client ID issued by Improve Digital">
+                   placeholder="OAuth2 client ID issued by Improve Digital"
+                   {% if adapter_locked %}readonly style="background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;" title="Locked after inventory sync"{% endif %}>
             <small class="form-text text-muted">
                 Issued per client application by Improve Digital — request via the platform team.
             </small>
@@ -38,7 +39,8 @@ Expected context:
             <label for="improvedigital_client_secret">Client Secret</label>
             <input type="password" id="improvedigital_client_secret" name="improvedigital_client_secret"
                    value=""
-                   placeholder="{% if adapter_config and adapter_config.get('client_id') %}(leave blank to keep existing){% else %}Enter client secret{% endif %}">
+                   placeholder="{% if adapter_locked %}(locked after inventory sync){% elif adapter_config and adapter_config.get('client_id') %}(leave blank to keep existing){% else %}Enter client secret{% endif %}"
+                   {% if adapter_locked %}readonly style="background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;" title="Locked after inventory sync"{% endif %}>
             <small class="form-text text-muted">
                 Stored encrypted at rest. Leave blank to keep the previously saved secret.
             </small>
@@ -49,7 +51,8 @@ Expected context:
             <input type="text" id="improvedigital_api_base_url" name="improvedigital_api_base_url"
                    list="improvedigital_api_hosts" class="form-control"
                    value="{{ adapter_config.get('api_base_url', '') if adapter_config else '' }}"
-                   placeholder="https://api.360yield.com">
+                   placeholder="https://api.360yield.com"
+                   {% if adapter_locked %}readonly style="background-color: #f3f4f6; color: #6b7280; cursor: not-allowed;" title="Locked after inventory sync"{% endif %}>
             <datalist id="improvedigital_api_hosts">
                 <option value="https://api.360yield.com">Production</option>
                 <option value="https://api.360yielddev.com">Development</option>

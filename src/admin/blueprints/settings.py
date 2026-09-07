@@ -426,6 +426,12 @@ def update_general(tenant_id):
 )
 def update_adapter(tenant_id):
     """Update the active adapter for a tenant."""
+    from src.core.database.adapter_config_lock import (
+        ADAPTER_LOCKED_MESSAGE,
+        AdapterConfigLockedError,
+        is_adapter_config_locked,
+    )
+
     try:
         # Support both JSON (from our frontend) and form data (from tests)
         if request.is_json:
@@ -450,6 +456,25 @@ def update_adapter(tenant_id):
                         return jsonify({"success": False, "error": "No adapter configured"}), 400
                     flash("No adapter configured", "error")
                     return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="adapter"))
+
+            # Once inventory has been synced, the ad server configuration is
+            # frozen — switching adapters (or clearing the GAM config via
+            # edit_config) would orphan synced inventory, products, and
+            # media-buy history. Field-level changes (templates, AXE keys, …)
+            # are caught at commit by the model guard and returned as 403 in
+            # the except clause below.
+            adapter_locked = is_adapter_config_locked(db_session, tenant_id)
+            requested_action = request.json.get("action") if request.is_json and request.json else None
+            current_adapter = tenant.ad_server or (
+                tenant.adapter_config.adapter_type if tenant.adapter_config else None
+            )
+            if adapter_locked and (
+                requested_action == "edit_config" or (current_adapter and new_adapter != current_adapter)
+            ):
+                if request.is_json:
+                    return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+                flash(ADAPTER_LOCKED_MESSAGE, "error")
+                return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="adapter"))
 
             # Update or create adapter config
             adapter_config_obj = tenant.adapter_config
@@ -592,6 +617,15 @@ def update_adapter(tenant_id):
 
             flash(f"Adapter changed to {new_adapter}", "success")
             return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="adapter"))
+
+    except AdapterConfigLockedError as e:
+        logger.info(f"Blocked adapter config change on locked tenant {tenant_id}: {e}")
+
+        if request.is_json:
+            return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+
+        flash(ADAPTER_LOCKED_MESSAGE, "error")
+        return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="adapter"))
 
     except Exception as e:
         logger.error(f"Error updating adapter: {e}", exc_info=True)
