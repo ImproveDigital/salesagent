@@ -271,17 +271,25 @@ class GetMediaBuyDeliveryResponse(NestedModelSerializerMixin, LibraryGetMediaBuy
         None, description="True when any requested geo package breakdown was truncated"
     )
 
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        """Override to ensure webhook metadata fields are present when notification_type is set.
+    # Todo: Check it if model_dump has any use case
+    # next_expected_at is intentionally NOT forced to null. Every AdCP schema
+    # (2.5, 3.0, 3.1) types it as a non-nullable date-time string and does not
+    # list it in ``required``; the response schema says it is "only present in
+    # webhook deliveries when notification_type is not 'final'" and the webhook
+    # result schema says "Omitted on final notifications". The base model's
+    # exclude-None behaviour already yields the correct wire shape.
 
-        The base AdCPBaseModel excludes None values, but the AdCP protocol requires
-        next_expected_at to be explicitly present (as null) when notification_type
-        is 'final' so consumers know no further reports are expected.
-        """
-        result = super().model_dump(**kwargs)
-        if self.notification_type is not None and "next_expected_at" not in result:
-            result["next_expected_at"] = None
-        return result
+    # def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+    #     """Override to ensure webhook metadata fields are present when notification_type is set.
+
+    #     The base AdCPBaseModel excludes None values, but the AdCP protocol requires
+    #     next_expected_at to be explicitly present (as null) when notification_type
+    #     is 'final' so consumers know no further reports are expected.
+    #     """
+    #     result = super().model_dump(**kwargs)
+    #     if self.notification_type is not None and "next_expected_at" not in result:
+    #         result["next_expected_at"] = None
+    #     return result
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""

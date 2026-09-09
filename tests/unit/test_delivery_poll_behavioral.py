@@ -692,35 +692,35 @@ class TestCreativeDeliveryResponseStr:
 
 
 class TestNextExpectedAtSerialization:
-    """model_dump() forces next_expected_at=null when notification_type is set.
+    """next_expected_at is omitted when unset -- never emitted as null.
 
-    The AdCP protocol requires next_expected_at to be explicitly present
-    (as null) when notification_type is 'final', so consumers know no
-    further reports are expected. The base model excludes None values,
-    so the override on line 304 re-injects it.
+    AdCP schemas (2.5, 3.0, 3.1) type the field as a non-nullable date-time
+    string and never list it in ``required``. The response schema says it is
+    "only present in webhook deliveries when notification_type is not 'final'"
+    and the webhook result schema says "Omitted on final notifications". A
+    null fails the framework's response validation, which turned every
+    completed-buy delivery response into VALIDATION_ERROR[/next_expected_at].
 
     Covers: UC-004-SERIAL-01
     """
 
-    def test_final_notification_includes_null_next_expected_at(self):
-        """notification_type='final' forces next_expected_at=null in JSON output.
+    def test_final_notification_omits_next_expected_at(self):
+        """notification_type='final' must omit next_expected_at (not null).
 
         Covers: UC-004-SERIAL-01
         """
         resp = _make_media_buy_delivery_response(0, notification_type="final")
         dumped = resp.model_dump(mode="json")
-        assert "next_expected_at" in dumped
-        assert dumped["next_expected_at"] is None
+        assert "next_expected_at" not in dumped
 
-    def test_scheduled_notification_includes_null_next_expected_at(self):
-        """Any notification_type (not just 'final') forces next_expected_at into JSON.
+    def test_scheduled_notification_without_timestamp_omits_next_expected_at(self):
+        """notification_type='scheduled' with no timestamp omits the key rather than emitting null.
 
         Covers: UC-004-SERIAL-01
         """
         resp = _make_media_buy_delivery_response(0, notification_type="scheduled")
         dumped = resp.model_dump(mode="json")
-        assert "next_expected_at" in dumped
-        assert dumped["next_expected_at"] is None
+        assert "next_expected_at" not in dumped
 
     def test_no_notification_type_excludes_next_expected_at(self):
         """Without notification_type, next_expected_at is excluded from JSON (base behavior).

@@ -93,7 +93,7 @@ class TestWebhookNotificationTypeFinal:
 
             dumped = response.model_dump(mode="json")
             assert dumped["notification_type"] == "final"
-            assert dumped["next_expected_at"] is None
+            assert "next_expected_at" not in dumped, "final notifications must omit next_expected_at, never null"
 
 
 # ---------------------------------------------------------------------------
