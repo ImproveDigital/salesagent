@@ -5,12 +5,17 @@ Delegates to ``core.main.main()`` — one Starlette binary serves MCP at /mcp,
 A2A at /, and Flask admin via WSGI middleware.
 """
 
+import faulthandler
 import os
 import sys
 
 
 def main():
     """Run the server with configurable port."""
+    # Dump Python tracebacks of every thread to stderr on a hard crash
+    # (segfault, abort, fatal signal) — otherwise the process just vanishes
+    # and the proxy reports 502 with nothing in the application log.
+    faulthandler.enable()
     try:
         sys.path.insert(0, ".")
         from src.core.startup import initialize_application

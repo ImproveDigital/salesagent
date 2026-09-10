@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from datetime import timedelta
 
 import markdown
@@ -341,6 +342,43 @@ def create_app(config=None):
             return _get_or_create_admin_csrf_token()
 
         return {"csrf_token": csrf_token}
+
+    @app.before_request
+    def log_admin_request_start():
+        """Boundary log for every unsafe admin request, registered before the
+        CSRF guard so it fires even when that guard aborts. Pairs with
+        ``log_admin_request_teardown`` below: START without END means the
+        request never completed inside Flask."""
+        if request.method in _CSRF_SAFE_METHODS:
+            return None
+        g._admin_request_started = time.monotonic()
+        logger.info(
+            "[admin_request] START %s %s content_length=%s endpoint=%s",
+            request.method,
+            request.path,
+            request.content_length,
+            request.endpoint,
+        )
+        return None
+
+    @app.teardown_request
+    def log_admin_request_teardown(exc):
+        started = getattr(g, "_admin_request_started", None)
+        if started is None:
+            return
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if exc is not None:
+            logger.error(
+                "[admin_request] END %s %s after %.0f ms with unhandled %s: %s",
+                request.method,
+                request.path,
+                elapsed_ms,
+                type(exc).__name__,
+                exc,
+                exc_info=exc,
+            )
+        else:
+            logger.info("[admin_request] END %s %s in %.0f ms", request.method, request.path, elapsed_ms)
 
     @app.before_request
     def enforce_admin_csrf():
