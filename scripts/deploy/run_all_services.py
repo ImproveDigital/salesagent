@@ -20,6 +20,12 @@ import time
 # Store process references for cleanup
 processes = []
 
+# Exit code of the MCP/A2A/Admin server child once it has stopped. ``None``
+# while it is running. The main loop watches this so the container exits
+# (and the orchestrator restarts it) instead of staying alive with nothing
+# listening on the app port, which the load balancer reports as 502.
+_mcp_exit_code: int | None = None
+
 
 def validate_required_env():
     """Validate required environment variables."""
@@ -181,9 +187,8 @@ def init_database():
         sys.exit(1)
 
 
-def cleanup(signum=None, frame=None):
-    """Clean up all processes on exit."""
-    print("\nShutting down all services...")
+def _terminate_children() -> None:
+    """Terminate every child process we started (nginx, cron, server)."""
     for proc in processes:
         if proc and proc.poll() is None:
             proc.terminate()
@@ -191,6 +196,12 @@ def cleanup(signum=None, frame=None):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+def cleanup(signum=None, frame=None):
+    """Clean up all processes on exit."""
+    print("\nShutting down all services...")
+    _terminate_children()
     sys.exit(0)
 
 
@@ -240,7 +251,16 @@ def run_mcp_server():
     for line in iter(proc.stdout.readline, b""):
         if line:
             print(f"[MCP] {line.decode().rstrip()}")
-    print("MCP server stopped")
+    rc = proc.wait()
+    # A negative return code means the child was killed by a signal:
+    # -9 = SIGKILL (kernel OOM killer), -11 = SIGSEGV (native crash).
+    if rc < 0:
+        hint = " (SIGKILL — likely out of memory)" if rc == -9 else " (SIGSEGV — native crash)" if rc == -11 else ""
+        print(f"MCP server stopped: killed by signal {-rc}{hint}")
+    else:
+        print(f"MCP server stopped with exit code {rc}")
+    global _mcp_exit_code
+    _mcp_exit_code = rc
 
 
 def exec_mcp_server():
@@ -424,10 +444,24 @@ def main():
         print("\nℹ️  Nginx reverse proxy skipped (SKIP_NGINX=true)")
         print("Press Ctrl+C to stop all services")
 
-    # Keep the main thread alive
+    # Keep the main thread alive while the server child is running. If the
+    # child dies (OOM kill, native crash, unhandled exit) we must exit too:
+    # otherwise this wrapper keeps the container "alive" with nothing on the
+    # app port, the load balancer serves 502s until its unhealthy threshold
+    # finally kills the task, and the stopped-task reason only says "failed
+    # ELB health checks" with exit code 0, hiding the real cause. Exiting
+    # with the child's status surfaces it (137 = SIGKILL/OOM, 139 = SIGSEGV)
+    # and lets the orchestrator restart the task immediately.
     try:
         while True:
             time.sleep(1)
+            if _mcp_exit_code is not None:
+                rc = _mcp_exit_code
+                print(f"❌ MCP server process exited (code {rc}); stopping container so it can be restarted")
+                _terminate_children()
+                if rc < 0:
+                    sys.exit(128 + (-rc))  # shell convention for signal deaths
+                sys.exit(rc or 1)  # a clean exit of the server is still a failure here
     except KeyboardInterrupt:
         print("\n\nShutting down all services...")
         sys.exit(0)
