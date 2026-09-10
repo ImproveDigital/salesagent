@@ -171,17 +171,38 @@ def check_schema_issues():
 
 
 def init_database():
-    """Initialize database schema and default data."""
+    """Initialize database schema and default data.
+
+    Runs in a subprocess (like ``run_migrations``) rather than in this
+    wrapper process on purpose: ``src.core.database.database`` imports the
+    ORM models, which import ``adcp.types``, and importing the ``adcp``
+    library builds native pydantic validators for ~1,900 models — about
+    1.2 GB of resident memory. This wrapper stays alive for the life of
+    the container, so doing that import here permanently doubled the
+    task's memory footprint (wrapper ~1.2 GB + server child ~1.5 GB) and
+    left a 4 GB Fargate task a few hundred MB from the OOM killer.
+    """
     print("📦 Initializing database schema and default data...")
     print(
         "ℹ️  Note: init_db() is safe - it only creates tables (IF NOT EXISTS) and default tenant (if no tenants exist)"
     )
 
     try:
-        from src.core.database.database import init_db
-
-        init_db(exit_on_error=True)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from src.core.database.database import init_db; init_db(exit_on_error=True)",
+            ],
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"❌ Database initialization failed (exit code {result.returncode})")
+            sys.exit(1)
         print("✅ Database initialization complete")
+    except subprocess.TimeoutExpired:
+        print("❌ Database initialization timed out after 300 seconds")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Database initialization failed: {e}")
         sys.exit(1)
