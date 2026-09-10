@@ -1,8 +1,10 @@
 """Products management blueprint for admin UI."""
 
 import asyncio
+import functools
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -30,6 +32,89 @@ from src.core.validation import sanitize_form_data
 from src.services.gam_product_config_service import GAMProductConfigService
 
 logger = logging.getLogger(__name__)
+
+
+def _log_product_flow(action: str):
+    """Log entry, exit, duration and any escaping exception of a product form handler.
+
+    Sits *inside* ``require_tenant_access`` so the tenant is already resolved.
+    The inner handlers already catch and flash most errors; this wrapper adds
+    the outer envelope: a START line, a DONE line with wall-clock duration and
+    the response status/redirect, or a FAILED line with the full traceback for
+    anything that escapes (which Flask turns into a 500). A request that logs
+    START but never DONE/FAILED was cut off upstream (proxy timeout, worker
+    killed) — that is the signature of a 502 at the gateway.
+    """
+
+    def decorator(f):
+        @functools.wraps(f)
+        def wrapper(*args, **kwargs):
+            started = time.monotonic()
+            tenant_id = kwargs.get("tenant_id") or (args[0] if args else None)
+            product_id = kwargs.get("product_id") or (args[1] if len(args) > 1 else None)
+            logger.info(
+                "[product_flow] %s START method=%s path=%s tenant=%s product=%s",
+                action,
+                request.method,
+                request.path,
+                tenant_id,
+                product_id,
+            )
+            try:
+                response = f(*args, **kwargs)
+            except Exception:
+                logger.exception(
+                    "[product_flow] %s FAILED after %.0f ms method=%s path=%s tenant=%s product=%s "
+                    "(unhandled exception — Flask will return 500)",
+                    action,
+                    (time.monotonic() - started) * 1000,
+                    request.method,
+                    request.path,
+                    tenant_id,
+                    product_id,
+                )
+                raise
+            status = getattr(response, "status_code", 200 if isinstance(response, str) else None)
+            headers = getattr(response, "headers", None)
+            location = headers.get("Location") if headers is not None else None
+            logger.info(
+                "[product_flow] %s DONE in %.0f ms method=%s tenant=%s product=%s status=%s location=%s",
+                action,
+                (time.monotonic() - started) * 1000,
+                request.method,
+                tenant_id,
+                product_id,
+                status,
+                location,
+            )
+            return response
+
+        return wrapper
+
+    return decorator
+
+
+def _publish_product_change_logged(step: str, publish_fn, **kwargs) -> None:
+    """Run a post-commit catalog webhook publication with timing and isolation.
+
+    The product row is already committed when this runs, so a webhook failure
+    must not turn a successful save into an error page — it is logged with the
+    traceback and the request continues. The duration is logged because the
+    Tenant Management webhook delivery posts synchronously (10 s HTTP timeout
+    per subscriber) and can hold the request long enough for a gateway timeout.
+    """
+    started = time.monotonic()
+    try:
+        publish_fn(**kwargs)
+    except Exception:
+        logger.exception(
+            "[product_flow] %s: webhook publication FAILED after %.0f ms (product already committed)",
+            step,
+            (time.monotonic() - started) * 1000,
+        )
+        return
+    logger.info("[product_flow] %s: webhook publication done in %.0f ms", step, (time.monotonic() - started) * 1000)
+
 
 # Create Blueprint
 products_bp = Blueprint("products", __name__)
@@ -834,6 +919,7 @@ def _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_d
 @products_bp.route("/add", methods=["GET", "POST"])
 @log_admin_action("add_product")
 @require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
+@_log_product_flow("add_product")
 def add_product(tenant_id):
     """Add a new product - adapter-specific form."""
     if not publisher_owns("compose_products"):
@@ -1429,7 +1515,9 @@ def add_product(tenant_id):
 
                 db_session.commit()
 
-                publish_product_catalog_change(
+                _publish_product_change_logged(
+                    "add_product",
+                    publish_product_catalog_change,
                     tenant_id=tenant_id,
                     action="created",
                     product_id=product.product_id,
@@ -1453,6 +1541,7 @@ def add_product(tenant_id):
 @products_bp.route("/<product_id>/edit", methods=["GET", "POST"])
 @log_admin_action("edit_product")
 @require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
+@_log_product_flow("edit_product")
 def edit_product(tenant_id, product_id):
     """Edit an existing product."""
     from sqlalchemy import select
@@ -2053,7 +2142,9 @@ def edit_product(tenant_id, product_id):
                 db_session.refresh(product)
                 logger.info(f"[DEBUG] After commit - product.format_ids from DB: {product.format_ids}")
 
-                publish_product_record_update_catalog_change(
+                _publish_product_change_logged(
+                    "edit_product",
+                    publish_product_record_update_catalog_change,
                     tenant_id=tenant_id,
                     product=product,
                     previous_allowed_principal_ids=previous_allowed_principal_ids,
