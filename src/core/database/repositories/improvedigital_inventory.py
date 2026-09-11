@@ -42,6 +42,32 @@ class ImproveDigitalInventoryRepository:
             stmt = stmt.filter(ImproveDigitalInventory.parent_id == parent_id)
         return list(self._session.scalars(stmt).all())
 
+    def list_picker_rows(
+        self,
+        entity_type: str,
+        *,
+        parent_id: str | None = None,
+    ) -> list[tuple[str, str | None, str | None]]:
+        """Return ``(entity_id, name, parent_id)`` tuples for one entity_type.
+
+        Column projection, not ORM instances: the product-form pickers pull
+        the full placement set (tens to hundreds of thousands of rows) and
+        only need these three fields. Loading ``ImproveDigitalInventory``
+        objects here also decodes each row's ``raw_json`` JSONB payload and
+        builds an ORM instance per row — measured at ~2 GB of resident
+        memory per request in dev, which OOM-killed the 4 GB Fargate task
+        whenever two product pages overlapped. Use :meth:`list_by_type`
+        only when the raw payload is actually needed.
+        """
+        stmt = select(
+            ImproveDigitalInventory.entity_id,
+            ImproveDigitalInventory.name,
+            ImproveDigitalInventory.parent_id,
+        ).filter_by(tenant_id=self._tenant_id, entity_type=entity_type)
+        if parent_id is not None:
+            stmt = stmt.filter(ImproveDigitalInventory.parent_id == parent_id)
+        return list(self._session.execute(stmt).tuples().all())
+
     def search(
         self,
         entity_type: str,

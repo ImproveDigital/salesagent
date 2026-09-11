@@ -1358,12 +1358,14 @@ def list_improvedigital_inventory(tenant_id, **kwargs):
 
     with get_db_session() as session:
         repo = ImproveDigitalInventoryRepository(session, tenant_id)
-        rows = repo.list_by_type(entity_type, parent_id=parent_id)
+        # Column projection only — see ImproveDigitalInventoryRepository.list_picker_rows
+        # for why loading full rows (with raw_json) here OOM-killed the dev task.
+        rows = repo.list_picker_rows(entity_type, parent_id=parent_id)
 
     items = [
-        {"entity_id": row.entity_id, "name": row.name, "parent_id": row.parent_id}
-        for row in rows
-        if not q or (row.name and q.lower() in row.name.lower())
+        {"entity_id": entity_id, "name": name, "parent_id": row_parent_id}
+        for entity_id, name, row_parent_id in rows
+        if not q or (name and q.lower() in name.lower())
     ]
     total = len(items)
     if limit is not None and limit >= 0:

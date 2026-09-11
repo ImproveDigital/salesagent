@@ -277,13 +277,16 @@ class ImproveDigitalAdapter(AdServerAdapter):
 
         with get_db_session() as session:
             repo = ImproveDigitalInventoryRepository(session, self.tenant_id or "default")
+            # Column projection, not full rows: the placement set runs to
+            # hundreds of thousands of rows and loading them as ORM objects
+            # (with raw_json) costs gigabytes — see list_picker_rows.
             placements = [
-                {"id": row.entity_id, "name": row.name, "publisher_id": row.parent_id}
-                for row in repo.list_by_type("placement")
+                {"id": entity_id, "name": name, "publisher_id": parent_id}
+                for entity_id, name, parent_id in repo.list_picker_rows("placement")
             ]
-            packages = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("package")]
-            sizes = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("size")]
-            publishers = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("publisher")]
+            packages = [{"id": entity_id, "name": name} for entity_id, name, _ in repo.list_picker_rows("package")]
+            sizes = [{"id": entity_id, "name": name} for entity_id, name, _ in repo.list_picker_rows("size")]
+            publishers = [{"id": entity_id, "name": name} for entity_id, name, _ in repo.list_picker_rows("publisher")]
 
         return {
             "placements": placements,
