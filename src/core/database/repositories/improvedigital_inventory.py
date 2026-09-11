@@ -42,23 +42,10 @@ class ImproveDigitalInventoryRepository:
             stmt = stmt.filter(ImproveDigitalInventory.parent_id == parent_id)
         return list(self._session.scalars(stmt).all())
 
-    def list_picker_rows(
-        self,
-        entity_type: str,
-        *,
-        parent_id: str | None = None,
-    ) -> list[tuple[str, str | None, str | None]]:
-        """Return ``(entity_id, name, parent_id)`` tuples for one entity_type.
-
-        Column projection, not ORM instances: the product-form pickers pull
-        the full placement set (tens to hundreds of thousands of rows) and
-        only need these three fields. Loading ``ImproveDigitalInventory``
-        objects here also decodes each row's ``raw_json`` JSONB payload and
-        builds an ORM instance per row — measured at ~2 GB of resident
-        memory per request in dev, which OOM-killed the 4 GB Fargate task
-        whenever two product pages overlapped. Use :meth:`list_by_type`
-        only when the raw payload is actually needed.
-        """
+    def _picker_filter(self, entity_type: str, *, parent_id: str | None, q: str | None):
+        """Shared WHERE clause for the picker projections: tenant scope,
+        entity_type, optional parent and optional case-insensitive substring
+        match on name or entity_id (same semantics as :meth:`search`)."""
         stmt = select(
             ImproveDigitalInventory.entity_id,
             ImproveDigitalInventory.name,
@@ -66,6 +53,66 @@ class ImproveDigitalInventoryRepository:
         ).filter_by(tenant_id=self._tenant_id, entity_type=entity_type)
         if parent_id is not None:
             stmt = stmt.filter(ImproveDigitalInventory.parent_id == parent_id)
+        if q:
+            pattern = f"%{q}%"
+            stmt = stmt.where(
+                (ImproveDigitalInventory.name.ilike(pattern)) | (ImproveDigitalInventory.entity_id.ilike(pattern))
+            )
+        return stmt
+
+    def list_picker_rows(
+        self,
+        entity_type: str,
+        *,
+        parent_id: str | None = None,
+        q: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[tuple[str, str | None, str | None]]:
+        """Return ``(entity_id, name, parent_id)`` tuples for one entity_type,
+        ordered by name then id so offset pagination is stable.
+
+        Column projection, not ORM instances: the product-form pickers page
+        through the placement set (tens to hundreds of thousands of rows) and
+        only need these three fields. Loading ``ImproveDigitalInventory``
+        objects here also decodes each row's ``raw_json`` JSONB payload and
+        builds an ORM instance per row — measured at ~2 GB of resident
+        memory per request in dev, which OOM-killed the 4 GB Fargate task
+        whenever two product pages overlapped. Use :meth:`list_by_type`
+        only when the raw payload is actually needed. ``limit=None`` returns
+        every matching row (adapter-internal callers); the HTTP endpoint
+        always passes a bounded limit.
+        """
+        stmt = self._picker_filter(entity_type, parent_id=parent_id, q=q).order_by(
+            ImproveDigitalInventory.name.asc(), ImproveDigitalInventory.entity_id.asc()
+        )
+        if offset:
+            stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list(self._session.execute(stmt).tuples().all())
+
+    def count_picker_rows(self, entity_type: str, *, parent_id: str | None = None, q: str | None = None) -> int:
+        """Total rows :meth:`list_picker_rows` would return without a limit —
+        lets the picker show "N of M" and decide whether to offer Load more."""
+        stmt = select(func.count()).select_from(self._picker_filter(entity_type, parent_id=parent_id, q=q).subquery())
+        return int(self._session.scalar(stmt) or 0)
+
+    def list_picker_rows_by_ids(self, entity_type: str, ids: Iterable[str]) -> list[tuple[str, str | None, str | None]]:
+        """Resolve already-attached ids to ``(entity_id, name, parent_id)`` so
+        the picker can label its chips without downloading the whole set."""
+        wanted = [str(i) for i in ids if str(i).strip()]
+        if not wanted:
+            return []
+        stmt = (
+            select(
+                ImproveDigitalInventory.entity_id,
+                ImproveDigitalInventory.name,
+                ImproveDigitalInventory.parent_id,
+            )
+            .filter_by(tenant_id=self._tenant_id, entity_type=entity_type)
+            .where(ImproveDigitalInventory.entity_id.in_(wanted))
+        )
         return list(self._session.execute(stmt).tuples().all())
 
     def search(

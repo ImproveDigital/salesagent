@@ -1334,43 +1334,72 @@ def discover_improvedigital_metadata(tenant_id, **kwargs):
         return jsonify({"success": False, "error": "Metadata discovery failed (see server logs)"}), 500
 
 
+# Picker page sizes for the Improve Digital inventory endpoint (see below).
+_IMPD_PICKER_PAGE_SIZE = 50
+_IMPD_PICKER_MAX_PAGE_SIZE = 200
+
+
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory", methods=["GET"])
 @require_tenant_access()
 def list_improvedigital_inventory(tenant_id, **kwargs):
-    """Return locally-cached Improve Digital inventory entries for the
-    product setup UI.
+    """Return a page of locally-cached Improve Digital inventory entries for
+    the product setup UI.
 
-    Filterable by ``entity_type`` (publisher, placement, package, size).
-    Optional ``parent_id`` narrows placements to one publisher. Optional
-    ``q`` substring-matches the ``name`` field. Optional ``limit`` caps the
-    returned rows AFTER filtering (the browse page passes it; the product
-    pickers omit it and cache the full set client-side).
+    Query params:
+
+    * ``entity_type`` (required) — publisher, placement, package, size.
+    * ``ids`` — comma-separated entity ids; returns just those rows (chip
+      label lookup for already-attached ids). Ignores paging params.
+    * ``q`` — case-insensitive substring match on name or id, in SQL.
+    * ``parent_id`` — narrows placements to one publisher.
+    * ``offset`` / ``limit`` — page window; ``limit`` defaults to 50 and is
+      capped at 200. ``count`` in the response is the TOTAL matching rows,
+      ``has_more`` says whether another page exists.
+
+    Everything is filtered and paged in SQL through a three-column
+    projection — the full placement set is hundreds of thousands of rows,
+    and materialising it as ORM objects OOM-killed the dev task.
     """
     from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
 
     entity_type = request.args.get("entity_type")
     parent_id = request.args.get("parent_id")
-    q = request.args.get("q")
-    limit = request.args.get("limit", type=int)
+    q = (request.args.get("q") or "").strip() or None
+    ids_param = request.args.get("ids")
+    offset = max(request.args.get("offset", default=0, type=int) or 0, 0)
+    limit = request.args.get("limit", default=_IMPD_PICKER_PAGE_SIZE, type=int) or _IMPD_PICKER_PAGE_SIZE
+    limit = max(1, min(limit, _IMPD_PICKER_MAX_PAGE_SIZE))
 
     if not entity_type:
         return jsonify({"success": False, "error": "entity_type query param is required"}), 400
 
+    def _item(row: tuple[str, str | None, str | None]) -> dict[str, str | None]:
+        entity_id, name, row_parent_id = row
+        return {"entity_id": entity_id, "name": name, "parent_id": row_parent_id}
+
     with get_db_session() as session:
         repo = ImproveDigitalInventoryRepository(session, tenant_id)
-        # Column projection only — see ImproveDigitalInventoryRepository.list_picker_rows
-        # for why loading full rows (with raw_json) here OOM-killed the dev task.
-        rows = repo.list_picker_rows(entity_type, parent_id=parent_id)
+        if ids_param is not None:
+            ids = [part.strip() for part in ids_param.split(",") if part.strip()]
+            items = [_item(row) for row in repo.list_picker_rows_by_ids(entity_type, ids)]
+            return jsonify(
+                {"success": True, "entity_type": entity_type, "count": len(items), "items": items, "has_more": False}
+            )
+        total = repo.count_picker_rows(entity_type, parent_id=parent_id, q=q)
+        rows = repo.list_picker_rows(entity_type, parent_id=parent_id, q=q, offset=offset, limit=limit)
 
-    items = [
-        {"entity_id": entity_id, "name": name, "parent_id": row_parent_id}
-        for entity_id, name, row_parent_id in rows
-        if not q or (name and q.lower() in name.lower())
-    ]
-    total = len(items)
-    if limit is not None and limit >= 0:
-        items = items[:limit]
-    return jsonify({"success": True, "entity_type": entity_type, "count": total, "items": items})
+    items = [_item(row) for row in rows]
+    return jsonify(
+        {
+            "success": True,
+            "entity_type": entity_type,
+            "count": total,
+            "items": items,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(items) < total,
+        }
+    )
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory-stats", methods=["GET"])
