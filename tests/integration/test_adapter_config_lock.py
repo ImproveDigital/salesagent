@@ -108,6 +108,48 @@ class TestLockStateAndStamping:
 
         assert is_adapter_config_locked(factory_session, tenant.tenant_id) is False
 
+    def test_gam_inventory_write_stamps_lock_before_completion(self, factory_session):
+        """The lock commits with the first inventory rows themselves — a sync
+        that persists inventory and then dies before completion still locks."""
+        from types import SimpleNamespace
+
+        from src.services.gam_inventory_service import GAMInventoryService
+
+        tenant, _ = _gam_tenant("lock_write_gam", locked=False)
+        item = SimpleNamespace(
+            id="au_1",
+            name="Ad Unit 1",
+            path=["Ad Unit 1"],
+            status=SimpleNamespace(value="ACTIVE"),
+            ad_unit_code="code_au_1",
+            parent_id=None,
+            description=None,
+            target_window=None,
+            explicitly_targeted=False,
+            has_children=False,
+            sizes=[],
+            effective_applied_labels=[],
+        )
+
+        GAMInventoryService(factory_session)._write_inventory_batch(
+            tenant.tenant_id, "ad_unit", [item], datetime.now(UTC)
+        )
+
+        # No sync job was ever completed — the inventory write alone locks.
+        assert is_adapter_config_locked(factory_session, tenant.tenant_id) is True
+
+    def test_improvedigital_inventory_write_stamps_lock_before_completion(self, factory_session):
+        """Improve Digital commits inventory per page — the first page locks."""
+        from src.adapters.improvedigital.inventory_sync import ImproveDigitalInventorySync
+
+        tenant = TenantFactory(tenant_id="lock_write_impd", ad_server="improvedigital")
+        AdapterConfigFactory(tenant=tenant, adapter_type="improvedigital")
+
+        sync = ImproveDigitalInventorySync(client=None, session=factory_session, tenant_id=tenant.tenant_id)
+        sync._persist_page([{"entity_type": "placement", "entity_id": "pl_1", "raw_json": {"id": "pl_1"}}])
+
+        assert is_adapter_config_locked(factory_session, tenant.tenant_id) is True
+
 
 class TestModelGuard:
     """The before_update listeners block config changes on locked tenants."""
