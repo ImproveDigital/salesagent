@@ -260,26 +260,66 @@
     });
 
     // ---- sync ----
+    // sync-inventory enqueues a background sweep and answers 202 with a
+    // sync_id (no counts yet) — poll sync-status/<sync_id> until it reaches a
+    // terminal state, then show the per-family counts and reload the panes.
+    const SYNC_POLL_MS = 3000;
+
+    function describeSyncJob(data) {
+        const counts = data.counts || {};
+        const total = Object.values(counts).reduce((sum, v) => sum + Number(v || 0), 0);
+        const summary = Object.entries(counts).map(([k, v]) => k + '=' + Number(v).toLocaleString()).join(', ');
+        const errors = Object.entries(data.errors || {}).map(([k, v]) => k + ': ' + v).join('; ');
+        if (data.status === 'failed') {
+            return '✗ ' + (data.error_message || errors || 'sync failed');
+        }
+        return '✓ Synced ' + total.toLocaleString() + ' items' + (summary ? ' (' + summary + ')' : '')
+            + (errors ? ' — partial failures: ' + errors : '');
+    }
+
+    function pollSync(syncId, status, done) {
+        fetch(apiBase + '/sync-status/' + encodeURIComponent(syncId), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'completed' || data.status === 'failed') {
+                    status.textContent = describeSyncJob(data);
+                    publishers = [];
+                    loadAll();
+                    done();
+                    return;
+                }
+                if (data.success === false) {
+                    status.textContent = '✗ ' + (data.error || 'could not read sync status');
+                    done();
+                    return;
+                }
+                status.textContent = 'Syncing in the background (' + (data.status || 'running') + ')… rows appear as pages land.';
+                setTimeout(() => pollSync(syncId, status, done), SYNC_POLL_MS);
+            })
+            .catch(err => { status.textContent = '✗ ' + err.message; done(); });
+    }
+
     window.impdSyncNow = function() {
         const btn = document.getElementById('impd-sync-btn');
         const status = document.getElementById('impd-sync-status');
         btn.disabled = true;
         status.textContent = 'Syncing… (can take a minute — rate-limited at 100 requests/min)';
+        const done = () => { btn.disabled = false; };
         fetch(apiBase + '/sync-inventory', {method: 'POST', headers: {'Content-Type': 'application/json'}, credentials: 'same-origin'})
             .then(r => r.json().then(data => ({status: r.status, data})))
-            .then(({status, data}) => {
-                if (data.success) {
-                    status.textContent = '✓ Synced ' + (data.total_synced || 0).toLocaleString() + ' items';
-                    publishers = [];
-                    loadAll();
-                } else if (status === 409) {
+            .then(({status: httpStatus, data}) => {
+                if (data.success && data.sync_id) {
+                    pollSync(data.sync_id, status, done);
+                    return;
+                }
+                if (httpStatus === 409) {
                     status.textContent = data.error || 'A sync is already running';
                 } else {
                     status.textContent = '✗ ' + (data.error || JSON.stringify(data.errors || 'sync failed'));
                 }
+                done();
             })
-            .catch(err => { status.textContent = '✗ ' + err.message; })
-            .finally(() => { btn.disabled = false; });
+            .catch(err => { status.textContent = '✗ ' + err.message; done(); });
     };
 
     // ---- boot ----

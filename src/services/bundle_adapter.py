@@ -12,7 +12,7 @@ items, name resolution, seed suggestions, etc. The protocol returns
 adapter-agnostic ``BundleInventoryRow`` records so templates don't need
 to know which adapter owns a row.
 
-GAM is fully implemented. FW + SS are honest stubs — they return empty
+GAM and Improve Digital are implemented. FW + SS are honest stubs — they return empty
 results today (their inventory sync surfaces don't carry the same data
 shape yet) but ship with their canonical labels + vocab so a tenant on
 either of them sees the right copy in the page header.
@@ -67,6 +67,9 @@ class BundleInventoryAdapter(Protocol):
     label: str  # "Google Ad Manager"
     vocab: dict[str, str]  # {"primary": "ad units", "secondary": "placements"}
     matches_tenant_ad_server: set[str]  # values of ``tenant.ad_server`` to claim
+    # True when the bundle editor should page inventory from the server
+    # (via :meth:`search_inventory`) instead of embedding a bounded list.
+    picker_paged: bool
 
     def has_synced_inventory(self, session: Session, tenant_id: str) -> bool: ...
 
@@ -95,6 +98,20 @@ class BundleInventoryAdapter(Protocol):
     ) -> BundleInventoryRow | None: ...
 
     def coverage_for_bundle(self, session: Session, tenant_id: str, inventory_config: dict) -> int: ...
+
+    def search_inventory(
+        self,
+        session: Session,
+        tenant_id: str,
+        entity_type: str,
+        *,
+        q: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[BundleInventoryRow], int | None]:
+        """One page of rows matching ``q`` plus the total match count
+        (``None`` when the adapter cannot count cheaply)."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +181,7 @@ class _GAMAdapter:
     label = "Google Ad Manager"
     vocab = {"primary": "ad units", "secondary": "placements"}
     matches_tenant_ad_server = {"google_ad_manager", "gam"}
+    picker_paged = False
 
     def _row_from_gam_inventory(self, row) -> BundleInventoryRow:
         return BundleInventoryRow(
@@ -249,6 +267,166 @@ class _GAMAdapter:
         synced_ad_unit_ids = {row.inventory_id for row in repo.list_inventory("ad_unit")}
         return len(covered.intersection(synced_ad_unit_ids))
 
+    def search_inventory(
+        self,
+        session: Session,
+        tenant_id: str,
+        entity_type: str,
+        *,
+        q: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[BundleInventoryRow], int | None]:
+        from src.core.database.repositories.gam_sync import GAMSyncRepository
+
+        repo = GAMSyncRepository(session, tenant_id)
+        rows = repo.search_inventory(entity_type, q=q, offset=offset, limit=limit)
+        total = repo.count_inventory(entity_type) if not q else None
+        return [self._row_from_gam_inventory(r) for r in rows], total
+
+
+# ---------------------------------------------------------------------------
+# Improve Digital adapter
+# ---------------------------------------------------------------------------
+
+
+class _ImproveDigitalAdapter:
+    """Improve Digital (360Yield) bundle-inventory adapter.
+
+    Reads the ``improvedigital_inventory`` cache filled by
+    ``ImproveDigitalInventorySync``. The bundle model has two slots — a
+    leaf entity (``ad_unit``) and a wrapper (``placement``) — which map onto
+    360Yield's placements and placement packages respectively:
+
+    * bundle ``ad_unit``   → cache ``placement`` (the bookable leaf)
+    * bundle ``placement`` → cache ``package``   (reusable placement grouping)
+
+    Package membership is not cached (it is a live per-package lookup), so
+    packages never expand into child placements here and coverage counts
+    only directly-picked placements.
+
+    ``picker_paged`` is on: the placement set runs to hundreds of thousands
+    of rows, so the editor searches/pages through :meth:`search_inventory`
+    instead of embedding a bounded list.
+    """
+
+    adapter_id = "improvedigital"
+    label = "Improve Digital"
+    vocab = {"primary": "placements", "secondary": "packages"}
+    matches_tenant_ad_server = {"improvedigital", "improve_digital"}
+    picker_paged = True
+
+    _CACHE_ENTITY = {"ad_unit": "placement", "placement": "package"}
+
+    def _repo(self, session: Session, tenant_id: str):
+        from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+        return ImproveDigitalInventoryRepository(session, tenant_id)
+
+    def _cache_type(self, entity_type: str) -> str:
+        try:
+            return self._CACHE_ENTITY[entity_type]
+        except KeyError as exc:
+            raise ValueError(f"Unknown bundle entity_type {entity_type!r}") from exc
+
+    def _rows(
+        self, repo, entity_type: str, tuples: list[tuple[str, str | None, str | None]]
+    ) -> list[BundleInventoryRow]:
+        """Normalize ``(entity_id, name, parent_id)`` tuples. Placements carry
+        their publisher as ``parent_id``; one extra lookup labels them."""
+        parent_ids = sorted({parent for _, _, parent in tuples if parent})
+        publishers: dict[str, str | None] = {}
+        if parent_ids:
+            publishers = {pid: name for pid, name, _ in repo.list_picker_rows_by_ids("publisher", parent_ids)}
+        rows: list[BundleInventoryRow] = []
+        for entity_id, name, parent_id in tuples:
+            publisher = publishers.get(parent_id) if parent_id else None
+            rows.append(
+                BundleInventoryRow(
+                    external_id=str(entity_id),
+                    name=name or str(entity_id),
+                    entity_type=entity_type,
+                    meta=publisher or "—",
+                    raw={"metadata": {"parent_id": parent_id}, "publisher": publisher},
+                )
+            )
+        return rows
+
+    def has_synced_inventory(self, session: Session, tenant_id: str) -> bool:
+        return (
+            self.count_inventory(session, tenant_id, "ad_unit") + self.count_inventory(session, tenant_id, "placement")
+        ) > 0
+
+    def count_inventory(self, session: Session, tenant_id: str, entity_type: str) -> int:
+        return self._repo(session, tenant_id).count_picker_rows(self._cache_type(entity_type))
+
+    def list_inventory_by_ids(
+        self, session: Session, tenant_id: str, entity_type: str, ids: list[str]
+    ) -> list[BundleInventoryRow]:
+        if not ids:
+            return []
+        repo = self._repo(session, tenant_id)
+        return self._rows(repo, entity_type, repo.list_picker_rows_by_ids(self._cache_type(entity_type), ids))
+
+    def list_inventory(
+        self, session: Session, tenant_id: str, entity_type: str, limit: int | None = None
+    ) -> list[BundleInventoryRow]:
+        repo = self._repo(session, tenant_id)
+        return self._rows(repo, entity_type, repo.list_picker_rows(self._cache_type(entity_type), limit=limit))
+
+    def list_unbundled(
+        self,
+        session: Session,
+        tenant_id: str,
+        bundled_ids_by_type: dict[str, set[str]],
+        limit: int,
+    ) -> list[BundleInventoryRow]:
+        # Packages first (they group placements), then placements fill the rest.
+        repo = self._repo(session, tenant_id)
+        out: list[BundleInventoryRow] = []
+        for entity_type in ("placement", "ad_unit"):
+            remaining = limit - len(out)
+            if remaining <= 0:
+                break
+            tuples = repo.list_picker_rows(
+                self._cache_type(entity_type),
+                limit=remaining,
+                exclude_ids=bundled_ids_by_type.get(entity_type) or (),
+            )
+            out.extend(self._rows(repo, entity_type, tuples))
+        return out
+
+    def list_top_level_placements(self, session: Session, tenant_id: str, limit: int) -> list[BundleInventoryRow]:
+        return self.list_inventory(session, tenant_id, "placement", limit=limit)
+
+    def find_inventory_item(
+        self, session: Session, tenant_id: str, entity_type: str, external_id: str
+    ) -> BundleInventoryRow | None:
+        rows = self.list_inventory_by_ids(session, tenant_id, entity_type, [external_id])
+        return rows[0] if rows else None
+
+    def coverage_for_bundle(self, session: Session, tenant_id: str, inventory_config: dict) -> int:
+        placement_ids = [str(i) for i in (inventory_config.get("ad_units") or []) if i]
+        if not placement_ids:
+            return 0
+        return len(self._repo(session, tenant_id).list_picker_rows_by_ids("placement", placement_ids))
+
+    def search_inventory(
+        self,
+        session: Session,
+        tenant_id: str,
+        entity_type: str,
+        *,
+        q: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[BundleInventoryRow], int | None]:
+        repo = self._repo(session, tenant_id)
+        cache_type = self._cache_type(entity_type)
+        total = repo.count_picker_rows(cache_type, q=q)
+        tuples = repo.list_picker_rows(cache_type, q=q, offset=offset, limit=limit)
+        return self._rows(repo, entity_type, tuples), total
+
 
 # ---------------------------------------------------------------------------
 # FreeWheel + SpringServe stubs
@@ -271,6 +449,7 @@ class _NullInventoryAdapter:
         self.label = label
         self.vocab = vocab
         self.matches_tenant_ad_server = ad_server_aliases
+        self.picker_paged = False
 
     def has_synced_inventory(self, session: Session, tenant_id: str) -> bool:
         return False
@@ -308,12 +487,25 @@ class _NullInventoryAdapter:
     def coverage_for_bundle(self, session: Session, tenant_id: str, inventory_config: dict) -> int:
         return 0
 
+    def search_inventory(
+        self,
+        session: Session,
+        tenant_id: str,
+        entity_type: str,
+        *,
+        q: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[BundleInventoryRow], int | None]:
+        return [], 0
+
 
 # ---------------------------------------------------------------------------
 # Module-level registration
 # ---------------------------------------------------------------------------
 
 register_adapter(_GAMAdapter())
+register_adapter(_ImproveDigitalAdapter())
 register_adapter(
     _NullInventoryAdapter(
         adapter_id="freewheel",
