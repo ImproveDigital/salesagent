@@ -42,10 +42,18 @@ class ImproveDigitalInventoryRepository:
             stmt = stmt.filter(ImproveDigitalInventory.parent_id == parent_id)
         return list(self._session.scalars(stmt).all())
 
-    def _picker_filter(self, entity_type: str, *, parent_id: str | None, q: str | None):
+    def _picker_filter(
+        self,
+        entity_type: str,
+        *,
+        parent_id: str | None,
+        q: str | None,
+        exclude_ids: Iterable[str] | None = None,
+    ):
         """Shared WHERE clause for the picker projections: tenant scope,
-        entity_type, optional parent and optional case-insensitive substring
-        match on name or entity_id (same semantics as :meth:`search`)."""
+        entity_type, optional parent, optional case-insensitive substring
+        match on name or entity_id (same semantics as :meth:`search`) and an
+        optional id exclusion set (the bundle page's "not yet bundled" rail)."""
         stmt = select(
             ImproveDigitalInventory.entity_id,
             ImproveDigitalInventory.name,
@@ -58,6 +66,9 @@ class ImproveDigitalInventoryRepository:
             stmt = stmt.where(
                 (ImproveDigitalInventory.name.ilike(pattern)) | (ImproveDigitalInventory.entity_id.ilike(pattern))
             )
+        excluded = [str(i) for i in (exclude_ids or ()) if str(i).strip()]
+        if excluded:
+            stmt = stmt.where(ImproveDigitalInventory.entity_id.not_in(excluded))
         return stmt
 
     def list_picker_rows(
@@ -68,6 +79,7 @@ class ImproveDigitalInventoryRepository:
         q: str | None = None,
         offset: int = 0,
         limit: int | None = None,
+        exclude_ids: Iterable[str] | None = None,
     ) -> list[tuple[str, str | None, str | None]]:
         """Return ``(entity_id, name, parent_id)`` tuples for one entity_type,
         ordered by name then id so offset pagination is stable.
@@ -83,7 +95,7 @@ class ImproveDigitalInventoryRepository:
         every matching row (adapter-internal callers); the HTTP endpoint
         always passes a bounded limit.
         """
-        stmt = self._picker_filter(entity_type, parent_id=parent_id, q=q).order_by(
+        stmt = self._picker_filter(entity_type, parent_id=parent_id, q=q, exclude_ids=exclude_ids).order_by(
             ImproveDigitalInventory.name.asc(), ImproveDigitalInventory.entity_id.asc()
         )
         if offset:
