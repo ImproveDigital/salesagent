@@ -319,6 +319,38 @@ class TestCreateMediaBuyLive:
         # The partially created campaign must not be left orphaned upstream.
         assert ("delete_campaign", 101) in adapter._client.campaigns.calls
 
+    def test_bundle_backed_package_translates_generic_inventory_keys(self):
+        """Inventory bundles overlay picked inventory as ``targeted_ad_unit_ids``
+        (360Yield placements) / ``targeted_placement_ids`` (360Yield packages);
+        the adapter must book those, not fail as if nothing was selected."""
+        adapter = make_live_adapter()
+        package = make_sample_video_package()
+        package.implementation_config = {
+            "source": "inventory_profile",
+            "status": "active",
+            "targeted_ad_unit_ids": ["11", "12"],
+            "targeted_placement_ids": ["77"],
+        }
+        response = invoke_create_media_buy(adapter, make_sample_create_request(), [package])
+
+        assert not getattr(response, "errors", None)
+        calls = adapter._client.campaigns.calls
+        placements_call = next(c for c in calls if c[0] == "set_line_item_placements")
+        assert placements_call[3] == {
+            "line_item_placements": [{"id": 11, "assigned": True}, {"id": 12, "assigned": True}]
+        }
+        packages_call = next(c for c in calls if c[0] == "set_packages")
+        assert packages_call[3] == {"line_item_packages": [{"id": 77, "assigned": True}]}
+
+    def test_explicit_adapter_inventory_keys_win_over_generic_ones(self):
+        adapter = make_live_adapter()
+        package = make_sample_video_package()
+        package.implementation_config = {
+            "improvedigital": {"placement_ids": [5]},
+            "targeted_ad_unit_ids": ["11"],
+        }
+        assert adapter._product_config_from_package(package)["placement_ids"] == [5]
+
 
 class TestCreativesLive:
     def test_upload_echoes_platform_creative_id(self):
