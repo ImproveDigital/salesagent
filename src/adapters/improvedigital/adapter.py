@@ -277,13 +277,16 @@ class ImproveDigitalAdapter(AdServerAdapter):
 
         with get_db_session() as session:
             repo = ImproveDigitalInventoryRepository(session, self.tenant_id or "default")
+            # Column projection, not full rows: the placement set runs to
+            # hundreds of thousands of rows and loading them as ORM objects
+            # (with raw_json) costs gigabytes — see list_picker_rows.
             placements = [
-                {"id": row.entity_id, "name": row.name, "publisher_id": row.parent_id}
-                for row in repo.list_by_type("placement")
+                {"id": entity_id, "name": name, "publisher_id": parent_id}
+                for entity_id, name, parent_id in repo.list_picker_rows("placement")
             ]
-            packages = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("package")]
-            sizes = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("size")]
-            publishers = [{"id": row.entity_id, "name": row.name} for row in repo.list_by_type("publisher")]
+            packages = [{"id": entity_id, "name": name} for entity_id, name, _ in repo.list_picker_rows("package")]
+            sizes = [{"id": entity_id, "name": name} for entity_id, name, _ in repo.list_picker_rows("size")]
+            publishers = [{"id": entity_id, "name": name} for entity_id, name, _ in repo.list_picker_rows("publisher")]
 
         return {
             "placements": placements,
@@ -833,8 +836,29 @@ class ImproveDigitalAdapter(AdServerAdapter):
         }
 
     def _product_config_from_package(self, package: MediaPackage) -> dict[str, Any]:
+        """Return the Improve Digital product config carried by a package.
+
+        Legacy products store ``placement_ids``/``package_ids`` directly
+        (optionally nested under ``"improvedigital"``). Inventory bundles
+        instead overlay their picked inventory in the generic bundle
+        vocabulary — ``targeted_ad_unit_ids`` (bundle ``ad_units`` = 360Yield
+        placements) and ``targeted_placement_ids`` (bundle ``placements`` =
+        360Yield packages) — so translate those when the adapter keys are
+        absent, otherwise a bundle-backed line item would target nothing.
+        """
         impl = getattr(package, "implementation_config", None) or {}
-        return impl.get("improvedigital", impl) if isinstance(impl, dict) else {}
+        if not isinstance(impl, dict):
+            return {}
+        config = dict(impl.get("improvedigital", impl))
+        if not config.get("placement_ids") and impl.get("targeted_ad_unit_ids"):
+            config["placement_ids"] = self._numeric_ids(impl["targeted_ad_unit_ids"])
+        if not config.get("package_ids") and impl.get("targeted_placement_ids"):
+            config["package_ids"] = self._numeric_ids(impl["targeted_placement_ids"])
+        return config
+
+    @staticmethod
+    def _numeric_ids(values: Any) -> list[int]:
+        return [int(v) for v in values if str(v).strip().isdigit()] if isinstance(values, list | tuple) else []
 
     def _with_product_geo_defaults(self, package: MediaPackage, product_config: dict[str, Any]) -> dict[str, Any]:
         """Fold the product's generic "Target Countries" selection

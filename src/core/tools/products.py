@@ -418,25 +418,19 @@ async def _get_products_impl(
             from src.core.inventory_profile_projection import (
                 default_wholesale_currency,
                 inventory_profiles_to_resolved_products,
+                preferred_wholesale_currency,
             )
 
             assert uow.currency_limits is not None
             assert uow.inventory_profiles is not None
             assert uow.adapter_configs is not None
             adapter_config = uow.adapter_configs.find_by_tenant()
-            preferred_currency = (
-                adapter_config.gam_network_currency
-                if adapter_config is not None
-                and adapter_config.adapter_type == "google_ad_manager"
-                and adapter_config.gam_network_currency
-                else None
-            )
             products = inventory_profiles_to_resolved_products(
                 uow.inventory_profiles.list_all(),
                 adapter_type=tenant_adapter_type,
                 default_currency=default_wholesale_currency(
                     uow.currency_limits.list_all(),
-                    preferred=preferred_currency,
+                    preferred=preferred_wholesale_currency(adapter_config),
                 ),
             )
         else:

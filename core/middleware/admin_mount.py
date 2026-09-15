@@ -39,9 +39,13 @@ working unchanged.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from src.core.domain_config import get_sales_agent_domain, is_admin_domain
+
+logger = logging.getLogger(__name__)
 
 # Path prefixes the Flask admin claims. Anything under one of these
 # segments dispatches to Flask; everything else falls through to A2A
@@ -118,7 +122,7 @@ class AdminWSGIMount:
             if self._is_admin_host(scope):
                 new_scope = dict(scope)
                 new_scope["root_path"] = scope.get("root_path", "") + "/admin"
-                await self.wsgi_app(new_scope, receive, send)
+                await self._dispatch_wsgi(new_scope, receive, send)
                 return
 
             path = scope.get("path", "")
@@ -182,11 +186,46 @@ class AdminWSGIMount:
                         # str length for ASCII prefixes.
                         new_scope["raw_path"] = raw[len(prefix) :] or b"/"
                         new_scope["root_path"] = scope.get("root_path", "") + prefix
-                        await self.wsgi_app(new_scope, receive, send)
+                        await self._dispatch_wsgi(new_scope, receive, send)
                         return
-                    await self.wsgi_app(scope, receive, send)
+                    await self._dispatch_wsgi(scope, receive, send)
                     return
         await self.app(scope, receive, send)
+
+    async def _dispatch_wsgi(self, scope: dict, receive: Any, send: Any) -> None:
+        """Hand an HTTP request to the Flask WSGI app with boundary logging.
+
+        Logs one START line before the request enters the WSGI bridge and one
+        DONE/FAILED line when it comes back. A START with no matching DONE means
+        the request died inside the bridge or the worker thread — the case a
+        reverse proxy reports as 502 while Flask itself never logs anything.
+        Only unsafe methods are logged at INFO to keep GET noise down.
+        """
+        method = scope.get("method", "?")
+        path = scope.get("path", "")
+        noisy = method in ("GET", "HEAD", "OPTIONS")
+        level = logging.DEBUG if noisy else logging.INFO
+        content_length = None
+        for raw_name, raw_value in scope.get("headers", ()):
+            if raw_name.lower() == b"content-length":
+                content_length = raw_value.decode("latin-1")
+        logger.log(
+            level,
+            "[admin_mount] START %s %s host=%s content_length=%s",
+            method,
+            path,
+            self._resolve_host(scope),
+            content_length,
+        )
+        started = time.monotonic()
+        try:
+            await self.wsgi_app(scope, receive, send)
+        except BaseException:
+            logger.exception(
+                "[admin_mount] FAILED %s %s after %.0f ms", method, path, (time.monotonic() - started) * 1000
+            )
+            raise
+        logger.log(level, "[admin_mount] DONE %s %s in %.0f ms", method, path, (time.monotonic() - started) * 1000)
 
     @staticmethod
     def _resolve_host(scope: dict) -> str | None:

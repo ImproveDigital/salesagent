@@ -83,6 +83,26 @@ def default_wholesale_currency(
     return currency_codes[0] if currency_codes else fallback_code
 
 
+def preferred_wholesale_currency(adapter_config: Any) -> str | None:
+    """Return the ad server's configured currency for bundle-backed pricing.
+
+    GAM reports its network currency on connection test; every other adapter
+    (Improve Digital, etc.) stores an operator-chosen default currency in
+    ``config_json["currency"]``. Returns ``None`` when neither is set so the
+    caller falls back to the tenant's currency limits.
+    """
+    if adapter_config is None:
+        return None
+    if adapter_config.adapter_type == "google_ad_manager":
+        network_currency = adapter_config.gam_network_currency
+        return str(network_currency).upper() if network_currency else None
+    config_json = adapter_config.config_json if isinstance(adapter_config.config_json, dict) else {}
+    configured = config_json.get("currency")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip().upper()
+    return None
+
+
 def inventory_profile_to_product_model(profile: InventoryProfile, *, default_currency: str) -> Product:
     """Build a transient Product model for a wholesale inventory bundle.
 
@@ -152,16 +172,9 @@ def project_visible_inventory_profile_product(
     if not isinstance(profile, InventoryProfile) or not is_buyer_visible_inventory_profile(profile):
         return None
     adapter_config = AdapterConfigRepository(session, tenant_id).find_by_tenant()
-    preferred_currency = (
-        adapter_config.gam_network_currency
-        if adapter_config is not None
-        and adapter_config.adapter_type == "google_ad_manager"
-        and adapter_config.gam_network_currency
-        else None
-    )
     currency = default_currency or default_wholesale_currency(
         CurrencyLimitRepository(session, tenant_id).list_all(),
-        preferred=preferred_currency,
+        preferred=preferred_wholesale_currency(adapter_config),
     )
     return inventory_profile_to_product_model(profile, default_currency=currency)
 

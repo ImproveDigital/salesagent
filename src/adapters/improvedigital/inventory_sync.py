@@ -115,6 +115,7 @@ class ImproveDigitalInventorySync:
     def __init__(self, client: ImproveDigitalClient, session: Session, tenant_id: str):
         self._client = client
         self._session = session
+        self._tenant_id = tenant_id
         self._repo = ImproveDigitalInventoryRepository(session, tenant_id)
 
     def _persist_page(self, rows: list[dict[str, Any]]) -> None:
@@ -124,6 +125,12 @@ class ImproveDigitalInventorySync:
         if not rows:
             return
         self._repo.bulk_upsert(rows)
+        # The first inventory rows freeze the tenant's ad server configuration
+        # (adapter_config_lock.py) — stamp in the same per-page transaction as
+        # the rows, not only at sync completion. Idempotent after the first page.
+        from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+        AdapterConfigRepository(self._session, self._tenant_id).mark_config_locked()
         self._session.commit()
 
     def run(self) -> SyncResult:

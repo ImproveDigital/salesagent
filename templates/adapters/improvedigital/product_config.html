@@ -62,6 +62,10 @@ Expected context:
 .impd-result__add { color: #0369a1; font-size: 0.78rem; white-space: nowrap; }
 .impd-note { padding: 0.5rem 0.6rem; font-size: 0.8rem; color: #6b7280; }
 .impd-note--warn { color: #b45309; }
+.impd-load-more { display: block; width: 100%; padding: 0.45rem 0.6rem; background: #f9fafb; border: 0;
+                  border-top: 1px solid #e5e7eb; color: #0369a1; font-size: 0.8rem; cursor: pointer; text-align: center; }
+.impd-load-more:hover { background: #f0f9ff; }
+.impd-load-more[disabled] { color: #9ca3af; cursor: default; }
 .impd-badge { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
               background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0;
               border-radius: 4px; padding: 0.1rem 0.35rem; vertical-align: middle; }
@@ -239,24 +243,18 @@ Expected context:
     const apiBase = scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/inventory';
     const settingsUrl = scriptRoot + '/tenant/' + tenantId + '/settings#adserver';
 
-    // The placement cache runs to tens of thousands of rows and two pickers
-    // share it — fetch each entity type once and hand the same array to both.
-    const inventoryCache = {};
-    function loadInventory(entityType) {
-        if (!inventoryCache[entityType]) {
-            inventoryCache[entityType] = fetch(apiBase + '?entity_type=' + encodeURIComponent(entityType),
-                                               {credentials: 'same-origin'})
-                .then(response => response.json())
-                .then(data => (data.success && data.items ? data.items : []).slice().sort(
-                    (a, b) => String(a.name || a.entity_id).localeCompare(String(b.name || b.entity_id))))
-                .catch(() => []);
-        }
-        return inventoryCache[entityType];
-    }
+    // Inventory is paged from the server: the placement set runs to hundreds of
+    // thousands of rows, so the picker never downloads it whole. Each picker
+    // fetches one page for the current search and appends the next page on
+    // "Load more". Already-attached ids are labelled through an ids= lookup.
+    const PAGE_SIZE = 50;
+    const DEBOUNCE_MS = 250;
 
-    // Results are capped so a 25k-row cache can't stall the page; the count
-    // line tells the operator when a search still hides matches.
-    const RESULT_LIMIT = 200;
+    function fetchInventory(entityType, params) {
+        const query = new URLSearchParams(Object.assign({entity_type: entityType}, params));
+        return fetch(apiBase + '?' + query.toString(), {credentials: 'same-origin'})
+            .then(response => response.json());
+    }
 
     function initPicker(root) {
         const field = root.dataset.field;
@@ -304,16 +302,24 @@ Expected context:
         searchRow.insertAdjacentElement('afterend', results);
         results.insertAdjacentElement('afterend', hidden);
 
-        let items = [];
+        const entityType = root.dataset.entityType;
+        const labels = {};          // entity_id -> display name (from any page or the ids lookup)
+        let page = freshPage('');   // the result list for the current search
+        let requestSeq = 0;         // drops responses from superseded searches
         let activeIndex = -1;
+        let debounceTimer = null;
 
-        function byId(id) {
-            return items.find(item => String(item.entity_id) === String(id));
+        function freshPage(query) {
+            return {query: query, items: [], total: 0, offset: 0, hasMore: false,
+                    loading: false, loaded: false, error: false};
+        }
+
+        function rememberLabels(list) {
+            list.forEach(item => { labels[String(item.entity_id)] = item.name || item.entity_id; });
         }
 
         function labelFor(id) {
-            const item = byId(id);
-            return item ? (item.name || item.entity_id) : id;
+            return labels[String(id)] || String(id);
         }
 
         function syncHiddenInputs() {
@@ -353,7 +359,7 @@ Expected context:
                     remove.addEventListener('click', () => detach(id));
                     chip.appendChild(label);
                     chip.appendChild(idTag);
-                    if (root.dataset.entityType === 'package') {
+                    if (entityType === 'package') {
                         const peekBtn = document.createElement('button');
                         peekBtn.type = 'button';
                         peekBtn.className = 'impd-chip__peek';
@@ -373,30 +379,41 @@ Expected context:
             clearAll.style.display = selected.length ? '' : 'none';
         }
 
-        function currentMatches() {
-            const needle = search.value.trim().toLowerCase();
-            return items.filter(item => {
-                if (selected.includes(String(item.entity_id))) return false;
-                if (!needle) return true;
-                return String(item.name || item.entity_id).toLowerCase().includes(needle)
-                    || String(item.entity_id).includes(needle);
-            });
+        // Rows already attached are hidden from the list; the server total
+        // still counts them, so "Showing X of N" is by matching rows.
+        function visibleItems() {
+            return page.items.filter(item => !selected.includes(String(item.entity_id)));
+        }
+
+        function note(text, warn) {
+            const div = document.createElement('div');
+            div.className = 'impd-note' + (warn ? ' impd-note--warn' : '');
+            div.textContent = text;
+            return div;
         }
 
         function renderResults() {
-            const matches = currentMatches();
-            const shown = matches.slice(0, RESULT_LIMIT);
+            const shown = visibleItems();
             activeIndex = -1;
             results.innerHTML = '';
 
-            if (!items.length) {
+            if (page.error) {
+                results.appendChild(note('Lookup failed — is the API reachable?', true));
+                return;
+            }
+            if (!page.loaded && !page.items.length) {
+                results.appendChild(note(page.loading ? 'Searching…' : ''));
+                return;
+            }
+            if (page.total === 0 && !page.query) {
                 results.innerHTML = '<div class="impd-note impd-note--warn">No ' + noun +
                     's in the inventory cache — run <a href="' + settingsUrl + '">Sync Inventory Now</a>.</div>';
                 return;
             }
-            if (!shown.length) {
-                results.innerHTML = '<div class="impd-note">No ' + noun + 's match “' +
-                    search.value.replace(/</g, '&lt;') + '”.</div>';
+            if (!shown.length && !page.hasMore) {
+                results.appendChild(note(page.query
+                    ? 'No ' + noun + 's match “' + page.query + '”.'
+                    : 'Every ' + noun + ' in the cache is already attached.'));
                 return;
             }
 
@@ -429,19 +446,69 @@ Expected context:
                 results.appendChild(row);
             });
 
-            const hiddenCount = matches.length - shown.length;
-            if (hiddenCount > 0) {
-                const note = document.createElement('div');
-                note.className = 'impd-note';
-                note.textContent = 'Showing ' + shown.length + ' of ' + matches.length +
-                    ' matches — keep typing to narrow the remaining ' + hiddenCount + '.';
-                results.appendChild(note);
+            if (page.hasMore || page.loading) {
+                const more = document.createElement('button');
+                more.type = 'button';
+                more.className = 'impd-load-more';
+                more.disabled = page.loading;
+                more.textContent = page.loading
+                    ? 'Loading…'
+                    : 'Load more (showing ' + page.items.length + ' of ' + page.total + ' matches)';
+                more.addEventListener('mousedown', event => {
+                    // mousedown keeps the search input focused so the panel stays open.
+                    event.preventDefault();
+                    if (!page.loading) loadPage(false);
+                });
+                results.appendChild(more);
+            } else if (page.items.length) {
+                results.appendChild(note('Showing all ' + page.total + ' matching ' + noun + (page.total === 1 ? '' : 's') + '.'));
             }
         }
 
-        function openResults() {
+        // reset=true starts a new search (page 0 for the current input);
+        // reset=false appends the next page to the current search.
+        function loadPage(reset) {
+            const query = search.value.trim();
+            if (reset) page = freshPage(query);
+            page.loading = true;
+            const seq = ++requestSeq;
             renderResults();
+            fetchInventory(entityType, {q: query, offset: page.offset, limit: PAGE_SIZE})
+                .then(data => {
+                    if (seq !== requestSeq) return;  // a newer search superseded this page
+                    const items = data.success && data.items ? data.items : [];
+                    rememberLabels(items);
+                    page.items = page.items.concat(items);
+                    page.total = data.count || 0;
+                    page.offset += items.length;
+                    page.hasMore = !!data.has_more;
+                    page.loading = false;
+                    page.loaded = true;
+                    renderResults();
+                })
+                .catch(() => {
+                    if (seq !== requestSeq) return;
+                    page.loading = false;
+                    page.loaded = true;
+                    page.error = true;
+                    renderResults();
+                });
+        }
+
+        function openResults() {
             results.hidden = false;
+            const query = search.value.trim();
+            if (!page.loaded || page.query !== query) {
+                loadPage(true);
+            } else {
+                renderResults();
+            }
+        }
+
+        function scheduleSearch() {
+            results.hidden = false;
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => loadPage(true), DEBOUNCE_MS);
         }
 
         function closeResults() {
@@ -453,7 +520,6 @@ Expected context:
             if (!selected.includes(key)) selected.push(key);
             syncHiddenInputs();
             renderChips();
-            search.value = '';
             renderResults();
             search.focus();
         }
@@ -546,7 +612,7 @@ Expected context:
         });
 
         search.addEventListener('focus', openResults);
-        search.addEventListener('input', openResults);
+        search.addEventListener('input', scheduleSearch);
         search.addEventListener('blur', () => setTimeout(closeResults, 120));
         search.addEventListener('keydown', event => {
             const rows = Array.from(results.querySelectorAll('.impd-result'));
@@ -570,14 +636,25 @@ Expected context:
         syncHiddenInputs();
         renderChips();
 
-        loadInventory(root.dataset.entityType).then(loaded => {
-            items = loaded;
-            renderChips();  // chip labels resolve once names are known
-            if (!items.length) {
-                helper.insertAdjacentHTML('beforeend',
-                    ' <span class="impd-note--warn">Cache empty — run Sync Inventory Now.</span>');
-            }
-        });
+        // Label the already-attached chips without downloading the whole set.
+        if (selected.length) {
+            fetchInventory(entityType, {ids: selected.join(',')})
+                .then(data => {
+                    rememberLabels(data.success && data.items ? data.items : []);
+                    renderChips();
+                })
+                .catch(() => { /* chips keep showing raw ids */ });
+        }
+
+        // One cheap probe tells the operator up front when the cache is empty.
+        fetchInventory(entityType, {limit: 1})
+            .then(data => {
+                if (data.success && data.count === 0) {
+                    helper.insertAdjacentHTML('beforeend',
+                        ' <span class="impd-note--warn">Cache empty — run Sync Inventory Now.</span>');
+                }
+            })
+            .catch(() => { /* the results panel reports lookup failures */ });
     }
 
     document.querySelectorAll('.impd-picker').forEach(initPicker);
