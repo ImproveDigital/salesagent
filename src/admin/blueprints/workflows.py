@@ -15,6 +15,7 @@ from src.core.database.models import AdapterConfig, Context, CurrencyLimit
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
 from src.core.database.repositories.workflow import WorkflowRepository
+from src.services.protocol_webhook_service import build_request_scoped_config, send_create_media_buy_decision
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +350,27 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     db.commit()
 
                     logger.info(f"[APPROVAL] Media buy {media_buy_id} successfully created in adapter")
+
+                    # Buyer registered push_notification_config on create_media_buy:
+                    # send the terminal task-status webhook (spec: completed).
+                    request_data = step.request_data or {}
+                    webhook_config = build_request_scoped_config(
+                        tenant_id=tenant_id,
+                        principal_id=media_buy.principal_id,
+                        push_config=request_data.get("push_notification_config"),
+                    )
+                    if webhook_config is not None:
+                        send_create_media_buy_decision(
+                            config=webhook_config,
+                            step_id=step_id,
+                            context_id=step.context_id,
+                            protocol=request_data.get("protocol", "mcp"),
+                            media_buy_id=media_buy_id,
+                            package_ids=[x.package_id for x in media_buy_repo.get_packages(media_buy_id)],
+                            status="completed",
+                            confirmed_at=media_buy.confirmed_at,
+                            revision=media_buy.revision,
+                        )
                     flash("Workflow step approved and media buy created successfully", "success")
                 else:
                     logger.warning(
