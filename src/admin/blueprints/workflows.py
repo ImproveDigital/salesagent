@@ -433,6 +433,11 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 media_buy_repo = MediaBuyRepository(db, tenant_id)
                 media_buy = media_buy_repo.get_by_id(mapping.object_id)
                 if media_buy:
+                    # Mirror operations.approve_media_buy(action="reject"): the buy
+                    # itself must leave pending_approval, not just the step.
+                    if media_buy.status == "pending_approval":
+                        media_buy_repo.update_status(media_buy.media_buy_id, "rejected")
+                        db.commit()
                     _notify_media_buy_decision(step, tenant_id, media_buy, media_buy_repo, status="rejected")
 
             flash("Workflow step rejected", "info")
