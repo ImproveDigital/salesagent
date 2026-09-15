@@ -165,6 +165,34 @@ def review_workflow_step(tenant_id, workflow_id, step_id):
         )
 
 
+def _notify_media_buy_decision(step, tenant_id: str, media_buy, media_buy_repo, *, status: str) -> bool:
+    """Send the terminal ``create_media_buy`` task webhook after an operator decision.
+
+    The buyer's ``push_notification_config`` is request-scoped: it lives on
+    the workflow step's ``request_data``, never in ``push_notification_configs``.
+    Returns ``False`` when the request registered no webhook.
+    """
+    request_data = step.request_data or {}
+    webhook_config = build_request_scoped_config(
+        tenant_id=tenant_id,
+        principal_id=media_buy.principal_id,
+        push_config=request_data.get("push_notification_config"),
+    )
+    if webhook_config is None:
+        return False
+    return send_create_media_buy_decision(
+        config=webhook_config,
+        step_id=step.step_id,
+        context_id=step.context_id,
+        protocol=request_data.get("protocol", "mcp"),
+        media_buy_id=media_buy.media_buy_id,
+        package_ids=[x.package_id for x in media_buy_repo.get_packages(media_buy.media_buy_id)],
+        status=status,
+        confirmed_at=media_buy.confirmed_at,
+        revision=media_buy.revision,
+    )
+
+
 def _replay_update_media_buy(step, tenant_id: str, db) -> tuple[bool, str | None]:
     """Re-enter `_update_media_buy_impl` with the persisted request payload.
 
@@ -353,24 +381,7 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
 
                     # Buyer registered push_notification_config on create_media_buy:
                     # send the terminal task-status webhook (spec: completed).
-                    request_data = step.request_data or {}
-                    webhook_config = build_request_scoped_config(
-                        tenant_id=tenant_id,
-                        principal_id=media_buy.principal_id,
-                        push_config=request_data.get("push_notification_config"),
-                    )
-                    if webhook_config is not None:
-                        send_create_media_buy_decision(
-                            config=webhook_config,
-                            step_id=step_id,
-                            context_id=step.context_id,
-                            protocol=request_data.get("protocol", "mcp"),
-                            media_buy_id=media_buy_id,
-                            package_ids=[x.package_id for x in media_buy_repo.get_packages(media_buy_id)],
-                            status="completed",
-                            confirmed_at=media_buy.confirmed_at,
-                            revision=media_buy.revision,
-                        )
+                    _notify_media_buy_decision(step, tenant_id, media_buy, media_buy_repo, status="completed")
                     flash("Workflow step approved and media buy created successfully", "success")
                 else:
                     logger.warning(
@@ -413,6 +424,16 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
                 return jsonify({"error": "Workflow step not found"}), 404
 
             db.commit()
+
+            # Buyer registered push_notification_config on create_media_buy:
+            # send the terminal task-status webhook (spec: rejected).
+            mappings = workflow_repo.get_mappings_for_step(step_id)
+            mapping = next((m for m in mappings if m.object_type == "media_buy"), None)
+            if mapping:
+                media_buy_repo = MediaBuyRepository(db, tenant_id)
+                media_buy = media_buy_repo.get_by_id(mapping.object_id)
+                if media_buy:
+                    _notify_media_buy_decision(step, tenant_id, media_buy, media_buy_repo, status="rejected")
 
             flash("Workflow step rejected", "info")
             return jsonify({"success": True}), 200
