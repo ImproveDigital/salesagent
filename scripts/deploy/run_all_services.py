@@ -22,8 +22,7 @@ processes = []
 
 # Exit code of the MCP/A2A/Admin server child once it has stopped. ``None``
 # while it is running. The main loop watches this so the container exits
-# (and the orchestrator restarts it) instead of staying alive with nothing
-# listening on the app port, which the load balancer reports as 502.
+# (and the orchestrator restarts it) instead of leaving nginx serving 502s.
 _mcp_exit_code: int | None = None
 
 
