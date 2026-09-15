@@ -122,8 +122,55 @@ const scriptRoot = '{{ request.script_root }}';
 const isGam = {{ 'true' if is_gam else 'false' }};
 const adapterType = '{{ adapter_type }}';
 
-// Non-GAM adapters with supports_inventory_sync: one-shot sync through the
-// shared orchestration. Synchronous call — completes (or 409s) in-request.
+// Non-GAM adapters with supports_inventory_sync: sync through the shared
+// orchestration. Some adapters finish in-request and return counts; others
+// (Improve Digital) enqueue a background job and answer 202 with a sync_id,
+// in which case we poll sync-status/<sync_id> until it reaches a terminal
+// state — the 202 body carries no counts, so reading them there shows "0".
+const ADAPTER_SYNC_POLL_MS = 3000;
+
+function adapterSyncSummary(counts) {
+    return Object.entries(counts || {}).map(([k, v]) => `${k}=${Number(v).toLocaleString()}`).join(', ');
+}
+
+function adapterSyncErrors(errors) {
+    return errors ? Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+}
+
+function showAdapterSyncResult(statusEl, data) {
+    const counts = data.counts || {};
+    const total = data.total_synced !== undefined
+        ? data.total_synced
+        : Object.values(counts).reduce((sum, v) => sum + Number(v || 0), 0);
+    const errors = adapterSyncErrors(data.errors);
+    if (data.status === 'failed' || (data.success === false && !Object.keys(counts).length)) {
+        statusEl.textContent = `✗ ${data.error_message || data.error || errors || 'Sync failed'}`;
+        return;
+    }
+    statusEl.textContent = `✓ Synced ${Number(total).toLocaleString()} items (${adapterSyncSummary(counts)})`
+        + (errors ? ` — partial failures: ${errors}` : '');
+}
+
+function pollAdapterSync(syncId, statusEl, done) {
+    fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/${adapterType}/sync-status/${syncId}`, { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'completed' || data.status === 'failed') {
+                showAdapterSyncResult(statusEl, data);
+                done();
+                return;
+            }
+            if (data.success === false) {
+                statusEl.textContent = `✗ ${data.error || 'Could not read sync status'}`;
+                done();
+                return;
+            }
+            statusEl.textContent = `Syncing in the background (${data.status || 'running'})… this page updates when it finishes.`;
+            setTimeout(() => pollAdapterSync(syncId, statusEl, done), ADAPTER_SYNC_POLL_MS);
+        })
+        .catch(err => { statusEl.textContent = '✗ ' + err.message; done(); });
+}
+
 function syncAdapterInventory() {
     const btn = document.getElementById('adapterSyncBtn');
     const statusEl = document.getElementById('adapterSyncStatus');
@@ -132,6 +179,7 @@ function syncAdapterInventory() {
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing…';
     statusEl.textContent = 'Syncing — large catalogs can take a minute (upstream rate limits apply).';
+    const done = () => { btn.disabled = false; btn.innerHTML = original; };
 
     fetch(`${scriptRoot}/api/tenant/${tenantId}/adapters/${adapterType}/sync-inventory`, {
         method: 'POST',
@@ -140,18 +188,20 @@ function syncAdapterInventory() {
     })
         .then(r => r.json().then(data => ({ status: r.status, data })))
         .then(({ status, data }) => {
+            if (data.success && (status === 202 || data.status === 'queued') && data.sync_id) {
+                pollAdapterSync(data.sync_id, statusEl, done);
+                return;
+            }
             if (data.success) {
-                const summary = Object.entries(data.counts || {}).map(([k, v]) => `${k}=${v}`).join(', ');
-                statusEl.textContent = `✓ Synced ${(data.total_synced || 0).toLocaleString()} items (${summary})`;
+                showAdapterSyncResult(statusEl, data);
             } else if (status === 409) {
                 statusEl.textContent = data.error || 'A sync is already running — wait for it to finish.';
             } else {
-                const errors = data.errors ? Object.entries(data.errors).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
-                statusEl.textContent = `✗ ${data.error || errors || 'Sync failed'}`;
+                statusEl.textContent = `✗ ${data.error || adapterSyncErrors(data.errors) || 'Sync failed'}`;
             }
+            done();
         })
-        .catch(err => { statusEl.textContent = '✗ ' + err.message; })
-        .finally(() => { btn.disabled = false; btn.innerHTML = original; });
+        .catch(err => { statusEl.textContent = '✗ ' + err.message; done(); });
 }
 
 function syncInventory(mode) {

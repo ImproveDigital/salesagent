@@ -7,6 +7,8 @@ SQL-backed methods are covered by integration tests in
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from src.services.bundle_adapter import (
@@ -21,9 +23,9 @@ from src.services.bundle_adapter import (
 class TestRegistry:
     """Registry resolution + tenant matching."""
 
-    def test_three_adapters_registered_at_import(self):
+    def test_four_adapters_registered_at_import(self):
         ids = {a.adapter_id for a in iter_adapters()}
-        assert ids == {"gam", "freewheel", "springserve"}
+        assert ids == {"gam", "improvedigital", "freewheel", "springserve"}
 
     def test_get_adapter_returns_registered_instance(self):
         gam = get_adapter("gam")
@@ -43,6 +45,8 @@ class TestRegistry:
             ("fw", "freewheel"),
             ("springserve", "springserve"),
             ("ss", "springserve"),
+            ("improvedigital", "improvedigital"),
+            ("improve_digital", "improvedigital"),
         ],
     )
     def test_adapter_for_tenant_matches_ad_server_aliases(self, ad_server, expected):
@@ -109,7 +113,120 @@ class TestStubAdapters:
 class TestProtocolConformance:
     """Every registered adapter must satisfy the runtime-checked Protocol."""
 
-    @pytest.mark.parametrize("adapter_id", ["gam", "freewheel", "springserve"])
+    @pytest.mark.parametrize("adapter_id", ["gam", "improvedigital", "freewheel", "springserve"])
     def test_adapter_isinstance_protocol(self, adapter_id):
         adapter = get_adapter(adapter_id)
         assert isinstance(adapter, BundleInventoryAdapter)
+
+    def test_only_improvedigital_pages_the_picker(self):
+        paged = {a.adapter_id for a in iter_adapters() if a.picker_paged}
+        assert paged == {"improvedigital"}
+
+
+REPO_PATH = "src.core.database.repositories.improvedigital_inventory.ImproveDigitalInventoryRepository"
+
+
+class TestImproveDigitalAdapter:
+    """Improve Digital maps the bundle slots onto the 360Yield cache:
+    bundle ``ad_unit`` → cached ``placement``, bundle ``placement`` →
+    cached ``package``. Reads go through the picker projections so the
+    editor never materializes ORM rows for the full placement set."""
+
+    def _repo(self):
+        repo = MagicMock()
+        repo.list_picker_rows_by_ids.side_effect = lambda entity_type, ids: (
+            [("7", "Pub Seven", None)]
+            if entity_type == "publisher"
+            else [(str(i), f"{entity_type}-{i}", "7") for i in ids]
+        )
+        return repo
+
+    def test_label_and_vocab(self):
+        adapter = get_adapter("improvedigital")
+        assert adapter.label == "Improve Digital"
+        assert adapter.vocab == {"primary": "placements", "secondary": "packages"}
+
+    def test_search_maps_bundle_slots_to_cache_entity_types(self):
+        adapter = get_adapter("improvedigital")
+        repo = self._repo()
+        repo.count_picker_rows.return_value = 3
+        repo.list_picker_rows.return_value = [("11", "Home top", "7"), ("12", "Home side", "7")]
+        with patch(REPO_PATH, return_value=repo):
+            rows, total = adapter.search_inventory(None, "t1", "ad_unit", q="home", offset=0, limit=2)
+        repo.count_picker_rows.assert_called_once_with("placement", q="home")
+        repo.list_picker_rows.assert_called_once_with("placement", q="home", offset=0, limit=2)
+        assert total == 3
+        assert [r.external_id for r in rows] == ["11", "12"]
+        assert all(r.entity_type == "ad_unit" for r in rows)
+        # Placements are labelled with their publisher (one extra lookup, not per row).
+        assert rows[0].meta == "Pub Seven"
+        assert rows[0].raw["metadata"]["parent_id"] == "7"
+        repo.list_picker_rows_by_ids.assert_called_once_with("publisher", ["7"])
+
+    def test_bundle_placement_slot_reads_packages(self):
+        adapter = get_adapter("improvedigital")
+        repo = self._repo()
+        repo.list_picker_rows.return_value = [("900", "Premium pack", None)]
+        with patch(REPO_PATH, return_value=repo):
+            rows = adapter.list_inventory(None, "t1", "placement", limit=5)
+        repo.list_picker_rows.assert_called_once_with("package", limit=5)
+        assert rows[0].entity_type == "placement"
+        assert rows[0].name == "Premium pack"
+
+    def test_coverage_counts_only_directly_picked_placements(self):
+        """Package membership is a live lookup, not cached — packages must
+        not inflate coverage."""
+        adapter = get_adapter("improvedigital")
+        repo = self._repo()
+        with patch(REPO_PATH, return_value=repo):
+            covered = adapter.coverage_for_bundle(None, "t1", {"ad_units": ["1", "2"], "placements": ["900"]})
+        assert covered == 2
+        repo.list_picker_rows_by_ids.assert_called_once_with("placement", ["1", "2"])
+
+    def test_unbundled_excludes_bundled_ids_and_lists_packages_first(self):
+        adapter = get_adapter("improvedigital")
+        repo = self._repo()
+        repo.list_picker_rows.side_effect = lambda entity_type, **kw: (
+            [("900", "Pack", None)] if entity_type == "package" else [("11", "Home top", "7")]
+        )
+        with patch(REPO_PATH, return_value=repo):
+            rows = adapter.list_unbundled(None, "t1", {"ad_unit": {"12"}, "placement": {"901"}}, limit=10)
+        assert [(r.entity_type, r.external_id) for r in rows] == [("placement", "900"), ("ad_unit", "11")]
+        calls = {c.args[0]: c.kwargs for c in repo.list_picker_rows.call_args_list}
+        assert set(calls["package"]["exclude_ids"]) == {"901"}
+        assert set(calls["placement"]["exclude_ids"]) == {"12"}
+
+    def test_unknown_entity_type_is_rejected(self):
+        adapter = get_adapter("improvedigital")
+        with patch(REPO_PATH, return_value=self._repo()), pytest.raises(ValueError):
+            adapter.count_inventory(None, "t1", "size")
+
+    def test_only_improvedigital_uses_explicit_creative_sizes(self):
+        explicit = {a.adapter_id for a in iter_adapters() if a.explicit_creative_sizes}
+        assert explicit == {"improvedigital"}
+        assert get_adapter("gam").list_creative_sizes(None, "t1") == []
+
+    def test_creative_sizes_map_360yield_types_and_skip_placeholders(self):
+        """Placements carry no sizes, so the editor offers the synced size
+        catalogue: display-ish types collapse to one display option per
+        WxH, vast becomes video, audio and 1x1/2x1 text placeholders drop."""
+        adapter = get_adapter("improvedigital")
+        repo = self._repo()
+        size_rows = [
+            {"id": 1, "name": "300x250", "type": "display", "width": 300, "height": 250},
+            {"id": 2, "name": "300x250 app", "type": "mobile_app", "width": 300, "height": 250},
+            {"id": 3, "name": "320x50", "type": "display", "width": 320, "height": 50},
+            {"id": 4, "name": "308x173 Video", "type": "vast", "width": 308, "height": 173},
+            {"id": 5, "name": "1x1 (Text Ad)", "type": "text", "width": 1, "height": 1},
+            {"id": 6, "name": "audio", "type": "vast_audio", "width": 1, "height": 1},
+            {"id": 7, "name": "broken", "type": "display", "width": None, "height": 90},
+        ]
+        repo.list_by_type.return_value = [MagicMock(raw_json=raw) for raw in size_rows]
+        with patch(REPO_PATH, return_value=repo):
+            options = adapter.list_creative_sizes(None, "t1")
+        repo.list_by_type.assert_called_once_with("size")
+        assert options == [
+            {"label": "300x250", "width": 300, "height": 250, "kind": "display"},
+            {"label": "320x50", "width": 320, "height": 50, "kind": "display"},
+            {"label": "308x173", "width": 308, "height": 173, "kind": "video"},
+        ]

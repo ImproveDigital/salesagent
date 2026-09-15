@@ -16,11 +16,16 @@ refresh token or FreeWheel password, naming templates, AXE keys, approval
 flags, other ``config_json`` fields) stays editable.
 
 Lock state is stored explicitly in ``adapter_config.config_locked_at``
-(adapter-agnostic — every inventory-sync completion path stamps it via
-:meth:`AdapterConfigRepository.mark_config_locked`, and the migration
-backfilled already-synced tenants). ``config_locked_at`` is itself a locked
-column: stamping it on an unlocked tenant is free, but clearing it once set
-requires ``super_admin_override`` — that is the documented unlock procedure.
+(adapter-agnostic). The inventory *persistence* paths stamp it via
+:meth:`AdapterConfigRepository.mark_config_locked` in the same transaction as
+the first inventory rows (GAM batch writers, Improve Digital per-page upsert;
+FreeWheel/SpringServe write in the single orchestration transaction), so the
+tenant is locked the moment inventory lands in the DB — even if the sync dies
+before completion. The sync-completion paths re-stamp as an idempotent
+backstop, and the migration backfilled already-synced tenants.
+``config_locked_at`` is itself a locked column: stamping it on an unlocked
+tenant is free, but clearing it once set requires ``super_admin_override`` —
+that is the documented unlock procedure.
 
 Enforcement mirrors :mod:`src.core.database.embedded_tenant_guard`: SQLAlchemy
 ``before_update`` listeners compare each locked column's pending value against

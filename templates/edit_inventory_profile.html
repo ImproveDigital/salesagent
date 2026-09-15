@@ -8,6 +8,12 @@
 
 {% set is_create = form_mode|default('edit') == 'create' %}
 {% set s = bundle_summary %}
+{# Adapter vocabulary for the inventory picker: GAM reads "ad units / placements",
+   Improve Digital "placements / packages". Defaults keep legacy callers working. #}
+{% set vocab = adapter_vocab|default({'ad_units': 'ad units', 'placements': 'placements'}) %}
+{% set vocab1 = adapter_vocab_singular|default({'ad_units': 'ad unit', 'placements': 'placement'}) %}
+{% set picker_paged = inventory_picker_paged|default(false) %}
+{% set explicit_sizes = explicit_creative_sizes|default(false) %}
 
 <div class="edit-page">
     <div class="edit-container">
@@ -232,14 +238,15 @@
                             <div>
                                 <h2 class="card__title">Inventory</h2>
                                 <p class="card__sub">
-                                    Pick placements or ad units from your synced {{ s.adapter_label }} inventory.
-                                    Placements wrap ad units — picking a placement covers all its children.
+                                    Pick {{ vocab.placements }} or {{ vocab.ad_units }} from your synced {{ s.adapter_label }} inventory.
+                                    {{ vocab.placements|capitalize }} wrap {{ vocab.ad_units }} — picking a {{ vocab1.placements }} covers all its children.
+                                    {% if picker_paged %}Results are searched and paged from the server — type to filter, then load more.{% endif %}
                                 </p>
                             </div>
                             <div class="card__controls">
                                 <div class="seg" id="inventory-picker-mode" aria-label="Inventory picker mode">
-                                    <button type="button" class="active" data-picker-mode="tree" aria-pressed="true">Tree</button>
-                                    <button type="button" data-picker-mode="flat" aria-pressed="false">Flat ad units</button>
+                                    <button type="button" class="active" data-picker-mode="tree" aria-pressed="true">{{ 'Tree' if vocab.placements == 'placements' else vocab.placements|capitalize }}</button>
+                                    <button type="button" data-picker-mode="flat" aria-pressed="false">Flat {{ vocab.ad_units }}</button>
                                 </div>
                             </div>
                         </div>
@@ -250,7 +257,7 @@
                                 <div class="picker__search">
                                     <span class="picker__search-icon" aria-hidden="true">⌕</span>
                                     <input type="search" id="inventory-picker-search"
-                                           placeholder="Filter placements, ad units, or IDs"
+                                           placeholder="Filter {{ vocab.placements }}, {{ vocab.ad_units }}, or IDs"
                                            aria-label="Filter inventory picker"
                                            autocomplete="off">
                                 </div>
@@ -261,7 +268,7 @@
                                 <div class="picker__spacer"></div>
                                 <label class="picker__toggle">
                                     <input type="checkbox" name="include_descendants" checked>
-                                    Include child ad units
+                                    Include child {{ vocab.ad_units }}
                                 </label>
                             </div>
 
@@ -269,8 +276,8 @@
                             <div class="reuse-strip" id="inventory-picker-help">
                                 <span class="reuse-strip__icon" aria-hidden="true">▦</span>
                                 <span>
-                                    <strong>Picking a placement</strong> includes its child ad units automatically.
-                                    Flip to <strong>Flat ad units</strong> to pick individual units only.
+                                    <strong>Picking a {{ vocab1.placements }}</strong> includes its child {{ vocab.ad_units }} automatically.
+                                    Flip to <strong>Flat {{ vocab.ad_units }}</strong> to pick individual units only.
                                 </span>
                             </div>
 
@@ -285,11 +292,32 @@
                             <div>
                                 <h2 class="card__title">Creative formats</h2>
                                 <p class="card__sub">
+                                    {% if explicit_sizes %}
+                                    {{ s.adapter_label }} {{ vocab.ad_units }} don't carry creative sizes, so pick the sizes this
+                                    bundle sells. Formats are derived from the sizes you select here.
+                                    {% else %}
                                     Automatically derived from selected GAM inventory sizes and rendering settings.
+                                    {% endif %}
                                 </p>
                             </div>
                         </div>
                         <div class="card__body">
+                            {% if explicit_sizes %}
+                            <div class="size-picker" id="creative-size-picker">
+                                <div id="creative-size-selected" class="chip-strip inventory-selected-strip"></div>
+                                <div class="picker__toolbar">
+                                    <div class="picker__search">
+                                        <span class="picker__search-icon" aria-hidden="true">⌕</span>
+                                        <input type="search" id="creative-size-search"
+                                               placeholder="Filter sizes, e.g. 300x250 or video"
+                                               aria-label="Filter creative sizes"
+                                               autocomplete="off">
+                                    </div>
+                                    <span class="picker__count" id="creative-size-status" aria-live="polite"></span>
+                                </div>
+                                <div class="tree-picker size-picker__list" id="creative-size-list"></div>
+                            </div>
+                            {% endif %}
                             <div id="format-derived-panel" style="padding: 12px 14px; background: var(--sig-bg-info); border: 1px solid var(--sig-bd-default); border-radius: 6px;">
                                 <div id="format-derived-status" style="color: var(--sig-fg-secondary); font-size: 13px;">
                                     Pick inventory to detect creative formats.
@@ -437,6 +465,20 @@ const INVENTORY_NAMES = {
 
 const INVENTORY_PICKER = {{ inventory_picker | tojson | safe }};
 const INVENTORY_PICKER_LIMIT = {{ inventory_picker_limit | tojson }};
+// Server-paged picker (Improve Digital): rows are searched/paged through
+// the inventory-profiles API instead of the embedded INVENTORY_PICKER list,
+// which only seeds already-selected rows. Mirrors the product-form picker.
+const INVENTORY_PICKER_PAGED = {{ picker_paged | tojson }};
+const INVENTORY_PICKER_PAGE_SIZE = {{ inventory_picker_page_size|default(50) | tojson }};
+const INVENTORY_PICKER_API = '{{ url_for("inventory_profiles.search_inventory_picker_api", tenant_id=tenant_id) }}';
+const INVENTORY_VOCAB = {{ vocab | tojson | safe }};
+const INVENTORY_VOCAB_SINGULAR = {{ vocab1 | tojson | safe }};
+const INVENTORY_PICKER_DEBOUNCE_MS = 250;
+// Explicit creative sizes (Improve Digital): the inventory rows carry no
+// sizes, so formats are derived from sizes the operator picks out of the
+// synced size catalogue instead of from the selected inventory.
+const INVENTORY_EXPLICIT_SIZES = {{ explicit_sizes | tojson }};
+const CREATIVE_SIZE_OPTIONS = {{ creative_size_options|default([]) | tojson | safe }};
 const INVENTORY_CHIP_REUSE_ENABLED = {{ (not is_create) | tojson }};
 const BUNDLE_ADAPTER_ID = {{ (s.adapter_id or '') | tojson }};
 const KNOWN_PROPERTY_TAGS = new Set({{ known_property_tags | tojson | safe }});
@@ -477,6 +519,10 @@ function inventoryRowById(key, id) {
 }
 
 function inventoryKindLabel(row) {
+    if (BUNDLE_ADAPTER_ID !== 'gam') {
+        const key = row.kind === 'placement' ? 'placements' : 'ad_units';
+        return (INVENTORY_VOCAB_SINGULAR[key] || key).toUpperCase();
+    }
     if (row.kind === 'placement') return row.subkind === 'tag' ? 'TAG' : 'SITE';
     return 'AD UNIT';
 }
@@ -567,7 +613,7 @@ function renderSelectedInventoryStrip() {
     });
 
     if (!items.length) {
-        strip.innerHTML = '<div class="inventory-selected-strip__empty">No inventory selected yet. Pick placements or ad units below.</div>';
+        strip.innerHTML = `<div class="inventory-selected-strip__empty">No inventory selected yet. Pick ${_escAttr(INVENTORY_VOCAB.placements)} or ${_escAttr(INVENTORY_VOCAB.ad_units)} below.</div>`;
         return;
     }
 
@@ -609,8 +655,201 @@ function inventoryIncludesDescendants() {
 }
 
 function inventoryPickerMayBeCapped() {
+    if (INVENTORY_PICKER_PAGED) return false;
     return inventoryRows('ad_units').length >= INVENTORY_PICKER_LIMIT ||
         inventoryRows('placements').length >= INVENTORY_PICKER_LIMIT;
+}
+
+// ---- explicit creative-size picker (INVENTORY_EXPLICIT_SIZES only) ----
+// Keys are `${kind}:${width}x${height}`; the selection is persisted only
+// through the derived formats (width/height on display_* / video_* ids),
+// so edit pages rebuild it from existingProfile.formats.
+const creativeSizeSelection = new Set();
+
+function creativeSizeKey(option) {
+    return `${option.kind}:${option.width}x${option.height}`;
+}
+
+function selectedCreativeSizeOptions() {
+    return CREATIVE_SIZE_OPTIONS.filter(option => creativeSizeSelection.has(creativeSizeKey(option)));
+}
+
+function explicitSizeFormats() {
+    const formats = [];
+    selectedCreativeSizeOptions().forEach(option => {
+        const ids = option.kind === 'video' ? GAM_CANONICAL_VIDEO_FORMAT_IDS : GAM_CANONICAL_DISPLAY_FORMAT_IDS;
+        ids.forEach(formatId => {
+            const ref = canonicalFormatRef(formatId);
+            formats.push({ agent_url: ref.agent_url, id: ref.id, width: option.width, height: option.height });
+        });
+    });
+    return formats;
+}
+
+function prePopulateCreativeSizes() {
+    if (!INVENTORY_EXPLICIT_SIZES) return;
+    (existingProfile.formats || []).forEach(format => {
+        if (!format || !format.width || !format.height) return;
+        const kind = String(format.id || '').startsWith('video') ? 'video' : 'display';
+        creativeSizeSelection.add(`${kind}:${Number(format.width)}x${Number(format.height)}`);
+    });
+}
+
+function toggleCreativeSize(key) {
+    if (creativeSizeSelection.has(key)) creativeSizeSelection.delete(key);
+    else creativeSizeSelection.add(key);
+    renderCreativeSizePicker();
+    updateDerivedFormats();
+    if (typeof recomputeValidity === 'function') recomputeValidity();
+}
+
+function renderCreativeSizePicker() {
+    const list = document.getElementById('creative-size-list');
+    if (!list) return;
+    const strip = document.getElementById('creative-size-selected');
+    const status = document.getElementById('creative-size-status');
+    const query = (document.getElementById('creative-size-search')?.value || '').toLowerCase().trim();
+    const selected = selectedCreativeSizeOptions();
+
+    if (strip) {
+        strip.innerHTML = selected.length
+            ? selected.map(option => `<span class="sel-chip">`
+                + `<span class="kindchip kindchip--unit">${option.kind === 'video' ? 'VIDEO' : 'DISPLAY'}</span>`
+                + `<span class="sel-chip__label">${_escAttr(option.label)}</span>`
+                + `<button type="button" class="sel-chip__x" data-remove-size="${_escAttr(creativeSizeKey(option))}" aria-label="Remove ${_escAttr(option.label)}">×</button>`
+                + `</span>`).join('')
+            : '<div class="inventory-selected-strip__empty">No creative sizes selected yet. Pick sizes below.</div>';
+    }
+
+    const visible = CREATIVE_SIZE_OPTIONS.filter(option => !query
+        || option.label.includes(query)
+        || option.kind.includes(query)
+        || (query === 'display' && option.kind === 'display'));
+    if (status) {
+        status.innerHTML = `<strong>${selected.length}</strong> selected · ${visible.length} of ${CREATIVE_SIZE_OPTIONS.length} shown`;
+    }
+    if (!CREATIVE_SIZE_OPTIONS.length) {
+        list.innerHTML = '<div class="tree-picker__empty">No creative sizes in the inventory cache yet — run Sync Inventory first.</div>';
+        return;
+    }
+    const renderRow = option => {
+        const key = creativeSizeKey(option);
+        const checked = creativeSizeSelection.has(key);
+        return `<div class="tree__row ${checked ? 'selected' : ''}" data-kind="size" data-depth="0" data-row-id="${_escAttr(key)}">`
+            + `<span class="chev placeholder"></span>`
+            + `<span class="check"><input type="checkbox" data-toggle-size="${_escAttr(key)}" aria-label="Select ${_escAttr(option.label)}" ${checked ? 'checked' : ''}></span>`
+            + `<button type="button" class="tree__name" data-toggle-size="${_escAttr(key)}" aria-label="Select ${_escAttr(option.label)}">`
+            + `<span class="kindchip kindchip--unit">${option.kind === 'video' ? 'VIDEO' : 'DISPLAY'}</span>`
+            + `<span class="label">${_escAttr(option.label)}</span>`
+            + `</button>`
+            + `<span class="tree__meta">${option.kind === 'video' ? 'video_standard · video_vast' : 'image · HTML5 · JS'}</span>`
+            + `</div>`;
+    };
+    const groups = [
+        ['display', 'Display sizes', 'image, HTML5 and JS creatives'],
+        ['video', 'Video sizes', 'VAST creatives'],
+    ].map(([kind, label, note]) => {
+        const rows = visible.filter(option => option.kind === kind);
+        return rows.length ? treeSection(label, note) + rows.map(renderRow).join('') : '';
+    }).join('');
+    list.innerHTML = groups || '<div class="tree-picker__empty">No sizes match.</div>';
+}
+
+// ---- server-paged picker state (INVENTORY_PICKER_PAGED only) ----
+// One page list per bundle slot. ``ids`` is the display order for the
+// current query; row payloads are registered into INVENTORY_PICKER so the
+// existing name lookups (chips, selected strip) keep working unchanged.
+const inventoryPages = {
+    placements: freshInventoryPage(''),
+    ad_units: freshInventoryPage(''),
+};
+let inventoryPageSeq = 0;
+let inventorySearchTimer = null;
+
+function freshInventoryPage(query) {
+    return { query, ids: [], total: null, offset: 0, hasMore: false, loading: false, loaded: false, error: false };
+}
+
+function registerInventoryRows(key, rows) {
+    if (!INVENTORY_PICKER[key]) INVENTORY_PICKER[key] = [];
+    const known = new Set(INVENTORY_PICKER[key].map(row => row.id));
+    rows.forEach(row => {
+        if (known.has(row.id)) return;
+        INVENTORY_PICKER[key].push(row);
+        known.add(row.id);
+        if (!INVENTORY_NAMES[key]) INVENTORY_NAMES[key] = {};
+        INVENTORY_NAMES[key][row.id] = { name: row.name, id: row.id, subkind: row.subkind };
+    });
+}
+
+function activeInventoryKey() {
+    return inventoryPickerMode === 'flat' ? 'ad_units' : 'placements';
+}
+
+// reset=true starts a new search for the current input (page 0);
+// reset=false appends the next page to the current search.
+function loadInventoryPage(key, reset) {
+    if (!INVENTORY_PICKER_PAGED) return;
+    const query = inventoryQuery();
+    if (reset) inventoryPages[key] = freshInventoryPage(query);
+    const page = inventoryPages[key];
+    page.loading = true;
+    const seq = ++inventoryPageSeq;
+    page.seq = seq;
+    renderInventoryPicker();
+    const params = new URLSearchParams({ kind: key, q: query, offset: String(page.offset), limit: String(INVENTORY_PICKER_PAGE_SIZE) });
+    fetch(`${INVENTORY_PICKER_API}?${params.toString()}`, { credentials: 'same-origin' })
+        .then(response => response.json())
+        .then(data => {
+            if (page.seq !== seq || inventoryPages[key] !== page) return;  // superseded by a newer search
+            const items = data.success && Array.isArray(data.items) ? data.items : [];
+            registerInventoryRows(key, items);
+            const seen = new Set(page.ids);
+            items.forEach(item => { if (!seen.has(item.id)) { page.ids.push(item.id); seen.add(item.id); } });
+            page.total = typeof data.count === 'number' ? data.count : null;
+            page.offset += items.length;
+            page.hasMore = !!data.has_more;
+            page.loading = false;
+            page.loaded = true;
+            page.error = !data.success;
+            renderInventoryPicker();
+        })
+        .catch(() => {
+            if (page.seq !== seq) return;
+            page.loading = false;
+            page.loaded = true;
+            page.error = true;
+            renderInventoryPicker();
+        });
+}
+
+function pagedInventoryRows(key) {
+    return inventoryPages[key].ids.map(id => inventoryRowById(key, id)).filter(Boolean);
+}
+
+function renderInventoryLoadMore(key) {
+    const page = inventoryPages[key];
+    const noun = INVENTORY_VOCAB[key] || key;
+    if (page.error) {
+        return `<div class="tree-picker__empty">Lookup failed — is the API reachable?</div>`;
+    }
+    if (page.hasMore || page.loading) {
+        const shown = page.ids.length;
+        const label = page.loading
+            ? 'Loading…'
+            : `Load more (showing ${shown.toLocaleString()} of ${page.total === null ? 'many' : page.total.toLocaleString()} matching ${_escAttr(noun)})`;
+        return `<button type="button" class="tree-picker__more" data-load-more="${_escAttr(key)}" ${page.loading ? 'disabled' : ''}>${label}</button>`;
+    }
+    if (page.loaded && page.ids.length && page.total !== null) {
+        return `<div class="tree-picker__section">Showing all ${page.total.toLocaleString()} matching ${_escAttr(noun)}</div>`;
+    }
+    return '';
+}
+
+function scheduleInventorySearch() {
+    if (!INVENTORY_PICKER_PAGED) { renderInventoryPicker(); return; }
+    clearTimeout(inventorySearchTimer);
+    inventorySearchTimer = setTimeout(() => loadInventoryPage(activeInventoryKey(), true), INVENTORY_PICKER_DEBOUNCE_MS);
 }
 
 function cssEscapeValue(value) {
@@ -640,8 +879,13 @@ function renderInventoryPickerStatus(visibleCount = 0) {
     if (!status) return;
     const placementCount = inventorySelection.placements.size;
     const adUnitCount = inventorySelection.ad_units.size;
+    let shown = `${visibleCount} shown`;
+    if (INVENTORY_PICKER_PAGED) {
+        const page = inventoryPages[activeInventoryKey()];
+        if (page.total !== null) shown = `${visibleCount.toLocaleString()} of ${page.total.toLocaleString()} shown`;
+    }
     const capped = inventoryPickerMayBeCapped() ? ` of first ${INVENTORY_PICKER_LIMIT} synced rows` : '';
-    status.innerHTML = `<strong>${placementCount}</strong> placements, <strong>${adUnitCount}</strong> standalone ad units · ${visibleCount} shown${capped}`;
+    status.innerHTML = `<strong>${placementCount}</strong> ${_escAttr(INVENTORY_VOCAB.placements)}, <strong>${adUnitCount}</strong> standalone ${_escAttr(INVENTORY_VOCAB.ad_units)} · ${shown}${capped}`;
 }
 
 function treeSection(label, note) {
@@ -672,7 +916,9 @@ function renderPlacementRow(row, query) {
         + `<span class="label">${_escAttr(row.name)}</span>`
         + `<span class="id">#${_escAttr(row.id)}</span>`
         + `</button>`
-        + `<span class="tree__meta"><span class="num">${row.child_count || children.length}</span><span>${(row.child_count || children.length) === 1 ? 'ad unit' : 'ad units'}</span></span>`
+        + ((row.child_count || children.length || BUNDLE_ADAPTER_ID === 'gam')
+            ? `<span class="tree__meta"><span class="num">${row.child_count || children.length}</span><span>${(row.child_count || children.length) === 1 ? _escAttr(INVENTORY_VOCAB_SINGULAR.ad_units) : _escAttr(INVENTORY_VOCAB.ad_units)}</span></span>`
+            : `<span class="tree__meta">${_escAttr(row.meta || '—')}</span>`)
         + inventoryRowSecondaryAction(row)
         + `</div>`;
 
@@ -707,40 +953,62 @@ function renderInventoryPicker(focusSelector = null) {
     const help = document.getElementById('inventory-picker-help');
     if (help) {
         help.hidden = inventoryPickerMode !== 'tree';
+        const one = _escAttr(INVENTORY_VOCAB_SINGULAR.placements);
+        const units = _escAttr(INVENTORY_VOCAB.ad_units);
         const helpText = inventoryIncludesDescendants()
-            ? '<strong>Picking a placement</strong> includes its child ad units automatically.'
-            : '<strong>Picking a placement</strong> targets only that placement. Child ad units stay standalone.';
+            ? `<strong>Picking a ${one}</strong> includes its child ${units} automatically.`
+            : `<strong>Picking a ${one}</strong> targets only that ${one}. Child ${units} stay standalone.`;
         help.innerHTML = '<span class="reuse-strip__icon" aria-hidden="true">▦</span>'
-            + `<span>${helpText} Flip to <strong>Flat ad units</strong> to pick individual units only.</span>`;
+            + `<span>${helpText} Flip to <strong>Flat ${units}</strong> to pick individual units only.</span>`;
     }
 
     if (inventoryPickerMode === 'flat') {
-        const rows = inventoryRows('ad_units').filter(row => inventoryRowMatches(row, query));
+        const rows = INVENTORY_PICKER_PAGED
+            ? pagedInventoryRows('ad_units')
+            : inventoryRows('ad_units').filter(row => inventoryRowMatches(row, query));
         renderInventoryPickerStatus(rows.length);
-        list.innerHTML = rows.length
+        const pending = INVENTORY_PICKER_PAGED && !inventoryPages.ad_units.loaded;
+        const errored = INVENTORY_PICKER_PAGED && inventoryPages.ad_units.error;
+        list.innerHTML = (rows.length
             ? rows.map(row => renderAdUnitRow(row)).join('')
-            : '<div class="tree-picker__empty">No ad units match.</div>';
+            : (errored ? '' : `<div class="tree-picker__empty">${pending ? 'Loading…' : `No ${_escAttr(INVENTORY_VOCAB.ad_units)} match.`}</div>`))
+            + (INVENTORY_PICKER_PAGED ? renderInventoryLoadMore('ad_units') : '');
         hydratePartialCheckboxes();
         restoreInventoryFocus(focusSelector);
         return;
     }
 
-    const placements = inventoryRows('placements');
-    const sitePlacements = placements.filter(row => row.subkind !== 'tag');
-    const tagPlacements = placements.filter(row => row.subkind === 'tag');
+    const placements = INVENTORY_PICKER_PAGED ? pagedInventoryRows('placements') : inventoryRows('placements');
     const renderGroup = (rows, label, note) => {
-        const visible = rows.filter(row => inventoryRowMatches(row, query) ||
-            childRowsForPlacement(row).some(child => inventoryRowMatches(child, query)));
+        const visible = INVENTORY_PICKER_PAGED
+            ? rows
+            : rows.filter(row => inventoryRowMatches(row, query) ||
+                childRowsForPlacement(row).some(child => inventoryRowMatches(child, query)));
         if (!visible.length) return { html: '', count: 0 };
         return {
             html: treeSection(label, note) + visible.map(row => renderPlacementRow(row, query)).join(''),
             count: visible.length,
         };
     };
-    const site = renderGroup(sitePlacements, 'Site placements', 'wrap a set of ad units');
-    const tag = renderGroup(tagPlacements, 'Tag-level placements', 'cross-section groups');
-    renderInventoryPickerStatus(site.count + tag.count);
-    list.innerHTML = (site.html + tag.html) || '<div class="tree-picker__empty">No placements match.</div>';
+    let groups;
+    if (BUNDLE_ADAPTER_ID === 'gam') {
+        const sitePlacements = placements.filter(row => row.subkind !== 'tag');
+        const tagPlacements = placements.filter(row => row.subkind === 'tag');
+        groups = [
+            renderGroup(sitePlacements, 'Site placements', 'wrap a set of ad units'),
+            renderGroup(tagPlacements, 'Tag-level placements', 'cross-section groups'),
+        ];
+    } else {
+        const label = INVENTORY_VOCAB.placements.charAt(0).toUpperCase() + INVENTORY_VOCAB.placements.slice(1);
+        groups = [renderGroup(placements, label, `group ${INVENTORY_VOCAB.ad_units}`)];
+    }
+    const count = groups.reduce((sum, group) => sum + group.count, 0);
+    renderInventoryPickerStatus(count);
+    const pending = INVENTORY_PICKER_PAGED && !inventoryPages.placements.loaded;
+    const errored = INVENTORY_PICKER_PAGED && inventoryPages.placements.error;
+    list.innerHTML = (groups.map(group => group.html).join('')
+        || (errored ? '' : `<div class="tree-picker__empty">${pending ? 'Loading…' : `No ${_escAttr(INVENTORY_VOCAB.placements)} match.`}</div>`))
+        + (INVENTORY_PICKER_PAGED ? renderInventoryLoadMore('placements') : '');
     hydratePartialCheckboxes();
     restoreInventoryFocus(focusSelector);
 }
@@ -1110,7 +1378,24 @@ function initializePublisherRows() {
 
 document.addEventListener('DOMContentLoaded', function() {
     seedInventoryNameMaps();
+    prePopulateCreativeSizes();
     prePopulateInventoryConfig();
+    if (INVENTORY_EXPLICIT_SIZES) {
+        renderCreativeSizePicker();
+        updateDerivedFormats();
+        const sizeList = document.getElementById('creative-size-list');
+        const sizeStrip = document.getElementById('creative-size-selected');
+        const sizeSearch = document.getElementById('creative-size-search');
+        if (sizeList) sizeList.addEventListener('click', (e) => {
+            const toggle = e.target.closest('[data-toggle-size]');
+            if (toggle) toggleCreativeSize(toggle.dataset.toggleSize);
+        });
+        if (sizeStrip) sizeStrip.addEventListener('click', (e) => {
+            const remove = e.target.closest('[data-remove-size]');
+            if (remove) toggleCreativeSize(remove.dataset.removeSize);
+        });
+        if (sizeSearch) sizeSearch.addEventListener('input', renderCreativeSizePicker);
+    }
 
     const pickerList = document.getElementById('inventory-picker-list');
     const pickerSearch = document.getElementById('inventory-picker-search');
@@ -1122,6 +1407,11 @@ document.addEventListener('DOMContentLoaded', function() {
         pickerList.addEventListener('click', (e) => {
             const reuse = e.target.closest('a.tree__use');
             if (reuse) return;
+            const more = e.target.closest('[data-load-more]');
+            if (more) {
+                if (!more.disabled) loadInventoryPage(more.dataset.loadMore, false);
+                return;
+            }
             const open = e.target.closest('[data-toggle-open]');
             if (open && !e.target.closest('[data-toggle-placement]')) {
                 const id = open.dataset.toggleOpen;
@@ -1139,7 +1429,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (adUnit && !adUnit.disabled) toggleAdUnit(adUnit.dataset.toggleAdUnit);
         });
     }
-    if (pickerSearch) pickerSearch.addEventListener('input', renderInventoryPicker);
+    if (pickerSearch) pickerSearch.addEventListener('input', scheduleInventorySearch);
     if (modeSwitch) {
         modeSwitch.addEventListener('click', (e) => {
             const button = e.target.closest('[data-picker-mode]');
@@ -1149,9 +1439,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 btn.classList.toggle('active', btn === button);
                 btn.setAttribute('aria-pressed', btn === button ? 'true' : 'false');
             });
+            // Paged mode: (re)load the slot when its query is stale or it has
+            // never been fetched; otherwise the cached page renders as is.
+            if (INVENTORY_PICKER_PAGED) {
+                const key = activeInventoryKey();
+                const page = inventoryPages[key];
+                if (!page.loaded || page.query !== inventoryQuery()) { loadInventoryPage(key, true); return; }
+            }
             renderInventoryPicker();
         });
     }
+    if (INVENTORY_PICKER_PAGED) loadInventoryPage(activeInventoryKey(), true);
     if (selectedStrip) {
         selectedStrip.addEventListener('click', (e) => {
             const button = e.target.closest('[data-remove-kind][data-remove-id]');
@@ -1413,6 +1711,7 @@ function addRowSpecialSizes(row, specialRows, fallbackCapabilities = null) {
 
 function selectedInventorySizes() {
     const sizes = new Set();
+    if (INVENTORY_EXPLICIT_SIZES) selectedCreativeSizeOptions().forEach(option => sizes.add(option.label));
     inventorySelection.ad_units.forEach(id => addRowSizes(inventoryRowById('ad_units', id), sizes));
     inventorySelection.placements.forEach(id => {
         const placement = inventoryRowById('placements', id);
@@ -1438,7 +1737,7 @@ function selectedInventorySpecialSizes() {
 }
 
 function deriveCanonicalFormatsFromInventory() {
-    const formats = [];
+    const formats = INVENTORY_EXPLICIT_SIZES ? explicitSizeFormats() : [];
     inventorySelection.ad_units.forEach(id => addRowCanonicalFormats(inventoryRowById('ad_units', id), formats));
     inventorySelection.placements.forEach(id => {
         const placement = inventoryRowById('placements', id);
@@ -1501,23 +1800,30 @@ function renderDerivedFormats() {
 
     const sizes = selectedInventorySizes();
     const specialRows = selectedInventorySpecialSizes();
-    if ((inventorySelection.ad_units.size + inventorySelection.placements.size) === 0) {
-        status.textContent = 'Pick placements or ad units to detect creative formats.';
+    if (INVENTORY_EXPLICIT_SIZES) {
+        if (sizes.length === 0) {
+            status.textContent = 'Pick at least one creative size above to set the formats this bundle sells.';
+            list.innerHTML = '';
+            return;
+        }
+    } else if ((inventorySelection.ad_units.size + inventorySelection.placements.size) === 0) {
+        status.textContent = `Pick ${INVENTORY_VOCAB.placements} or ${INVENTORY_VOCAB.ad_units} to detect creative formats.`;
         list.innerHTML = '';
         return;
-    }
-    if (sizes.length === 0 && specialRows.length === 0) {
+    } else if (sizes.length === 0 && specialRows.length === 0) {
         status.textContent = 'No creative sizes were found on the selected inventory. Choose synced inventory with sizes.';
         list.innerHTML = '';
         return;
     }
 
     const fixedText = sizes.length
-        ? `${sizes.length} fixed ${sizes.length === 1 ? 'size' : 'sizes'} detected.`
+        ? `${sizes.length} fixed ${sizes.length === 1 ? 'size' : 'sizes'} ${INVENTORY_EXPLICIT_SIZES ? 'selected' : 'detected'}.`
         : 'No fixed creative sizes detected.';
-    const specialText = specialRows.length
-        ? ` ${specialRows.length} GAM 1x1 ${specialRows.length === 1 ? 'slot needs' : 'slots need'} capability setup before saving.`
-        : ' Formats use display creative types supported by GAM.';
+    const specialText = INVENTORY_EXPLICIT_SIZES
+        ? ' Formats follow the sizes picked above.'
+        : (specialRows.length
+            ? ` ${specialRows.length} GAM 1x1 ${specialRows.length === 1 ? 'slot needs' : 'slots need'} capability setup before saving.`
+            : ' Formats use display creative types supported by GAM.');
     status.textContent = fixedText + specialText;
 
     const formatChips = derivedFormatChips().map(group => `
@@ -1644,8 +1950,8 @@ function computeValidity() {
     const placements = _placementIds();
     const invSize = adUnits.length + placements.length;
     const invParts = [];
-    if (placements.length) invParts.push(placements.length + (placements.length === 1 ? ' placement' : ' placements'));
-    if (adUnits.length) invParts.push(adUnits.length + (adUnits.length === 1 ? ' ad unit' : ' ad units'));
+    if (placements.length) invParts.push(placements.length + ' ' + (placements.length === 1 ? INVENTORY_VOCAB_SINGULAR.placements : INVENTORY_VOCAB.placements));
+    if (adUnits.length) invParts.push(adUnits.length + ' ' + (adUnits.length === 1 ? INVENTORY_VOCAB_SINGULAR.ad_units : INVENTORY_VOCAB.ad_units));
 
     const formatCount = derivedFormats.length;
     const formatSizeCount = selectedInventorySizes().length;
@@ -1779,16 +2085,18 @@ function computeValidity() {
         inventory: item({
             ok: invSize > 0,
             text: invParts.length ? invParts.join(' · ') : 'none yet',
-            message: 'Add at least one placement or ad unit to save.',
+            message: `Add at least one ${INVENTORY_VOCAB_SINGULAR.placements} or ${INVENTORY_VOCAB_SINGULAR.ad_units} to save.`,
             focusId: 'inventory-picker-search',
         }),
         formats: item({
             ok: formatCount > 0 && specialSizeCount === 0,
             text: formatSizeCount > 0 ? `${formatSizeCount} ${formatSizeCount === 1 ? 'size' : 'sizes'}` : 'none',
-            message: specialSizeCount > 0
-                ? 'Classify GAM 1x1 special inventory before saving.'
-                : 'Pick inventory with synced creative sizes to save.',
-            focusId: 'inventory-picker-search',
+            message: INVENTORY_EXPLICIT_SIZES
+                ? 'Pick at least one creative size to save.'
+                : (specialSizeCount > 0
+                    ? 'Classify GAM 1x1 special inventory before saving.'
+                    : 'Pick inventory with synced creative sizes to save.'),
+            focusId: INVENTORY_EXPLICIT_SIZES ? 'creative-size-search' : 'inventory-picker-search',
         }),
         properties: item({
             ok: propertyOk,
