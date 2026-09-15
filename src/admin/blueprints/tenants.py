@@ -267,6 +267,13 @@ def tenant_settings(tenant_id, section=None):
             if adapter_config_obj and adapter_config_obj.adapter_type == "google_ad_manager":
                 oauth_configured = bool(adapter_config_obj.gam_refresh_token)
 
+            # Ad server identity is frozen once inventory has been synced —
+            # the template disables the adapter picker and hides "Edit
+            # Configuration" when this is set.
+            from src.core.database.adapter_config_lock import is_adapter_config_locked
+
+            adapter_locked = is_adapter_config_locked(db_session, tenant_id)
+
             # Check if GAM OAuth environment variables are configured
             gam_oauth_configured = bool(
                 os.environ.get("GAM_OAUTH_CLIENT_ID") and os.environ.get("GAM_OAUTH_CLIENT_SECRET")
@@ -293,6 +300,17 @@ def tenant_settings(tenant_id, section=None):
                     "secondary_currencies": adapter_config_obj.gam_secondary_currencies or [],
                     "network_timezone": adapter_config_obj.gam_network_timezone or "",
                 }
+                # Non-GAM adapters (improvedigital, triton, freewheel, …) keep
+                # their settings in config_json — merge them so their templates
+                # can re-render saved values. Secret values are reduced to a
+                # boolean so ciphertext never reaches the page source (templates
+                # only truth-test them, e.g. "leave blank to keep existing").
+                if adapter_config_obj.config_json:
+                    for key, value in adapter_config_obj.config_json.items():
+                        if any(marker in key for marker in ("secret", "password", "token", "api_key")):
+                            adapter_config_dict[key] = bool(value)
+                        else:
+                            adapter_config_dict[key] = value
 
             # Get environment info for URL generation
             is_production = os.environ.get("PRODUCTION") == "true"
@@ -346,6 +364,7 @@ def tenant_settings(tenant_id, section=None):
                 section=section or "general",
                 active_adapter=active_adapter,
                 adapter_config=adapter_config_dict,  # Use dict format
+                adapter_locked=adapter_locked,
                 oauth_configured=oauth_configured,
                 gam_oauth_configured=gam_oauth_configured,  # Environment check for GAM OAuth
                 principals=principals,

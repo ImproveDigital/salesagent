@@ -41,11 +41,12 @@ class PlatformMappingModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     google_ad_manager: dict[str, Any] | None = None
+    improvedigital: dict[str, Any] | None = None
     mock: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def at_least_one_platform(self):
-        if not any([self.google_ad_manager, self.mock]):
+        if not any([self.google_ad_manager, self.improvedigital, self.mock]):
             raise ValueError("At least one platform mapping is required")
         return self
 
@@ -58,6 +59,12 @@ class TargetingTemplateModel(BaseModel):
     audience_segments: list[str] | None = None
     content_categories: list[str] | None = None
     custom_parameters: dict[str, Any] | None = None
+    # Custom targeting rules from the product-form targeting widget —
+    # {"groups": [{"criteria": [{"keyId", "values"}]}]} (grouped),
+    # {"include"/"exclude": ...} (enhanced), or a flat key→values dict
+    # (legacy). Without this field Pydantic silently dropped the key and
+    # every product save scrubbed the widget's targeting to {}.
+    key_value_pairs: dict[str, Any] | None = None
 
 
 class PolicySettingsModel(BaseModel):

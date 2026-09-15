@@ -356,6 +356,7 @@ class SlackNotifier:
         error_message: str | None = None,
         details: dict[str, Any] | None = None,
         security_alert: bool = False,
+        tenant_id: str | None = None,
     ) -> bool:
         """
         Send audit log entry to Slack audit channel.
@@ -369,6 +370,7 @@ class SlackNotifier:
             error_message: Error message if operation failed
             details: Additional operation details
             security_alert: Whether this is a security-related event
+            tenant_id: Tenant ID for delivery tracking (must be the ID, not the display name)
 
         Returns:
             True if notification sent successfully
@@ -453,7 +455,7 @@ class SlackNotifier:
             max_retries=3,
             timeout=10,
             event_type="slack.audit_log",
-            tenant_id=tenant_name,  # Use tenant_name as identifier
+            tenant_id=tenant_id,
         )
 
         success_delivery, result = deliver_webhook_with_retry(delivery)
@@ -728,7 +730,7 @@ class SlackNotifier:
             max_retries=3,
             timeout=10,
             event_type="slack.media_buy_event",
-            tenant_id=tenant_name,
+            tenant_id=tenant_id,
             object_id=media_buy_id,
         )
 

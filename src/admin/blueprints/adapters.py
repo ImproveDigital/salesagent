@@ -203,6 +203,13 @@ def save_adapter_config(tenant_id, **kwargs):
         "config": { ... adapter-specific config ... }
     }
     """
+    from src.core.database.adapter_config_lock import (
+        ADAPTER_LOCKED_MESSAGE,
+        LOCKED_CONFIG_JSON_FIELDS,
+        AdapterConfigLockedError,
+        is_adapter_config_locked,
+    )
+
     try:
         data = request.get_json()
         if not data:
@@ -271,6 +278,33 @@ def save_adapter_config(tenant_id, **kwargs):
             stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
             adapter_config = session.scalars(stmt).first()
 
+            # Once inventory has been synced, the connection identity is
+            # frozen: no adapter switch (saving a different adapter_type also
+            # flips tenant.ad_server below), and the client_id/client_secret
+            # keys inside config_json are read-only. Compared post-validation
+            # so both sides are plaintext — the schema's field validator
+            # decrypts stored ciphertext, which is non-deterministic at rest
+            # and useless to compare directly. Other config fields (passwords,
+            # tokens, environment, …) stay editable.
+            if adapter_config and is_adapter_config_locked(session, tenant_id):
+                if adapter_config.adapter_type != adapter_type:
+                    return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+
+                if validated_config is not None and adapter_config.config_json:
+                    locked_fields = [f for f in LOCKED_CONFIG_JSON_FIELDS if f in type(validated_config).model_fields]
+                    stored_model = None
+                    if locked_fields:
+                        try:
+                            stored_model = type(validated_config).model_validate(adapter_config.config_json)
+                        except ValidationError:
+                            # Legacy/partial stored config that no longer
+                            # validates — nothing comparable to protect.
+                            stored_model = None
+                    if stored_model is not None:
+                        for field_name in locked_fields:
+                            if getattr(validated_config, field_name) != getattr(stored_model, field_name):
+                                return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
+
             if not adapter_config:
                 adapter_config = AdapterConfig(
                     tenant_id=tenant_id,
@@ -292,6 +326,23 @@ def save_adapter_config(tenant_id, **kwargs):
             # Note: GAM will be added as its schema is created. FreeWheel
             # already uses config_json via its connection schema.
 
+            # Keep tenant.ad_server in sync: the products/settings pages resolve
+            # the active adapter from tenant.ad_server, while the runtime
+            # get_adapter() prefers AdapterConfig.adapter_type — saving a config
+            # here IS an adapter switch, so both must agree or the product forms
+            # render the wrong adapter's UI.
+            from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+            tenant = TenantConfigRepository(session, tenant_id).get_tenant()
+            if tenant and tenant.ad_server != adapter_type:
+                logger.info(
+                    "Adapter config save switches tenant.ad_server: tenant_id=%s %s -> %s",
+                    tenant_id,
+                    tenant.ad_server,
+                    adapter_type,
+                )
+                tenant.ad_server = adapter_type
+
             session.commit()
             if adapter_type == "freewheel":
                 logger.info(
@@ -309,6 +360,10 @@ def save_adapter_config(tenant_id, **kwargs):
                 logger.info(f"Saved adapter config for tenant {tenant_id}: {adapter_type}")
 
         return jsonify({"success": True, "adapter_type": adapter_type})
+
+    except AdapterConfigLockedError as e:
+        logger.info(f"Blocked adapter config change on locked tenant {tenant_id}: {e}")
+        return jsonify({"success": False, "error": ADAPTER_LOCKED_MESSAGE}), 403
 
     except Exception as e:
         logger.error(f"Error saving adapter config: {e}", exc_info=True)
@@ -973,6 +1028,849 @@ def test_springserve_connection(tenant_id, **kwargs):
     except Exception as e:
         logger.error(f"SpringServe connection test failed: {e}", exc_info=True)
         return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
+
+
+def _resolve_improvedigital_credentials(tenant_id: str, data: dict) -> tuple[dict | None, str | None]:
+    """Resolve Improve Digital client credentials from a request body, falling
+    back to the values stored on AdapterConfig.config_json.
+
+    Submitted ciphertext on the secret field is rejected to prevent
+    cross-tenant replay. Returns ``(client_kwargs, error_message)``.
+    """
+    from src.core.utils.encryption import is_encrypted
+
+    client_id = data.get("client_id")
+    client_secret = data.get("client_secret")
+    api_base_url = data.get("api_base_url")
+
+    if client_secret and is_encrypted(client_secret):
+        return None, "client_secret must be plaintext (encrypted-token replay rejected)"
+
+    if not (client_id and client_secret):
+        from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+        with get_db_session() as session:
+            existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+            if existing and existing.config_json:
+                from src.adapters.improvedigital import ImproveDigitalConnectionConfig
+
+                try:
+                    rehydrated = ImproveDigitalConnectionConfig.model_validate(existing.config_json)
+                    client_id = client_id or rehydrated.client_id
+                    client_secret = client_secret or rehydrated.client_secret
+                    api_base_url = api_base_url or rehydrated.api_base_url
+                except ValidationError:
+                    pass
+
+    if not (client_id and client_secret):
+        return None, "client_id + client_secret are required (submit them or save the configuration first)"
+
+    client_kwargs: dict = {"client_id": client_id, "client_secret": client_secret}
+    if api_base_url:
+        client_kwargs["base_url"] = api_base_url
+    return client_kwargs, None
+
+
+def _improvedigital_rows(payload, *keys: str) -> list:
+    """Unwrap a 360Yield list envelope (e.g. ``{"buying_entity_offices": [...]}``)."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in keys:
+            if isinstance(payload.get(key), list):
+                return payload[key]
+        for value in payload.values():
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _improvedigital_buyer_options(payload) -> list[dict]:
+    """Normalize 360Yield buyer rows into ``{id, name}`` picker options.
+
+    Buyers surface as a ``buyers`` list on ``/lookup/v1/user-details`` and on
+    buying-entity office rows. ``BuyerDto`` carries both a numeric ``id`` and
+    a string ``buyer_id`` (the platform's external reference) — the line item
+    field is an integer, so the numeric id wins and a non-numeric fallback is
+    dropped rather than sent as garbage.
+    """
+    rows = payload.get("buyers") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    options: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        identifier = row.get("id")
+        if identifier is None and str(row.get("buyer_id") or "").isdigit():
+            identifier = int(row["buyer_id"])
+        if not isinstance(identifier, int):
+            continue
+        options.append({"id": identifier, "name": row.get("name") or row.get("buyer_name") or str(identifier)})
+    return options
+
+
+def _improvedigital_paginate(fetch_page, envelope_key: str, page_size: int = 100, max_rows: int = 10000) -> list:
+    """Exhaust a 360Yield offset/limit-paginated list endpoint.
+
+    The server clamps ``limit`` (observed max 100), so a page shorter than the
+    requested size is NOT a termination signal. Advance by what was actually
+    returned and stop on an empty page, on reaching the envelope's
+    ``totalNumberOfElemements`` (sic — upstream typo), or on a page that adds
+    no unseen ids (guards against a server that ignores ``offset``);
+    ``max_rows`` backstops a runaway loop.
+    """
+
+    def _row_key(row: dict) -> tuple:
+        # Dictionary rows (RegionDto/CountryDto) carry only ``name`` — keying
+        # on id alone would collapse them all to None and stop pagination
+        # after the first page.
+        return (row.get("id"), row.get("name"))
+
+    rows: list = []
+    seen_ids: set = set()
+    offset = 0
+    while len(rows) < max_rows:
+        payload = fetch_page(limit=page_size, offset=offset)
+        page = _improvedigital_rows(payload, envelope_key)
+        if not page:
+            break
+        fresh = [row for row in page if not isinstance(row, dict) or _row_key(row) not in seen_ids]
+        seen_ids.update(_row_key(row) for row in fresh if isinstance(row, dict))
+        if not fresh:
+            break
+        rows.extend(fresh)
+        total = payload.get("totalNumberOfElemements") if isinstance(payload, dict) else None
+        if isinstance(total, int) and len(rows) >= total:
+            break
+        offset += len(page)
+    return rows[:max_rows]
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/test-connection", methods=["POST"])
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
+def test_improvedigital_connection(tenant_id, **kwargs):
+    """Verify Improve Digital OAuth2 credentials by minting a bearer and
+    probing a Classic-campaigns read; on success, best-effort identify the
+    API user via ``/lookup/v1/user-details``.
+
+    Read-only probe — never writes to AdapterConfig — so it opts into the
+    embedded-write gate.
+    """
+    try:
+        data = request.get_json() or {}
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client = ImproveDigitalClient(**client_kwargs)
+        try:
+            status, _body = client.probe("GET", "/rtb/v1/classic/campaigns?limit=1")
+        except ImproveDigitalError as exc:
+            logger.warning(
+                "Improve Digital credential probe failed: tenant_id=%s status=%s error=%s body_excerpt=%s",
+                tenant_id,
+                exc.status_code,
+                exc,
+                safe_upstream_body_excerpt(exc.body),
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the credentials"}), 200
+
+        if status >= 400:
+            return jsonify({"success": False, "error": f"Improve Digital responded HTTP {status}"}), 200
+
+        result: dict = {"success": True, "base_url": client._transport.base_url}
+        try:
+            details = client.lookups.user_details()
+            result["user"] = {
+                "user_id": details.get("user_id"),
+                "name": f"{details.get('first_name', '')} {details.get('last_name', '')}".strip(),
+                "business_unit": details.get("business_unit_name"),
+                # Campaign booking requires a business_unit_id (layer-2 rule,
+                # not in the create schema) — the API user's own unit is the
+                # right default, so the UI auto-fills it from here. The
+                # user_id doubles as the improve_demand_contact_id, and the
+                # buyer list backs the Buyer ID picker.
+                "business_unit_id": details.get("business_unit_id"),
+                "buyers": _improvedigital_buyer_options(details),
+            }
+        except ImproveDigitalError:
+            pass  # identity display is optional — credentials are already verified
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Improve Digital connection test failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/discover-buying-entities", methods=["POST"])
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
+def discover_improvedigital_buying_entities(tenant_id, **kwargs):
+    """Discover buying entities — or, when ``buying_entity_id`` is submitted,
+    that entity's offices (each carrying its ``improve_demand_contact_id``).
+
+    Backs the cascading pickers in the adapter connection UI. Requires
+    admin-scoped Improve Digital credentials; a 403 upstream is reported as
+    ``discovery_available: false`` so the UI falls back to manual ID entry.
+
+    Read-only — never writes to AdapterConfig — so it opts into the
+    embedded-write gate.
+    """
+    try:
+        data = request.get_json() or {}
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client = ImproveDigitalClient(**client_kwargs)
+        try:
+            if data.get("buying_entity_id"):
+                rows = _improvedigital_paginate(
+                    lambda **params: client.admin.list_buying_entity_offices(int(data["buying_entity_id"]), **params),
+                    "buying_entity_offices",
+                )
+                offices = [
+                    {
+                        "id": row.get("id"),
+                        "office": row.get("office"),
+                        "buying_entity_id": row.get("buying_entity_id"),
+                        "improve_demand_contact_id": row.get("improve_demand_contact_id"),
+                        "billing_currency_code": row.get("billing_currency_code"),
+                        "buying_types": row.get("buying_types") or [],
+                        # Offices that pin a buyer let the picker fill Buyer ID
+                        # from the office selection instead of a second lookup.
+                        "buyers": _improvedigital_buyer_options(row),
+                    }
+                    for row in rows
+                    if row.get("active") and "Classic" in (row.get("buying_types") or [])
+                ]
+                return jsonify({"success": True, "offices": offices})
+
+            rows = _improvedigital_paginate(client.admin.list_buying_entities, "buying_entities_combo")
+            entities = [{"id": row.get("id"), "name": row.get("name")} for row in rows]
+            return jsonify({"success": True, "buying_entities": entities})
+        except ImproveDigitalError as exc:
+            if exc.status_code == 403:
+                return jsonify(
+                    {
+                        "success": False,
+                        "discovery_available": False,
+                        "error": "Credentials lack Admin API scope — enter the IDs manually",
+                    }
+                )
+            logger.warning(
+                "Improve Digital buying-entity discovery failed: tenant_id=%s status=%s error=%s body_excerpt=%s",
+                tenant_id,
+                exc.status_code,
+                exc,
+                safe_upstream_body_excerpt(exc.body),
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the discovery request"}), 200
+    except Exception as e:
+        logger.error(f"Improve Digital buying-entity discovery failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Discovery failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/discover-metadata", methods=["POST"])
+@require_tenant_access(role=("admin",), allow_embedded_writes=True)
+def discover_improvedigital_metadata(tenant_id, **kwargs):
+    """Search the campaign-metadata dimensions (advertisers / agencies).
+
+    Backs the Campaign Metadata pickers in the adapter connection UI. Both
+    endpoints take a free-text ``search`` and return ``{id, name}`` rows —
+    advertiser ids are UUID strings, agency ids are integers, so ids are
+    passed through verbatim rather than coerced.
+
+    Read-only — never writes to AdapterConfig — so it opts into the
+    embedded-write gate.
+    """
+    try:
+        data = request.get_json() or {}
+        kind = str(data.get("kind") or "advertisers")
+        if kind not in ("advertisers", "agencies"):
+            return jsonify({"success": False, "error": f"Unknown metadata kind {kind!r}"}), 400
+
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, data)
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client = ImproveDigitalClient(**client_kwargs)
+        search = (data.get("search") or "").strip() or None
+        try:
+            fetch = client.metadata.list_advertisers if kind == "advertisers" else client.metadata.list_agencies
+            rows = _improvedigital_rows(fetch(search), kind, "content", "data")
+        except ImproveDigitalError as exc:
+            if exc.status_code == 403:
+                return jsonify(
+                    {
+                        "success": False,
+                        "discovery_available": False,
+                        "error": "Credentials lack metadata API scope — enter the values manually",
+                    }
+                )
+            logger.warning(
+                "Improve Digital metadata discovery failed: tenant_id=%s kind=%s status=%s error=%s body_excerpt=%s",
+                tenant_id,
+                kind,
+                exc.status_code,
+                exc,
+                safe_upstream_body_excerpt(exc.body),
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the metadata lookup"}), 200
+
+        items = [
+            {"id": row.get("id"), "name": row.get("name")}
+            for row in rows
+            if isinstance(row, dict) and row.get("id") is not None
+        ]
+        return jsonify({"success": True, "kind": kind, "items": items})
+    except Exception as e:
+        logger.error(f"Improve Digital metadata discovery failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Metadata discovery failed (see server logs)"}), 500
+
+
+# Picker page sizes for the Improve Digital inventory endpoint (see below).
+_IMPD_PICKER_PAGE_SIZE = 50
+_IMPD_PICKER_MAX_PAGE_SIZE = 200
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory", methods=["GET"])
+@require_tenant_access()
+def list_improvedigital_inventory(tenant_id, **kwargs):
+    """Return a page of locally-cached Improve Digital inventory entries for
+    the product setup UI.
+
+    Query params:
+
+    * ``entity_type`` (required) — publisher, placement, package, size.
+    * ``ids`` — comma-separated entity ids; returns just those rows (chip
+      label lookup for already-attached ids). Ignores paging params.
+    * ``q`` — case-insensitive substring match on name or id, in SQL.
+    * ``parent_id`` — narrows placements to one publisher.
+    * ``offset`` / ``limit`` — page window; ``limit`` defaults to 50 and is
+      capped at 200. ``count`` in the response is the TOTAL matching rows,
+      ``has_more`` says whether another page exists.
+
+    Everything is filtered and paged in SQL through a three-column
+    projection — the full placement set is hundreds of thousands of rows,
+    and materialising it as ORM objects OOM-killed the dev task.
+    """
+    from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+    entity_type = request.args.get("entity_type")
+    parent_id = request.args.get("parent_id")
+    q = (request.args.get("q") or "").strip() or None
+    ids_param = request.args.get("ids")
+    offset = max(request.args.get("offset", default=0, type=int) or 0, 0)
+    limit = request.args.get("limit", default=_IMPD_PICKER_PAGE_SIZE, type=int) or _IMPD_PICKER_PAGE_SIZE
+    limit = max(1, min(limit, _IMPD_PICKER_MAX_PAGE_SIZE))
+
+    if not entity_type:
+        return jsonify({"success": False, "error": "entity_type query param is required"}), 400
+
+    def _item(row: tuple[str, str | None, str | None]) -> dict[str, str | None]:
+        entity_id, name, row_parent_id = row
+        return {"entity_id": entity_id, "name": name, "parent_id": row_parent_id}
+
+    with get_db_session() as session:
+        repo = ImproveDigitalInventoryRepository(session, tenant_id)
+        if ids_param is not None:
+            ids = [part.strip() for part in ids_param.split(",") if part.strip()]
+            items = [_item(row) for row in repo.list_picker_rows_by_ids(entity_type, ids)]
+            return jsonify(
+                {"success": True, "entity_type": entity_type, "count": len(items), "items": items, "has_more": False}
+            )
+        total = repo.count_picker_rows(entity_type, parent_id=parent_id, q=q)
+        rows = repo.list_picker_rows(entity_type, parent_id=parent_id, q=q, offset=offset, limit=limit)
+
+    items = [_item(row) for row in rows]
+    return jsonify(
+        {
+            "success": True,
+            "entity_type": entity_type,
+            "count": total,
+            "items": items,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(items) < total,
+        }
+    )
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/inventory-stats", methods=["GET"])
+@require_tenant_access()
+def improvedigital_inventory_stats(tenant_id, **kwargs):
+    """Quick stats for the Improve Digital inventory cache — row counts per
+    entity type + last sync time. Feeds the Browse Inventory header and the
+    Sync Inventory page without materializing the 20k+ cached rows."""
+    from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
+
+    with get_db_session() as session:
+        repo = ImproveDigitalInventoryRepository(session, tenant_id)
+        counts = repo.counts_by_type()
+        last_synced = repo.latest_sync_at()
+
+    return jsonify(
+        {
+            "success": True,
+            "counts": counts,
+            "total": sum(counts.values()),
+            "last_synced_at": last_synced.isoformat() if last_synced else None,
+        }
+    )
+
+
+@adapters_bp.route(
+    "/api/tenant/<tenant_id>/adapters/improvedigital/packages/<int:package_id>/placements", methods=["GET"]
+)
+@require_tenant_access()
+def peek_improvedigital_package_placements(tenant_id, package_id, **kwargs):
+    """Peek inside one placement package — live membership from the 360Yield
+    API (``GET /rtb/v1/packages/{id}/placements``).
+
+    On-demand per package the operator actually expands: package membership
+    is dynamic on Improve Digital's side, so it is deliberately NOT part of
+    the inventory sync (2k+ packages × one request each would eat the
+    100-reads/60s quota for ~20 minutes per sweep).
+    """
+    try:
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, {})
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+
+        from src.adapters.improvedigital import ImproveDigitalClient, ImproveDigitalError
+
+        client = ImproveDigitalClient(**client_kwargs)
+        try:
+            raw = client.inventory.package_placements(package_id)
+        except ImproveDigitalError as exc:
+            if exc.status_code == 404:
+                return jsonify({"success": False, "error": "Package not found on Improve Digital"}), 404
+            logger.warning(
+                "Improve Digital package peek failed: tenant_id=%s package_id=%s status=%s error=%s",
+                tenant_id,
+                package_id,
+                exc.status_code,
+                exc,
+            )
+            return jsonify({"success": False, "error": "Improve Digital rejected the lookup"}), 200
+
+        placements = [
+            {
+                "id": row.get("placement_id") if row.get("placement_id") is not None else row.get("id"),
+                "name": row.get("placement_name") or row.get("name"),
+                "site": row.get("site_name"),
+                "publisher": row.get("publisher_name"),
+            }
+            for row in _improvedigital_rows(raw, "placements", "content")
+        ]
+        return jsonify({"success": True, "package_id": package_id, "count": len(placements), "placements": placements})
+    except Exception as e:
+        logger.error(f"Improve Digital package peek failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Package lookup failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-inventory", methods=["POST"])
+@require_tenant_access(api_mode=True, role=("admin",))
+def sync_improvedigital_inventory(tenant_id, **kwargs):
+    """Enqueue a 360Yield buy-side inventory sweep and return immediately.
+
+    The sweep runs in a background thread via the shared sync orchestration
+    (adapter construction from stored config, SyncJob bookkeeping); rows
+    are committed page-by-page so the cache fills progressively. Returns
+    202 with the ``sync_id`` — the UI polls ``sync-status/<sync_id>`` for
+    the outcome. Enqueueing is idempotent: if a sweep is already in flight
+    its ``sync_id`` is returned instead of starting a duplicate.
+
+    The cache feeds the Improve Digital product setup UI; it's not exposed
+    to AdCP buyers (property discovery goes through AAO lookup).
+    """
+    from src.services.adapter_sync_orchestration import enqueue_adapter_sync
+
+    try:
+        sync_id = enqueue_adapter_sync(
+            tenant_id=tenant_id,
+            adapter_type="improvedigital",
+            sync_kind="inventory",
+            triggered_by="admin_button",
+        )
+        if sync_id is None:
+            return (
+                jsonify({"success": False, "error": "Improve Digital adapter is not configured for this tenant"}),
+                400,
+            )
+        return jsonify({"success": True, "sync_id": sync_id, "status": "queued"}), 202
+    except Exception as e:
+        logger.error(f"Improve Digital inventory sync enqueue failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed to start (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-status/<sync_id>", methods=["GET"])
+@require_tenant_access(api_mode=True)
+def improvedigital_sync_status(tenant_id, sync_id, **kwargs):
+    """Poll one sync job's state — feeds the async Sync Inventory button.
+
+    Counts/errors come from ``SyncJob.progress`` (stamped by the
+    orchestrator when the run finishes); while the job is still running
+    the UI shows live cache growth via ``inventory-stats`` instead.
+    """
+    from src.core.database.repositories.sync_job import SyncJobRepository
+
+    with get_db_session() as session:
+        job = SyncJobRepository(session, tenant_id).find_by_sync_id(sync_id)
+        if job is None:
+            return jsonify({"success": False, "error": "Unknown sync job"}), 404
+        progress = job.progress or {}
+        payload = {
+            "success": True,
+            "sync_id": job.sync_id,
+            "status": job.status,
+            "counts": progress.get("counts", {}),
+            "errors": progress.get("errors", {}),
+            "metadata": progress.get("metadata", {}),
+            "error_message": job.error_message,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        }
+    return jsonify(payload)
+
+
+def _improvedigital_reporting_payload(
+    stat_rows,
+    buys_by_campaign: dict,
+    currency: str,
+    *,
+    campaign_id: str | None = None,
+    media_buy_id: str | None = None,
+    q: str | None = None,
+) -> dict:
+    """Shape line-item stats cache rows into the reporting-page JSON.
+
+    ``buys_by_campaign`` maps Classic campaign IDs to MediaBuy rows so each
+    stats row can carry the buy it belongs to; rows whose campaign has no
+    matching buy (e.g. booked outside salesagent) still render, unattributed.
+    Spend is stored as micros — converted to currency units here, once.
+
+    Filters apply per row *before* totals, so the summary cards always
+    match the visible table: ``campaign_id`` / ``media_buy_id`` are exact
+    matches, ``q`` is a case-insensitive substring across the buy's order
+    name, advertiser and the campaign / line-item / media-buy ids.
+    """
+    needle = (q or "").strip().lower()
+    rows = []
+    total_impressions = 0
+    total_clicks = 0
+    total_spend = 0.0
+    total_completed = 0
+    for stat in stat_rows:
+        buy = buys_by_campaign.get(str(stat.campaign_id)) if stat.campaign_id else None
+        if campaign_id and str(stat.campaign_id or "") != str(campaign_id):
+            continue
+        if media_buy_id and (buy is None or buy.media_buy_id != media_buy_id):
+            continue
+        if needle:
+            haystack = " ".join(
+                str(value)
+                for value in (
+                    stat.campaign_id,
+                    stat.line_item_id,
+                    buy.media_buy_id if buy else None,
+                    buy.order_name if buy else None,
+                    buy.advertiser_name if buy else None,
+                )
+                if value
+            ).lower()
+            if needle not in haystack:
+                continue
+        impressions = int(stat.impressions or 0)
+        clicks = int(stat.clicks) if stat.clicks is not None else None
+        spend = round((stat.spend_micros or 0) / 1_000_000, 2)
+        rows.append(
+            {
+                "campaign_id": stat.campaign_id,
+                "line_item_id": stat.line_item_id,
+                "media_buy_id": buy.media_buy_id if buy else None,
+                "order_name": buy.order_name if buy else None,
+                "advertiser_name": buy.advertiser_name if buy else None,
+                "impressions": impressions,
+                "clicks": clicks,
+                "ctr": round(clicks / impressions * 100, 2) if clicks and impressions else None,
+                "completed_views": int(stat.completed_views) if stat.completed_views is not None else None,
+                "spend": spend,
+                "currency": stat.currency or currency,
+                "as_of": stat.as_of.isoformat() if stat.as_of else None,
+            }
+        )
+        total_impressions += impressions
+        total_clicks += clicks or 0
+        total_spend += spend
+        total_completed += int(stat.completed_views or 0)
+    return {
+        "rows": rows,
+        "totals": {
+            "impressions": total_impressions,
+            "clicks": total_clicks,
+            "ctr": round(total_clicks / total_impressions * 100, 2) if total_impressions else None,
+            "completed_views": total_completed,
+            "spend": round(total_spend, 2),
+        },
+        "currency": currency,
+    }
+
+
+# Quick ranges the reporting page may request live from the Report API
+# (subset of ReportGenerationRequestDateRange.quick the UI exposes).
+_IMPROVEDIGITAL_REPORT_RANGES = {
+    "TODAY",
+    "YESTERDAY",
+    "LAST_7_DAYS",
+    "LAST_31_DAYS",
+    "LAST_90_DAYS",
+    "THIS_MONTH",
+    "LAST_MONTH",
+    "LAST_3_MONTHS",
+}
+# Mirrors the GAM reporting page's timezone picker (+ UTC).
+_IMPROVEDIGITAL_REPORT_TIMEZONES = {
+    "Europe/Amsterdam",
+    "Europe/London",
+    "Europe/Lisbon",
+    "Europe/Helsinki",
+    "UTC",
+}
+
+
+def _improvedigital_live_stat_rows(
+    client, tenant_id: str, campaign_ids: list[int], quick_range: str, timezone: str, currency: str
+):
+    """Query the Report API live for a date-filtered reporting-page view.
+
+    The stats cache holds one aggregate row per line item with no time
+    dimension, so date filters can't slice it — a live preview scoped to
+    the tenant's campaigns answers instead (same request vocabulary as the
+    reporting sync). Returns stat-row-shaped objects so
+    :func:`_improvedigital_reporting_payload` treats both sources alike.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from src.adapters.improvedigital.reporting_sync import (
+        PREVIEW_ROW_LIMIT,
+        ImproveDigitalReportingSync,
+        _as_float,
+        _as_int,
+        build_report_request,
+        filter_to_existing_campaigns,
+        quick_date_range,
+        resolve_currency_id,
+    )
+
+    # Environment gate — the Report API warehouse serves foreign-environment
+    # campaign ids; only query campaigns this environment actually knows.
+    campaign_ids = [int(cid) for cid in filter_to_existing_campaigns(client, tenant_id, [str(c) for c in campaign_ids])]
+    if not campaign_ids:
+        return []
+    # Shared request builder + currency resolver — one wire contract with
+    # the reporting sync, so the live view can never drift from it.
+    # quick_date_range translates TODAY (500s upstream) to a relative range.
+    request_body = build_report_request(
+        currency_id=resolve_currency_id(client, currency),
+        date_range=quick_date_range(quick_range),
+        campaign_ids=campaign_ids,
+        timezone=timezone,
+    )
+    payload = {
+        "rows": PREVIEW_ROW_LIMIT,
+        "report_generation_request": {**request_body, "action": "PREVIEW_REPORT"},
+    }
+    logger.info(
+        "Improve Digital live report view: POST /report/ext/preview window=%s timezone=%s campaigns=%s",
+        quick_range,
+        timezone,
+        campaign_ids,
+    )
+    import time as _time
+
+    started = _time.monotonic()
+    rows = ImproveDigitalReportingSync._parse_rows(client.reporting.preview(payload))
+    logger.info(
+        "Improve Digital live report view: %d line-item row(s) in %.1fs",
+        len(rows),
+        _time.monotonic() - started,
+    )
+    as_of = datetime.now(UTC)
+    stat_rows = []
+    for row in rows:
+        spend = _as_float(row.get("advertiser_payout"))
+        stat_rows.append(
+            SimpleNamespace(
+                campaign_id=str(row["campaign_id"]) if row.get("campaign_id") not in (None, "") else None,
+                line_item_id=str(row["line_item_id"]),
+                impressions=_as_int(row.get("impressions")),
+                clicks=_as_int(row.get("clicks")),
+                completed_views=_as_int(row.get("complete")),
+                spend_micros=int(round(spend * 1_000_000)) if spend is not None else 0,
+                currency=currency,
+                as_of=as_of,
+            )
+        )
+    return stat_rows
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/reporting", methods=["GET"])
+@require_tenant_access(api_mode=True)
+def get_improvedigital_reporting(tenant_id, **kwargs):
+    """Serve reporting-page data — cached by default, live when date-filtered.
+
+    Without ``date_range``, reads ``improvedigital_line_item_stats``
+    (populated by the reporting sync — no upstream call, instant load).
+    With ``date_range=<quick>`` (e.g. TODAY, LAST_7_DAYS) plus optional
+    ``timezone``, runs a live Report API preview scoped to the tenant's
+    campaigns instead — the cache has no time dimension to slice.
+    Campaigns are joined to media buys via the
+    ``improvedigital_<campaign_id>`` reference on ``external_id`` /
+    ``media_buy_id``; ``campaign_id`` / ``media_buy_id`` / ``q`` filter
+    either source identically.
+    """
+    from src.adapters.improvedigital.client import ImproveDigitalError
+    from src.core.database.models import MediaBuy
+    from src.core.database.repositories.improvedigital_line_item_stats import (
+        ImproveDigitalLineItemStatsRepository,
+    )
+
+    date_range = (request.args.get("date_range") or "").strip().upper() or None
+    timezone_arg = (request.args.get("timezone") or "").strip() or "Europe/Amsterdam"
+    if date_range and date_range not in _IMPROVEDIGITAL_REPORT_RANGES:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": f"Unsupported date_range — pick one of {sorted(_IMPROVEDIGITAL_REPORT_RANGES)}",
+                }
+            ),
+            400,
+        )
+    if timezone_arg not in _IMPROVEDIGITAL_REPORT_TIMEZONES:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": f"Unsupported timezone — pick one of {sorted(_IMPROVEDIGITAL_REPORT_TIMEZONES)}",
+                }
+            ),
+            400,
+        )
+
+    with get_db_session() as session:
+        repo = ImproveDigitalLineItemStatsRepository(session, tenant_id)
+        last_synced_at = repo.latest_sync_at()
+        stat_rows = [] if date_range else repo.list_all()
+
+        buys_by_campaign: dict = {}
+        for buy in session.scalars(select(MediaBuy).filter_by(tenant_id=tenant_id)).all():
+            for candidate in (buy.external_id, buy.media_buy_id):
+                if not candidate:
+                    continue
+                campaign_id = str(candidate).removeprefix("improvedigital_")
+                if campaign_id.isdigit():
+                    buys_by_campaign[campaign_id] = buy
+                    break
+
+        config_row = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
+        currency = str((config_row.config_json or {}).get("currency") or "EUR") if config_row else "EUR"
+
+    if date_range:
+        # Live path — only campaigns booked via salesagent are queried
+        # (unattributed cache rows have no known campaign list to scope by).
+        client_kwargs, cred_error = _resolve_improvedigital_credentials(tenant_id, {})
+        if cred_error:
+            return jsonify({"success": False, "error": cred_error}), 400
+        from src.adapters.improvedigital import ImproveDigitalClient
+
+        client = ImproveDigitalClient(timeout=90.0, **client_kwargs)
+        try:
+            stat_rows = _improvedigital_live_stat_rows(
+                client,
+                tenant_id,
+                sorted(int(cid) for cid in buys_by_campaign),
+                date_range,
+                timezone_arg,
+                currency,
+            )
+        except ImproveDigitalError as exc:
+            logger.warning("Improve Digital live reporting query failed for tenant %s: %s", tenant_id, exc)
+            return jsonify({"success": False, "error": f"Report API query failed: {exc}"}), 502
+
+    payload = _improvedigital_reporting_payload(
+        stat_rows,
+        buys_by_campaign,
+        currency,
+        campaign_id=(request.args.get("campaign_id") or "").strip() or None,
+        media_buy_id=(request.args.get("media_buy_id") or "").strip() or None,
+        q=(request.args.get("q") or "").strip() or None,
+    )
+    payload["success"] = True
+    payload["source"] = "live" if date_range else "cache"
+    payload["date_range"] = date_range
+    payload["last_synced_at"] = last_synced_at.isoformat() if last_synced_at else None
+    return jsonify(payload)
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/sync-reporting", methods=["POST"])
+@require_tenant_access(role=("admin",), api_mode=True)
+def sync_improvedigital_reporting(tenant_id, **kwargs):
+    """Pull fresh delivery metrics from the 360Yield Report API (generation
+    job + preview) and upsert the ``improvedigital_line_item_stats`` cache
+    feeding the reporting page and ``get_media_buy_delivery``; totals also
+    roll up to the media buys' ``delivered_*`` columns.
+
+    Async: enqueues the sync in a background thread and returns 202 with
+    the ``sync_id`` — the UI polls ``sync-status/<sync_id>`` for the
+    outcome (a generation job + preview can take many seconds, and holding
+    the request thread open serves nobody). Enqueueing is idempotent: a
+    sync already in flight returns its existing ``sync_id``. A pending
+    Report API scope grant surfaces via the status endpoint's metadata.
+
+    Optional JSON body narrows the sync to the reporting page's selected
+    campaign: ``{"campaign_id": "<id>"}`` (date filters stay view-only —
+    a partial-window sync would clobber the lifetime cache).
+    """
+    from src.services.adapter_sync_orchestration import enqueue_adapter_sync
+
+    # Only the campaign filter narrows the sync. Date-range/timezone are
+    # deliberately NOT forwarded: the cache and delivered_* columns hold
+    # lifetime totals, and syncing a partial window would overwrite them
+    # with window-only counts. Date-filtered views use the live GET path.
+    data = request.get_json(silent=True) or {}
+    run_kwargs: dict = {}
+    campaign_id = str(data.get("campaign_id") or "").strip()
+    if campaign_id:
+        if not campaign_id.isdigit():
+            return jsonify({"success": False, "error": "campaign_id must be numeric"}), 400
+        run_kwargs["campaign_ids"] = [campaign_id]
+
+    try:
+        sync_id = enqueue_adapter_sync(
+            tenant_id=tenant_id,
+            adapter_type="improvedigital",
+            sync_kind="reporting",
+            triggered_by="admin_button",
+            run_kwargs=run_kwargs or None,
+        )
+        if sync_id is None:
+            return (
+                jsonify({"success": False, "error": "Improve Digital adapter is not configured for this tenant"}),
+                400,
+            )
+        return jsonify({"success": True, "sync_id": sync_id, "status": "queued"}), 202
+    except Exception as e:
+        logger.error(f"Improve Digital reporting sync enqueue failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed to start (see server logs)"}), 500
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/springserve/inventory", methods=["GET"])

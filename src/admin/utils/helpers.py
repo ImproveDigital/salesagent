@@ -22,6 +22,19 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
+# Display labels for ad-server adapter types. Keys match
+# ``adapter_config.adapter_type`` / ``tenant.ad_server`` values.
+ADAPTER_LABELS: dict[str, str] = {
+    "google_ad_manager": "Google Ad Manager",
+    "gam": "Google Ad Manager",
+    "freewheel": "Freewheel",
+    "broadstreet": "Broadstreet",
+    "springserve": "SpringServe",
+    "triton": "Triton",
+    "improvedigital": "Improve Digital",
+    "mock": "Mock",
+}
+
 
 def is_admin_production() -> bool:
     """Return True when admin should behave in production-safe mode.

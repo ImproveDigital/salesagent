@@ -9,6 +9,7 @@ from .broadstreet import BroadstreetAdapter
 from .creative_engine import CreativeEngineAdapter
 from .freewheel import FreeWheelAdapter
 from .google_ad_manager import GoogleAdManager as GAMAdapter
+from .improvedigital import ImproveDigitalAdapter
 from .mock_ad_server import MockAdServer as MockAdapter
 from .springserve import SpringServeAdapter
 
@@ -24,6 +25,7 @@ ADAPTER_REGISTRY = {
     "google_ad_manager": GAMAdapter,
     "broadstreet": BroadstreetAdapter,
     "freewheel": FreeWheelAdapter,
+    "improvedigital": ImproveDigitalAdapter,
     "springserve": SpringServeAdapter,
     "mock": MockAdapter,
     "creative_engine": CreativeEngineAdapter,

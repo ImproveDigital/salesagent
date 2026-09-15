@@ -115,8 +115,8 @@
             <nav>
                 {% if session.authenticated %}
                     {# Identity lockup. The "ADMIN" mode pill is super-admin-only
-                       (operator-of-platform); for tenant_admin we don't need a
-                       pill since the workspace name already conveys context. #}
+                       (operator-of-platform); for tenant users the pill shows
+                       the configured ad-server adapter instead. #}
                     <span class="role-tag">
                         {% if session.role == 'super_admin' %}
                             <span class="workspace-name">{{ session.email or session.username }}</span>
@@ -125,6 +125,14 @@
                             <span class="workspace-name">{{ tenant.name }}</span>
                         {% else %}
                             <span class="workspace-name">{{ session.email or session.username }}</span>
+                        {% endif %}
+                        {% if nav_adapter_type %}
+                            {# Configured ad-server chip — metadata, not a control
+                               (deliberately NOT .workspace-name: that class carries
+                               the ▾ switcher affordance). #}
+                            <span class="adapter-chip" title="Configured ad server: {{ nav_adapter_type }}">
+                                <span class="adapter-chip__label">Ad server</span>{{ nav_adapter_type }}
+                            </span>
                         {% endif %}
                     </span>
                     {% if session.role == 'super_admin' %}

@@ -134,6 +134,11 @@ class GAMSyncManager:
             # TODO: SyncJob.completed_at should use Mapped[datetime] not Mapped[DateTime]
             sync_job.completed_at = datetime.now(UTC)
             sync_job.summary = json.dumps(summary)
+            # First successful inventory sync freezes the tenant's ad server
+            # configuration (adapter_config_lock.py).
+            from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+            AdapterConfigRepository(db_session, self.tenant_id).mark_config_locked()
             db_session.commit()
 
             logger.info(f"Inventory sync completed for tenant {self.tenant_id}: {summary}")
@@ -366,6 +371,11 @@ class GAMSyncManager:
             # TODO: SyncJob.completed_at should use Mapped[datetime] not Mapped[DateTime]
             sync_job.completed_at = datetime.now(UTC)
             sync_job.summary = json.dumps(summary)
+            # Selective syncs persist inventory too — same lock trigger as a
+            # full inventory sync (adapter_config_lock.py).
+            from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+            AdapterConfigRepository(db_session, self.tenant_id).mark_config_locked()
             db_session.commit()
 
             logger.info(f"Selective sync completed for tenant {self.tenant_id}: {summary}")

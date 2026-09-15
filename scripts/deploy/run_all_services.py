@@ -20,6 +20,11 @@ import time
 # Store process references for cleanup
 processes = []
 
+# Exit code of the MCP/A2A/Admin server child once it has stopped. ``None``
+# while it is running. The main loop watches this so the container exits
+# (and the orchestrator restarts it) instead of leaving nginx serving 502s.
+_mcp_exit_code: int | None = None
+
 
 def validate_required_env():
     """Validate required environment variables."""
@@ -165,25 +170,45 @@ def check_schema_issues():
 
 
 def init_database():
-    """Initialize database schema and default data."""
+    """Initialize database schema and default data.
+
+    Runs in a subprocess (like ``run_migrations``) rather than in this
+    wrapper process on purpose: ``src.core.database.database`` imports the
+    ORM models, which import ``adcp.types``, and importing the ``adcp``
+    library builds native pydantic validators for ~1,900 models — about
+    1.2 GB of resident memory. This wrapper stays alive for the life of
+    the container, so doing that import here permanently doubled the
+    task's memory footprint (wrapper ~1.2 GB + server child ~1.5 GB) and
+    left a 4 GB Fargate task a few hundred MB from the OOM killer.
+    """
     print("📦 Initializing database schema and default data...")
     print(
         "ℹ️  Note: init_db() is safe - it only creates tables (IF NOT EXISTS) and default tenant (if no tenants exist)"
     )
 
     try:
-        from src.core.database.database import init_db
-
-        init_db(exit_on_error=True)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from src.core.database.database import init_db; init_db(exit_on_error=True)",
+            ],
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"❌ Database initialization failed (exit code {result.returncode})")
+            sys.exit(1)
         print("✅ Database initialization complete")
+    except subprocess.TimeoutExpired:
+        print("❌ Database initialization timed out after 300 seconds")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Database initialization failed: {e}")
         sys.exit(1)
 
 
-def cleanup(signum=None, frame=None):
-    """Clean up all processes on exit."""
-    print("\nShutting down all services...")
+def _terminate_children() -> None:
+    """Terminate every child process we started (nginx, cron, server)."""
     for proc in processes:
         if proc and proc.poll() is None:
             proc.terminate()
@@ -191,6 +216,12 @@ def cleanup(signum=None, frame=None):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+def cleanup(signum=None, frame=None):
+    """Clean up all processes on exit."""
+    print("\nShutting down all services...")
+    _terminate_children()
     sys.exit(0)
 
 
@@ -240,7 +271,16 @@ def run_mcp_server():
     for line in iter(proc.stdout.readline, b""):
         if line:
             print(f"[MCP] {line.decode().rstrip()}")
-    print("MCP server stopped")
+    rc = proc.wait()
+    # A negative return code means the child was killed by a signal:
+    # -9 = SIGKILL (kernel OOM killer), -11 = SIGSEGV (native crash).
+    if rc < 0:
+        hint = " (SIGKILL — likely out of memory)" if rc == -9 else " (SIGSEGV — native crash)" if rc == -11 else ""
+        print(f"MCP server stopped: killed by signal {-rc}{hint}")
+    else:
+        print(f"MCP server stopped with exit code {rc}")
+    global _mcp_exit_code
+    _mcp_exit_code = rc
 
 
 def exec_mcp_server():
@@ -424,10 +464,24 @@ def main():
         print("\nℹ️  Nginx reverse proxy skipped (SKIP_NGINX=true)")
         print("Press Ctrl+C to stop all services")
 
-    # Keep the main thread alive
+    # Keep the main thread alive while the server child is running. If the
+    # child dies (OOM kill, native crash, unhandled exit) we must exit too:
+    # otherwise this wrapper keeps the container "alive" with nothing on the
+    # app port, the load balancer serves 502s until its unhealthy threshold
+    # finally kills the task, and the stopped-task reason only says "failed
+    # ELB health checks" with exit code 0, hiding the real cause. Exiting
+    # with the child's status surfaces it (137 = SIGKILL/OOM, 139 = SIGSEGV)
+    # and lets the orchestrator restart the task immediately.
     try:
         while True:
             time.sleep(1)
+            if _mcp_exit_code is not None:
+                rc = _mcp_exit_code
+                print(f"❌ MCP server process exited (code {rc}); stopping container so it can be restarted")
+                _terminate_children()
+                if rc < 0:
+                    sys.exit(128 + (-rc))  # shell convention for signal deaths
+                sys.exit(rc or 1)  # a clean exit of the server is still a failure here
     except KeyboardInterrupt:
         print("\n\nShutting down all services...")
         sys.exit(0)

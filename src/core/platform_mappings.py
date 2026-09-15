@@ -14,6 +14,7 @@ ADAPTER_PLATFORM_MAP: dict[str, str] = {
     "triton": "triton",
     "broadstreet": "broadstreet",
     "freewheel": "freewheel",
+    "improvedigital": "improvedigital",
     "mock": "mock",
 }
 

@@ -280,11 +280,13 @@ class TestGetMediaBuyDeliveryResponseMethods:
         resp = _make_delivery_response(media_buy_deliveries=deliveries)
         assert str(resp) == "Retrieved delivery data for 3 media buys."
 
-    def test_model_dump_includes_next_expected_at_when_notification_type_set(self):
+    def test_model_dump_omits_next_expected_at_on_final_notification(self):
+        # AdCP types next_expected_at as a non-nullable date-time string that is
+        # "only present ... when notification_type is not 'final'"; a null fails
+        # response schema validation, so the key must be absent, never null.
         resp = _make_delivery_response(notification_type="final")
         dumped = resp.model_dump()
-        assert "next_expected_at" in dumped
-        assert dumped["next_expected_at"] is None
+        assert "next_expected_at" not in dumped
 
     def test_model_dump_omits_next_expected_at_when_no_notification_type(self):
         resp = _make_delivery_response()

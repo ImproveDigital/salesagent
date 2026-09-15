@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from datetime import timedelta
 
 import markdown
@@ -343,6 +344,43 @@ def create_app(config=None):
         return {"csrf_token": csrf_token}
 
     @app.before_request
+    def log_admin_request_start():
+        """Boundary log for every unsafe admin request, registered before the
+        CSRF guard so it fires even when that guard aborts. Pairs with
+        ``log_admin_request_teardown`` below: START without END means the
+        request never completed inside Flask."""
+        if request.method in _CSRF_SAFE_METHODS:
+            return None
+        g._admin_request_started = time.monotonic()
+        logger.info(
+            "[admin_request] START %s %s content_length=%s endpoint=%s",
+            request.method,
+            request.path,
+            request.content_length,
+            request.endpoint,
+        )
+        return None
+
+    @app.teardown_request
+    def log_admin_request_teardown(exc):
+        started = getattr(g, "_admin_request_started", None)
+        if started is None:
+            return
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if exc is not None:
+            logger.error(
+                "[admin_request] END %s %s after %.0f ms with unhandled %s: %s",
+                request.method,
+                request.path,
+                elapsed_ms,
+                type(exc).__name__,
+                exc,
+                exc_info=exc,
+            )
+        else:
+            logger.info("[admin_request] END %s %s in %.0f ms", request.method, request.path, elapsed_ms)
+
+    @app.before_request
     def enforce_admin_csrf():
         from flask import abort, request
 
@@ -615,8 +653,9 @@ def create_app(config=None):
         from flask import g, session
         from sqlalchemy import func, select
 
+        from src.admin.utils.helpers import ADAPTER_LABELS
         from src.core.database.database_session import get_db_session
-        from src.core.database.models import Product, Tenant
+        from src.core.database.models import AdapterConfig, Product, Tenant
         from src.core.domain_config import get_sales_agent_domain, get_support_email
         from src.core.version import get_build_info
 
@@ -668,6 +707,16 @@ def create_app(config=None):
                         context["nav_product_count"] = (
                             db_session.scalar(select(func.count()).select_from(Product).filter_by(tenant_id=tenant_id))
                             or 0
+                        )
+                        # Adapter type shown next to the workspace name in the
+                        # top bar; fetched here because ``tenant`` is detached
+                        # once the session closes, so the relationship can't
+                        # be lazy-loaded from the template.
+                        adapter_type = db_session.scalar(
+                            select(AdapterConfig.adapter_type).filter_by(tenant_id=tenant_id)
+                        )
+                        context["nav_adapter_type"] = (
+                            ADAPTER_LABELS.get(adapter_type, adapter_type) if adapter_type else None
                         )
             except Exception as e:
                 logger.warning(f"Could not load tenant {tenant_id} for context: {e}")

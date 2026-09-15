@@ -29,6 +29,35 @@ def _coerce_task_type(raw: str | None) -> TaskType | None:
         return None
 
 
+# Internal ``WorkflowStep.status`` values that are not AdCP task statuses.
+# Anything already a ``GeneratedTaskStatus`` value passes through unchanged.
+_INTERNAL_STATUS_TO_ADCP: dict[str, GeneratedTaskStatus] = {
+    "requires_approval": GeneratedTaskStatus.input_required,
+    "pending_approval": GeneratedTaskStatus.input_required,
+    "pending": GeneratedTaskStatus.submitted,
+    "in_progress": GeneratedTaskStatus.working,
+    "approved": GeneratedTaskStatus.working,  # approved by operator; adapter creation still pending
+}
+
+
+def _coerce_task_status(raw: str | None) -> GeneratedTaskStatus:
+    """Map a workflow-step status to the AdCP ``GeneratedTaskStatus`` for webhooks.
+
+    Steps use internal vocabulary (``requires_approval`` ...). Buyers only
+    understand the AdCP enum; ``unknown`` is the last resort, not the answer
+    for a step that is simply waiting on the publisher.
+    """
+    if not raw:
+        return GeneratedTaskStatus.unknown
+    mapped = _INTERNAL_STATUS_TO_ADCP.get(raw)
+    if mapped is not None:
+        return mapped
+    try:
+        return GeneratedTaskStatus(raw)
+    except ValueError:
+        return GeneratedTaskStatus.unknown
+
+
 from sqlalchemy import select
 
 from src.core.database.database_session import DatabaseManager
@@ -700,10 +729,7 @@ class ContextManager(DatabaseManager):
                 raw_task_type = step.tool_name or mapping.action or ""
                 task_type_enum = _coerce_task_type(raw_task_type)
                 protocol = (step.request_data or {}).get("protocol", "mcp")
-                try:
-                    status_enum = GeneratedTaskStatus(new_status)
-                except ValueError:
-                    status_enum = GeneratedTaskStatus.unknown
+                status_enum = _coerce_task_status(new_status)
 
                 payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
                 if protocol == "a2a":

@@ -23,8 +23,8 @@ from uuid import uuid4
 
 import requests
 from a2a.types import Task, TaskStatusUpdateEvent
-from adcp import extract_webhook_result_data
-from adcp.types import McpWebhookPayload
+from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload, extract_webhook_result_data
+from adcp.types import CreateMediaBuySuccessResponse, GeneratedTaskStatus, McpWebhookPayload, Package
 from adcp.webhooks import generate_webhook_idempotency_key, sign_legacy_webhook
 from google.protobuf.json_format import MessageToDict
 
@@ -556,6 +556,84 @@ class ProtocolWebhookService:
 
 # Global service instance
 _webhook_service: ProtocolWebhookService | None = None
+
+
+def build_request_scoped_config(
+    *, tenant_id: str, principal_id: str | None, push_config: dict[str, Any] | None
+) -> PushNotificationConfig | None:
+    """Rebuild a delivery config from a request's ``push_notification_config``.
+
+    ``create_media_buy`` stores the buyer's webhook config on the workflow step
+    (request-scoped); it is never persisted to ``push_notification_configs``.
+    Admin approve/reject handlers use this to send the terminal task-status
+    webhook. Mirrors ``ContextManager._send_push_notifications``. Returns
+    ``None`` when no URL was registered.
+    """
+    if not push_config:
+        return None
+    url = push_config.get("url")
+    if not url:
+        return None
+    authentication = push_config.get("authentication") or {}
+    schemes = authentication.get("schemes") or []
+    auth_type = schemes[0] if isinstance(schemes, list) and schemes else None
+    return PushNotificationConfig(
+        id=push_config.get("id") or f"pnc_{uuid4().hex[:16]}",
+        tenant_id=tenant_id,
+        principal_id=principal_id,
+        url=str(url),
+        authentication_type=auth_type,
+        authentication_token=authentication.get("credentials"),
+        purpose="async_task",
+        is_active=True,
+    )
+
+
+def send_create_media_buy_decision(
+    *,
+    config: PushNotificationConfig,
+    step_id: str,
+    context_id: str,
+    protocol: str,
+    media_buy_id: str,
+    package_ids: list[str],
+    status: str,
+    confirmed_at: datetime | None = None,
+    revision: int = 1,
+) -> bool:
+    """Send the terminal ``create_media_buy`` task webhook after an admin decision.
+
+    ``status`` is an AdCP task status (``completed`` on approve, ``rejected`` on
+    reject). Synchronous: intended for Flask admin handlers. Never raises —
+    delivery failure is logged and reported as ``False``.
+    """
+    result = CreateMediaBuySuccessResponse(
+        media_buy_id=media_buy_id,
+        status="completed",
+        packages=[Package(package_id=pid) for pid in package_ids],
+        confirmed_at=confirmed_at or datetime.now(UTC),
+        revision=revision,
+    )
+    task_status = GeneratedTaskStatus(status)
+    payload: Task | TaskStatusUpdateEvent | McpWebhookPayload
+    if protocol == "a2a":
+        payload = create_a2a_webhook_payload(task_id=step_id, status=task_status, result=result, context_id=context_id)
+    else:
+        payload = create_mcp_webhook_payload(
+            task_id=step_id, status=task_status, task_type="create_media_buy", result=result
+        )
+    metadata = {"task_type": "create_media_buy", "tenant_id": config.tenant_id, "principal_id": config.principal_id}
+    try:
+        ok = asyncio.run(
+            get_protocol_webhook_service().send_notification(
+                push_notification_config=config, payload=payload, metadata=metadata
+            )
+        )
+    except Exception as exc:
+        logger.warning("Failed to send %s webhook for media buy %s: %s", status, media_buy_id, exc)
+        return False
+    logger.info("Sent %s webhook for media buy %s", status, media_buy_id)
+    return bool(ok)
 
 
 def get_protocol_webhook_service() -> ProtocolWebhookService:

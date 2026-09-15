@@ -485,10 +485,18 @@ class AdServerAdapter(ABC):
         total_impressions = sum(getattr(row, "impressions", 0) or 0 for row in stat_rows)
         total_spend = sum(getattr(row, "spend_micros", 0) or 0 for row in stat_rows) / 1_000_000.0
         total_completed = sum(getattr(row, "completed_views", 0) or 0 for row in stat_rows)
+        # None means the platform doesn't report clicks; 0 is a real count —
+        # only surface click totals when at least one row carried one.
+        clicks_reported = any(getattr(row, "clicks", None) is not None for row in stat_rows)
+        total_clicks = sum(getattr(row, "clicks", 0) or 0 for row in stat_rows)
         currency = next((row.currency for row in stat_rows if row.currency), default_currency)
         totals = DeliveryTotals(
             impressions=float(total_impressions),
             spend=total_spend,
+            clicks=float(total_clicks) if clicks_reported else None,
+            # Clamped: click trackers/companion clicks can report more clicks
+            # than impressions, and DeliveryTotals.ctr enforces le=1.
+            ctr=(min(1.0, total_clicks / total_impressions)) if clicks_reported and total_impressions else None,
             completed_views=float(total_completed) if total_completed else None,
             completion_rate=(total_completed / total_impressions) if total_impressions else None,
         )

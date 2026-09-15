@@ -249,6 +249,7 @@ class AuditLogger:
                     error_message=error,
                     details=details,
                     security_alert=security_alert,
+                    tenant_id=tenant_id,
                 )
         except Exception:
             # Don't let Slack failures affect core functionality
@@ -322,6 +323,7 @@ class AuditLogger:
                 error_message=f"Security violation: {reason}",
                 details={"resource_id": resource_id, "violation_type": "unauthorized_access"},
                 security_alert=True,
+                tenant_id=tenant_id,
             )
         except Exception:
             # Don't let Slack failures affect core functionality

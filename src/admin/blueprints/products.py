@@ -1,8 +1,10 @@
 """Products management blueprint for admin UI."""
 
 import asyncio
+import functools
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -30,6 +32,89 @@ from src.core.validation import sanitize_form_data
 from src.services.gam_product_config_service import GAMProductConfigService
 
 logger = logging.getLogger(__name__)
+
+
+def _log_product_flow(action: str):
+    """Log entry, exit, duration and any escaping exception of a product form handler.
+
+    Sits *inside* ``require_tenant_access`` so the tenant is already resolved.
+    The inner handlers already catch and flash most errors; this wrapper adds
+    the outer envelope: a START line, a DONE line with wall-clock duration and
+    the response status/redirect, or a FAILED line with the full traceback for
+    anything that escapes (which Flask turns into a 500). A request that logs
+    START but never DONE/FAILED was cut off upstream (proxy timeout, worker
+    killed) — that is the signature of a 502 at the gateway.
+    """
+
+    def decorator(f):
+        @functools.wraps(f)
+        def wrapper(*args, **kwargs):
+            started = time.monotonic()
+            tenant_id = kwargs.get("tenant_id") or (args[0] if args else None)
+            product_id = kwargs.get("product_id") or (args[1] if len(args) > 1 else None)
+            logger.info(
+                "[product_flow] %s START method=%s path=%s tenant=%s product=%s",
+                action,
+                request.method,
+                request.path,
+                tenant_id,
+                product_id,
+            )
+            try:
+                response = f(*args, **kwargs)
+            except Exception:
+                logger.exception(
+                    "[product_flow] %s FAILED after %.0f ms method=%s path=%s tenant=%s product=%s "
+                    "(unhandled exception — Flask will return 500)",
+                    action,
+                    (time.monotonic() - started) * 1000,
+                    request.method,
+                    request.path,
+                    tenant_id,
+                    product_id,
+                )
+                raise
+            status = getattr(response, "status_code", 200 if isinstance(response, str) else None)
+            headers = getattr(response, "headers", None)
+            location = headers.get("Location") if headers is not None else None
+            logger.info(
+                "[product_flow] %s DONE in %.0f ms method=%s tenant=%s product=%s status=%s location=%s",
+                action,
+                (time.monotonic() - started) * 1000,
+                request.method,
+                tenant_id,
+                product_id,
+                status,
+                location,
+            )
+            return response
+
+        return wrapper
+
+    return decorator
+
+
+def _publish_product_change_logged(step: str, publish_fn, **kwargs) -> None:
+    """Run a post-commit catalog webhook publication with timing and isolation.
+
+    The product row is already committed when this runs, so a webhook failure
+    must not turn a successful save into an error page — it is logged with the
+    traceback and the request continues. The duration is logged because the
+    Tenant Management webhook delivery posts synchronously (10 s HTTP timeout
+    per subscriber) and can hold the request long enough for a gateway timeout.
+    """
+    started = time.monotonic()
+    try:
+        publish_fn(**kwargs)
+    except Exception:
+        logger.exception(
+            "[product_flow] %s: webhook publication FAILED after %.0f ms (product already committed)",
+            step,
+            (time.monotonic() - started) * 1000,
+        )
+        return
+    logger.info("[product_flow] %s: webhook publication done in %.0f ms", step, (time.monotonic() - started) * 1000)
+
 
 # Create Blueprint
 products_bp = Blueprint("products", __name__)
@@ -696,6 +781,46 @@ def list_products(tenant_id):
         return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
 
 
+def _improvedigital_implementation_config(base_config: dict) -> dict:
+    """Layer Improve Digital line-item fields from the product form onto
+    ``base_config``.
+
+    Reads the ``impl_*`` fields rendered by
+    ``templates/adapters/improvedigital/product_config.html`` — inventory
+    pickers submit multi-selects (``request.form.getlist``), the rest are
+    scalars. Blank fields remove the corresponding key so clearing a picker
+    on edit actually clears the stored config.
+    """
+    config = dict(base_config)
+
+    for field in ("placement_ids", "excluded_placement_ids", "package_ids", "size_ids"):
+        values = [int(v) for v in request.form.getlist(f"impl_{field}") if str(v).strip().isdigit()]
+        if values:
+            config[field] = values
+        else:
+            config.pop(field, None)
+
+    for field in ("pricing_model", "frequency_interval_type", "delivery_schedule", "goal"):
+        raw = (request.form.get(f"impl_{field}") or "").strip()
+        if raw:
+            config[field] = raw
+        else:
+            config.pop(field, None)
+
+    for field, cast in (("frequency_cap", int), ("frequency_interval", float)):
+        raw = (request.form.get(f"impl_{field}") or "").strip()
+        if raw:
+            try:
+                config[field] = cast(raw)
+            except ValueError:
+                flash(f"Invalid value for {field.replace('_', ' ')}: {raw!r} — must be a number", "error")
+                config.pop(field, None)
+        else:
+            config.pop(field, None)
+
+    return config
+
+
 def _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_data=None):
     """Helper to render add product form with optional preserved form data.
 
@@ -794,6 +919,7 @@ def _render_add_product_form(tenant_id, tenant, adapter_type, currencies, form_d
 @products_bp.route("/add", methods=["GET", "POST"])
 @log_admin_action("add_product")
 @require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
+@_log_product_flow("add_product")
 def add_product(tenant_id):
     """Add a new product - adapter-specific form."""
     if not publisher_owns("compose_products"):
@@ -962,6 +1088,14 @@ def add_product(tenant_id):
                         base_config["priority"] = int(form_data["priority"])
 
                     implementation_config = base_config
+                elif adapter_type == "improvedigital":
+                    # Start from the generic default config, then layer the
+                    # Improve Digital picker fields (placements/packages/sizes
+                    # + line-item defaults) from the form.
+                    gam_config_service = GAMProductConfigService()
+                    implementation_config = _improvedigital_implementation_config(
+                        gam_config_service.generate_default_config(delivery_type, formats)
+                    )
                 else:
                     # For other adapters, use simple config
                     gam_config_service = GAMProductConfigService()
@@ -1381,7 +1515,9 @@ def add_product(tenant_id):
 
                 db_session.commit()
 
-                publish_product_catalog_change(
+                _publish_product_change_logged(
+                    "add_product",
+                    publish_product_catalog_change,
                     tenant_id=tenant_id,
                     action="created",
                     product_id=product.product_id,
@@ -1405,6 +1541,7 @@ def add_product(tenant_id):
 @products_bp.route("/<product_id>/edit", methods=["GET", "POST"])
 @log_admin_action("edit_product")
 @require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
+@_log_product_flow("edit_product")
 def edit_product(tenant_id, product_id):
     """Edit an existing product."""
     from sqlalchemy import select
@@ -1696,6 +1833,21 @@ def edit_product(tenant_id, product_id):
                     elif line_item_type in ["PRICE_PRIORITY", "HOUSE"]:
                         product.delivery_type = "non_guaranteed"
 
+                # Parse targeting template from form (custom targeting key-value
+                # pairs). The unified edit form posts this field for EVERY
+                # adapter — storing it must not be GAM-only, or non-GAM tenants
+                # silently lose their Custom Targeting edits on save.
+                targeting_template_json = form_data.get("targeting_template", "{}")
+                try:
+                    targeting_template = json.loads(targeting_template_json) if targeting_template_json else {}
+                except json.JSONDecodeError:
+                    targeting_template = {}
+
+                product.targeting_template = targeting_template
+                from sqlalchemy.orm import attributes as _sa_attributes
+
+                _sa_attributes.flag_modified(product, "targeting_template")
+
                 # Update implementation_config with GAM-specific fields
                 # Note: This must run even if line_item_type is not present (automatic mode)
                 if adapter_type == "google_ad_manager":
@@ -1751,14 +1903,8 @@ def edit_product(tenant_id, product_id):
                     if form_data.get("priority"):
                         base_config["priority"] = int(form_data["priority"])
 
-                    # Parse targeting template from form (includes custom targeting key-value pairs)
-                    targeting_template_json = form_data.get("targeting_template", "{}")
-                    try:
-                        targeting_template = json.loads(targeting_template_json) if targeting_template_json else {}
-                    except json.JSONDecodeError:
-                        targeting_template = {}
-
-                    # If targeting template has key_value_pairs, copy to implementation_config for GAM
+                    # If targeting template (parsed above, stored for every
+                    # adapter) has key_value_pairs, copy to implementation_config for GAM
                     if targeting_template.get("key_value_pairs"):
                         if "custom_targeting_keys" not in base_config:
                             base_config["custom_targeting_keys"] = {}
@@ -1774,8 +1920,7 @@ def edit_product(tenant_id, product_id):
                             # Legacy format - merge as before
                             base_config["custom_targeting_keys"].update(kv_pairs)
 
-                    # Store targeting_template in product
-                    product.targeting_template = targeting_template
+                    # (targeting_template itself is stored above for every adapter)
 
                     # Reject inconsistent GAM inventory configuration. Only applies to direct
                     # targeting — profile-based products derive their inventory from the profile.
@@ -1838,6 +1983,15 @@ def edit_product(tenant_id, product_id):
                     if base_config.get("custom_targeting_keys"):
                         custom_keys = base_config["custom_targeting_keys"]
                         create_custom_key_inventory_mappings(db_session, tenant_id, product_id, custom_keys)
+
+                elif adapter_type == "improvedigital":
+                    # Layer the Improve Digital picker fields onto the stored
+                    # config (preserving keys the form doesn't manage).
+                    base_config = product.implementation_config.copy() if product.implementation_config else {}
+                    product.implementation_config = _improvedigital_implementation_config(base_config)
+                    from sqlalchemy.orm import attributes
+
+                    attributes.flag_modified(product, "implementation_config")
 
                 # Update pricing options (AdCP PR #88)
                 # Note: min_spend is now stored in pricing_options[].min_spend_per_package
@@ -1988,7 +2142,9 @@ def edit_product(tenant_id, product_id):
                 db_session.refresh(product)
                 logger.info(f"[DEBUG] After commit - product.format_ids from DB: {product.format_ids}")
 
-                publish_product_record_update_catalog_change(
+                _publish_product_change_logged(
+                    "edit_product",
+                    publish_product_record_update_catalog_change,
                     tenant_id=tenant_id,
                     product=product,
                     previous_allowed_principal_ids=previous_allowed_principal_ids,

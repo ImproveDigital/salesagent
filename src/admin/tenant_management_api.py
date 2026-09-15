@@ -207,6 +207,7 @@ from src.core.inventory_profile_projection import (
     inventory_profile_to_product_model,
     is_complete_inventory_profile,
     is_wholesale_owned_inventory_profile,
+    preferred_wholesale_currency,
 )
 from src.core.security.url_validator import check_url_ssrf
 from src.services.aao_lookup_service import get_publisher_partner_status
@@ -1720,14 +1721,9 @@ def _default_wholesale_currency_for_authoring(
     tenant_id: str,
     adapter: AdapterConfig | None,
 ) -> str:
-    preferred_currency = (
-        adapter.gam_network_currency
-        if adapter is not None and adapter.adapter_type == "google_ad_manager" and adapter.gam_network_currency
-        else None
-    )
     return default_wholesale_currency(
         CurrencyLimitRepository(session, tenant_id).list_all(),
-        preferred=preferred_currency,
+        preferred=preferred_wholesale_currency(adapter),
     )
 
 

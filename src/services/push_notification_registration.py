@@ -27,10 +27,17 @@ from src.services.catalog_event_types import ACCOUNT_NOTIFICATION_EVENT_TYPES
 from src.services.protocol_webhook_service import _normalize_localhost_for_docker
 from src.services.webhook_signing import (
     SIGNING_MODE_BOTH,
+    SIGNING_MODE_HMAC,
     SIGNING_MODE_RFC9421,
     SigningConfigurationError,
     load_active_signing_credential,
 )
+
+# Deprecated AdCP 3.x authentication schemes that select the legacy signing
+# path (shared-secret HMAC or bare Bearer token). Anything else — including
+# the spec's ``HTTP_MESSAGE_SIGNATURES`` marker — resolves to RFC 9421 so a
+# webhook is never emitted unsigned. Compared case-insensitively.
+_LEGACY_AUTH_SCHEMES = frozenset({"hmac-sha256", "bearer"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -65,7 +72,11 @@ def normalize_push_notification_config(
         str(config_dict["subscriber_id"]) if config_dict.get("subscriber_id") is not None else default_subscriber_id
     )
     event_types = _normalize_event_types(config_dict.get("event_types"))
-    signing_mode = "hmac" if auth_type is not None else "rfc9421"
+    signing_mode = (
+        SIGNING_MODE_HMAC
+        if auth_type is not None and auth_type.lower() in _LEGACY_AUTH_SCHEMES
+        else SIGNING_MODE_RFC9421
+    )
     return PushNotificationRegistration(
         config_id=config_id,
         url=str(url),

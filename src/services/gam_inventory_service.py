@@ -98,6 +98,14 @@ class GAMInventoryService:
             """Flush current batch to database with error handling."""
             nonlocal total_inserted, total_updated
             try:
+                if to_insert or to_update:
+                    # The first inventory rows freeze the tenant's ad server
+                    # configuration (adapter_config_lock.py) — stamp in the
+                    # same transaction as the rows. Idempotent after the
+                    # first batch.
+                    from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+                    AdapterConfigRepository(self.db, tenant_id).mark_config_locked()
                 if to_insert:
                     self.db.bulk_insert_mappings(GAMInventory, to_insert)
                     batch_inserted = len(to_insert)
@@ -483,6 +491,15 @@ class GAMInventoryService:
         """
         if not items:
             return
+
+        # The first inventory rows freeze the tenant's ad server configuration
+        # (adapter_config_lock.py). Stamped here — not only at sync completion —
+        # so config_locked_at commits atomically with the first batch of
+        # inventory rows, even if the sync dies mid-way. Idempotent after the
+        # first call.
+        from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+        AdapterConfigRepository(self.db, tenant_id).mark_config_locked()
 
         logger.info(f"📊 Writing {len(items)} {inventory_type} items to database...")
 

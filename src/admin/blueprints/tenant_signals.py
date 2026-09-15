@@ -41,6 +41,7 @@ from flask import Blueprint, flash, jsonify, redirect, render_template, request,
 from src.admin.services.catalog_webhook_events import publish_signal_catalog_changes
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.helpers import ADAPTER_LABELS
 from src.admin.utils.signal_id import unique_signal_id
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantSignal
@@ -61,14 +62,8 @@ _MAX_TAG_LENGTH = 64
 _MAX_SIGNAL_NAME_LENGTH = 200
 _MAX_BULK_SIGNAL_IDS = 500
 # Display labels for the (multi-)adapter source list on the bulk-map UI
-# (#480). Keys match ``tenant.ad_server`` values.
-_ADAPTER_LABELS = {
-    "google_ad_manager": "Google Ad Manager",
-    "freewheel": "Freewheel",
-    "broadstreet": "Broadstreet",
-    "springserve": "SpringServe",
-    "mock": "Mock",
-}
+# (#480) now live in ``src.admin.utils.helpers.ADAPTER_LABELS``, shared
+# with the nav header.
 
 
 def _notify_signal_catalog_changes(
@@ -389,7 +384,7 @@ def list_signals(tenant_id: str):
 
     has_inventory = bool(segments or keys or composites)
     adapter_key = tenant.ad_server or "mock"
-    adapter_label = _ADAPTER_LABELS.get(adapter_key, adapter_key)
+    adapter_label = ADAPTER_LABELS.get(adapter_key, adapter_key)
     return render_template(
         "tenant_signals_list.html",
         tenant_id=tenant_id,
