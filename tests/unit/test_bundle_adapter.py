@@ -200,3 +200,33 @@ class TestImproveDigitalAdapter:
         adapter = get_adapter("improvedigital")
         with patch(REPO_PATH, return_value=self._repo()), pytest.raises(ValueError):
             adapter.count_inventory(None, "t1", "size")
+
+    def test_only_improvedigital_uses_explicit_creative_sizes(self):
+        explicit = {a.adapter_id for a in iter_adapters() if a.explicit_creative_sizes}
+        assert explicit == {"improvedigital"}
+        assert get_adapter("gam").list_creative_sizes(None, "t1") == []
+
+    def test_creative_sizes_map_360yield_types_and_skip_placeholders(self):
+        """Placements carry no sizes, so the editor offers the synced size
+        catalogue: display-ish types collapse to one display option per
+        WxH, vast becomes video, audio and 1x1/2x1 text placeholders drop."""
+        adapter = get_adapter("improvedigital")
+        repo = self._repo()
+        size_rows = [
+            {"id": 1, "name": "300x250", "type": "display", "width": 300, "height": 250},
+            {"id": 2, "name": "300x250 app", "type": "mobile_app", "width": 300, "height": 250},
+            {"id": 3, "name": "320x50", "type": "display", "width": 320, "height": 50},
+            {"id": 4, "name": "308x173 Video", "type": "vast", "width": 308, "height": 173},
+            {"id": 5, "name": "1x1 (Text Ad)", "type": "text", "width": 1, "height": 1},
+            {"id": 6, "name": "audio", "type": "vast_audio", "width": 1, "height": 1},
+            {"id": 7, "name": "broken", "type": "display", "width": None, "height": 90},
+        ]
+        repo.list_by_type.return_value = [MagicMock(raw_json=raw) for raw in size_rows]
+        with patch(REPO_PATH, return_value=repo):
+            options = adapter.list_creative_sizes(None, "t1")
+        repo.list_by_type.assert_called_once_with("size")
+        assert options == [
+            {"label": "300x250", "width": 300, "height": 250, "kind": "display"},
+            {"label": "320x50", "width": 320, "height": 50, "kind": "display"},
+            {"label": "308x173", "width": 308, "height": 173, "kind": "video"},
+        ]

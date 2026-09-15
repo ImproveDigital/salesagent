@@ -13,6 +13,7 @@
 {% set vocab = adapter_vocab|default({'ad_units': 'ad units', 'placements': 'placements'}) %}
 {% set vocab1 = adapter_vocab_singular|default({'ad_units': 'ad unit', 'placements': 'placement'}) %}
 {% set picker_paged = inventory_picker_paged|default(false) %}
+{% set explicit_sizes = explicit_creative_sizes|default(false) %}
 
 <div class="edit-page">
     <div class="edit-container">
@@ -291,11 +292,32 @@
                             <div>
                                 <h2 class="card__title">Creative formats</h2>
                                 <p class="card__sub">
+                                    {% if explicit_sizes %}
+                                    {{ s.adapter_label }} {{ vocab.ad_units }} don't carry creative sizes, so pick the sizes this
+                                    bundle sells. Formats are derived from the sizes you select here.
+                                    {% else %}
                                     Automatically derived from selected GAM inventory sizes and rendering settings.
+                                    {% endif %}
                                 </p>
                             </div>
                         </div>
                         <div class="card__body">
+                            {% if explicit_sizes %}
+                            <div class="size-picker" id="creative-size-picker">
+                                <div id="creative-size-selected" class="chip-strip inventory-selected-strip"></div>
+                                <div class="picker__toolbar">
+                                    <div class="picker__search">
+                                        <span class="picker__search-icon" aria-hidden="true">⌕</span>
+                                        <input type="search" id="creative-size-search"
+                                               placeholder="Filter sizes, e.g. 300x250 or video"
+                                               aria-label="Filter creative sizes"
+                                               autocomplete="off">
+                                    </div>
+                                    <span class="picker__count" id="creative-size-status" aria-live="polite"></span>
+                                </div>
+                                <div class="tree-picker size-picker__list" id="creative-size-list"></div>
+                            </div>
+                            {% endif %}
                             <div id="format-derived-panel" style="padding: 12px 14px; background: var(--sig-bg-info); border: 1px solid var(--sig-bd-default); border-radius: 6px;">
                                 <div id="format-derived-status" style="color: var(--sig-fg-secondary); font-size: 13px;">
                                     Pick inventory to detect creative formats.
@@ -452,6 +474,11 @@ const INVENTORY_PICKER_API = '{{ url_for("inventory_profiles.search_inventory_pi
 const INVENTORY_VOCAB = {{ vocab | tojson | safe }};
 const INVENTORY_VOCAB_SINGULAR = {{ vocab1 | tojson | safe }};
 const INVENTORY_PICKER_DEBOUNCE_MS = 250;
+// Explicit creative sizes (Improve Digital): the inventory rows carry no
+// sizes, so formats are derived from sizes the operator picks out of the
+// synced size catalogue instead of from the selected inventory.
+const INVENTORY_EXPLICIT_SIZES = {{ explicit_sizes | tojson }};
+const CREATIVE_SIZE_OPTIONS = {{ creative_size_options|default([]) | tojson | safe }};
 const INVENTORY_CHIP_REUSE_ENABLED = {{ (not is_create) | tojson }};
 const BUNDLE_ADAPTER_ID = {{ (s.adapter_id or '') | tojson }};
 const KNOWN_PROPERTY_TAGS = new Set({{ known_property_tags | tojson | safe }});
@@ -631,6 +658,101 @@ function inventoryPickerMayBeCapped() {
     if (INVENTORY_PICKER_PAGED) return false;
     return inventoryRows('ad_units').length >= INVENTORY_PICKER_LIMIT ||
         inventoryRows('placements').length >= INVENTORY_PICKER_LIMIT;
+}
+
+// ---- explicit creative-size picker (INVENTORY_EXPLICIT_SIZES only) ----
+// Keys are `${kind}:${width}x${height}`; the selection is persisted only
+// through the derived formats (width/height on display_* / video_* ids),
+// so edit pages rebuild it from existingProfile.formats.
+const creativeSizeSelection = new Set();
+
+function creativeSizeKey(option) {
+    return `${option.kind}:${option.width}x${option.height}`;
+}
+
+function selectedCreativeSizeOptions() {
+    return CREATIVE_SIZE_OPTIONS.filter(option => creativeSizeSelection.has(creativeSizeKey(option)));
+}
+
+function explicitSizeFormats() {
+    const formats = [];
+    selectedCreativeSizeOptions().forEach(option => {
+        const ids = option.kind === 'video' ? GAM_CANONICAL_VIDEO_FORMAT_IDS : GAM_CANONICAL_DISPLAY_FORMAT_IDS;
+        ids.forEach(formatId => {
+            const ref = canonicalFormatRef(formatId);
+            formats.push({ agent_url: ref.agent_url, id: ref.id, width: option.width, height: option.height });
+        });
+    });
+    return formats;
+}
+
+function prePopulateCreativeSizes() {
+    if (!INVENTORY_EXPLICIT_SIZES) return;
+    (existingProfile.formats || []).forEach(format => {
+        if (!format || !format.width || !format.height) return;
+        const kind = String(format.id || '').startsWith('video') ? 'video' : 'display';
+        creativeSizeSelection.add(`${kind}:${Number(format.width)}x${Number(format.height)}`);
+    });
+}
+
+function toggleCreativeSize(key) {
+    if (creativeSizeSelection.has(key)) creativeSizeSelection.delete(key);
+    else creativeSizeSelection.add(key);
+    renderCreativeSizePicker();
+    updateDerivedFormats();
+    if (typeof recomputeValidity === 'function') recomputeValidity();
+}
+
+function renderCreativeSizePicker() {
+    const list = document.getElementById('creative-size-list');
+    if (!list) return;
+    const strip = document.getElementById('creative-size-selected');
+    const status = document.getElementById('creative-size-status');
+    const query = (document.getElementById('creative-size-search')?.value || '').toLowerCase().trim();
+    const selected = selectedCreativeSizeOptions();
+
+    if (strip) {
+        strip.innerHTML = selected.length
+            ? selected.map(option => `<span class="sel-chip">`
+                + `<span class="kindchip kindchip--unit">${option.kind === 'video' ? 'VIDEO' : 'DISPLAY'}</span>`
+                + `<span class="sel-chip__label">${_escAttr(option.label)}</span>`
+                + `<button type="button" class="sel-chip__x" data-remove-size="${_escAttr(creativeSizeKey(option))}" aria-label="Remove ${_escAttr(option.label)}">×</button>`
+                + `</span>`).join('')
+            : '<div class="inventory-selected-strip__empty">No creative sizes selected yet. Pick sizes below.</div>';
+    }
+
+    const visible = CREATIVE_SIZE_OPTIONS.filter(option => !query
+        || option.label.includes(query)
+        || option.kind.includes(query)
+        || (query === 'display' && option.kind === 'display'));
+    if (status) {
+        status.innerHTML = `<strong>${selected.length}</strong> selected · ${visible.length} of ${CREATIVE_SIZE_OPTIONS.length} shown`;
+    }
+    if (!CREATIVE_SIZE_OPTIONS.length) {
+        list.innerHTML = '<div class="tree-picker__empty">No creative sizes in the inventory cache yet — run Sync Inventory first.</div>';
+        return;
+    }
+    const renderRow = option => {
+        const key = creativeSizeKey(option);
+        const checked = creativeSizeSelection.has(key);
+        return `<div class="tree__row ${checked ? 'selected' : ''}" data-kind="size" data-depth="0" data-row-id="${_escAttr(key)}">`
+            + `<span class="chev placeholder"></span>`
+            + `<span class="check"><input type="checkbox" data-toggle-size="${_escAttr(key)}" aria-label="Select ${_escAttr(option.label)}" ${checked ? 'checked' : ''}></span>`
+            + `<button type="button" class="tree__name" data-toggle-size="${_escAttr(key)}" aria-label="Select ${_escAttr(option.label)}">`
+            + `<span class="kindchip kindchip--unit">${option.kind === 'video' ? 'VIDEO' : 'DISPLAY'}</span>`
+            + `<span class="label">${_escAttr(option.label)}</span>`
+            + `</button>`
+            + `<span class="tree__meta">${option.kind === 'video' ? 'video_standard · video_vast' : 'image · HTML5 · JS'}</span>`
+            + `</div>`;
+    };
+    const groups = [
+        ['display', 'Display sizes', 'image, HTML5 and JS creatives'],
+        ['video', 'Video sizes', 'VAST creatives'],
+    ].map(([kind, label, note]) => {
+        const rows = visible.filter(option => option.kind === kind);
+        return rows.length ? treeSection(label, note) + rows.map(renderRow).join('') : '';
+    }).join('');
+    list.innerHTML = groups || '<div class="tree-picker__empty">No sizes match.</div>';
 }
 
 // ---- server-paged picker state (INVENTORY_PICKER_PAGED only) ----
@@ -846,9 +968,10 @@ function renderInventoryPicker(focusSelector = null) {
             : inventoryRows('ad_units').filter(row => inventoryRowMatches(row, query));
         renderInventoryPickerStatus(rows.length);
         const pending = INVENTORY_PICKER_PAGED && !inventoryPages.ad_units.loaded;
+        const errored = INVENTORY_PICKER_PAGED && inventoryPages.ad_units.error;
         list.innerHTML = (rows.length
             ? rows.map(row => renderAdUnitRow(row)).join('')
-            : `<div class="tree-picker__empty">${pending ? 'Loading…' : `No ${_escAttr(INVENTORY_VOCAB.ad_units)} match.`}</div>`)
+            : (errored ? '' : `<div class="tree-picker__empty">${pending ? 'Loading…' : `No ${_escAttr(INVENTORY_VOCAB.ad_units)} match.`}</div>`))
             + (INVENTORY_PICKER_PAGED ? renderInventoryLoadMore('ad_units') : '');
         hydratePartialCheckboxes();
         restoreInventoryFocus(focusSelector);
@@ -882,8 +1005,9 @@ function renderInventoryPicker(focusSelector = null) {
     const count = groups.reduce((sum, group) => sum + group.count, 0);
     renderInventoryPickerStatus(count);
     const pending = INVENTORY_PICKER_PAGED && !inventoryPages.placements.loaded;
+    const errored = INVENTORY_PICKER_PAGED && inventoryPages.placements.error;
     list.innerHTML = (groups.map(group => group.html).join('')
-        || `<div class="tree-picker__empty">${pending ? 'Loading…' : `No ${_escAttr(INVENTORY_VOCAB.placements)} match.`}</div>`)
+        || (errored ? '' : `<div class="tree-picker__empty">${pending ? 'Loading…' : `No ${_escAttr(INVENTORY_VOCAB.placements)} match.`}</div>`))
         + (INVENTORY_PICKER_PAGED ? renderInventoryLoadMore('placements') : '');
     hydratePartialCheckboxes();
     restoreInventoryFocus(focusSelector);
@@ -1254,7 +1378,24 @@ function initializePublisherRows() {
 
 document.addEventListener('DOMContentLoaded', function() {
     seedInventoryNameMaps();
+    prePopulateCreativeSizes();
     prePopulateInventoryConfig();
+    if (INVENTORY_EXPLICIT_SIZES) {
+        renderCreativeSizePicker();
+        updateDerivedFormats();
+        const sizeList = document.getElementById('creative-size-list');
+        const sizeStrip = document.getElementById('creative-size-selected');
+        const sizeSearch = document.getElementById('creative-size-search');
+        if (sizeList) sizeList.addEventListener('click', (e) => {
+            const toggle = e.target.closest('[data-toggle-size]');
+            if (toggle) toggleCreativeSize(toggle.dataset.toggleSize);
+        });
+        if (sizeStrip) sizeStrip.addEventListener('click', (e) => {
+            const remove = e.target.closest('[data-remove-size]');
+            if (remove) toggleCreativeSize(remove.dataset.removeSize);
+        });
+        if (sizeSearch) sizeSearch.addEventListener('input', renderCreativeSizePicker);
+    }
 
     const pickerList = document.getElementById('inventory-picker-list');
     const pickerSearch = document.getElementById('inventory-picker-search');
@@ -1570,6 +1711,7 @@ function addRowSpecialSizes(row, specialRows, fallbackCapabilities = null) {
 
 function selectedInventorySizes() {
     const sizes = new Set();
+    if (INVENTORY_EXPLICIT_SIZES) selectedCreativeSizeOptions().forEach(option => sizes.add(option.label));
     inventorySelection.ad_units.forEach(id => addRowSizes(inventoryRowById('ad_units', id), sizes));
     inventorySelection.placements.forEach(id => {
         const placement = inventoryRowById('placements', id);
@@ -1595,7 +1737,7 @@ function selectedInventorySpecialSizes() {
 }
 
 function deriveCanonicalFormatsFromInventory() {
-    const formats = [];
+    const formats = INVENTORY_EXPLICIT_SIZES ? explicitSizeFormats() : [];
     inventorySelection.ad_units.forEach(id => addRowCanonicalFormats(inventoryRowById('ad_units', id), formats));
     inventorySelection.placements.forEach(id => {
         const placement = inventoryRowById('placements', id);
@@ -1658,23 +1800,30 @@ function renderDerivedFormats() {
 
     const sizes = selectedInventorySizes();
     const specialRows = selectedInventorySpecialSizes();
-    if ((inventorySelection.ad_units.size + inventorySelection.placements.size) === 0) {
-        status.textContent = 'Pick placements or ad units to detect creative formats.';
+    if (INVENTORY_EXPLICIT_SIZES) {
+        if (sizes.length === 0) {
+            status.textContent = 'Pick at least one creative size above to set the formats this bundle sells.';
+            list.innerHTML = '';
+            return;
+        }
+    } else if ((inventorySelection.ad_units.size + inventorySelection.placements.size) === 0) {
+        status.textContent = `Pick ${INVENTORY_VOCAB.placements} or ${INVENTORY_VOCAB.ad_units} to detect creative formats.`;
         list.innerHTML = '';
         return;
-    }
-    if (sizes.length === 0 && specialRows.length === 0) {
+    } else if (sizes.length === 0 && specialRows.length === 0) {
         status.textContent = 'No creative sizes were found on the selected inventory. Choose synced inventory with sizes.';
         list.innerHTML = '';
         return;
     }
 
     const fixedText = sizes.length
-        ? `${sizes.length} fixed ${sizes.length === 1 ? 'size' : 'sizes'} detected.`
+        ? `${sizes.length} fixed ${sizes.length === 1 ? 'size' : 'sizes'} ${INVENTORY_EXPLICIT_SIZES ? 'selected' : 'detected'}.`
         : 'No fixed creative sizes detected.';
-    const specialText = specialRows.length
-        ? ` ${specialRows.length} GAM 1x1 ${specialRows.length === 1 ? 'slot needs' : 'slots need'} capability setup before saving.`
-        : ' Formats use display creative types supported by GAM.';
+    const specialText = INVENTORY_EXPLICIT_SIZES
+        ? ' Formats follow the sizes picked above.'
+        : (specialRows.length
+            ? ` ${specialRows.length} GAM 1x1 ${specialRows.length === 1 ? 'slot needs' : 'slots need'} capability setup before saving.`
+            : ' Formats use display creative types supported by GAM.');
     status.textContent = fixedText + specialText;
 
     const formatChips = derivedFormatChips().map(group => `
@@ -1801,8 +1950,8 @@ function computeValidity() {
     const placements = _placementIds();
     const invSize = adUnits.length + placements.length;
     const invParts = [];
-    if (placements.length) invParts.push(placements.length + (placements.length === 1 ? ' placement' : ' placements'));
-    if (adUnits.length) invParts.push(adUnits.length + (adUnits.length === 1 ? ' ad unit' : ' ad units'));
+    if (placements.length) invParts.push(placements.length + ' ' + (placements.length === 1 ? INVENTORY_VOCAB_SINGULAR.placements : INVENTORY_VOCAB.placements));
+    if (adUnits.length) invParts.push(adUnits.length + ' ' + (adUnits.length === 1 ? INVENTORY_VOCAB_SINGULAR.ad_units : INVENTORY_VOCAB.ad_units));
 
     const formatCount = derivedFormats.length;
     const formatSizeCount = selectedInventorySizes().length;
@@ -1936,16 +2085,18 @@ function computeValidity() {
         inventory: item({
             ok: invSize > 0,
             text: invParts.length ? invParts.join(' · ') : 'none yet',
-            message: 'Add at least one placement or ad unit to save.',
+            message: `Add at least one ${INVENTORY_VOCAB_SINGULAR.placements} or ${INVENTORY_VOCAB_SINGULAR.ad_units} to save.`,
             focusId: 'inventory-picker-search',
         }),
         formats: item({
             ok: formatCount > 0 && specialSizeCount === 0,
             text: formatSizeCount > 0 ? `${formatSizeCount} ${formatSizeCount === 1 ? 'size' : 'sizes'}` : 'none',
-            message: specialSizeCount > 0
-                ? 'Classify GAM 1x1 special inventory before saving.'
-                : 'Pick inventory with synced creative sizes to save.',
-            focusId: 'inventory-picker-search',
+            message: INVENTORY_EXPLICIT_SIZES
+                ? 'Pick at least one creative size to save.'
+                : (specialSizeCount > 0
+                    ? 'Classify GAM 1x1 special inventory before saving.'
+                    : 'Pick inventory with synced creative sizes to save.'),
+            focusId: INVENTORY_EXPLICIT_SIZES ? 'creative-size-search' : 'inventory-picker-search',
         }),
         properties: item({
             ok: propertyOk,

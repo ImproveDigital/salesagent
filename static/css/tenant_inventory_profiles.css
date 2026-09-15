@@ -1092,6 +1092,14 @@
     letter-spacing: 0;
     font-weight: 450;
 }
+.size-picker {
+    margin-bottom: 12px;
+}
+
+.size-picker .size-picker__list {
+    max-height: 280px;
+}
+
 .tree-picker__more {
     display: block;
     width: 100%;

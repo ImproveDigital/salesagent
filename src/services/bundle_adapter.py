@@ -70,6 +70,11 @@ class BundleInventoryAdapter(Protocol):
     # True when the bundle editor should page inventory from the server
     # (via :meth:`search_inventory`) instead of embedding a bounded list.
     picker_paged: bool
+    # True when the adapter's inventory rows carry no creative sizes, so the
+    # bundle editor offers an explicit size picker (fed by
+    # :meth:`list_creative_sizes`) instead of deriving formats from the
+    # selected inventory.
+    explicit_creative_sizes: bool
 
     def has_synced_inventory(self, session: Session, tenant_id: str) -> bool: ...
 
@@ -111,6 +116,12 @@ class BundleInventoryAdapter(Protocol):
     ) -> tuple[list[BundleInventoryRow], int | None]:
         """One page of rows matching ``q`` plus the total match count
         (``None`` when the adapter cannot count cheaply)."""
+        ...
+
+    def list_creative_sizes(self, session: Session, tenant_id: str) -> list[dict[str, Any]]:
+        """Options for the explicit creative-size picker — ``{label, width,
+        height, kind}`` with ``kind`` ``display`` | ``video``. Empty for
+        adapters that derive sizes from the selected inventory."""
         ...
 
 
@@ -182,6 +193,7 @@ class _GAMAdapter:
     vocab = {"primary": "ad units", "secondary": "placements"}
     matches_tenant_ad_server = {"google_ad_manager", "gam"}
     picker_paged = False
+    explicit_creative_sizes = False
 
     def _row_from_gam_inventory(self, row) -> BundleInventoryRow:
         return BundleInventoryRow(
@@ -284,6 +296,9 @@ class _GAMAdapter:
         total = repo.count_inventory(entity_type) if not q else None
         return [self._row_from_gam_inventory(r) for r in rows], total
 
+    def list_creative_sizes(self, session: Session, tenant_id: str) -> list[dict[str, Any]]:
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Improve Digital adapter
@@ -305,6 +320,11 @@ class _ImproveDigitalAdapter:
     packages never expand into child placements here and coverage counts
     only directly-picked placements.
 
+    360Yield placements carry no creative sizes (sizes are a search filter
+    and a separate ``size`` lookup), so ``explicit_creative_sizes`` is on:
+    the editor offers the synced size catalogue and derives the bundle's
+    canonical formats from the sizes the operator picks.
+
     ``picker_paged`` is on: the placement set runs to hundreds of thousands
     of rows, so the editor searches/pages through :meth:`search_inventory`
     instead of embedding a bounded list.
@@ -315,8 +335,12 @@ class _ImproveDigitalAdapter:
     vocab = {"primary": "placements", "secondary": "packages"}
     matches_tenant_ad_server = {"improvedigital", "improve_digital"}
     picker_paged = True
+    explicit_creative_sizes = True
 
     _CACHE_ENTITY = {"ad_unit": "placement", "placement": "package"}
+    # 360Yield size ``type`` → AdCP creative family. ``vast_audio`` has no
+    # display/video equivalent and is skipped.
+    _SIZE_KIND = {"display": "display", "mobile_app": "display", "text": "display", "vast": "video"}
 
     def _repo(self, session: Session, tenant_id: str):
         from src.core.database.repositories.improvedigital_inventory import ImproveDigitalInventoryRepository
@@ -427,6 +451,29 @@ class _ImproveDigitalAdapter:
         tuples = repo.list_picker_rows(cache_type, q=q, offset=offset, limit=limit)
         return self._rows(repo, entity_type, tuples), total
 
+    def list_creative_sizes(self, session: Session, tenant_id: str) -> list[dict[str, Any]]:
+        """Distinct ``(kind, width, height)`` options from the synced size
+        catalogue (~800 rows, so loading the raw payloads is cheap). 1x1 and
+        2x1 "text" placeholders have no AdCP display equivalent and are
+        dropped."""
+        options: dict[tuple[str, int, int], dict[str, Any]] = {}
+        for row in self._repo(session, tenant_id).list_by_type("size"):
+            raw = row.raw_json if isinstance(row.raw_json, dict) else {}
+            kind = self._SIZE_KIND.get(str(raw.get("type") or "display"))
+            width_raw, height_raw = raw.get("width"), raw.get("height")
+            if kind is None or width_raw is None or height_raw is None:
+                continue
+            try:
+                width, height = int(width_raw), int(height_raw)
+            except (TypeError, ValueError):
+                continue
+            if width <= 1 or height <= 1:
+                continue
+            options.setdefault(
+                (kind, width, height), {"label": f"{width}x{height}", "width": width, "height": height, "kind": kind}
+            )
+        return [options[key] for key in sorted(options)]
+
 
 # ---------------------------------------------------------------------------
 # FreeWheel + SpringServe stubs
@@ -450,6 +497,7 @@ class _NullInventoryAdapter:
         self.vocab = vocab
         self.matches_tenant_ad_server = ad_server_aliases
         self.picker_paged = False
+        self.explicit_creative_sizes = False
 
     def has_synced_inventory(self, session: Session, tenant_id: str) -> bool:
         return False
@@ -498,6 +546,9 @@ class _NullInventoryAdapter:
         limit: int = 50,
     ) -> tuple[list[BundleInventoryRow], int | None]:
         return [], 0
+
+    def list_creative_sizes(self, session: Session, tenant_id: str) -> list[dict[str, Any]]:
+        return []
 
 
 # ---------------------------------------------------------------------------

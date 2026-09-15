@@ -1071,22 +1071,28 @@ def _singular(noun: str) -> str:
     return noun[:-1] if noun.endswith("s") else noun
 
 
-def _inventory_picker_context(adapter) -> dict:
-    """Adapter vocabulary + paging flag for the bundle editor template.
+def _inventory_picker_context(session, tenant_id: str, adapter) -> dict:
+    """Adapter vocabulary, paging flag and creative-size options for the
+    bundle editor template.
 
-    GAM keeps its "ad units / placements" wording; Improve Digital renders
-    "placements / packages" and pages inventory from the server.
+    GAM keeps its "ad units / placements" wording and derives formats from
+    the selected inventory; Improve Digital renders "placements / packages",
+    pages inventory from the server, and — because 360Yield placements carry
+    no sizes — offers the synced size catalogue as an explicit picker.
     """
     vocab = (
         {"ad_units": adapter.vocab["primary"], "placements": adapter.vocab["secondary"]}
         if adapter is not None
         else dict(_DEFAULT_PICKER_VOCAB)
     )
+    explicit_sizes = bool(adapter is not None and getattr(adapter, "explicit_creative_sizes", False))
     return {
         "adapter_vocab": vocab,
         "adapter_vocab_singular": {key: _singular(value) for key, value in vocab.items()},
         "inventory_picker_paged": bool(adapter is not None and getattr(adapter, "picker_paged", False)),
         "inventory_picker_page_size": INVENTORY_PICKER_PAGE_SIZE,
+        "explicit_creative_sizes": explicit_sizes,
+        "creative_size_options": adapter.list_creative_sizes(session, tenant_id) if explicit_sizes else [],
     }
 
 
@@ -1335,6 +1341,7 @@ def add_inventory_profile(tenant_id: str):
         )
         inventory_picker = _build_inventory_picker_payload(session, tenant_id, adapter, profile.inventory_config)
         known_property_tags = sorted({tag for prop in authorized_properties for tag in (prop.tags or [])})
+        picker_context = _inventory_picker_context(session, tenant_id, adapter)
 
     return render_template(
         "edit_inventory_profile.html",
@@ -1354,7 +1361,7 @@ def add_inventory_profile(tenant_id: str):
         products_using=[],
         form_mode="create",
         active_tab="inventory_profiles",
-        **_inventory_picker_context(adapter),
+        **picker_context,
     )
 
 
@@ -1627,7 +1634,7 @@ def edit_inventory_profile(tenant_id: str, profile_id: int):
             known_property_tags=known_property_tags,
             products_using=products_using,
             active_tab="inventory_profiles",
-            **_inventory_picker_context(adapter),
+            **_inventory_picker_context(session, tenant_id, adapter),
         )
 
 
@@ -2079,7 +2086,9 @@ def search_inventory_picker_api(tenant_id: str):
         if adapter is None:
             return jsonify({"success": True, "kind": kind, "items": [], "count": 0, "has_more": False})
         rows, total = adapter.search_inventory(session, tenant_id, entity_type, q=q, offset=offset, limit=limit)
-        membership = _bundle_membership_counts(session, tenant_id, {kind: {row.external_id for row in rows}})[kind]
+        ids_by_key: dict[str, set[str]] = {"ad_units": set(), "placements": set()}
+        ids_by_key[kind] = {row.external_id for row in rows}
+        membership = _bundle_membership_counts(session, tenant_id, ids_by_key)[kind]
         items = [_inventory_picker_row(row, membership.get(row.external_id, 0)) for row in rows]
 
     has_more = offset + len(items) < total if isinstance(total, int) else len(items) >= limit
