@@ -690,13 +690,18 @@ def create_app(config=None):
         explicit_embed = request.args.get("embedded") in ("1", "true", "yes")
         context["embedded"] = explicit_embed or embedded_user
 
-        # Inject fresh tenant data if user is logged in with a tenant.
-        # First check the session, then fall back to the URL ``tenant_id``
-        # route argument — admin pages are scoped to a tenant via the URL,
-        # not via the session, in test/embedded flows.
-        tenant_id = session.get("tenant_id")
-        if not tenant_id and request.view_args:
+        # Inject fresh tenant data for the tenant this page is scoped to.
+        # Admin pages are scoped to a tenant via the URL ``tenant_id`` route
+        # argument, so prefer that; fall back to the session only for
+        # tenant-less routes. The session value is stamped at login /
+        # tenant selection and goes stale as soon as a super admin browses
+        # to a different tenant, which made the navbar ad-server chip show
+        # the previously selected tenant's adapter.
+        tenant_id = None
+        if request.view_args:
             tenant_id = request.view_args.get("tenant_id")
+        if not tenant_id:
+            tenant_id = session.get("tenant_id")
         if tenant_id and tenant_id != "*":
             try:
                 with get_db_session() as db_session:
