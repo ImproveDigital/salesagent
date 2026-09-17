@@ -121,10 +121,39 @@
                         {% if session.role == 'super_admin' %}
                             <span class="workspace-name">{{ session.email or session.username }}</span>
                             <span class="status">Admin</span>
-                        {% elif tenant %}
-                            <span class="workspace-name">{{ tenant.name }}</span>
-                        {% else %}
+                        {% elif not tenant %}
                             <span class="workspace-name">{{ session.email or session.username }}</span>
+                        {% endif %}
+                        {% if tenant %}
+                            {# Tenant lockup. Becomes a switcher (sa-menu) when
+                               the user can reach more than one tenant. Super
+                               admins can open any tenant directly, so their
+                               items are plain links; other users go through
+                               select_tenant(), which re-verifies access and
+                               stamps the new tenant on the session. #}
+                            {% if nav_tenants|length > 1 %}
+                            <div class="sa-menu sa-tenant-switch" data-sa-menu>
+                                <button type="button" class="sa-menu__trigger sa-tenant-switch__trigger" data-sa-menu-trigger aria-haspopup="true" aria-expanded="false" title="Switch tenant">
+                                    {{ tenant.name }}
+                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                                </button>
+                                <div class="sa-menu__panel sa-tenant-switch__panel" role="menu">
+                                    <div class="sa-menu__group-label">Switch tenant</div>
+                                    {% for t in nav_tenants %}
+                                        {% set _is_current = t.tenant_id == tenant.tenant_id %}
+                                        {% if session.role == 'super_admin' %}
+                                        <a class="sa-menu__item{% if _is_current %} is-current{% endif %}" role="menuitem" href="{{ script_name }}/tenant/{{ t.tenant_id }}"{% if _is_current %} aria-current="true"{% endif %}>{{ t.name }}</a>
+                                        {% else %}
+                                        <form method="POST" action="{{ url_for('auth.select_tenant') }}" class="sa-tenant-switch__form">
+                                            <button type="submit" class="sa-menu__item{% if _is_current %} is-current{% endif %}" role="menuitem" name="tenant_id" value="{{ t.tenant_id }}"{% if _is_current %} aria-current="true"{% endif %}>{{ t.name }}</button>
+                                        </form>
+                                        {% endif %}
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% else %}
+                            <span class="workspace-name">{{ tenant.name }}</span>
+                            {% endif %}
                         {% endif %}
                         {% if nav_adapter_type %}
                             {# Configured ad-server chip — metadata, not a control

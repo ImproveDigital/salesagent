@@ -351,6 +351,51 @@ pre {
     border-right: 1px solid var(--sa-header-rule);
 }
 
+/* Tenant switcher — the tenant name becomes a sa-menu trigger when the
+   user can reach more than one tenant. Header-colour overrides keep the
+   trigger legible on both the paper and inverted admin bars; the panel is
+   a normal surface popover anchored to the name's left edge so it drops
+   straight down from the lockup rather than off to the right. */
+.header .role-tag .sa-tenant-switch__trigger {
+    color: var(--sa-header-fg);
+    opacity: 0.85;
+    font-size: 12.5px;
+    font-weight: 400;
+    gap: 4px;
+}
+.header .role-tag .sa-tenant-switch__trigger:hover,
+.header .role-tag .sa-tenant-switch.is-open > .sa-tenant-switch__trigger {
+    color: var(--sa-header-fg);
+    opacity: 1;
+}
+.header .role-tag .sa-tenant-switch__trigger svg { color: var(--sa-header-fg-dim); }
+.header .role-tag .sa-tenant-switch.is-open .sa-tenant-switch__trigger svg { color: var(--sa-header-fg); }
+.header .role-tag .sa-tenant-switch__panel {
+    left: 0;
+    right: auto;
+    max-height: 60vh;
+    overflow-y: auto;
+    text-align: left;
+    line-height: normal;
+}
+.sa-tenant-switch__form { margin: 0; }
+button.sa-menu__item {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+}
+.sa-menu__item.is-current {
+    font-weight: 600;
+}
+.sa-menu__item.is-current::after {
+    content: '\2713';   /* ✓ — the tenant this page is scoped to */
+    margin-left: 8px;
+    color: var(--sa-ink-50);
+}
+
 /* The role badge becomes the Ledger STOREFRONT / ADMIN pill — mono lockup,
    inverted from the bar background. */
 .header .role-tag .status {
