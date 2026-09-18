@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -131,6 +132,20 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # Optional — the Classic campaign API accepts campaigns without an
         # advertiser (every live dev campaign carries advertiserId=null).
         self.advertiser_id = self.principal.get_adapter_id("improvedigital") or self.config.get("default_advertiser_id")
+        # Marketplace reference numbers: both the campaign's and every line
+        # item's ``reference_number`` are the buyer agent's ID, stamped on the
+        # principal's improvedigital mapping at admit time (Admin UI ->
+        # Buyer Agents). Fall back to the principal_id itself for buyer
+        # agents admitted before the fields existed.
+        impd_mapping = (self.principal.platform_mappings or {}).get("improvedigital") or {}
+        if not isinstance(impd_mapping, dict):
+            impd_mapping = {}
+        self.campaign_reference_number: str = (
+            impd_mapping.get("campaign_reference_number") or self.principal.principal_id
+        )
+        self.line_item_reference_number: str = (
+            impd_mapping.get("line_item_reference_number") or self.principal.principal_id
+        )
         # Campaign identity chain (sandbox-confirmed): buying entity +
         # office are required on every campaign; the office carries a
         # default demand contact, so the explicit contact is an override.
@@ -361,8 +376,6 @@ class ImproveDigitalAdapter(AdServerAdapter):
         end_time: datetime,
         package_pricing_info: dict[str, dict] | None = None,
     ) -> CreateMediaBuyResponse:
-        self._audit_create_media_buy(request, start_time, end_time)
-
         targeting_error = self._validate_targeting_or_error(
             packages, validate_targeting, adapter_name="Improve Digital"
         )
@@ -372,9 +385,14 @@ class ImproveDigitalAdapter(AdServerAdapter):
         buy_name = self._buy_name(request)
 
         if self.dry_run:
+            self._audit_create_media_buy(request, start_time, end_time)
             campaign_payload = self._campaign_payload(buy_name, start_time, end_time)
             self.log(f"Would call: POST {self.base_url}/rtb/v1/classic/campaigns")
             self.log(f"  Campaign: {campaign_payload}")
+            self.log(
+                f"Would call: PUT {self.base_url}/rtb/v1/classic/campaigns/<new> "
+                f"reference_number={self.campaign_reference_number}"
+            )
             if self._has_campaign_metadata():
                 self.log(f"Would call: POST {self.base_url}/api/metadata-campaigns")
                 self.log(f"  Metadata: {self._campaign_metadata_payload(0, buy_name, start_time, end_time)}")
@@ -383,6 +401,10 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
                 self.log(f"Would call: POST {self.base_url}/rtb/v1/classic/campaigns/<new>/line-items")
                 self.log(f"  LineItem: {payload}")
+                self.log(
+                    f"Would call: PUT {self.base_url}/rtb/v1/classic/campaigns/<new>/line-items/<new> "
+                    f"reference_number={self.line_item_reference_number}"
+                )
                 product_config = self._product_config_from_package(package)
                 if product_config.get("placement_ids") or product_config.get("package_ids"):
                     self.log(
@@ -411,52 +433,59 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 ]
             )
         campaign_id: int | None = None
+        api_requests: list[dict[str, Any]] = []
         try:
-            campaign = self._client.campaigns.create_campaign(self._campaign_payload(buy_name, start_time, end_time))
-            campaign_id = int(campaign["id"])
-            # Commercial attribution rides on its own record, posted before
-            # the line items so a rejection cleans up the campaign alone.
-            if self._has_campaign_metadata():
-                self._client.metadata.upsert_campaign_metadata(
-                    self._campaign_metadata_payload(campaign_id, buy_name, start_time, end_time)
+            with self._client.record_requests() as api_requests:
+                campaign = self._client.campaigns.create_campaign(
+                    self._campaign_payload(buy_name, start_time, end_time)
                 )
-                logger.info("Improve Digital: campaign metadata attached for campaign %s", campaign_id)
-            else:
-                logger.info(
-                    "Improve Digital: campaign metadata skipped for campaign %s — no attribution "
-                    "fields configured for tenant %s (fill them in the adapter settings page)",
-                    campaign_id,
-                    self.tenant_id,
-                )
-            platform_line_item_ids: dict[str, str] = {}
-            package_responses: list[ResponsePackage] = []
-            for package in packages:
-                rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
-                payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
-                # Geo travels via its own per-line-item endpoint, not the
-                # create body (LineItemGeoTargetingDto — see targeting.py).
-                geo_targeting = payload.pop("geo_targeting", None)
-                line_item = self._client.campaigns.create_line_item(campaign_id, payload)
-                line_item_id = int(line_item["id"])
-                self._line_item_campaigns[str(line_item_id)] = campaign_id
-                self._assign_inventory(campaign_id, line_item_id, package)
-                if geo_targeting:
-                    self._client.campaigns.set_line_item_geo_targeting(
+                campaign_id = int(campaign["id"])
+                self._put_campaign_reference(campaign_id)
+                # Commercial attribution rides on its own record, posted before
+                # the line items so a rejection cleans up the campaign alone.
+                if self._has_campaign_metadata():
+                    self._client.metadata.upsert_campaign_metadata(
+                        self._campaign_metadata_payload(campaign_id, buy_name, start_time, end_time)
+                    )
+                    logger.info("Improve Digital: campaign metadata attached for campaign %s", campaign_id)
+                else:
+                    logger.info(
+                        "Improve Digital: campaign metadata skipped for campaign %s — no attribution "
+                        "fields configured for tenant %s (fill them in the adapter settings page)",
                         campaign_id,
-                        line_item_id,
-                        {"filter": True, "geo_targeting": self._resolve_geo_regions(geo_targeting)},
+                        self.tenant_id,
                     )
-                platform_line_item_ids[package.package_id] = str(line_item_id)
-                package_responses.append(
-                    ResponsePackage(
-                        package_id=package.package_id,
-                        paused=False,
-                        platform_line_item_id=str(line_item_id),
+                platform_line_item_ids: dict[str, str] = {}
+                package_responses: list[ResponsePackage] = []
+                for package in packages:
+                    rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
+                    payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
+                    # Geo travels via its own per-line-item endpoint, not the
+                    # create body (LineItemGeoTargetingDto — see targeting.py).
+                    geo_targeting = payload.pop("geo_targeting", None)
+                    line_item = self._client.campaigns.create_line_item(campaign_id, payload)
+                    line_item_id = int(line_item["id"])
+                    self._put_line_item_reference(campaign_id, line_item_id)
+                    self._line_item_campaigns[str(line_item_id)] = campaign_id
+                    self._assign_inventory(campaign_id, line_item_id, package)
+                    if geo_targeting:
+                        self._client.campaigns.set_line_item_geo_targeting(
+                            campaign_id,
+                            line_item_id,
+                            {"filter": True, "geo_targeting": self._resolve_geo_regions(geo_targeting)},
+                        )
+                    platform_line_item_ids[package.package_id] = str(line_item_id)
+                    package_responses.append(
+                        ResponsePackage(
+                            package_id=package.package_id,
+                            paused=False,
+                            platform_line_item_id=str(line_item_id),
+                        )
                     )
-                )
         except (ImproveDigitalError, KeyError, TypeError, ValueError) as exc:
             logger.warning("Improve Digital create_media_buy failed: %s", exc)
             self._cleanup_partial_campaign(campaign_id)
+            self._audit_booking(request, start_time, end_time, campaign_id, api_requests, error=str(exc))
             return CreateMediaBuyError(
                 errors=[
                     Error(
@@ -467,6 +496,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 ]
             )
 
+        self._audit_booking(request, start_time, end_time, campaign_id, api_requests)
         response = self._build_create_success(
             request,
             f"improvedigital_{campaign_id}",
@@ -478,6 +508,90 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # by update_media_buy and the reporting read path.
         object.__setattr__(response, "_platform_line_item_ids", platform_line_item_ids)
         return response
+
+    def _audit_booking(
+        self,
+        request: CreateMediaBuyRequest,
+        start_time: datetime,
+        end_time: datetime,
+        campaign_id: int | None,
+        api_requests: list[dict[str, Any]],
+        error: str | None = None,
+    ) -> None:
+        """Write the ``create_media_buy`` audit row after the booking ran.
+
+        Unlike the generic pre-flight audit, this carries the real outcome
+        and the full wire log of the Classic API calls (method, path,
+        status, JSON body) so operators can inspect exactly what was sent
+        during approval from ``audit_logs.details``. The ``_api_requests``
+        key's leading underscore keeps that bulk out of the Slack audit
+        summary, which skips underscore-prefixed keys.
+        """
+        self.audit_logger.log_operation(
+            operation="create_media_buy",
+            principal_name=self.principal.name,
+            principal_id=self.principal.principal_id,
+            adapter_id=str(self.advertiser_id or "unknown"),
+            success=error is None,
+            error=error,
+            details={
+                "po_number": request.po_number,
+                "flight_dates": f"{start_time.date()} to {end_time.date()}",
+                "campaign_id": campaign_id,
+                "external_media_buy_id": f"improvedigital_{campaign_id}" if campaign_id else None,
+                "campaign_reference_number": self.campaign_reference_number,
+                "_api_requests": api_requests,
+            },
+        )
+
+    def _put_campaign_reference(self, campaign_id: int) -> None:
+        """Set the created campaign's ``reference_number`` (the buyer agent's
+        ``campaign_reference_number``) with a read-modify-write PUT.
+
+        Interim path agreed with Improve Digital (2026-09-17): the reference
+        is applied via the Classic update API after every create, until the
+        V3 create API gains ``campaign_reference_number``. Raises on failure
+        so the buy fails loudly and the partial campaign is cleaned up.
+        """
+        assert self._client is not None
+        client = self._client.campaigns
+        self._put_reference_number(
+            f"campaign {campaign_id}",
+            self.campaign_reference_number,
+            lambda: client.get_campaign(campaign_id),
+            lambda dto: client.update_campaign(campaign_id, dto),
+        )
+
+    def _put_line_item_reference(self, campaign_id: int, line_item_id: int) -> None:
+        """Same interim PUT path for the line item's ``reference_number``
+        (the buyer agent's ``line_item_reference_number``)."""
+        assert self._client is not None
+        client = self._client.campaigns
+        self._put_reference_number(
+            f"line item {line_item_id} (campaign {campaign_id})",
+            self.line_item_reference_number,
+            lambda: client.get_line_item(campaign_id, line_item_id),
+            lambda dto: client.update_line_item(campaign_id, line_item_id, dto),
+        )
+
+    @staticmethod
+    def _put_reference_number(
+        label: str,
+        expected: str,
+        fetch: Callable[[], dict[str, Any]],
+        put: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> None:
+        """GET the Classic DTO, set ``reference_number``, PUT it back, and
+        verify the platform persisted it."""
+        dto = fetch()
+        dto["reference_number"] = expected
+        updated = put(dto)
+        if updated.get("reference_number") != expected:
+            raise ValueError(
+                f"Improve Digital {label} did not persist reference_number={expected!r} "
+                f"(got {updated.get('reference_number')!r})"
+            )
+        logger.info("Improve Digital: reference_number %s set on %s via PUT", expected, label)
 
     def _cleanup_partial_campaign(self, campaign_id: int | None) -> None:
         """Best-effort removal of a campaign whose packages failed mid-create,
@@ -672,6 +786,12 @@ class ImproveDigitalAdapter(AdServerAdapter):
             # carry metadata-advertiser UUIDs, which CampaignDto.advertiserId
             # (integer) cannot hold.
             "advertiserId": (int(str(self.advertiser_id)) if str(self.advertiser_id or "").isdigit() else None),
+            # Buyer-agent reference the marketplace carries on the campaign
+            # (per-principal, like GAM's advertiser mapping). Classic
+            # CampaignDto key confirmed with Improve Digital 2026-09-17; the
+            # value is also PUT right after create (_put_campaign_reference).
+            # The V3 create API will add ``campaign_reference_number`` later.
+            "reference_number": self.campaign_reference_number,
         }
         if self.buying_entity_office_id:
             payload["buying_entity_office_id"] = int(self.buying_entity_office_id)
@@ -802,7 +922,10 @@ class ImproveDigitalAdapter(AdServerAdapter):
             "is_consentless": False,
             "is_coppa_compliant": False,
             "optout_mechanism": [],
-            "reference_number": package.package_id,
+            # Buyer-agent reference (same as the campaign's); PUT again right
+            # after create (_put_line_item_reference). V3 will add
+            # ``line_item_reference_number``.
+            "reference_number": self.line_item_reference_number,
             "improve_demand_contact_id": self.improve_demand_contact_id,
         }
         payload["budget"] = budget
