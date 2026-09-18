@@ -106,11 +106,14 @@ class TestReferenceNumbers:
         adapter = self._live_adapter_with_mock_client(mock_principal)
         adapter._client.campaigns.get_campaign.return_value = {"id": 1, "name": "adcp_PO-1", "reference_number": None}
         adapter._client.campaigns.update_campaign.return_value = {"id": 1, "reference_number": "principal_impd_1"}
-        adapter._put_campaign_reference(1)
+        echoed = adapter._put_campaign_reference(1)
+        assert echoed is False  # platform did not echo the V3 key (pre-V3)
         adapter._client.campaigns.get_campaign.assert_called_once_with(1)
         cid, dto = adapter._client.campaigns.update_campaign.call_args.args
         assert cid == 1
         assert dto["reference_number"] == "principal_impd_1"
+        assert dto["campaign_reference_number"] == "principal_impd_1"  # upcoming V3 key, sent alongside
+        assert "line_item_reference_number" not in dto
         assert dto["name"] == "adcp_PO-1"  # full DTO round-trips
 
     def test_campaign_reference_raises_when_put_does_not_persist(self, mock_principal):
@@ -123,12 +126,19 @@ class TestReferenceNumbers:
     def test_line_item_reference_is_put_after_create(self, mock_principal):
         adapter = self._live_adapter_with_mock_client(mock_principal)
         adapter._client.campaigns.get_line_item.return_value = {"id": 202, "name": "li", "budget": 12.0}
-        adapter._client.campaigns.update_line_item.return_value = {"id": 202, "reference_number": "principal_impd_1"}
-        adapter._put_line_item_reference(1, 202)
+        adapter._client.campaigns.update_line_item.return_value = {
+            "id": 202,
+            "reference_number": "principal_impd_1",
+            "line_item_reference_number": "principal_impd_1",
+        }
+        echoed = adapter._put_line_item_reference(1, 202)
+        assert echoed is True  # platform echoed the V3 key
         adapter._client.campaigns.get_line_item.assert_called_once_with(1, 202)
         cid, lid, dto = adapter._client.campaigns.update_line_item.call_args.args
         assert (cid, lid) == (1, 202)
         assert dto["reference_number"] == "principal_impd_1"
+        assert dto["line_item_reference_number"] == "principal_impd_1"  # upcoming V3 key, sent alongside
+        assert "campaign_reference_number" not in dto
         assert dto["budget"] == 12.0  # full DTO round-trips
 
     def test_line_item_reference_raises_when_put_does_not_persist(self, mock_principal):

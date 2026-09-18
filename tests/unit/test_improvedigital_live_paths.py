@@ -209,12 +209,14 @@ class TestCreateMediaBuyLive:
         campaign_put = next(c for c in calls if c[0] == "update_campaign")
         assert campaign_put[1] == 101
         assert campaign_put[2]["reference_number"] == "principal_impd_1"
+        assert campaign_put[2]["campaign_reference_number"] == "principal_impd_1"
         assert campaign_put[2]["name"] == "adcp_x"  # full DTO round-trips
         line_item_create = next(c for c in calls if c[0] == "create_line_item")
         assert line_item_create[2]["reference_number"] == "principal_impd_1"
         line_item_put = next(c for c in calls if c[0] == "update_line_item")
         assert line_item_put[1:3] == (101, 202)
         assert line_item_put[3]["reference_number"] == "principal_impd_1"
+        assert line_item_put[3]["line_item_reference_number"] == "principal_impd_1"
         # PUTs happen right after their POST, before anything else touches the object.
         names = [c[0] for c in calls]
         assert names.index("update_campaign") < names.index("create_line_item")
@@ -233,7 +235,10 @@ class TestCreateMediaBuyLive:
         details = kwargs["details"]
         assert details["campaign_id"] == 101
         assert details["external_media_buy_id"] == "improvedigital_101"
-        assert details["campaign_reference_number"] == "principal_impd_1"
+        assert details["reference_number_sent"] == "principal_impd_1"
+        # FakeCampaignsClient echoes the PUT payload, so both V3 keys come back.
+        assert details["campaign_reference_number_echoed"] is True
+        assert details["line_item_reference_number_echoed"] is True
         # The recorder's list is what gets persisted; the underscore keeps it out of Slack.
         assert details["_api_requests"] is adapter._client.recorded
 
@@ -253,6 +258,9 @@ class TestCreateMediaBuyLive:
         assert "line item rejected" in kwargs["error"]
         assert kwargs["details"]["campaign_id"] == 101
         assert kwargs["details"]["_api_requests"] is adapter._client.recorded
+        # Campaign PUT ran (echoed), the line-item PUT never did.
+        assert kwargs["details"]["campaign_reference_number_echoed"] is True
+        assert kwargs["details"]["line_item_reference_number_echoed"] is None
         assert ("delete_campaign", 101) in adapter._client.campaigns.calls
 
     def test_product_geo_defaults_put_to_geo_targeting_endpoint(self):

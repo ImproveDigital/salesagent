@@ -391,7 +391,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
             self.log(f"  Campaign: {campaign_payload}")
             self.log(
                 f"Would call: PUT {self.base_url}/rtb/v1/classic/campaigns/<new> "
-                f"reference_number={self.campaign_reference_number}"
+                f"reference_number=campaign_reference_number={self.campaign_reference_number}"
             )
             if self._has_campaign_metadata():
                 self.log(f"Would call: POST {self.base_url}/api/metadata-campaigns")
@@ -403,7 +403,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 self.log(f"  LineItem: {payload}")
                 self.log(
                     f"Would call: PUT {self.base_url}/rtb/v1/classic/campaigns/<new>/line-items/<new> "
-                    f"reference_number={self.line_item_reference_number}"
+                    f"reference_number=line_item_reference_number={self.line_item_reference_number}"
                 )
                 product_config = self._product_config_from_package(package)
                 if product_config.get("placement_ids") or product_config.get("package_ids"):
@@ -434,13 +434,20 @@ class ImproveDigitalAdapter(AdServerAdapter):
             )
         campaign_id: int | None = None
         api_requests: list[dict[str, Any]] = []
+        # Whether the platform echoed the upcoming V3 keys on the PUT
+        # responses — recorded in the audit row so the moment Improve Digital
+        # starts storing them is visible per booking.
+        v3_echoed: dict[str, bool | None] = {
+            "campaign_reference_number_echoed": None,
+            "line_item_reference_number_echoed": None,
+        }
         try:
             with self._client.record_requests() as api_requests:
                 campaign = self._client.campaigns.create_campaign(
                     self._campaign_payload(buy_name, start_time, end_time)
                 )
                 campaign_id = int(campaign["id"])
-                self._put_campaign_reference(campaign_id)
+                v3_echoed["campaign_reference_number_echoed"] = self._put_campaign_reference(campaign_id)
                 # Commercial attribution rides on its own record, posted before
                 # the line items so a rejection cleans up the campaign alone.
                 if self._has_campaign_metadata():
@@ -465,7 +472,11 @@ class ImproveDigitalAdapter(AdServerAdapter):
                     geo_targeting = payload.pop("geo_targeting", None)
                     line_item = self._client.campaigns.create_line_item(campaign_id, payload)
                     line_item_id = int(line_item["id"])
-                    self._put_line_item_reference(campaign_id, line_item_id)
+                    echoed = self._put_line_item_reference(campaign_id, line_item_id)
+                    previous = v3_echoed["line_item_reference_number_echoed"]
+                    v3_echoed["line_item_reference_number_echoed"] = (
+                        echoed if previous is None else (previous and echoed)
+                    )
                     self._line_item_campaigns[str(line_item_id)] = campaign_id
                     self._assign_inventory(campaign_id, line_item_id, package)
                     if geo_targeting:
@@ -485,7 +496,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
         except (ImproveDigitalError, KeyError, TypeError, ValueError) as exc:
             logger.warning("Improve Digital create_media_buy failed: %s", exc)
             self._cleanup_partial_campaign(campaign_id)
-            self._audit_booking(request, start_time, end_time, campaign_id, api_requests, error=str(exc))
+            self._audit_booking(request, start_time, end_time, campaign_id, api_requests, v3_echoed, error=str(exc))
             return CreateMediaBuyError(
                 errors=[
                     Error(
@@ -496,7 +507,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 ]
             )
 
-        self._audit_booking(request, start_time, end_time, campaign_id, api_requests)
+        self._audit_booking(request, start_time, end_time, campaign_id, api_requests, v3_echoed)
         response = self._build_create_success(
             request,
             f"improvedigital_{campaign_id}",
@@ -516,6 +527,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
         end_time: datetime,
         campaign_id: int | None,
         api_requests: list[dict[str, Any]],
+        v3_echoed: dict[str, bool | None],
         error: str | None = None,
     ) -> None:
         """Write the ``create_media_buy`` audit row after the booking ran.
@@ -539,12 +551,17 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 "flight_dates": f"{start_time.date()} to {end_time.date()}",
                 "campaign_id": campaign_id,
                 "external_media_buy_id": f"improvedigital_{campaign_id}" if campaign_id else None,
-                "campaign_reference_number": self.campaign_reference_number,
+                # What we sent (the buyer agent id), not a platform response —
+                # see the reference_number keys in the recorded bodies.
+                "reference_number_sent": self.campaign_reference_number,
+                # True/False = the PUT response did/did not echo the V3 key;
+                # None = that PUT never ran (booking failed earlier).
+                **v3_echoed,
                 "_api_requests": api_requests,
             },
         )
 
-    def _put_campaign_reference(self, campaign_id: int) -> None:
+    def _put_campaign_reference(self, campaign_id: int) -> bool:
         """Set the created campaign's ``reference_number`` (the buyer agent's
         ``campaign_reference_number``) with a read-modify-write PUT.
 
@@ -552,24 +569,28 @@ class ImproveDigitalAdapter(AdServerAdapter):
         is applied via the Classic update API after every create, until the
         V3 create API gains ``campaign_reference_number``. Raises on failure
         so the buy fails loudly and the partial campaign is cleaned up.
+        Returns whether the response echoed ``campaign_reference_number``.
         """
         assert self._client is not None
         client = self._client.campaigns
-        self._put_reference_number(
+        return self._put_reference_number(
             f"campaign {campaign_id}",
             self.campaign_reference_number,
+            "campaign_reference_number",
             lambda: client.get_campaign(campaign_id),
             lambda dto: client.update_campaign(campaign_id, dto),
         )
 
-    def _put_line_item_reference(self, campaign_id: int, line_item_id: int) -> None:
+    def _put_line_item_reference(self, campaign_id: int, line_item_id: int) -> bool:
         """Same interim PUT path for the line item's ``reference_number``
-        (the buyer agent's ``line_item_reference_number``)."""
+        (the buyer agent's ``line_item_reference_number``). Returns whether
+        the response echoed ``line_item_reference_number``."""
         assert self._client is not None
         client = self._client.campaigns
-        self._put_reference_number(
+        return self._put_reference_number(
             f"line item {line_item_id} (campaign {campaign_id})",
             self.line_item_reference_number,
+            "line_item_reference_number",
             lambda: client.get_line_item(campaign_id, line_item_id),
             lambda dto: client.update_line_item(campaign_id, line_item_id, dto),
         )
@@ -578,20 +599,33 @@ class ImproveDigitalAdapter(AdServerAdapter):
     def _put_reference_number(
         label: str,
         expected: str,
+        v3_key: str,
         fetch: Callable[[], dict[str, Any]],
         put: Callable[[dict[str, Any]], dict[str, Any]],
-    ) -> None:
-        """GET the Classic DTO, set ``reference_number``, PUT it back, and
-        verify the platform persisted it."""
+    ) -> bool:
+        """GET the Classic DTO, set the reference, PUT it back, and verify.
+
+        The value is written under two keys: ``reference_number`` (the
+        Classic DTO field Improve Digital confirmed, and the one whose
+        persistence is verified) and ``v3_key`` (``campaign_reference_number``
+        / ``line_item_reference_number``, the names Improve Digital is adding
+        to the V3 API — sent now so the switch needs no wire change; the
+        platform may ignore it until then, so it is not verified).
+        """
         dto = fetch()
         dto["reference_number"] = expected
+        dto[v3_key] = expected
         updated = put(dto)
         if updated.get("reference_number") != expected:
             raise ValueError(
                 f"Improve Digital {label} did not persist reference_number={expected!r} "
                 f"(got {updated.get('reference_number')!r})"
             )
+        echoed = updated.get(v3_key) == expected
+        if not echoed:
+            logger.info("Improve Digital: %s not echoed on %s yet (pre-V3); reference_number persisted", v3_key, label)
         logger.info("Improve Digital: reference_number %s set on %s via PUT", expected, label)
+        return echoed
 
     def _cleanup_partial_campaign(self, campaign_id: int | None) -> None:
         """Best-effort removal of a campaign whose packages failed mid-create,
