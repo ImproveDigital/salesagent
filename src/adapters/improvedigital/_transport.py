@@ -26,6 +26,8 @@ import base64
 import json
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlencode
 
@@ -50,6 +52,10 @@ _REFRESH_LEEWAY_SECONDS = 2 * 60
 # when the quota was burned at its very start.
 _RATE_LIMIT_RETRY_DELAYS = (20.0, 65.0)
 _RATE_LIMIT_SLEEP_SECONDS = 61.0
+
+# Recorded request bodies are persisted to audit_logs.details; cap each so a
+# runaway payload cannot bloat the row.
+_RECORDED_BODY_MAX_CHARS = 20_000
 
 
 class ImproveDigitalError(Exception):
@@ -143,8 +149,53 @@ class ImproveDigitalTransport:
             mint_fn=self._mint_token,
             refresh_leeway_seconds=_REFRESH_LEEWAY_SECONDS,
         )
+        self._recording: list[dict[str, Any]] | None = None
 
     # ----- public methods -----
+
+    @contextmanager
+    def record_requests(self) -> Iterator[list[dict[str, Any]]]:
+        """Collect every API call made inside the block for an audit trail.
+
+        Yields a list that fills with ``{method, path, status, params?,
+        body?, multipart_parts?}`` entries as requests complete (failures
+        included). Bodies are the parsed JSON we sent; headers — and so
+        the bearer token — are never recorded.
+        """
+        recorded: list[dict[str, Any]] = []
+        previous = self._recording
+        self._recording = recorded
+        try:
+            yield recorded
+        finally:
+            self._recording = previous
+
+    def _record(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None,
+        body: str | None,
+        files: dict[str, Any] | None,
+        response: requests.Response,
+    ) -> None:
+        if self._recording is None:
+            return
+        entry: dict[str, Any] = {"method": method, "path": path, "status": response.status_code}
+        if params:
+            entry["params"] = params
+        if body is not None:
+            if len(body) > _RECORDED_BODY_MAX_CHARS:
+                entry["body"] = body[:_RECORDED_BODY_MAX_CHARS]
+                entry["body_truncated"] = True
+            else:
+                try:
+                    entry["body"] = json.loads(body)
+                except ValueError:
+                    entry["body"] = body
+        if files:
+            entry["multipart_parts"] = sorted(files)
+        self._recording.append(entry)
 
     def get_json(self, path: str, **params: Any) -> Any:
         """GET a JSON resource. Returns the parsed body (dict or list)."""
@@ -320,6 +371,7 @@ class ImproveDigitalTransport:
             )
             time.sleep(wait)
             response = self._do_request(method, path, params, body, content_type)
+        self._record(method, path, params, body, files, response)
         self._raise_for_status(response, method, path)
         return response
 

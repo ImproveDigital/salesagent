@@ -98,6 +98,18 @@ rows are filtered to `active == true` and `"Classic" in buying_types`.
 Fires on media buy approval, in this order. Any failure triggers cleanup
 (§4.6).
 
+Every call in this section is recorded — method, path, HTTP status and the
+JSON body we sent — and persisted with the ``create_media_buy`` audit row in
+``audit_logs.details["_api_requests"]`` (alongside ``campaign_id``,
+``external_media_buy_id``, ``reference_number_sent`` — the buyer agent id
+we sent, not a platform response — and ``campaign_reference_number_echoed`` /
+``line_item_reference_number_echoed``, whether the PUT responses carried the
+upcoming V3 keys; ``null`` means that PUT never ran), so what went
+out during approval can be inspected afterwards. Failed bookings are
+recorded too, with ``success=false`` and the upstream error. Bearer tokens
+travel in headers and are never recorded; bodies over 20k characters are
+truncated.
+
 ### 4.1 Create the campaign
 
 ```
@@ -114,6 +126,7 @@ POST /rtb/v1/classic/campaigns
   "improve_demand_contact_id": 15917,
   "buying_entity_id": 421,
   "advertiserId": null,
+  "reference_number": "nike",
   "buying_entity_office_id": 5068,
   "buying_entity_office_ids": [5068],
   "agencyId": 123
@@ -125,6 +138,15 @@ POST /rtb/v1/classic/campaigns
   omitted when not configured.
 - `advertiserId` is the principal's platform mapping, but only when it is
   numeric — metadata-advertiser UUIDs are sent as `null`.
+- `reference_number` is the buyer agent's ID, read from the principal's
+  `improvedigital` mapping (`campaign_reference_number`, stamped by Admin UI
+  → Buyer Agents on create) and falling back to the `principal_id` for older
+  principals. Right after the create, the adapter also does
+  `GET` + `PUT /rtb/v1/classic/campaigns/{id}` with the same value under
+  both `reference_number` (the confirmed Classic key, whose persistence is
+  verified) and `campaign_reference_number` (the key Improve Digital is
+  adding to the V3 API; sent now, not verified until the platform echoes it).
+  Interim path agreed with Improve Digital, 2026-09-17.
 - The response `id` becomes the media buy's external ID
   (`improvedigital_<campaign_id>`).
 
@@ -246,7 +268,7 @@ Field sources:
 | `impression_cap` | budget ÷ rate × 1000, computed by the core layer before dispatch |
 | `pricing_model` | product config, else `CPM` (`FLAT_RATE` for flat-rate pricing) |
 | `delivery_schedule`, `frequency_*` | product config; `delivery_schedule` defaults to `Evenly`, the frequency keys are omitted when unset |
-| `reference_number` | our internal package ID, for reconciliation |
+| `reference_number` | the buyer agent's ID (`line_item_reference_number` on the principal's `improvedigital` mapping, same value as the campaign's). Right after the create the adapter also does `GET` + `PUT /rtb/v1/classic/campaigns/{cid}/line-items/{lid}` with it under both `reference_number` (verified) and `line_item_reference_number` (the upcoming V3 key, sent now) — interim path agreed with Improve Digital, 2026-09-17 |
 | `improve_demand_contact_id`, `business_unit_id`, `buyer_id`, `time_zone` | tenant adapter config (`business_unit_id`/`buyer_id` omitted when unset) |
 | `placement_ids`, `package_ids`, `size_ids` | product config |
 
