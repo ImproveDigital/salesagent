@@ -33,7 +33,6 @@ class TestTenantAdapterContext:
         assert ctx["has_improvedigital"] is True
         assert ctx["is_mock"] is False
         assert ctx["adapter_label"] == "Improve Digital"
-        assert ctx["supports_principal_mapping"] is True
 
     def test_adapter_type_falls_back_to_adapter_config(self):
         ctx = _tenant_adapter_context(_tenant(None, adapter_type="improvedigital"))
@@ -50,7 +49,6 @@ class TestTenantAdapterContext:
     def test_adapter_without_principal_mapping(self):
         ctx = _tenant_adapter_context(_tenant("broadstreet"))
         assert ctx["is_mock"] is False
-        assert ctx["supports_principal_mapping"] is False
         assert ctx["adapter_label"] == "Broadstreet"
 
 
@@ -69,43 +67,33 @@ class TestAdapterMappingsFromForm:
         mappings, error = _adapter_mappings_from_form(MultiDict({"gam_advertiser_id": ""}), "p1")
         assert (mappings, error) == ({}, None)
 
-    def test_improvedigital_numeric_id(self):
-        form = MultiDict({"improvedigital_advertiser_id": "17918"})
+    def test_improvedigital_marker_writes_reference_numbers(self):
+        form = MultiDict({"improvedigital_mapping": "1"})
         mappings, error = _adapter_mappings_from_form(form, "p1")
         assert error is None
-        assert mappings == {
-            "improvedigital": {
-                "advertiser_id": "17918",
-                "enabled": True,
-                "campaign_reference_number": "p1",
-                "line_item_reference_number": "p1",
-            }
-        }
-
-    def test_improvedigital_blank_means_tenant_default(self):
-        form = MultiDict({"improvedigital_advertiser_id": ""})
-        mappings, error = _adapter_mappings_from_form(form, "p1")
-        assert error is None
-        # Still writes an enabled mapping so the at-least-one-platform validator passes
+        # No advertiser id per buyer agent: it comes from the tenant connection config.
         assert mappings == {
             "improvedigital": {"enabled": True, "campaign_reference_number": "p1", "line_item_reference_number": "p1"}
         }
 
     def test_improvedigital_reference_number_is_the_buyer_agent_id_not_form_input(self):
-        # Read-only by construction: a posted value is ignored, the principal_id wins.
-        form = MultiDict({"improvedigital_advertiser_id": "", "campaign_reference_number": "tampered"})
+        # Read-only by construction: posted values are ignored, the principal_id wins.
+        form = MultiDict(
+            {
+                "improvedigital_mapping": "1",
+                "campaign_reference_number": "tampered",
+                "improvedigital_advertiser_id": "9",
+            }
+        )
         mappings, error = _adapter_mappings_from_form(form, "nike")
         assert error is None
-        assert mappings["improvedigital"]["campaign_reference_number"] == "nike"
-        assert mappings["improvedigital"]["line_item_reference_number"] == "nike"
+        assert mappings["improvedigital"] == {
+            "enabled": True,
+            "campaign_reference_number": "nike",
+            "line_item_reference_number": "nike",
+        }
 
-    def test_improvedigital_non_numeric_rejected(self):
-        form = MultiDict({"improvedigital_advertiser_id": "brand-x"})
-        mappings, error = _adapter_mappings_from_form(form, "p1")
-        assert mappings == {}
-        assert error is not None and "Improve Digital advertiser ID must be numeric" in error
-
-    def test_improvedigital_field_absent_writes_nothing(self):
+    def test_improvedigital_marker_absent_writes_nothing(self):
         mappings, error = _adapter_mappings_from_form(MultiDict({"name": "Buyer"}), "p1")
         assert (mappings, error) == ({}, None)
 

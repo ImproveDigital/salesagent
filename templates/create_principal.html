@@ -41,7 +41,6 @@
             <h4 style="margin-top: 0;">Preview</h4>
             <dl style="margin: 0;">
                 <dt>Name</dt><dd id="preview-name">—</dd>
-                <dt>ID</dt><dd><code id="preview-id">—</code></dd>
                 <dt>Agent URL</dt><dd><code id="preview-agent-url">—</code></dd>
                 <dt>Signing keys</dt><dd id="preview-keys">—</dd>
             </dl>
@@ -55,17 +54,18 @@
     {% endif %}
 
     <form method="POST" style="margin-top: 2rem;">
+        {% if edit_mode %}
         <div class="form-group">
             <label for="principal_id">Buyer Agent ID</label>
-            <input type="text" id="principal_id" name="principal_id" required
-                   pattern="[a-zA-Z0-9_-]+"
-                   placeholder="e.g., nike, coca_cola, ford_motors"
-                   title="Only letters, numbers, underscores, and hyphens allowed"
-                   value="{{ principal.principal_id if edit_mode else (form_data.principal_id if form_data else '') }}"
-                   {{ 'readonly' if edit_mode else '' }}
-                   class="{{ 'error' if errors and 'principal_id' in errors else '' }}">
-            <small>A unique identifier for this buyer agent. Use lowercase with underscores.{% if edit_mode %} (Cannot be changed){% endif %}</small>
+            {# System-generated on create; shown for reference only (no name attribute, never posted). #}
+            <input type="text" id="principal_id" readonly value="{{ principal.principal_id }}">
+            <small>Generated when the buyer agent was created. Used as the principal ID in API auth and ad-server references. Cannot be changed.</small>
         </div>
+        {% else %}
+        <div class="alert alert-info" style="margin-bottom: var(--sa-space-4);">
+            The <strong>Buyer Agent ID</strong> is generated automatically when you save. It becomes the principal ID used in API auth and ad-server references, and cannot be changed afterwards.
+        </div>
+        {% endif %}
 
         <div class="form-group">
             <label for="name">Buyer Agent Name</label>
@@ -162,16 +162,10 @@
             <div id="advertiser-loading-error" style="display: none; color: red; margin-top: 0.5rem;"></div>
         </div>
         {% elif has_improvedigital %}
-        <div class="form-group">
-            <label for="improvedigital_advertiser_id">Improve Digital advertiser ID <span style="color: var(--sa-text-muted); font-weight: normal;">(optional)</span></label>
-            <input type="text" id="improvedigital_advertiser_id" name="improvedigital_advertiser_id"
-                   inputmode="numeric" pattern="[0-9]*"
-                   placeholder="e.g., 12345"
-                   title="Numeric Improve Digital advertiser ID"
-                   value="{{ existing_improvedigital_id if edit_mode and existing_improvedigital_id else (form_data.improvedigital_advertiser_id if form_data and form_data.improvedigital_advertiser_id else '') }}"
-                   class="{{ 'error' if errors and 'improvedigital_advertiser_id' in errors else '' }}">
-            <small>Campaigns from this buyer agent are booked in Improve Digital with this advertiser (the Classic campaign <code>advertiserId</code>). Leave blank to use the tenant default advertiser from Settings → Ad Server.</small>
-        </div>
+        {# Marker for the create/edit handler: write the improvedigital mapping
+           (reference numbers = Buyer Agent ID). The advertiser comes from the
+           tenant's Improve Digital connection config, not per buyer agent. #}
+        <input type="hidden" name="improvedigital_mapping" value="1">
         <div class="form-group">
             <label for="campaign_reference_number">Improve Digital reference number (campaign &amp; line items)</label>
             {# Derived server-side from the Buyer Agent ID; shown for visibility only (no name attribute, so it is never posted). #}
@@ -244,12 +238,10 @@ input:invalid { border-color: var(--sa-danger); }
     const errorBox = document.getElementById('resolve-error');
     const preview = document.getElementById('resolve-preview');
     const previewName = document.getElementById('preview-name');
-    const previewId = document.getElementById('preview-id');
     const previewAgentUrl = document.getElementById('preview-agent-url');
     const previewKeys = document.getElementById('preview-keys');
     const previewChecks = document.getElementById('preview-checks');
     const manualDetails = document.getElementById('manual-entry');
-    const principalIdInput = document.getElementById('principal_id');
     const nameInput = document.getElementById('name');
     const agentUrlInput = document.getElementById('agent_url');
     const brandDomainInput = document.getElementById('brand_domain');
@@ -263,14 +255,8 @@ input:invalid { border-color: var(--sa-danger); }
         if (manualDetails) manualDetails.open = true;
     }
 
-    const campaignRefInput = document.getElementById('campaign_reference_number');
-    if (campaignRefInput) {
-        principalIdInput.addEventListener('input', function() { campaignRefInput.value = principalIdInput.value; });
-    }
-
     function fillForm(data) {
-        principalIdInput.value = data.principal_id || '';
-        if (campaignRefInput) campaignRefInput.value = principalIdInput.value;
+        // principal_id is system-generated on save; the resolver's slug is not used.
         nameInput.value = data.name || '';
         if (agentUrlInput) agentUrlInput.value = data.agent_url || '';
         // brand_domain is the operator-typed value (the trust anchor).
@@ -315,7 +301,6 @@ input:invalid { border-color: var(--sa-danger); }
                 return;
             }
             previewName.textContent = data.name || '—';
-            previewId.textContent = data.principal_id || '—';
             previewAgentUrl.textContent = data.agent_url || '—';
             previewKeys.textContent = (data.signing_keys || []).length
                 ? data.signing_keys.map(k => k.kid + ' (' + k.alg + ')').join(', ')

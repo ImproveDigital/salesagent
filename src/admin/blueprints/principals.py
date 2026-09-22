@@ -16,26 +16,21 @@ from src.admin.utils.helpers import ADAPTER_LABELS
 from src.core.database.database_session import get_db_session
 from src.core.database.models import MediaBuy, Principal, PushNotificationConfig, Tenant
 from src.core.platform_mappings import resolve_adapter_id
-from src.core.validation import FormValidator
 
 logger = logging.getLogger(__name__)
 
 # Create Blueprint (url_prefix is set during registration in app.py)
 principals_bp = Blueprint("principals", __name__)
 
-# Adapters whose buyer agents carry a per-principal advertiser mapping.
-# ``PlatformMappingModel`` (src/core/json_validators.py) only accepts these
-# keys plus ``mock``; other adapters book against their tenant-level
-# ``default_advertiser_id`` and cannot store a per-buyer mapping.
-_ADAPTERS_WITH_PRINCIPAL_MAPPING = ("google_ad_manager", "improvedigital")
-
 
 def _tenant_adapter_context(tenant: Tenant) -> dict:
     """Describe the tenant's ad server for the buyer-agent form.
 
-    The form renders one advertiser control per adapter (GAM picker,
-    Improve Digital advertiser ID, or the Mock notice), so it needs to know
-    which adapter is live — not just "GAM or not".
+    The form renders one control per adapter (GAM picker, Improve Digital
+    reference number, or the Mock notice), so it needs to know which adapter
+    is live — not just "GAM or not". Only GAM and Improve Digital carry a
+    per-buyer mapping: ``PlatformMappingModel`` (src/core/json_validators.py)
+    accepts just those keys plus ``mock``.
     """
     adapter_type = tenant.ad_server or (tenant.adapter_config.adapter_type if tenant.adapter_config else None)
     if tenant.is_gam_tenant:
@@ -47,7 +42,6 @@ def _tenant_adapter_context(tenant: Tenant) -> dict:
         "has_gam": tenant.is_gam_tenant,
         "has_improvedigital": adapter_type == "improvedigital",
         "is_mock": is_mock,
-        "supports_principal_mapping": adapter_type in _ADAPTERS_WITH_PRINCIPAL_MAPPING,
     }
 
 
@@ -58,14 +52,14 @@ def _adapter_mappings_from_form(form, principal_id: str) -> tuple[dict, str | No
     field's presence tells us which adapter the operator is mapping:
 
     - ``gam_advertiser_id`` (non-empty): GAM company id, must be numeric.
-    - ``improvedigital_advertiser_id`` (present): Classic ``advertiserId``;
-      blank means "use the tenant default" and still writes an ``enabled``
-      mapping so the at-least-one-platform validator passes. The mapping
-      also carries ``campaign_reference_number`` and
-      ``line_item_reference_number`` = the Buyer Agent ID,
-      which the adapter sends as the campaign ``reference_number`` on
-      every marketplace campaign it creates.
-      It is derived, never read from the form, so it stays read-only.
+    - ``improvedigital_mapping`` (hidden marker on Improve Digital tenants):
+      writes an ``enabled`` mapping carrying ``campaign_reference_number``
+      and ``line_item_reference_number`` = the Buyer Agent ID, which the
+      adapter sends as ``reference_number`` on every marketplace campaign
+      and line item it creates. Derived, never read from the form, so it
+      stays read-only. The advertiser comes from the tenant's connection
+      config (``default_advertiser_id``); any ``advertiser_id`` already on
+      an older mapping is preserved by the edit handler.
     - ``enable_mock``: Mock adapter mapping.
 
     Returns ``(mappings, error_message)``; ``mappings`` is empty on error.
@@ -81,18 +75,12 @@ def _adapter_mappings_from_form(form, principal_id: str) -> tuple[dict, str | No
             )
         mappings["google_ad_manager"] = {"advertiser_id": gam_advertiser_id, "enabled": True}
 
-    if "improvedigital_advertiser_id" in form:
-        impd_advertiser_id = (form.get("improvedigital_advertiser_id") or "").strip()
-        if impd_advertiser_id and not impd_advertiser_id.isdigit():
-            return {}, f"Improve Digital advertiser ID must be numeric (got: '{impd_advertiser_id}')."
-        impd_mapping: dict = {
+    if form.get("improvedigital_mapping"):
+        mappings["improvedigital"] = {
             "enabled": True,
             "campaign_reference_number": principal_id,
             "line_item_reference_number": principal_id,
         }
-        if impd_advertiser_id:
-            impd_mapping["advertiser_id"] = impd_advertiser_id
-        mappings["improvedigital"] = impd_mapping
 
     if form.get("enable_mock"):
         mappings["mock"] = {"advertiser_id": f"mock_{principal_id}", "enabled": True}
@@ -281,18 +269,11 @@ def create_principal(tenant_id):
             flash("Buyer agent name is required", "error")
             return redirect(request.url)
 
-        # The form (and domain resolve) offer a Buyer Agent ID; honor it
-        # when supplied, otherwise mint one. API callers omit the field.
-        # The id is the stable key every media buy, account, routing rule
-        # and signing-cache entry references, so it is validated here and
-        # read-only on the edit page — nothing downstream assumes a prefix.
-        requested_id = (request.form.get("principal_id") or "").strip()
-        if requested_id:
-            id_error = FormValidator.validate_principal_id(requested_id)
-            if id_error:
-                flash(f"Buyer Agent ID: {id_error}", "error")
-                return redirect(request.url)
-        principal_id = requested_id or f"prin_{uuid.uuid4().hex[:8]}"
+        # The Buyer Agent ID is system-generated: it is the stable key every
+        # media buy, account, routing rule, signing-cache entry and ad-server
+        # reference_number points at, so operators never choose or change
+        # it — the edit page shows it read-only.
+        principal_id = f"prin_{uuid.uuid4().hex[:8]}"
         access_token = f"tok_{secrets.token_urlsafe(32)}"
 
         # Adapter mapping (GAM picker / Improve Digital advertiser / Mock)
@@ -302,18 +283,11 @@ def create_principal(tenant_id):
             return redirect(request.url)
 
         with get_db_session() as db_session:
-            # Check if principal name or ID already exists
+            # Check if principal name already exists
             existing = db_session.scalars(select(Principal).filter_by(tenant_id=tenant_id, name=principal_name)).first()
             if existing:
                 flash(f"A buyer agent named '{principal_name}' already exists", "error")
                 return redirect(request.url)
-            if requested_id:
-                id_taken = db_session.scalars(
-                    select(Principal).filter_by(tenant_id=tenant_id, principal_id=principal_id)
-                ).first()
-                if id_taken:
-                    flash(f"A buyer agent with ID '{principal_id}' already exists", "error")
-                    return redirect(request.url)
 
             # Optional signing config. brand_domain is the trust anchor
             # (operator-typed buyer domain); the verifier walks
@@ -425,7 +399,6 @@ def edit_principal(tenant_id, principal_id):
             # Extract existing adapter advertiser IDs if present
             mappings = principal.platform_mappings if isinstance(principal.platform_mappings, dict) else {}
             existing_gam_id = resolve_adapter_id(mappings, "google_ad_manager")
-            existing_improvedigital_id = resolve_adapter_id(mappings, "improvedigital")
 
             # Verification status block. Reads ``principals.last_signed_verified_at``
             # (cached on the row by the verifier middleware) — independent of
@@ -453,7 +426,6 @@ def edit_principal(tenant_id, principal_id):
                 edit_mode=True,
                 principal=principal,
                 existing_gam_id=existing_gam_id,
-                existing_improvedigital_id=existing_improvedigital_id,
                 verification_status=verification_status,
                 **_tenant_adapter_context(tenant),
             )
@@ -527,10 +499,16 @@ def edit_principal(tenant_id, principal_id):
             # Preserve mappings the form didn't touch (e.g. mock adapter for
             # tests) so edit doesn't accidentally drop them. GAM is replaced
             # only when a new advertiser_id is submitted; Improve Digital is
-            # replaced whenever its field is on the form (blank = tenant default).
+            # re-stamped on every save, merged over the stored mapping so an
+            # advertiser_id set before the form dropped that field survives.
             existing_mappings = principal.platform_mappings if isinstance(principal.platform_mappings, dict) else {}
             new_mappings = dict(existing_mappings)
-            new_mappings.update(adapter_mappings)
+            for platform_key, mapping in adapter_mappings.items():
+                stored = existing_mappings.get(platform_key)
+                if platform_key == "improvedigital" and isinstance(stored, dict):
+                    new_mappings[platform_key] = {**stored, **mapping}
+                else:
+                    new_mappings[platform_key] = mapping
             principal.platform_mappings = new_mappings
 
             principal.agent_url = agent_url

@@ -1214,10 +1214,10 @@
                                                         <small class="badge bg-primary me-1" title="Google Ad Manager (not configured)">GAM: Not configured</small>
                                                     {% endif %}
                                                 {% elif platform == 'improvedigital' %}
-                                                    {% if config is mapping and config.advertiser_id %}
-                                                        <small class="badge bg-primary me-1" title="Improve Digital Advertiser">Improve Digital: {{ config.advertiser_id }}</small>
+                                                    {% if config is mapping and config.campaign_reference_number %}
+                                                        <small class="badge bg-primary me-1" title="Improve Digital reference number (campaign &amp; line items)">Improve Digital ref: {{ config.campaign_reference_number }}</small>
                                                     {% else %}
-                                                        <small class="badge bg-primary me-1" title="Improve Digital (tenant default advertiser)">Improve Digital: default advertiser</small>
+                                                        <small class="badge bg-primary me-1" title="Improve Digital (reference number = buyer agent id)">Improve Digital</small>
                                                     {% endif %}
                                                 {% elif platform == 'mock' %}
                                                     {% if config is mapping and config.advertiser_id %}

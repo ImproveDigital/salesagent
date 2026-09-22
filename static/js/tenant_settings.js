@@ -1110,16 +1110,16 @@ function displayPrincipalMappingsForm(principal) {
         `;
     }
 
-    // Improve Digital mapping (Classic campaign advertiserId, optional)
+    // Improve Digital mapping: nothing to edit — the reference numbers equal
+    // the buyer agent id and the advertiser comes from the tenant config.
     const improveMapping = platformMappings.improvedigital || {};
     if (isImproveDigital) {
+        const reference = improveMapping.campaign_reference_number || principal.principal_id || '';
         formHtml += `
             <div class="mb-3">
                 <label class="form-label"><strong>Improve Digital</strong></label>
-                <label for="improvedigital_advertiser_id" class="form-label">Advertiser ID (optional)</label>
-                <input type="text" class="form-control" id="improvedigital_advertiser_id" inputmode="numeric"
-                       value="${escapePrincipalHtml(improveMapping.advertiser_id || '')}" placeholder="e.g., 12345">
-                <small class="form-text text-muted">Leave blank to book with the tenant default advertiser from Settings → Ad Server.</small>
+                <input type="hidden" id="improvedigital_mapping" value="1">
+                <p class="form-text text-muted mb-0">Campaign &amp; line item reference number: <code>${escapePrincipalHtml(reference)}</code> (the buyer agent id, read-only).</p>
             </div>
             <hr>
         `;
@@ -1243,18 +1243,13 @@ function savePrincipalMappings() {
         }
     }
 
-    // Improve Digital mapping (blank advertiser id = tenant default)
-    const improveAdvertiserField = document.getElementById('improvedigital_advertiser_id');
-    if (improveAdvertiserField) {
-        const improveAdvertiserId = improveAdvertiserField.value.trim();
-        if (improveAdvertiserId && !/^\d+$/.test(improveAdvertiserId)) {
-            alert('Improve Digital advertiser ID must be numeric');
-            return;
-        }
-        platformMappings.improvedigital = { enabled: true };
-        if (improveAdvertiserId) {
-            platformMappings.improvedigital.advertiser_id = improveAdvertiserId;
-        }
+    // Improve Digital mapping: reference numbers are the buyer agent id
+    if (document.getElementById('improvedigital_mapping')) {
+        platformMappings.improvedigital = {
+            enabled: true,
+            campaign_reference_number: principalId,
+            line_item_reference_number: principalId
+        };
     }
 
     // Mock mapping
