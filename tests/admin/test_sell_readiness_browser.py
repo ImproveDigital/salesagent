@@ -174,16 +174,16 @@ def _set_mock_manual_approval(live_server: dict[str, str], required: bool) -> No
             )
 
 
-def _get_principal_record(live_server: dict[str, str], principal_id: str) -> tuple[str, str, str] | None:
+def _get_principal_record(live_server: dict[str, str], principal_name: str) -> tuple[str, str, str] | None:
     with psycopg2.connect(live_server["postgres"]) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT principal_id, name, access_token
                 FROM principals
-                WHERE tenant_id = %s AND principal_id = %s
+                WHERE tenant_id = %s AND name = %s
                 """,
-                (TENANT_ID, principal_id),
+                (TENANT_ID, principal_name),
             )
             return cursor.fetchone()
 
@@ -342,21 +342,25 @@ def test_edit_product_browser_flow(docker_services_e2e, live_server, test_auth_t
 
 
 def test_create_principal_browser_flow(docker_services_e2e, live_server):
-    """Create a principal in the browser and verify persisted state."""
-    principal_id = f"browser-principal-{uuid.uuid4().hex[:8]}"
+    """Create a principal in the browser and verify persisted state.
+
+    The Buyer Agent ID is system-generated (no ID field on the create page),
+    so the row is looked up by name and the generated id is asserted on.
+    """
     principal_name = f"Browser Principal {uuid.uuid4().hex[:6]}"
 
     with browser_page(live_server["admin"]) as page:
         login_as_tenant_admin(page, TENANT_ID)
         page.goto(f"/tenant/{TENANT_ID}/principals/create", wait_until="networkidle")
-        page.locator("#principal_id").fill(principal_id)
+        assert page.locator("#principal_id").count() == 0, "Create page must not offer an editable Buyer Agent ID"
         page.locator("#name").fill(principal_name)
         page.get_by_role("button", name="Add Buyer Agent").click()
         page.wait_for_url(f"**/tenant/{TENANT_ID}/settings*", wait_until="networkidle")
         page.wait_for_selector(f"text={principal_name}")
 
-    record = _get_principal_record(live_server, principal_id)
+    record = _get_principal_record(live_server, principal_name)
     assert record is not None, "Principal should be persisted"
+    assert record[0].startswith("prin_"), "Buyer Agent ID should be system-generated"
     assert record[1] == principal_name
     assert len(record[2]) > 0, "Principal access token should be generated"
 

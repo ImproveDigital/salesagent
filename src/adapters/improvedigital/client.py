@@ -413,6 +413,10 @@ class ImproveDigitalClient:
         """Non-raising permission probe — see :meth:`ImproveDigitalTransport.probe`."""
         return self._transport.probe(method, path)
 
+    def record_requests(self):
+        """Audit-trail recorder — see :meth:`ImproveDigitalTransport.record_requests`."""
+        return self._transport.record_requests()
+
     def close(self) -> None:
         """Best-effort server-side token invalidation."""
         self._transport.logout()

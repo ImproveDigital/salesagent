@@ -69,6 +69,86 @@ class TestRegistry:
         assert "olv" in channels
 
 
+class TestReferenceNumbers:
+    START, END = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 31, tzinfo=UTC)
+
+    def test_payloads_carry_references_from_principal_mapping(self, mock_principal):
+        mock_principal.platform_mappings = {
+            "improvedigital": {
+                "advertiser_id": "5001",
+                "campaign_reference_number": "nike",
+                "line_item_reference_number": "nike",
+            }
+        }
+        adapter = make_dry_run_adapter(mock_principal)
+        campaign = adapter._campaign_payload("adcp_PO-1", self.START, self.END)
+        # Classic CampaignDto key confirmed by Improve Digital: reference_number
+        assert campaign["reference_number"] == "nike"
+        assert "campaign_reference_number" not in campaign
+        assert campaign["advertiserId"] == 5001
+        line_item = adapter._line_item_payload(make_sample_video_package(), 10.0, "fixed", self.START, self.END)
+        assert line_item["reference_number"] == "nike"
+
+    def test_references_fall_back_to_principal_id_for_older_mappings(self, mock_principal):
+        # Buyer agents admitted before the fields existed still book with a reference.
+        adapter = make_dry_run_adapter(mock_principal)
+        assert adapter.campaign_reference_number == "principal_impd_1"
+        assert adapter.line_item_reference_number == "principal_impd_1"
+        assert adapter._campaign_payload("adcp_PO-1", self.START, self.END)["reference_number"] == "principal_impd_1"
+
+    def _live_adapter_with_mock_client(self, mock_principal):
+        adapter = make_dry_run_adapter(mock_principal)
+        adapter._client = MagicMock()
+        return adapter
+
+    def test_campaign_reference_is_put_after_create(self, mock_principal):
+        # Interim path agreed with Improve Digital: GET + PUT the campaign DTO, always.
+        adapter = self._live_adapter_with_mock_client(mock_principal)
+        adapter._client.campaigns.get_campaign.return_value = {"id": 1, "name": "adcp_PO-1", "reference_number": None}
+        adapter._client.campaigns.update_campaign.return_value = {"id": 1, "reference_number": "principal_impd_1"}
+        echoed = adapter._put_campaign_reference(1)
+        assert echoed is False  # platform did not echo the V3 key (pre-V3)
+        adapter._client.campaigns.get_campaign.assert_called_once_with(1)
+        cid, dto = adapter._client.campaigns.update_campaign.call_args.args
+        assert cid == 1
+        assert dto["reference_number"] == "principal_impd_1"
+        assert dto["campaign_reference_number"] == "principal_impd_1"  # upcoming V3 key, sent alongside
+        assert "line_item_reference_number" not in dto
+        assert dto["name"] == "adcp_PO-1"  # full DTO round-trips
+
+    def test_campaign_reference_raises_when_put_does_not_persist(self, mock_principal):
+        adapter = self._live_adapter_with_mock_client(mock_principal)
+        adapter._client.campaigns.get_campaign.return_value = {"id": 1}
+        adapter._client.campaigns.update_campaign.return_value = {"id": 1, "reference_number": None}
+        with pytest.raises(ValueError, match="campaign 1 did not persist reference_number"):
+            adapter._put_campaign_reference(1)
+
+    def test_line_item_reference_is_put_after_create(self, mock_principal):
+        adapter = self._live_adapter_with_mock_client(mock_principal)
+        adapter._client.campaigns.get_line_item.return_value = {"id": 202, "name": "li", "budget": 12.0}
+        adapter._client.campaigns.update_line_item.return_value = {
+            "id": 202,
+            "reference_number": "principal_impd_1",
+            "line_item_reference_number": "principal_impd_1",
+        }
+        echoed = adapter._put_line_item_reference(1, 202)
+        assert echoed is True  # platform echoed the V3 key
+        adapter._client.campaigns.get_line_item.assert_called_once_with(1, 202)
+        cid, lid, dto = adapter._client.campaigns.update_line_item.call_args.args
+        assert (cid, lid) == (1, 202)
+        assert dto["reference_number"] == "principal_impd_1"
+        assert dto["line_item_reference_number"] == "principal_impd_1"  # upcoming V3 key, sent alongside
+        assert "campaign_reference_number" not in dto
+        assert dto["budget"] == 12.0  # full DTO round-trips
+
+    def test_line_item_reference_raises_when_put_does_not_persist(self, mock_principal):
+        adapter = self._live_adapter_with_mock_client(mock_principal)
+        adapter._client.campaigns.get_line_item.return_value = {"id": 202}
+        adapter._client.campaigns.update_line_item.return_value = {"id": 202, "reference_number": None}
+        with pytest.raises(ValueError, match="line item 202 .* did not persist reference_number"):
+            adapter._put_line_item_reference(1, 202)
+
+
 class TestAdapterConstruction:
     def test_dry_run_defers_client_construction(self, mock_principal):
         adapter = make_dry_run_adapter(mock_principal)

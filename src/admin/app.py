@@ -176,6 +176,49 @@ class CustomProxyFix:
         return self.app(environ, custom_start_response)
 
 
+def _nav_switchable_tenants(email: str | None, role: str | None) -> list[dict[str, str]]:
+    """Tenants the logged-in user can switch to from the top-bar tenant menu.
+
+    Super admins can open any active tenant. Everyone else gets the union
+    of their User-record, authorized-domain and authorized-email access —
+    the same sources ``_build_available_tenants`` feeds the tenant chooser,
+    so the menu never offers a tenant ``select_tenant()`` would reject.
+    """
+    from sqlalchemy import select
+
+    from src.core.database.database_session import get_db_session
+    from src.core.database.models import Tenant
+
+    if role == "super_admin":
+        with get_db_session() as db_session:
+            stmt = (
+                select(Tenant.tenant_id, Tenant.name)
+                .where(Tenant.is_active == True)  # noqa: E712
+                .order_by(Tenant.name)
+            )
+            return [{"tenant_id": tenant_id, "name": name} for tenant_id, name in db_session.execute(stmt).all()]
+
+    if not email:
+        return []
+
+    from src.admin.domain_access import get_user_tenant_access
+
+    access = get_user_tenant_access(email)
+    candidates = list(access["user_tenants"]) + list(access["email_tenants"])
+    if access["domain_tenant"]:
+        candidates.append(access["domain_tenant"])
+
+    seen: set[str] = set()
+    tenants: list[dict[str, str]] = []
+    for tenant in candidates:
+        if tenant.tenant_id in seen:
+            continue
+        seen.add(tenant.tenant_id)
+        tenants.append({"tenant_id": tenant.tenant_id, "name": tenant.name})
+    tenants.sort(key=lambda t: t["name"].lower())
+    return tenants
+
+
 def create_app(config=None):
     """Create and configure the Flask application."""
     app = Flask(__name__, template_folder="../../templates", static_folder="../../static")
@@ -690,13 +733,18 @@ def create_app(config=None):
         explicit_embed = request.args.get("embedded") in ("1", "true", "yes")
         context["embedded"] = explicit_embed or embedded_user
 
-        # Inject fresh tenant data if user is logged in with a tenant.
-        # First check the session, then fall back to the URL ``tenant_id``
-        # route argument — admin pages are scoped to a tenant via the URL,
-        # not via the session, in test/embedded flows.
-        tenant_id = session.get("tenant_id")
-        if not tenant_id and request.view_args:
+        # Inject fresh tenant data for the tenant this page is scoped to.
+        # Admin pages are scoped to a tenant via the URL ``tenant_id`` route
+        # argument, so prefer that; fall back to the session only for
+        # tenant-less routes. The session value is stamped at login /
+        # tenant selection and goes stale as soon as a super admin browses
+        # to a different tenant, which made the navbar ad-server chip show
+        # the previously selected tenant's adapter.
+        tenant_id = None
+        if request.view_args:
             tenant_id = request.view_args.get("tenant_id")
+        if not tenant_id:
+            tenant_id = session.get("tenant_id")
         if tenant_id and tenant_id != "*":
             try:
                 with get_db_session() as db_session:
@@ -720,6 +768,18 @@ def create_app(config=None):
                         )
             except Exception as e:
                 logger.warning(f"Could not load tenant {tenant_id} for context: {e}")
+
+        # Tenant switcher in the top bar. Only meaningful on tenant-scoped
+        # pages for an interactive (non-embedded) session; the template
+        # renders the menu only when more than one tenant comes back.
+        context["nav_tenants"] = []
+        if context.get("tenant") and session.get("authenticated") and not context["embedded"]:
+            user_info = session.get("user")
+            email = user_info.get("email") if isinstance(user_info, dict) else user_info
+            try:
+                context["nav_tenants"] = _nav_switchable_tenants(email, session.get("role"))
+            except Exception as e:
+                logger.warning(f"Could not load switchable tenants for {email}: {e}")
 
         # Resolve the embed-mode host-link override (header > tenant
         # column > None). Read by ``base.html`` to render the leftmost

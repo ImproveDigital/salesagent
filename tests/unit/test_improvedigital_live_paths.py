@@ -8,20 +8,21 @@ reporting-cache read/write paths. No HTTP, no DB.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.adapters.base import DeliveryDataUnavailable
 from src.adapters.improvedigital import ImproveDigitalAdapter
-from src.adapters.improvedigital.client import ImproveDigitalForbiddenError
+from src.adapters.improvedigital.client import ImproveDigitalError, ImproveDigitalForbiddenError
 from src.adapters.improvedigital.reporting_sync import (
     ImproveDigitalReportingSync,
     ReportingScopeNotGranted,
 )
-from src.core.schemas import ReportingPeriod
+from src.core.schemas import CreateMediaBuyError, ReportingPeriod
 from tests.helpers.adapter_test_helpers import (
     invoke_create_media_buy,
     make_sample_create_request,
@@ -60,6 +61,14 @@ class FakeCampaignsClient:
     def create_campaign(self, payload):
         self.calls.append(("create_campaign", payload))
         return {**payload, "id": 101}
+
+    def get_campaign(self, campaign_id):
+        self.calls.append(("get_campaign", campaign_id))
+        return {"id": campaign_id, "name": "adcp_x", "reference_number": None}
+
+    def update_campaign(self, campaign_id, payload):
+        self.calls.append(("update_campaign", campaign_id, payload))
+        return payload
 
     def create_line_item(self, campaign_id, payload):
         self.calls.append(("create_line_item", campaign_id, payload))
@@ -138,6 +147,11 @@ class FakeClient:
         self.campaigns = FakeCampaignsClient()
         self.creatives = FakeCreativesClient()
         self.lookups = FakeLookupsClient()
+        self.recorded: list[dict] = [{"method": "POST", "path": "/rtb/v1/classic/campaigns", "status": 200}]
+
+    @contextmanager
+    def record_requests(self):
+        yield self.recorded
 
 
 def make_live_adapter() -> ImproveDigitalAdapter:
@@ -181,6 +195,73 @@ class TestCreateMediaBuyLive:
         }
         packages_call = next(c for c in calls if c[0] == "set_packages")
         assert packages_call[3] == {"line_item_packages": [{"id": 77, "assigned": True}]}
+
+    def test_references_are_put_after_campaign_and_line_item_create(self):
+        # Interim path agreed with Improve Digital (2026-09-17): after each
+        # create, GET + PUT the Classic DTO with reference_number = the buyer
+        # agent id, for the campaign and every line item.
+        adapter = make_live_adapter()
+        response = invoke_create_media_buy(adapter, make_sample_create_request(), [make_targeted_package()])
+        assert response.media_buy_id == "improvedigital_101"
+
+        calls = adapter._client.campaigns.calls
+        assert calls[0][1]["reference_number"] == "principal_impd_1"  # campaign create body
+        campaign_put = next(c for c in calls if c[0] == "update_campaign")
+        assert campaign_put[1] == 101
+        assert campaign_put[2]["reference_number"] == "principal_impd_1"
+        assert campaign_put[2]["campaign_reference_number"] == "principal_impd_1"
+        assert campaign_put[2]["name"] == "adcp_x"  # full DTO round-trips
+        line_item_create = next(c for c in calls if c[0] == "create_line_item")
+        assert line_item_create[2]["reference_number"] == "principal_impd_1"
+        line_item_put = next(c for c in calls if c[0] == "update_line_item")
+        assert line_item_put[1:3] == (101, 202)
+        assert line_item_put[3]["reference_number"] == "principal_impd_1"
+        assert line_item_put[3]["line_item_reference_number"] == "principal_impd_1"
+        # PUTs happen right after their POST, before anything else touches the object.
+        names = [c[0] for c in calls]
+        assert names.index("update_campaign") < names.index("create_line_item")
+        assert names.index("update_line_item") < names.index("set_line_item_placements")
+
+    def test_successful_booking_audits_outcome_with_wire_log(self):
+        adapter = make_live_adapter()
+        adapter.audit_logger = MagicMock()
+        invoke_create_media_buy(adapter, make_sample_create_request(), [make_targeted_package()])
+
+        adapter.audit_logger.log_operation.assert_called_once()
+        kwargs = adapter.audit_logger.log_operation.call_args.kwargs
+        assert kwargs["operation"] == "create_media_buy"
+        assert kwargs["success"] is True
+        assert kwargs["principal_id"] == "principal_impd_1"
+        details = kwargs["details"]
+        assert details["campaign_id"] == 101
+        assert details["external_media_buy_id"] == "improvedigital_101"
+        assert details["reference_number_sent"] == "principal_impd_1"
+        # FakeCampaignsClient echoes the PUT payload, so both V3 keys come back.
+        assert details["campaign_reference_number_echoed"] is True
+        assert details["line_item_reference_number_echoed"] is True
+        # The recorder's list is what gets persisted; the underscore keeps it out of Slack.
+        assert details["_api_requests"] is adapter._client.recorded
+
+    def test_failed_booking_audits_failure_after_cleanup(self):
+        adapter = make_live_adapter()
+        adapter.audit_logger = MagicMock()
+
+        def create_line_item(campaign_id, payload):
+            raise ImproveDigitalError("line item rejected", status_code=400)
+
+        adapter._client.campaigns.create_line_item = create_line_item
+        response = invoke_create_media_buy(adapter, make_sample_create_request(), [make_targeted_package()])
+        assert isinstance(response, CreateMediaBuyError)
+
+        kwargs = adapter.audit_logger.log_operation.call_args.kwargs
+        assert kwargs["success"] is False
+        assert "line item rejected" in kwargs["error"]
+        assert kwargs["details"]["campaign_id"] == 101
+        assert kwargs["details"]["_api_requests"] is adapter._client.recorded
+        # Campaign PUT ran (echoed), the line-item PUT never did.
+        assert kwargs["details"]["campaign_reference_number_echoed"] is True
+        assert kwargs["details"]["line_item_reference_number_echoed"] is None
+        assert ("delete_campaign", 101) in adapter._client.campaigns.calls
 
     def test_product_geo_defaults_put_to_geo_targeting_endpoint(self):
         """Geo travels via the per-line-item geo-targeting PUT, never in the

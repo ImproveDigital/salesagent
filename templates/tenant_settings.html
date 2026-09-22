@@ -1128,7 +1128,9 @@
             {# Standalone-only banner: Sprint 5 demoted (operator, brand) → GAM
                advertiser mapping out of this page and into Buyer Routing. The
                directory below remains for buyer-protocol Principal admin
-               (access-token-bound buyer identities calling MCP / A2A). #}
+               (access-token-bound buyer identities calling MCP / A2A).
+               Buyer Routing only exists for Google Ad Manager tenants. #}
+            {% if active_adapter == 'google_ad_manager' %}
             <div class="alert alert-info" role="status" style="margin-bottom: 1rem;">
                 <strong>📍 Advertiser mapping moved to Buyer Routing.</strong>
                 <p class="mb-0">
@@ -1143,6 +1145,7 @@
                     Buyer Routing instead.
                 </p>
             </div>
+            {% endif %}
             {% endif %}
 
             <div class="status-card">
@@ -1210,14 +1213,22 @@
                                                     {% else %}
                                                         <small class="badge bg-primary me-1" title="Google Ad Manager (not configured)">GAM: Not configured</small>
                                                     {% endif %}
+                                                {% elif platform == 'improvedigital' %}
+                                                    {% if config is mapping and config.campaign_reference_number %}
+                                                        <small class="badge bg-primary me-1" title="Improve Digital reference number (campaign &amp; line items)">Improve Digital ref: {{ config.campaign_reference_number }}</small>
+                                                    {% else %}
+                                                        <small class="badge bg-primary me-1" title="Improve Digital (reference number = buyer agent id)">Improve Digital</small>
+                                                    {% endif %}
                                                 {% elif platform == 'mock' %}
                                                     {% if config is mapping and config.advertiser_id %}
                                                         <small class="badge bg-secondary me-1" title="Mock Adapter">Mock: {{ config.advertiser_id }}</small>
                                                     {% else %}
                                                         <small class="badge bg-secondary me-1" title="Mock Adapter">Mock</small>
                                                     {% endif %}
+                                                {% elif config is mapping %}
+                                                    <small class="badge bg-info me-1" title="{{ platform }}">{{ platform }}: {{ config.advertiser_id or config.id or config.company_id or 'enabled' }}</small>
                                                 {% else %}
-                                                    <small class="badge bg-info me-1" title="{{ platform }}">{{ platform }}: {{ config if config is string else config|first if config is iterable else config }}</small>
+                                                    <small class="badge bg-info me-1" title="{{ platform }}">{{ platform }}: {{ config }}</small>
                                                 {% endif %}
                                             {% endfor %}
                                         {% else %}
@@ -1243,12 +1254,12 @@
                                         <div class="btn-group btn-group-sm">
                                             <a href="{{ url_for('principals.edit_principal', tenant_id=tenant_id, principal_id=principal.principal_id) }}"
                                                class="btn btn-outline-secondary btn-sm"
-                                               title="Edit Advertiser">
+                                               title="Edit Buyer Agent">
                                                 ✏️
                                             </a>
                                             <button class="btn btn-outline-danger btn-sm"
                                                     onclick="deletePrincipal('{{ principal.principal_id }}', '{{ principal.name }}')"
-                                                    title="Delete Advertiser">
+                                                    title="Delete Buyer Agent">
                                                 🗑️
                                             </button>
                                         </div>
