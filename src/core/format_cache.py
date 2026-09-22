@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from adcp.types import FormatId as LibraryFormatId
+from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 
 from src.core._deprecations import LEGACY_FORMAT_ID_SUNSET, warn_deprecated
 from src.core.canonical_formats import (

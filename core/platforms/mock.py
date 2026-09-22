@@ -144,7 +144,7 @@ class MockSellerPlatform(DecisioningPlatform):
 
     # ─────────────────────────── list_creative_formats ───────────────
 
-    async def list_creative_formats(
+    async def list_creative_formats_legacy(
         self,
         req: Any,
         ctx: RequestContext[Any],

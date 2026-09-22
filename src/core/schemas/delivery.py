@@ -16,10 +16,10 @@ from adcp.types import (
     PricingModel,
     SchemaVariant,
 )
-from adcp.types import GetCreativeDeliveryResponse as LibraryGetCreativeDeliveryResponse
 from adcp.types import GetMediaBuyDeliveryRequest as LibraryGetMediaBuyDeliveryRequest
-from adcp.types import GetMediaBuyDeliveryResponse as LibraryGetMediaBuyDeliveryResponse
 from adcp.types import ReportingPeriod as LibraryReportingPeriod
+from adcp.types.legacy import LegacyGetCreativeDeliveryResponse as LibraryGetCreativeDeliveryResponse
+from adcp.types.legacy import LegacyGetMediaBuyDeliveryResponse as LibraryGetMediaBuyDeliveryResponse
 from pydantic import ConfigDict, Field, field_serializer
 
 from src.core.config import get_pydantic_extra_mode

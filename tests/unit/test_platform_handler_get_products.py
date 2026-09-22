@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from adcp.decisioning.serve import create_adcp_server_from_platform
 from adcp.server.base import ToolContext
-from adcp.types import GetProductsRequest
+from adcp.types.legacy import LegacyGetProductsRequest as GetProductsRequest
 
 from core.platforms.mock import MockSellerPlatform
 from tests.helpers.core_platform import make_active_tenant_session, make_get_products_response

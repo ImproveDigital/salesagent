@@ -24,7 +24,9 @@ from uuid import uuid4
 import requests
 from a2a.types import Task, TaskStatusUpdateEvent
 from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload, extract_webhook_result_data
-from adcp.types import CreateMediaBuySuccessResponse, GeneratedTaskStatus, McpWebhookPayload, Package
+from adcp.types import GeneratedTaskStatus, McpWebhookPayload
+from adcp.types.legacy import LegacyCreateMediaBuyResponse1 as CreateMediaBuySuccessResponse
+from adcp.types.legacy import LegacyPackage as Package
 from adcp.webhooks import generate_webhook_idempotency_key, sign_legacy_webhook
 from google.protobuf.json_format import MessageToDict
 

@@ -34,7 +34,6 @@ from typing import Any, ClassVar
 
 from adcp.decisioning import RequestContext
 from adcp.decisioning.proposal_manager import ProposalCapabilities
-from adcp.types import GetProductsRequest, GetProductsResponse
 from adcp.types.generated_poc.core.product_allocation import ProductAllocation
 from adcp.types.generated_poc.core.proposal import Proposal
 from adcp.types.generated_poc.media_buy.get_products_response import (
@@ -43,6 +42,8 @@ from adcp.types.generated_poc.media_buy.get_products_response import (
     RefinementApplied2,
     RefinementApplied3,
 )
+from adcp.types.legacy import LegacyGetProductsRequest as GetProductsRequest
+from adcp.types.legacy import LegacyGetProductsResponse as GetProductsResponse
 
 from core.platforms._delegate import _build_identity, _coerce_to_request_model, translate_adcp_errors
 from src.core.embedded_runtime import mark_compose_disabled, publisher_owns_compose_products

@@ -19,31 +19,32 @@ from adcp.types import (
     PricingModel,  # Replaces local PricingModel enum (lowercase members: .cpm, .cpc, etc.)
     SchemaVariant,
 )
-from adcp.types import CreateMediaBuyRequest as LibraryCreateMediaBuyRequest
-from adcp.types import Format as LibraryFormat
-from adcp.types import FormatId as LibraryFormatId
 from adcp.types import GetMediaBuysRequest as LibraryGetMediaBuysRequest
-from adcp.types import GetMediaBuysResponse as LibraryGetMediaBuysResponse
-from adcp.types import PackageRequest as LibraryPackageRequest
-from adcp.types import PackageUpdate as LibraryPackageUpdate
-from adcp.types import UpdateMediaBuyRequest as LibraryUpdateMediaBuyRequest
-from adcp.types.aliases import (
-    CreateMediaBuyErrorResponse as AdCPCreateMediaBuyError,
-)
-from adcp.types.aliases import (
-    CreateMediaBuySubmittedResponse as AdCPCreateMediaBuySubmitted,
-)
-from adcp.types.aliases import (
-    CreateMediaBuySuccessResponse as AdCPCreateMediaBuySuccess,
-)
 from adcp.types.aliases import Package as AdCPPackage
 from adcp.types.base import AdCPBaseModel as LibraryAdCPBaseModel
+from adcp.types.base import _build_deferred_serializers
 from adcp.types.generated_poc.media_buy.update_media_buy_response import (
     UpdateMediaBuyResponse1 as AdCPUpdateMediaBuySuccess,
 )
 from adcp.types.generated_poc.media_buy.update_media_buy_response import (
     UpdateMediaBuyResponse2 as AdCPUpdateMediaBuyError,
 )
+
+# adcp 7.x makes canonical creative identity (``format_options`` / ``format_kind``)
+# the primary Python contract and rejects the legacy ``format_id``/``format_ids``
+# wire shape on its root models. salesagent still speaks the AdCP 3.0/3.1 named-
+# format wire shape, so every product/creative/media-buy model extends the
+# explicit ``Legacy*`` variants the SDK keeps for that purpose.
+from adcp.types.legacy import LegacyCreateMediaBuyRequest as LibraryCreateMediaBuyRequest
+from adcp.types.legacy import LegacyCreateMediaBuyResponse1 as AdCPCreateMediaBuySuccess
+from adcp.types.legacy import LegacyCreateMediaBuyResponse2 as AdCPCreateMediaBuyError
+from adcp.types.legacy import LegacyCreateMediaBuyResponse3 as AdCPCreateMediaBuySubmitted
+from adcp.types.legacy import LegacyFormat as LibraryFormat
+from adcp.types.legacy import LegacyFormatId as LibraryFormatId
+from adcp.types.legacy import LegacyGetMediaBuysResponse as LibraryGetMediaBuysResponse
+from adcp.types.legacy import LegacyPackageRequest as LibraryPackageRequest
+from adcp.types.legacy import LegacyPackageUpdate as LibraryPackageUpdate
+from adcp.types.legacy import LegacyUpdateMediaBuyRequest as LibraryUpdateMediaBuyRequest
 
 from src.core.config import get_pydantic_extra_mode
 
@@ -62,7 +63,6 @@ from adcp.types import (
     FlatRatePricingOption,
     GeoCountry,
     GeoMetro,
-    GeoPostalArea,
     GeoRegion,
     VcpmPricingOption,  # V3: consolidated from VcpmAuctionPricingOption/VcpmFixedRatePricingOption
 )
@@ -77,6 +77,10 @@ from adcp.types import PlatformDeployment as LibraryPlatformDeployment
 from adcp.types import Property as LibraryProperty
 from adcp.types import SignalFilters as LibrarySignalFilters
 from adcp.types import TargetingOverlay as LibraryTargetingOverlay
+
+# adcp 7.x removed ``GeoPostalArea`` from the typed surface (deprecated lazy alias
+# only). Bind the name to the legacy ``{system, values}`` PostalArea arm it maps to.
+from adcp.types.generated_poc.core.postal_area import PostalArea5 as GeoPostalArea
 from adcp.types.generated_poc.signals.get_signals_response import Signal as LibrarySignal
 from pydantic import (
     AnyUrl,
@@ -84,6 +88,7 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -117,6 +122,26 @@ def url(value: str) -> AnyUrl:
         AnyUrl instance (auto-validated by Pydantic)
     """
     return AnyUrl(value)  # Pydantic handles string -> AnyUrl conversion
+
+
+def _run_default_serializer(model: BaseModel, serializer: Any) -> Any:
+    """Run pydantic's default serializer, building deferred nested schemas on demand.
+
+    adcp>=6.4.1 builds model core schemas lazily (``defer_build=True``) and
+    ``AdCPBaseModel.model_dump()`` defaults ``serialize_as_any=True``, which makes
+    pydantic-core dispatch every nested value to its *own* class serializer — a
+    placeholder (``MockValSer``) until that class is first built. The SDK retries
+    on the resulting ``TypeError``, but inside a wrap ``@model_serializer`` pydantic
+    re-raises it as ``PydanticSerializationError`` before that retry can run.
+    Mirror the SDK's recovery here: build the instance graph's schemas, retry.
+    """
+    try:
+        return serializer(model)
+    except TypeError as exc:
+        if "MockValSer" not in str(exc):
+            raise
+        _build_deferred_serializers(model, set())
+        return serializer(model)
 
 
 class NestedModelSerializerMixin:
@@ -175,7 +200,7 @@ class NestedModelSerializerMixin:
     def _serialize_nested_models(self, serializer, info):
         """Automatically serialize nested Pydantic models using their custom model_dump()."""
         # Get default serialization
-        data = serializer(self)
+        data = _run_default_serializer(self, serializer)
 
         # Introspect all fields and re-serialize nested Pydantic models
         for field_name, _ in self.__class__.model_fields.items():
@@ -280,7 +305,7 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     def _serialize_model(self, serializer, info):
         """Serialize model, excluding internal fields by default."""
         # Get base serialization
-        data = serializer(self)
+        data = _run_default_serializer(self, serializer)
 
         # Exclude internal fields from protocol responses
         # (unless explicitly requested via model_dump_internal)
@@ -462,7 +487,7 @@ class UpdateMediaBuySuccess(AdCPUpdateMediaBuySuccess):
     def _serialize_model(self, serializer, info):
         """Serialize model — keeps workflow_step_id for deferred-state signal."""
         # Get base serialization
-        data = serializer(self)
+        data = _run_default_serializer(self, serializer)
 
         # Explicitly serialize affected_packages to ensure AffectedPackage.model_dump() is called
         # This ensures internal fields (changes_applied, buyer_package_ref) are excluded via exclude=True
@@ -1286,6 +1311,30 @@ class FormatId(LibraryFormatId):
 
     AdCP 2.5+ supports parameterized format IDs with width/height/duration_ms fields.
     """
+
+    @field_validator("agent_url", mode="before")
+    @classmethod
+    def _coerce_agent_url(cls, value: Any) -> Any:
+        """adcp 7.x ``LegacyFormatId.agent_url`` is a wire-preserving ``str``;
+        keep accepting ``AnyUrl`` instances from callers (e.g. ``url(...)``)."""
+        if isinstance(value, AnyUrl):
+            return str(value)
+        return value
+
+    @field_validator("width", "height", "duration_ms", mode="before")
+    @classmethod
+    def _coerce_numeric_strings(cls, value: Any) -> Any:
+        """adcp 7.x ``LegacyFormatId`` uses strict numeric types; keep accepting the
+        numeric strings that older buyers and stored references carry."""
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lstrip("-").isdigit():
+                return int(text)
+            try:
+                return float(text)
+            except ValueError:
+                return value
+        return value
 
     def __str__(self) -> str:
         """Return human-readable format identifier for display in UIs."""

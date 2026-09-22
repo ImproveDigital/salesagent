@@ -6,13 +6,13 @@ Issue #782: Support creative format templates with dynamic width/height/duration
 from pathlib import Path
 
 import pytest
-from adcp.types import Dimensions, FormatId, Renders
+from adcp.types import Dimensions, Renders
 
 from src.core.helpers import _extract_format_info, _extract_format_namespace
 from src.core.helpers.creative_helpers import (
     _convert_creative_to_adapter_asset,
 )
-from src.core.schemas import Creative, Format
+from src.core.schemas import Creative, Format, FormatId
 from src.core.schemas import FormatId as SchemasFormatId
 
 

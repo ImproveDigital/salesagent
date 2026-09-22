@@ -3,7 +3,7 @@
 import logging
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from adcp import FormatId as LibraryFormatId
+from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 from pydantic import BaseModel
 
 from src.core.canonical_formats import canonicalize_creative_agent_url

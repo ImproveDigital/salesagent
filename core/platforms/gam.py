@@ -141,7 +141,7 @@ class GamPlatform(DecisioningPlatform):
     ) -> dict[str, Any]:
         return await _delegate_get_media_buy_delivery(req, ctx)
 
-    async def list_creative_formats(
+    async def list_creative_formats_legacy(
         self,
         req: Any,
         ctx: RequestContext[Any],

@@ -397,7 +397,7 @@ class TestBuildCreateSuccess:
 
     def test_pre_built_package_responses_override(self):
         """When package_responses is provided, it is used instead of building from packages."""
-        from adcp.types.aliases import Package as ResponsePackage
+        from adcp.types.legacy import LegacyPackage as ResponsePackage
 
         adapter = _make_adapter_instance()
         pre_built = [ResponsePackage(package_id="custom-p1", paused=False)]

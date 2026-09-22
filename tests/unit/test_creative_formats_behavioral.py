@@ -11,12 +11,8 @@ Each test references its upstream BDD scenario ID for traceability.
 from unittest.mock import MagicMock, patch
 
 import pytest
-from adcp.types.generated_poc.core.format import (
-    Assets,
-    Assets5,
-    Dimensions,
-    Renders,
-)
+from adcp.types.generated_poc.core.format import Assets, Dimensions, Renders
+from adcp.types.generated_poc.core.format import Assets10 as Assets5
 
 # adcp 3.9: Assets classes are type-discriminated by asset_type + item_type.
 # Assets = individual image, Assets5 = individual video
@@ -443,7 +439,7 @@ class TestAssetTypesFilterExclusion:
     def test_format_with_non_matching_assets_excluded(self):
         """Format with assets that do not match any requested type is excluded."""
         # adcp 3.6.0: use typed asset classes - Assets (image), Assets9 (html)
-        from adcp.types.generated_poc.core.format import Assets9
+        from adcp.types.generated_poc.core.format import Assets14 as Assets9
 
         formats = [
             _make_format(

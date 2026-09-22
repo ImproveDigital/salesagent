@@ -11,12 +11,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 # Import types from adcp library - use public API when available
-from adcp import Format, Property
-from adcp.types import CreativeAsset, FormatId, Product
+from adcp import Property
 from adcp.types.generated_poc.brand import Brand
+from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
+from adcp.types.legacy import LegacyFormat as Format
+from adcp.types.legacy import LegacyProduct as Product
 
 # Import Package and PackageRequest from our schemas (they extend adcp library)
-from src.core.schemas import Package, PackageRequest, url
+from src.core.schemas import FormatId, Package, PackageRequest, url
 
 
 def create_test_reporting_capabilities(**overrides: Any) -> dict[str, Any]:

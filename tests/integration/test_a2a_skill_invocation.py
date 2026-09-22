@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from a2a.types import DataPart, Message, MessageSendParams, Part, Role, Task, TaskState, TaskStatus
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from tests.utils.a2a_helpers import create_a2a_message_with_skill, create_a2a_text_message
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -724,7 +724,7 @@ class TestA2ASkillInvocation:
             ctx = make_a2a_context(headers={"host": f"{sample_tenant['subdomain']}.example.com"})
 
             # Mock adapter - must return UpdateMediaBuySuccessResponse, not dict
-            from adcp.types.aliases import UpdateMediaBuySuccessResponse
+            from adcp.types.legacy import LegacyUpdateMediaBuyResponse1 as UpdateMediaBuySuccessResponse
 
             mock_adapter = MagicMock()
             mock_adapter.update_media_buy.return_value = UpdateMediaBuySuccessResponse(
