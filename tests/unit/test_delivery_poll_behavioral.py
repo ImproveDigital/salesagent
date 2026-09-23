@@ -474,7 +474,7 @@ class TestMCPToolResultContent:
         from unittest.mock import AsyncMock
 
         from fastmcp.server.context import Context
-        from fastmcp.tools.tool import ToolResult
+        from fastmcp.tools import ToolResult
 
         from src.core.tools.media_buy_delivery import get_media_buy_delivery
 

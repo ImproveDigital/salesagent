@@ -77,6 +77,7 @@ from adcp.types import PlatformDeployment as LibraryPlatformDeployment
 from adcp.types import Property as LibraryProperty
 from adcp.types import SignalFilters as LibrarySignalFilters
 from adcp.types import TargetingOverlay as LibraryTargetingOverlay
+from adcp.types.generated_poc.core.format_id import FormatReferenceStructuredObject
 
 # adcp 7.x removed ``GeoPostalArea`` from the typed surface (deprecated lazy alias
 # only). Bind the name to the legacy ``{system, values}`` PostalArea arm it maps to.
@@ -1312,6 +1313,19 @@ class FormatId(LibraryFormatId):
     AdCP 2.5+ supports parameterized format IDs with width/height/duration_ms fields.
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_base_instances(cls, value: Any) -> Any:
+        """Accept plain ``FormatReferenceStructuredObject`` instances.
+
+        adcp 7 types ``format_id``/``format_ids`` on its legacy request models as
+        the generated base tuple, while salesagent fields are typed as this
+        subclass; pydantic does not upcast parent-class instances, so unwrap them.
+        """
+        if isinstance(value, FormatReferenceStructuredObject) and not isinstance(value, cls):
+            return value.model_dump(mode="python", exclude_none=True)
+        return value
+
     @field_validator("agent_url", mode="before")
     @classmethod
     def _coerce_agent_url(cls, value: Any) -> Any:
@@ -1334,6 +1348,8 @@ class FormatId(LibraryFormatId):
                 return float(text)
             except ValueError:
                 return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)  # A2A/protobuf renders JSON integers as floats
         return value
 
     def __str__(self) -> str:
@@ -1664,9 +1680,10 @@ class MediaPackage(SalesAgentBaseModel):
     # the ad server's primary-goal delivery cap. NOT a measured delivery
     # number. See media_buy_create._goal_units_from_budget.
     impressions: int
-    # Accept library FormatId (not our extended FormatId) to avoid validation errors
-    # when Product from library returns LibraryFormatId instances
-    format_ids: list[LibraryFormatId]  # FormatId objects per AdCP spec
+    # Our ``FormatId`` upcasts plain ``FormatReferenceStructuredObject`` tuples
+    # (what adcp 7's legacy request models carry) — the bare library type
+    # rejects them as foreign instances.
+    format_ids: list[FormatId]  # FormatId objects per AdCP spec
     targeting_overlay: Targeting | None = None
     product_id: str | None = None  # Product ID for this package
     budget: float | None = None  # Budget allocation in the currency specified by the pricing option

@@ -72,6 +72,7 @@ from adcp.server.mcp_tools import (
 )
 from adcp.server.spec_compat import _spec_compat_hooks_impl
 
+from src.core.auth import get_principal_from_context
 from src.core.slim_schemas import compact_tool_schemas
 
 # Optionally compact the adcp tool definitions served on tools/list.
@@ -265,9 +266,13 @@ def _with_dev_unknown_field_rejection(
     def make_hook(tool_name: str, base_hook: PreValidationHook | None, known_fields: set[str]) -> PreValidationHook:
         def hook(name: str, params: dict[str, Any]) -> dict[str, Any]:
             normalized = base_hook(name, params) if base_hook is not None else params
+            from core.platforms._canonical_formats import prepare_legacy_request
             from src.core.request_compat import normalize_request_params
 
             normalized = normalize_request_params(tool_name, normalized).params
+            # adcp 7: legacy creative identity must be seen before the SDK
+            # negotiates the creative dialect (see core/platforms/_canonical_formats).
+            normalized = prepare_legacy_request(tool_name, normalized)
             from src.core.config import is_production
 
             if not is_production():
@@ -431,7 +436,7 @@ def auth_context_factory_with_discovery_fallback(meta):
     if not token:
         token = request.headers.get("x-adcp-auth")
     if not token:
-        return ctx
+        return _anonymous_context_with_tenant(ctx, request)
     principal = _validate_token(token)
     if principal is None:
         return ctx
@@ -459,6 +464,42 @@ def auth_context_factory_with_discovery_fallback(meta):
 
 
 # ---- Per-tenant DecisioningPlatform factory -------------------------------
+
+
+def _anonymous_context_with_tenant(ctx: ToolContext, request: Any) -> ToolContext:
+    """Anonymous discovery: pin the tenant from the request headers.
+
+    ``SalesagentAccountStore.resolve`` derives the tenant of an unauthenticated
+    request from the SDK's ``current_tenant`` ContextVars. With adcp 7's
+    transport stack (fastmcp 4 / mcp 2) the tool dispatch runs in a task where
+    the tenant-router ContextVar set by the ASGI middleware is not visible, so
+    anonymous ``get_products`` on a bare host or via ``x-adcp-tenant`` failed
+    with ``ACCOUNT_NOT_FOUND``. This factory runs in the dispatch task; resolve
+    the tenant from the same headers ``resolve_identity`` uses and publish it
+    on ``ToolContext.tenant_id`` and the auth ContextVar the store reads.
+    """
+    from types import SimpleNamespace
+
+    from adcp.server.auth import current_tenant
+
+    try:
+        headers = dict(request.headers)
+        _principal_id, tenant_context = get_principal_from_context(
+            SimpleNamespace(headers=headers), require_valid_token=False
+        )
+    except Exception:  # never block discovery on tenant hint problems
+        logger.debug("anonymous tenant resolution from headers failed", exc_info=True)
+        return ctx
+    tenant_id = tenant_context.get("tenant_id") if isinstance(tenant_context, dict) else None
+    if not tenant_id:
+        return ctx
+    current_tenant.set(tenant_id)
+    return ToolContext(
+        request_id=ctx.request_id,
+        caller_identity=None,
+        tenant_id=tenant_id,
+        metadata=dict(ctx.metadata or {}),
+    )
 
 
 async def build_platform_for_tenant(tenant_id: str) -> DecisioningPlatform:
@@ -517,8 +558,11 @@ def _build_proposal_managers() -> dict[str, SalesAgentProposalManager]:
 
 
 def build_router() -> LazyPlatformRouter:
-    from adcp.types.generated_poc.bundled.protocol.get_adcp_capabilities_response import Features
-
+    from core.platforms._canonical_formats import (
+        CanonicalCreativeFeatures,
+        canonical_format_legacy_resolver,
+        legacy_format_converter,
+    )
     from core.platforms._delegate import (
         SUPPORTED_ADCP_VERSIONS,
         SUPPORTED_MAJOR_VERSIONS,
@@ -555,7 +599,8 @@ def build_router() -> LazyPlatformRouter:
             # its own ``PropertyListFetcher`` plug — and we don't ship one,
             # so SDK boot fails fast (``no PropertyListFetcher was
             # wired``). Declare when we wire that plug.
-            features=Features(inline_creative_management=True),
+            # ``canonical_creatives`` (AdCP 3.1) — see CanonicalCreativeFeatures.
+            features=CanonicalCreativeFeatures(inline_creative_management=True),
         ),
         signals=Signals(discovery_modes=["brief", "wholesale"], features=SignalsFeatures(catalog_signals=True)),
         webhook_signing=WebhookSigning(supported=False, legacy_hmac_fallback=True),
@@ -616,6 +661,13 @@ def build_router() -> LazyPlatformRouter:
     # ``getattr(platform, "_adcp_idempotency_external", False)``; use setattr to
     # match the SDK's read-side ergonomics without adding ``type: ignore``.
     setattr(router, "_adcp_idempotency_external", True)  # noqa: B010
+    # adcp 7 creative-dialect hooks. The SDK dispatcher reads these off the
+    # platform object it serves (this router) to project legacy buyers'
+    # ``format_id``/``format_ids`` to canonical declarations on the way in and
+    # our canonical results back to named formats on the way out. See
+    # ``core/platforms/_canonical_formats.py``.
+    router.legacy_format_converter = legacy_format_converter  # type: ignore[attr-defined]
+    router.canonical_format_legacy_resolver = canonical_format_legacy_resolver  # type: ignore[attr-defined]
     return router
 
 

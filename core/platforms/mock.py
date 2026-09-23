@@ -36,6 +36,7 @@ from adcp.decisioning.capabilities import (
 )
 
 from core.idempotency import get_idempotency_store, translate_idempotency_conflict
+from core.platforms._canonical_formats import canonical_format_legacy_resolver, legacy_format_converter
 from core.platforms._delegate import (
     _delegate_create_media_buy,
     _delegate_get_media_buy_delivery,
@@ -62,6 +63,10 @@ class MockSellerPlatform(DecisioningPlatform):
     a full ``sales-non-guaranteed`` lifecycle against the salesagent
     ``MediaBuy`` ORM via ``src/core/tools/*`` ``_impl`` delegates.
     Idempotent on every mutating method."""
+
+    # adcp 7 creative-dialect hooks (see core/platforms/_canonical_formats.py).
+    legacy_format_converter = staticmethod(legacy_format_converter)
+    canonical_format_legacy_resolver = staticmethod(canonical_format_legacy_resolver)
 
     capabilities = DecisioningCapabilities(
         specialisms=["sales-non-guaranteed", "signal-owned"],

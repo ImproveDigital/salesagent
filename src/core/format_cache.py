@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from adcp.types.generated_poc.core.format_id import FormatReferenceStructuredObject
 from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 
 from src.core._deprecations import LEGACY_FORMAT_ID_SUNSET, warn_deprecated
@@ -222,7 +223,7 @@ def upgrade_legacy_format_id(format_id_value: str | dict | FormatId) -> FormatId
     # FormatId object (including our subclass) - convert to canonical shape so
     # persisted legacy IDs like display_300x250 still behave as display_image
     # with width/height parameters.
-    if isinstance(format_id_value, LibraryFormatId):
+    if isinstance(format_id_value, FormatReferenceStructuredObject):  # LegacyFormatId / FormatId subclass it
         return _format_id_object_to_canonical(format_id_value)
 
     # Already a dict with agent_url
