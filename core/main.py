@@ -90,8 +90,9 @@ from src.core.slim_schemas import compact_tool_schemas
 # unusable.  The inlined outputSchemas are just as bad in aggregate (~4.7 MB
 # across the 13 advertised tools — 92% of the remaining payload) and pushed
 # the tools/list response past buyer-agent size caps (Scope3 caps at 5 MB),
-# blocking catalog discovery.  compact_tool_schemas() slims the four booking
-# inputSchemas and strips outputSchema from every tool — see its docstring.
+# blocking catalog discovery.  compact_tool_schemas() slims the booking-flow
+# and account-scoped inputSchemas listed in SLIM_INPUT_SCHEMAS and strips
+# outputSchema from every tool — see its docstring.
 #
 # Set ADCP_COMPACT_TOOL_SCHEMAS=true to activate.
 # When unset or false, the full adcp-generated schemas are used (default).

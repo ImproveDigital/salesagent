@@ -6,14 +6,23 @@ The adcp library generates input schemas from Pydantic models via
 creative asset union, the result is enormous.  Approximate served cost of
 one booking flow (tokens, at ~4 chars/token) before and after slimming:
 
-===================== ============ ===========
-tool                          full        slim
-===================== ============ ===========
-sync_creatives             480 036       ~1 000
-create_media_buy           546 896       ~1 300
-update_media_buy         1 045 087       ~1 300
-get_products                45 972       ~1 000
-===================== ============ ===========
+======================= ============ ===========
+tool                            full        slim
+======================= ============ ===========
+sync_creatives               480 036       ~1 000
+create_media_buy             546 896       ~1 300
+update_media_buy           1 045 087       ~1 300
+get_products                  45 972       ~1 000
+sync_accounts                 35 200       ~1 000
+list_creatives                15 700       ~1 100
+get_signals                   12 700         ~600
+get_media_buy_delivery        10 200         ~500
+get_media_buys                 8 100         ~400
+list_accounts                  7 300         ~200
+======================= ============ ===========
+
+The second tier is dominated by the inlined ``AccountReference`` union
+(~25 kB in every account-scoped tool), shared here via ``_account_ref``.
 
 Either volume alone fills an LLM context window on ``tools/list`` before any
 useful work can happen.
@@ -964,6 +973,455 @@ GET_PRODUCTS_SLIM_SCHEMA: dict = {
 
 
 # ---------------------------------------------------------------------------
+# Shared fragments
+# ---------------------------------------------------------------------------
+# The inlined ``AccountReference`` union alone is ~25 kB in every account-
+# scoped tool (list_accounts, get_media_buys, get_media_buy_delivery,
+# list_creatives, get_signals) — it is the single biggest contributor to the
+# remaining tools/list payload once the booking-flow tools are slimmed.
+# ---------------------------------------------------------------------------
+
+
+def _account_ref(description: str) -> dict:
+    """Slim ``AccountReference``: by seller ID or by natural key."""
+    return {
+        "type": "object",
+        "description": (
+            f"{description} Either {{account_id: str}} or {{brand: {{domain: str}}, operator: str, sandbox?: bool}}."
+        ),
+        "properties": {
+            "account_id": {"type": "string"},
+            "brand": {
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string"},
+                    "brand_id": {"type": "string"},
+                },
+            },
+            "operator": {"type": "string"},
+            "sandbox": {"type": "boolean"},
+        },
+    }
+
+
+_PAGINATION_SCHEMA: dict = {
+    "type": "object",
+    "description": "Cursor pagination: {max_results: int (max 100), cursor: str from a previous response}.",
+    "properties": {
+        "max_results": {"type": "integer"},
+        "cursor": {"type": "string"},
+    },
+}
+
+_MEDIA_BUY_STATUSES: list[str] = [
+    "pending_creatives",
+    "pending_start",
+    "active",
+    "paused",
+    "completed",
+    "rejected",
+    "canceled",
+]
+
+_MEDIA_BUY_STATUS_FILTER_SCHEMA: dict = {
+    "description": "Filter by media buy status. A single status string or an array of statuses.",
+    "anyOf": [
+        {"type": "string", "enum": _MEDIA_BUY_STATUSES},
+        {"type": "array", "items": {"type": "string", "enum": _MEDIA_BUY_STATUSES}},
+    ],
+}
+
+_PUSH_NOTIFICATION_CONFIG_SCHEMA: dict = {
+    "type": "object",
+    "description": (
+        "Webhook for async task-completion notifications. Provide {url, authentication: {schemes, credentials}}."
+    ),
+    "properties": {
+        "url": {"type": "string", "format": "uri"},
+        "authentication": {"type": "object"},
+    },
+    "required": ["url"],
+}
+
+
+# ---------------------------------------------------------------------------
+# list_accounts
+# ---------------------------------------------------------------------------
+# Required fields: none — every filter is optional.
+# ---------------------------------------------------------------------------
+
+LIST_ACCOUNTS_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "account": _account_ref("Optional exact account filter. Use account_id to retrieve one known account."),
+        "status": {
+            "type": "string",
+            "enum": ["active", "pending_approval", "rejected", "payment_required", "suspended", "closed"],
+            "description": "Filter accounts by status. Omit to return accounts in all statuses.",
+        },
+        "sandbox": {
+            "type": "boolean",
+            "description": "true returns only sandbox accounts, false only production accounts. Omit for both.",
+        },
+        "pagination": _PAGINATION_SCHEMA,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# sync_accounts
+# ---------------------------------------------------------------------------
+# Required fields (2):  idempotency_key, accounts
+# Each accounts[] entry is one of two shapes (enforced by the Pydantic model):
+#   * provisioning:     brand + operator + billing (no `account`)
+#   * settings-update:  account (existing account key) + optional patch fields
+# ---------------------------------------------------------------------------
+
+SYNC_ACCOUNTS_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "required": ["idempotency_key", "accounts"],
+    "properties": {
+        # ── required ──────────────────────────────────────────────────────
+        "idempotency_key": {
+            "type": "string",
+            "description": (
+                "Client-generated unique key (16-255 chars, alphanumeric + _.:-). "
+                "Re-send the same key to safely retry without applying the sync twice."
+            ),
+        },
+        "accounts": {
+            "type": "array",
+            "description": (
+                "Per-account sync entries. Provisioning mode: provide brand + operator + billing "
+                "(no `account`). Settings-update mode: provide `account` (existing account key) plus "
+                "only the fields to change; brand/operator/billing must then be absent."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "account": _account_ref("Settings-update key targeting an existing account."),
+                    "brand": {
+                        "type": "object",
+                        "description": "Brand reference (provisioning mode). Provide {domain: 'example.com'}.",
+                        "properties": {
+                            "domain": {"type": "string"},
+                            "brand_id": {"type": "string"},
+                        },
+                    },
+                    "operator": {
+                        "type": "string",
+                        "description": (
+                            "Domain of the entity operating on the brand's behalf (provisioning mode). "
+                            "Equal to the brand domain when the brand operates directly."
+                        ),
+                    },
+                    "billing": {
+                        "type": "string",
+                        "enum": ["operator", "agent", "advertiser"],
+                        "description": "Who is invoiced (provisioning mode).",
+                    },
+                    "billing_entity": {
+                        "type": "object",
+                        "description": "Legal entity details for the paying party: {name, address?, tax_id?, ...}.",
+                    },
+                    "payment_terms": {
+                        "type": "string",
+                        "enum": ["net_15", "net_30", "net_45", "net_60", "net_90", "prepay"],
+                    },
+                    "sandbox": {
+                        "type": "boolean",
+                        "description": "Provision as a sandbox account with no real platform calls or billing.",
+                    },
+                    "notification_configs": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Account-level webhook subscriptions: [{url, authentication, event_types?}].",
+                    },
+                },
+            },
+        },
+        # ── common optional ─────────────────────────────────────────────────
+        "delete_missing": {
+            "type": "boolean",
+            "description": (
+                "Close every account previously synced by this agent that is absent from this call. Use with care."
+            ),
+        },
+        "dry_run": {
+            "type": "boolean",
+            "description": "Preview what would be created/updated without applying it.",
+        },
+        "push_notification_config": _PUSH_NOTIFICATION_CONFIG_SCHEMA,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# get_media_buys
+# ---------------------------------------------------------------------------
+# Required fields: none — omit media_buy_ids for a paginated listing.
+# ---------------------------------------------------------------------------
+
+GET_MEDIA_BUYS_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "account": _account_ref("Account to retrieve media buys for. Omit for all accessible accounts."),
+        "media_buy_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Media buy IDs to retrieve. Omit for a paginated listing.",
+        },
+        "status_filter": _MEDIA_BUY_STATUS_FILTER_SCHEMA,
+        "include_snapshot": {
+            "type": "boolean",
+            "description": "Include a near-real-time delivery snapshot for each package.",
+        },
+        "include_history": {
+            "type": "integer",
+            "description": "Include the last N revision history entries for each media buy.",
+        },
+        "include_webhook_activity": {
+            "type": "boolean",
+            "description": "Include recent webhook delivery records per media buy.",
+        },
+        "webhook_activity_limit": {
+            "type": "integer",
+            "description": "Max webhook records per media buy when include_webhook_activity=true.",
+        },
+        "pagination": _PAGINATION_SCHEMA,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# get_media_buy_delivery
+# ---------------------------------------------------------------------------
+# Required fields: none — omit both dates for campaign-to-date totals.
+# attribution_window is omitted (rare; still accepted at runtime).
+# ---------------------------------------------------------------------------
+
+GET_MEDIA_BUY_DELIVERY_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "account": _account_ref("Filter delivery data to one account. Omit for all accessible accounts."),
+        "media_buy_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Media buy IDs to report on.",
+        },
+        "status_filter": _MEDIA_BUY_STATUS_FILTER_SCHEMA,
+        "start_date": {
+            "type": "string",
+            "format": "date",
+            "description": "Reporting period start (YYYY-MM-DD). Omit with end_date for campaign-to-date totals.",
+        },
+        "end_date": {
+            "type": "string",
+            "format": "date",
+            "description": "Reporting period end (YYYY-MM-DD).",
+        },
+        "include_package_daily_breakdown": {
+            "type": "boolean",
+            "description": "Include a daily_breakdown array within each package.",
+        },
+        "time_granularity": {
+            "type": "string",
+            "enum": ["hourly", "daily", "monthly"],
+            "description": "Per-window slice granularity; pair with include_window_breakdown.",
+        },
+        "include_window_breakdown": {
+            "type": "boolean",
+            "description": "Include per-window delivery arrays on each media buy.",
+        },
+        "reporting_dimensions": {
+            "type": "object",
+            "description": (
+                "Dimensional breakdowns to include. Keys: geo, device_type, device_platform, audience, placement."
+            ),
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# list_creatives
+# ---------------------------------------------------------------------------
+# Required fields: none — call with no arguments to list everything.
+# filters.accounts and the top-level account both inline AccountReference in
+# the generated schema (~25 kB each); both are slimmed via _account_ref.
+# ---------------------------------------------------------------------------
+
+LIST_CREATIVES_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "filters": {
+            "type": "object",
+            "description": "Structured creative filters — all supplied filters must match.",
+            "properties": {
+                "statuses": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["processing", "pending_review", "approved", "suspended", "rejected", "archived"],
+                    },
+                },
+                "creative_ids": {"type": "array", "items": {"type": "string"}},
+                "name_contains": {
+                    "type": "string",
+                    "description": "Case-insensitive substring match on creative name.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "All tags must match.",
+                },
+                "tags_any": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Any tag may match.",
+                },
+                "created_after": {"type": "string", "format": "date-time"},
+                "created_before": {"type": "string", "format": "date-time"},
+                "updated_after": {"type": "string", "format": "date-time"},
+                "updated_before": {"type": "string", "format": "date-time"},
+                "media_buy_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Creatives assigned to any of these media buys.",
+                },
+                "assigned_to_packages": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Creatives assigned to any of these package IDs.",
+                },
+                "unassigned": {
+                    "type": "boolean",
+                    "description": "true = only unassigned creatives, false = only assigned.",
+                },
+                "has_served": {"type": "boolean"},
+                "concept_ids": {"type": "array", "items": {"type": "string"}},
+                "has_variables": {"type": "boolean"},
+                "accounts": {
+                    "type": "array",
+                    "items": _account_ref("Owning account."),
+                    "description": "Filter creatives by owning accounts.",
+                },
+            },
+        },
+        "sort": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "enum": ["created_date", "updated_date", "name", "status", "assignment_count"],
+                },
+                "direction": {"type": "string", "enum": ["asc", "desc"]},
+            },
+        },
+        "pagination": _PAGINATION_SCHEMA,
+        "include_assignments": {
+            "type": "boolean",
+            "description": "Include package assignment information per creative.",
+        },
+        "include_snapshot": {
+            "type": "boolean",
+            "description": "Include a lightweight delivery snapshot per creative.",
+        },
+        "include_items": {
+            "type": "boolean",
+            "description": "Include items for multi-asset formats (carousels, native).",
+        },
+        "include_variables": {
+            "type": "boolean",
+            "description": "Include dynamic content variable definitions (DCO slots).",
+        },
+        "include_pricing": {
+            "type": "boolean",
+            "description": "Include pricing_options per creative. Requires account.",
+        },
+        "account": _account_ref("Account for pricing and access resolution."),
+        "fields": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "creative_id",
+                    "name",
+                    "format_id",
+                    "status",
+                    "created_date",
+                    "updated_date",
+                    "tags",
+                    "assignments",
+                    "snapshot",
+                    "items",
+                    "variables",
+                    "concept",
+                    "pricing_options",
+                ],
+            },
+            "description": "Restrict response to these fields. Omit for all fields.",
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# get_signals
+# ---------------------------------------------------------------------------
+# Required fields: none — signal_spec drives semantic discovery.
+# Deprecated fields (signal_ids, max_results) and rare version tokens
+# (if_wholesale_feed_version, if_pricing_version) are omitted; the request
+# model still accepts them at runtime.
+# ---------------------------------------------------------------------------
+
+GET_SIGNALS_SLIM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "discovery_mode": {
+            "type": "string",
+            "enum": ["brief", "wholesale"],
+            "description": (
+                "'brief' (default): semantic discovery from signal_spec. "
+                "'wholesale': full catalog with rate-card pricing."
+            ),
+        },
+        "signal_spec": {
+            "type": "string",
+            "description": "Natural-language description of the desired signals (semantic discovery).",
+        },
+        "signal_refs": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Exact lookup by signal reference: [{agent_url, id}].",
+        },
+        "account": _account_ref("Account for per-account pricing and access."),
+        "destinations": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Restrict to signals activatable on these agents/platforms: [{agent_url} | {platform}].",
+        },
+        "countries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "ISO 3166-1 alpha-2 country codes where signals will be used.",
+        },
+        "filters": {
+            "type": "object",
+            "description": "Structured signal filters (catalog_types, data_providers, max_cpm, ...).",
+        },
+        "fields": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Restrict response to these signal fields. Omit for all fields.",
+        },
+        "pagination": _PAGINATION_SCHEMA,
+        "push_notification_config": _PUSH_NOTIFICATION_CONFIG_SCHEMA,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Tool-definition compaction
 # ---------------------------------------------------------------------------
 
@@ -973,6 +1431,12 @@ SLIM_INPUT_SCHEMAS: dict[str, dict] = {
     "update_media_buy": UPDATE_MEDIA_BUY_SLIM_SCHEMA,
     "sync_creatives": SYNC_CREATIVES_SLIM_SCHEMA,
     "get_products": GET_PRODUCTS_SLIM_SCHEMA,
+    "sync_accounts": SYNC_ACCOUNTS_SLIM_SCHEMA,
+    "list_creatives": LIST_CREATIVES_SLIM_SCHEMA,
+    "get_signals": GET_SIGNALS_SLIM_SCHEMA,
+    "get_media_buy_delivery": GET_MEDIA_BUY_DELIVERY_SLIM_SCHEMA,
+    "get_media_buys": GET_MEDIA_BUYS_SLIM_SCHEMA,
+    "list_accounts": LIST_ACCOUNTS_SLIM_SCHEMA,
 }
 
 
@@ -983,7 +1447,8 @@ def compact_tool_schemas(tool_defs: list[dict]) -> None:
 
     * ``inputSchema`` — replaced with the hand-written slim schema for the
       tools in ``SLIM_INPUT_SCHEMAS`` (the asset-bearing booking-flow tools
-      whose inlined schemas run to megabytes).
+      whose inlined schemas run to megabytes, plus the account-scoped
+      read/sync tools bloated by the inlined ``AccountReference`` union).
     * ``outputSchema`` — dropped from **every** tool.  The inlined output
       schemas total ~4.7 MB across the advertised tools — 92% of the
       ``tools/list`` payload — which pushed the response past buyer-agent
