@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from adcp.decisioning.serve import create_adcp_server_from_platform
 from adcp.server.base import ToolContext
-from adcp.types import GetProductsRequest
+from adcp.types.legacy import LegacyGetProductsRequest as GetProductsRequest
 
 from core.platforms.mock import MockSellerPlatform
 from tests.helpers.core_platform import make_active_tenant_session, make_get_products_response
@@ -80,8 +80,13 @@ def test_get_products_dispatches_through_framework_handler(mocked_pipeline):
     assert product["pricing_options"][0]["pricing_model"] == "cpm"
     # Framework requires reporting_capabilities on every product
     assert "reporting_capabilities" in product
-    # Wire shape: format_ids must be FormatId-shaped dicts
-    assert product["format_ids"][0]["agent_url"].startswith("https://")
+    # Wire shape (adcp 7 / AdCP 3.1): the platform returns canonical format
+    # declarations; the SDK dispatcher projects them back to ``format_ids`` for
+    # legacy buyers via ``canonical_format_legacy_resolver``.
+    assert "format_ids" not in product
+    option = product["format_options"][0]
+    assert option["format_option_id"].startswith("migrated_")
+    assert option["format_kind"] == "image"
 
     # Delegation reached the impl with the buyer's brief intact.
     assert mocked_pipeline.await_count == 1

@@ -54,8 +54,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
-from adcp.types.generated_poc.core.format_id import FormatId as AdcpFormatId
+from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
 from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
 from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError, AdCPValidationError
@@ -74,6 +73,7 @@ from src.core.schemas import (
     SyncCreativesRequest,
     SyncCreativesResponse,
 )
+from src.core.schemas import FormatId as AdcpFormatId
 from tests.factories import PrincipalFactory
 
 # ---------------------------------------------------------------------------
@@ -159,9 +159,7 @@ class TestCreativeSchemaCompliance:
         library type at adcp-client-python media_buy/list_creatives_response.py.
         Existing: test_architecture_schema_inheritance.py (structural guard)
         """
-        from adcp.types.generated_poc.creative.list_creatives_response import (
-            Creative as ListingCreative,
-        )
+        from adcp.types.generated_poc.creative.list_creatives_response import Creatives as ListingCreative
 
         assert issubclass(Creative, ListingCreative)
 
@@ -1499,7 +1497,7 @@ class TestListCreativesRawBoundaryCompleteness:
 
         Covers: UC-006-MAIN-REST-01
         """
-        from adcp import CreativeFilters
+        from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 
         from src.core.tools.creatives.listing import list_creatives_raw
 
@@ -2899,9 +2897,7 @@ class TestCreativeWrongBaseClass:
         from adcp.types.generated_poc.creative.get_creative_delivery_response import (
             Creative as DeliveryCreative,
         )
-        from adcp.types.generated_poc.creative.list_creatives_response import (
-            Creative as ListingCreative,
-        )
+        from adcp.types.generated_poc.creative.list_creatives_response import Creatives as ListingCreative
 
         assert issubclass(Creative, ListingCreative), (
             f"Creative must extend the listing Creative (list_creatives_response.Creative), not {Creative.__bases__}"

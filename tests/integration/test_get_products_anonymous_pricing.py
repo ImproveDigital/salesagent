@@ -105,7 +105,7 @@ class TestAnonymousPricingSuppression:
 
         Covers: UC-001-ALT-ANONYMOUS-DISCOVERY-05A
         """
-        from adcp import GetProductsResponse as LibraryGetProductsResponse
+        from adcp.types.legacy import LegacyGetProductsResponse as LibraryGetProductsResponse
 
         with ProductEnv(tenant_id="anon-pricing-wholesale", principal_id=None) as env:
             tenant = TenantFactory(

@@ -5,10 +5,10 @@ import time
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from adcp import CreativeFilters
 from adcp.types import (
     ContextObject,
 )
+from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 from pydantic import ValidationError
 
 from src.core.audit_logger import get_audit_logger
@@ -77,13 +77,13 @@ def _list_creatives_impl(
     Returns:
         ListCreativesResponse with filtered creative assets and pagination info
     """
-    from adcp.types import CreativeFilters as LibraryCreativeFilters
     from adcp.types import PaginationRequest as LibraryPagination
 
     # adcp 4.4 ships two ``Sort`` classes — a generic tasks-list one (re-exported
     # at adcp.types) and a creative-specific one used by ``ListCreativesRequest``.
     # Use the matching shape so the request validator accepts it.
     from adcp.types.generated_poc.creative.list_creatives_request import Sort as LibrarySort
+    from adcp.types.legacy import LegacyCreativeFilters as LibraryCreativeFilters
 
     from src.core.schemas import ListCreativesRequest
 

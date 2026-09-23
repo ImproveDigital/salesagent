@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from fastmcp import FastMCP
 from fastmcp.server.context import Context as FastMCPContext
-from fastmcp.tools.tool import FunctionTool
+from fastmcp.tools import FunctionTool
 from pydantic import BaseModel
 
 from src.core.mcp_context_wrapper import MCPContextWrapper

@@ -41,7 +41,6 @@
             <h4 style="margin-top: 0;">Preview</h4>
             <dl style="margin: 0;">
                 <dt>Name</dt><dd id="preview-name">—</dd>
-                <dt>ID</dt><dd><code id="preview-id">—</code></dd>
                 <dt>Agent URL</dt><dd><code id="preview-agent-url">—</code></dd>
                 <dt>Signing keys</dt><dd id="preview-keys">—</dd>
             </dl>
@@ -55,17 +54,18 @@
     {% endif %}
 
     <form method="POST" style="margin-top: 2rem;">
+        {% if edit_mode %}
         <div class="form-group">
             <label for="principal_id">Buyer Agent ID</label>
-            <input type="text" id="principal_id" name="principal_id" required
-                   pattern="[a-zA-Z0-9_-]+"
-                   placeholder="e.g., nike, coca_cola, ford_motors"
-                   title="Only letters, numbers, underscores, and hyphens allowed"
-                   value="{{ principal.principal_id if edit_mode else (form_data.principal_id if form_data else '') }}"
-                   {{ 'readonly' if edit_mode else '' }}
-                   class="{{ 'error' if errors and 'principal_id' in errors else '' }}">
-            <small>A unique identifier for this advertiser. Use lowercase with underscores.{% if edit_mode %} (Cannot be changed){% endif %}</small>
+            {# System-generated on create; shown for reference only (no name attribute, never posted). #}
+            <input type="text" id="principal_id" readonly value="{{ principal.principal_id }}">
+            <small>Generated when the buyer agent was created. Used as the principal ID in API auth and ad-server references. Cannot be changed.</small>
         </div>
+        {% else %}
+        <div class="alert alert-info" style="margin-bottom: var(--sa-space-4);">
+            The <strong>Buyer Agent ID</strong> is generated automatically when you save. It becomes the principal ID used in API auth and ad-server references, and cannot be changed afterwards.
+        </div>
+        {% endif %}
 
         <div class="form-group">
             <label for="name">Buyer Agent Name</label>
@@ -73,7 +73,7 @@
                    placeholder="e.g., Nike Corporation"
                    value="{{ principal.name if edit_mode else (form_data.name if form_data else '') }}"
                    class="{{ 'error' if errors and 'name' in errors else '' }}">
-            <small>The advertiser's company name as it will appear in reports.</small>
+            <small>The buyer agent's display name as it will appear in reports.</small>
         </div>
 
         {% if edit_mode and verification_status %}
@@ -142,34 +142,67 @@
             </div>
         </fieldset>
 
+        {# Ad-server mapping. One control per adapter: the tenant's live
+           adapter is resolved server-side (_tenant_adapter_context), so
+           an Improve Digital tenant never sees GAM- or Mock-specific copy. #}
         {% if has_gam %}
         <div class="form-group">
-            <label for="gam_advertiser_id">GAM Buyer Agent <span style="color: red;">*</span></label>
+            <label for="gam_advertiser_id">GAM Advertiser <span style="color: red;">*</span></label>
             <select id="gam_advertiser_id" name="gam_advertiser_id" required
                     class="{{ 'error' if errors and 'gam_advertiser_id' in errors else '' }}">
+                {% set selected_gam_id = existing_gam_id if edit_mode else (form_data.gam_advertiser_id if form_data else None) %}
+                {% if selected_gam_id %}
+                {# Pre-seed the saved id so the form stays submittable even if the GAM lookup fails; JS swaps in the name. #}
+                <option value="{{ selected_gam_id }}" selected>{{ selected_gam_id }}</option>
+                {% else %}
                 <option value="">Loading advertisers...</option>
+                {% endif %}
             </select>
-            <small>All campaigns for this advertiser will be created under this GAM advertiser account.</small>
+            <small>All campaigns from this buyer agent will be created under this Google Ad Manager advertiser (company).</small>
             <div id="advertiser-loading-error" style="display: none; color: red; margin-top: 0.5rem;"></div>
         </div>
-        {% else %}
+        {% elif has_improvedigital %}
+        {# Marker for the create/edit handler: write the improvedigital mapping
+           (reference numbers = Buyer Agent ID). The advertiser comes from the
+           tenant's Improve Digital connection config, not per buyer agent. #}
+        <input type="hidden" name="improvedigital_mapping" value="1">
+        <div class="form-group">
+            <label for="campaign_reference_number">Improve Digital reference number (campaign &amp; line items)</label>
+            {# Derived server-side from the Buyer Agent ID; shown for visibility only (no name attribute, so it is never posted). #}
+            <input type="text" id="campaign_reference_number" readonly
+                   value="{{ principal.principal_id if edit_mode else '' }}"
+                   placeholder="Assigned on create — same as the Buyer Agent ID">
+            <small>Set as the <code>campaign_reference_number</code> and <code>line_item_reference_number</code> on every campaign and line item this buyer agent creates in the Improve Digital marketplace. It equals the Buyer Agent ID and cannot be changed.</small>
+        </div>
+        {% elif is_mock %}
         <div class="alert alert-info" style="margin: 1rem 0;">
             <strong>ℹ️ Note:</strong> This tenant uses the Mock adapter for testing. No real ad server API calls will be made.
-            <br><strong>To use a real ad server</strong>, configure GAM or another adapter in the Settings → Ad Server tab.
+            <br><strong>To use a real ad server</strong>, configure one in the Settings → Ad Server tab.
         </div>
         <!-- Automatically enable mock adapter when no real ad server is configured -->
+        <input type="hidden" name="enable_mock" value="1">
+        {% else %}
+        <div class="alert alert-info" style="margin: 1rem 0;">
+            <strong>ℹ️ Note:</strong> This tenant uses {{ adapter_label }}. This adapter does not support per-buyer-agent advertiser mapping;
+            campaigns are booked with the default advertiser configured in the Settings → Ad Server tab.
+        </div>
+        {# platform_mappings must contain at least one platform (PlatformMappingModel) and only
+           accepts google_ad_manager / improvedigital / mock keys, so a placeholder mock entry is
+           stored for adapters without a per-principal mapping. #}
         <input type="hidden" name="enable_mock" value="1">
         {% endif %}
 
         <div style="background: var(--sa-gray-50); padding: var(--sa-space-4); border-radius: var(--sa-radius-lg); margin: var(--sa-space-6) 0;">
             <h4 style="margin-top: 0;">What happens next?</h4>
             <ol style="margin: var(--sa-space-2) 0; padding-left: var(--sa-space-5);">
-                <li>A secure API token will be generated for this advertiser</li>
-                <li>Share the API token with the advertiser to enable programmatic campaign access</li>
+                <li>A secure API token will be generated for this buyer agent</li>
+                <li>Share the API token with the buyer agent's operator to enable programmatic campaign access</li>
                 {% if has_gam %}
-                <li>When they create campaigns via the API, orders and line items will be created in GAM</li>
-                {% else %}
+                <li>When they create campaigns via the API, orders and line items will be created in Google Ad Manager</li>
+                {% elif is_mock %}
                 <li>Campaigns will use the Mock adapter (no real ad server API calls)</li>
+                {% else %}
+                <li>When they create campaigns via the API, campaigns and line items will be created in {{ adapter_label }}</li>
                 {% endif %}
             </ol>
         </div>
@@ -205,12 +238,10 @@ input:invalid { border-color: var(--sa-danger); }
     const errorBox = document.getElementById('resolve-error');
     const preview = document.getElementById('resolve-preview');
     const previewName = document.getElementById('preview-name');
-    const previewId = document.getElementById('preview-id');
     const previewAgentUrl = document.getElementById('preview-agent-url');
     const previewKeys = document.getElementById('preview-keys');
     const previewChecks = document.getElementById('preview-checks');
     const manualDetails = document.getElementById('manual-entry');
-    const principalIdInput = document.getElementById('principal_id');
     const nameInput = document.getElementById('name');
     const agentUrlInput = document.getElementById('agent_url');
     const brandDomainInput = document.getElementById('brand_domain');
@@ -225,7 +256,7 @@ input:invalid { border-color: var(--sa-danger); }
     }
 
     function fillForm(data) {
-        principalIdInput.value = data.principal_id || '';
+        // principal_id is system-generated on save; the resolver's slug is not used.
         nameInput.value = data.name || '';
         if (agentUrlInput) agentUrlInput.value = data.agent_url || '';
         // brand_domain is the operator-typed value (the trust anchor).
@@ -270,7 +301,6 @@ input:invalid { border-color: var(--sa-danger); }
                 return;
             }
             previewName.textContent = data.name || '—';
-            previewId.textContent = data.principal_id || '—';
             previewAgentUrl.textContent = data.agent_url || '—';
             previewKeys.textContent = (data.signing_keys || []).length
                 ? data.signing_keys.map(k => k.kid + ' (' + k.alg + ')').join(', ')
@@ -303,7 +333,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const errorDiv = document.getElementById('advertiser-loading-error');
 
     selectElement.select2({
-        placeholder: 'Search for a GAM Buyer Agent...',
+        placeholder: 'Search for a GAM advertiser...',
         allowClear: true,
         minimumInputLength: 0, // Start searching from first character
         ajax: {
@@ -394,7 +424,7 @@ document.addEventListener('DOMContentLoaded', function() {
         },
         templateSelection: function(advertiser) {
             // Format selected value
-            return advertiser.text || 'Select a GAM Buyer Agent...';
+            return advertiser.text || 'Select a GAM advertiser...';
         }
     });
 
@@ -407,9 +437,10 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    // Restore previous selection if form was reloaded with errors OR in edit mode
+    // Restore previous selection if form was reloaded with errors OR in edit mode.
+    // The saved id is already pre-seeded as the selected <option> server-side;
+    // here we only swap its label for the advertiser name once GAM answers.
     {% if (form_data and form_data.gam_advertiser_id) or (edit_mode and existing_gam_id) %}
-    // Need to fetch the advertiser name to display it
     const advertiserId = '{{ existing_gam_id if edit_mode else form_data.gam_advertiser_id }}';
     fetch('{{ script_name }}/tenant/{{ tenant_id }}/api/gam/get-advertisers', {
         method: 'POST',
@@ -423,10 +454,15 @@ document.addEventListener('DOMContentLoaded', function() {
     })
     .then(response => response.json())
     .then(data => {
+        if (data.error || !Array.isArray(data.advertisers)) {
+            console.warn('Could not load GAM advertisers to label the saved selection:', data.error || data);
+            return;
+        }
         // Compare as strings to handle type mismatches (DB stores strings, API might return numbers)
-        const previousBuyer Agent = data.advertisers.find(a => String(a.id) === String(advertiserId));
-        if (previousBuyer Agent) {
-            const option = new Option(previousBuyer Agent.name, previousBuyer Agent.id, true, true);
+        const previousAdvertiser = data.advertisers.find(a => String(a.id) === String(advertiserId));
+        if (previousAdvertiser) {
+            selectElement.find('option').remove();
+            const option = new Option(previousAdvertiser.name, previousAdvertiser.id, true, true);
             selectElement.append(option).trigger('change');
         } else {
             console.warn('Could not find advertiser with ID:', advertiserId, 'in', data.advertisers.length, 'results');

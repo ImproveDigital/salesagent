@@ -12,13 +12,80 @@ from sqlalchemy import func, select
 from src.admin.services import DashboardService
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.helpers import ADAPTER_LABELS
 from src.core.database.database_session import get_db_session
 from src.core.database.models import MediaBuy, Principal, PushNotificationConfig, Tenant
+from src.core.platform_mappings import resolve_adapter_id
 
 logger = logging.getLogger(__name__)
 
 # Create Blueprint (url_prefix is set during registration in app.py)
 principals_bp = Blueprint("principals", __name__)
+
+
+def _tenant_adapter_context(tenant: Tenant) -> dict:
+    """Describe the tenant's ad server for the buyer-agent form.
+
+    The form renders one control per adapter (GAM picker, Improve Digital
+    reference number, or the Mock notice), so it needs to know which adapter
+    is live — not just "GAM or not". Only GAM and Improve Digital carry a
+    per-buyer mapping: ``PlatformMappingModel`` (src/core/json_validators.py)
+    accepts just those keys plus ``mock``.
+    """
+    adapter_type = tenant.ad_server or (tenant.adapter_config.adapter_type if tenant.adapter_config else None)
+    if tenant.is_gam_tenant:
+        adapter_type = "google_ad_manager"
+    is_mock = adapter_type in (None, "", "mock")
+    return {
+        "adapter_type": adapter_type,
+        "adapter_label": ADAPTER_LABELS.get(adapter_type, adapter_type) if adapter_type else "Mock",
+        "has_gam": tenant.is_gam_tenant,
+        "has_improvedigital": adapter_type == "improvedigital",
+        "is_mock": is_mock,
+    }
+
+
+def _adapter_mappings_from_form(form, principal_id: str) -> tuple[dict, str | None]:
+    """Build the adapter entries of ``platform_mappings`` from the form.
+
+    The form only renders the control for the tenant's live adapter, so a
+    field's presence tells us which adapter the operator is mapping:
+
+    - ``gam_advertiser_id`` (non-empty): GAM company id, must be numeric.
+    - ``improvedigital_mapping`` (hidden marker on Improve Digital tenants):
+      writes an ``enabled`` mapping carrying ``campaign_reference_number``
+      and ``line_item_reference_number`` = the Buyer Agent ID, which the
+      adapter sends as ``reference_number`` on every marketplace campaign
+      and line item it creates. Derived, never read from the form, so it
+      stays read-only. The advertiser comes from the tenant's connection
+      config (``default_advertiser_id``); any ``advertiser_id`` already on
+      an older mapping is preserved by the edit handler.
+    - ``enable_mock``: Mock adapter mapping.
+
+    Returns ``(mappings, error_message)``; ``mappings`` is empty on error.
+    """
+    mappings: dict = {}
+
+    gam_advertiser_id = (form.get("gam_advertiser_id") or "").strip()
+    if gam_advertiser_id:
+        if not gam_advertiser_id.isdigit():
+            return {}, (
+                f"GAM Advertiser ID must be numeric (got: '{gam_advertiser_id}'). "
+                "Please select a valid advertiser from the dropdown."
+            )
+        mappings["google_ad_manager"] = {"advertiser_id": gam_advertiser_id, "enabled": True}
+
+    if form.get("improvedigital_mapping"):
+        mappings["improvedigital"] = {
+            "enabled": True,
+            "campaign_reference_number": principal_id,
+            "line_item_reference_number": principal_id,
+        }
+
+    if form.get("enable_mock"):
+        mappings["mock"] = {"advertiser_id": f"mock_{principal_id}", "enabled": True}
+
+    return mappings, None
 
 
 @principals_bp.route("/principals")
@@ -188,61 +255,38 @@ def create_principal(tenant_id):
                 flash("Tenant not found", "error")
                 return redirect(url_for("core.index"))
 
-            # Check if GAM is configured (uses centralized tenant.is_gam_tenant property)
-            has_gam = tenant.is_gam_tenant
-
             return render_template(
                 "create_principal.html",
                 tenant_id=tenant_id,
                 tenant_name=tenant.name,
-                has_gam=has_gam,
+                **_tenant_adapter_context(tenant),
             )
 
     # POST - Create the principal
     try:
         principal_name = request.form.get("name", "").strip()
         if not principal_name:
-            flash("Principal name is required", "error")
+            flash("Buyer agent name is required", "error")
             return redirect(request.url)
 
-        # Generate unique ID and token
+        # The Buyer Agent ID is system-generated: it is the stable key every
+        # media buy, account, routing rule, signing-cache entry and ad-server
+        # reference_number points at, so operators never choose or change
+        # it — the edit page shows it read-only.
         principal_id = f"prin_{uuid.uuid4().hex[:8]}"
         access_token = f"tok_{secrets.token_urlsafe(32)}"
 
-        # Build platform mappings
-        platform_mappings = {}
-
-        # GAM advertiser mapping
-        gam_advertiser_id = request.form.get("gam_advertiser_id", "").strip()
-        if gam_advertiser_id:
-            # Validate it's numeric (GAM expects integer company IDs)
-            try:
-                int(gam_advertiser_id)
-            except (ValueError, TypeError):
-                flash(
-                    f"GAM Advertiser ID must be numeric (got: '{gam_advertiser_id}'). "
-                    "Please select a valid advertiser from the dropdown.",
-                    "error",
-                )
-                return redirect(request.url)
-
-            platform_mappings["google_ad_manager"] = {
-                "advertiser_id": gam_advertiser_id,
-                "enabled": True,
-            }
-
-        # Mock adapter mapping (for testing)
-        if request.form.get("enable_mock"):
-            platform_mappings["mock"] = {
-                "advertiser_id": f"mock_{principal_id}",
-                "enabled": True,
-            }
+        # Adapter mapping (GAM picker / Improve Digital advertiser / Mock)
+        platform_mappings, mapping_error = _adapter_mappings_from_form(request.form, principal_id)
+        if mapping_error:
+            flash(mapping_error, "error")
+            return redirect(request.url)
 
         with get_db_session() as db_session:
             # Check if principal name already exists
             existing = db_session.scalars(select(Principal).filter_by(tenant_id=tenant_id, name=principal_name)).first()
             if existing:
-                flash(f"An advertiser named '{principal_name}' already exists", "error")
+                flash(f"A buyer agent named '{principal_name}' already exists", "error")
                 return redirect(request.url)
 
             # Optional signing config. brand_domain is the trust anchor
@@ -301,12 +345,12 @@ def create_principal(tenant_id):
                 {"principal_id": principal_id, "name": principal_name},
             )
 
-            flash(f"Advertiser '{principal_name}' created successfully", "success")
+            flash(f"Buyer agent '{principal_name}' created successfully", "success")
             return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="advertisers"))
 
     except Exception as e:
         logger.error(f"Error creating principal: {e}", exc_info=True)
-        flash("Error creating advertiser", "error")
+        flash("Error creating buyer agent", "error")
         return redirect(request.url)
 
 
@@ -352,15 +396,9 @@ def edit_principal(tenant_id, principal_id):
                 flash("Advertiser not found", "error")
                 return redirect(url_for("tenants.dashboard", tenant_id=tenant_id))
 
-            # Check if GAM is configured (uses centralized tenant.is_gam_tenant property)
-            has_gam = tenant.is_gam_tenant
-
-            # Extract existing GAM advertiser ID if present
-            existing_gam_id = None
-            if principal.platform_mappings:
-                mappings = principal.platform_mappings if isinstance(principal.platform_mappings, dict) else {}
-                gam_mapping = mappings.get("google_ad_manager", {})
-                existing_gam_id = gam_mapping.get("advertiser_id")
+            # Extract existing adapter advertiser IDs if present
+            mappings = principal.platform_mappings if isinstance(principal.platform_mappings, dict) else {}
+            existing_gam_id = resolve_adapter_id(mappings, "google_ad_manager")
 
             # Verification status block. Reads ``principals.last_signed_verified_at``
             # (cached on the row by the verifier middleware) — independent of
@@ -385,11 +423,11 @@ def edit_principal(tenant_id, principal_id):
                 "create_principal.html",
                 tenant_id=tenant_id,
                 tenant_name=tenant.name,
-                has_gam=has_gam,
                 edit_mode=True,
                 principal=principal,
                 existing_gam_id=existing_gam_id,
                 verification_status=verification_status,
+                **_tenant_adapter_context(tenant),
             )
 
     # POST - Update the principal
@@ -447,30 +485,30 @@ def edit_principal(tenant_id, principal_id):
                     )
                     return redirect(request.url)
 
-            # GAM advertiser mapping (validated before assignment)
-            gam_advertiser_id = request.form.get("gam_advertiser_id", "").strip()
-            if gam_advertiser_id:
-                try:
-                    int(gam_advertiser_id)
-                except (ValueError, TypeError):
-                    flash("GAM Advertiser ID must be numeric", "error")
-                    return redirect(request.url)
+            # Adapter advertiser mapping (validated before assignment)
+            adapter_mappings, mapping_error = _adapter_mappings_from_form(request.form, principal_id)
+            if mapping_error:
+                flash(mapping_error, "error")
+                return redirect(request.url)
 
             # Update name if provided
             principal_name = request.form.get("name", "").strip()
             if principal_name:
                 principal.name = principal_name
 
-            # Preserve non-GAM mappings (e.g. mock adapter for tests) so edit
-            # doesn't accidentally drop them. Replace google_ad_manager only
-            # when a new advertiser_id is submitted.
+            # Preserve mappings the form didn't touch (e.g. mock adapter for
+            # tests) so edit doesn't accidentally drop them. GAM is replaced
+            # only when a new advertiser_id is submitted; Improve Digital is
+            # re-stamped on every save, merged over the stored mapping so an
+            # advertiser_id set before the form dropped that field survives.
             existing_mappings = principal.platform_mappings if isinstance(principal.platform_mappings, dict) else {}
             new_mappings = dict(existing_mappings)
-            if gam_advertiser_id:
-                new_mappings["google_ad_manager"] = {
-                    "advertiser_id": gam_advertiser_id,
-                    "enabled": True,
-                }
+            for platform_key, mapping in adapter_mappings.items():
+                stored = existing_mappings.get(platform_key)
+                if platform_key == "improvedigital" and isinstance(stored, dict):
+                    new_mappings[platform_key] = {**stored, **mapping}
+                else:
+                    new_mappings[platform_key] = mapping
             principal.platform_mappings = new_mappings
 
             principal.agent_url = agent_url
@@ -490,12 +528,12 @@ def edit_principal(tenant_id, principal_id):
             principal.updated_at = datetime.now(UTC)
             db_session.commit()
 
-            flash(f"Advertiser '{principal.name}' updated successfully", "success")
+            flash(f"Buyer agent '{principal.name}' updated successfully", "success")
             return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="advertisers"))
 
     except Exception as e:
         logger.error(f"Error updating principal: {e}", exc_info=True)
-        flash("Error updating advertiser", "error")
+        flash("Error updating buyer agent", "error")
         return redirect(request.url)
 
 
@@ -551,25 +589,23 @@ def update_mappings(tenant_id, principal_id):
 
         platform_mappings = data.get("platform_mappings", {})
 
-        # Validate GAM advertiser_id if present
-        if "google_ad_manager" in platform_mappings:
-            gam_config = platform_mappings["google_ad_manager"]
-            advertiser_id = gam_config.get("advertiser_id") or gam_config.get("company_id")
-
-            if advertiser_id:
-                # Validate it's numeric (GAM expects integer company IDs)
-                try:
-                    int(advertiser_id)
-                except (ValueError, TypeError):
-                    return (
-                        jsonify(
-                            {
-                                "error": f"GAM Advertiser ID must be numeric (got: '{advertiser_id}'). "
-                                "Please select a valid advertiser from the dropdown."
-                            }
-                        ),
-                        400,
-                    )
+        # Validate numeric advertiser ids (GAM company ids and Improve
+        # Digital Classic advertiserId are both integers)
+        for platform_key, label in (("google_ad_manager", "GAM"), ("improvedigital", "Improve Digital")):
+            adapter_mapping = platform_mappings.get(platform_key)
+            if not isinstance(adapter_mapping, dict):
+                continue
+            advertiser_id = adapter_mapping.get("advertiser_id") or adapter_mapping.get("company_id")
+            if advertiser_id and not str(advertiser_id).isdigit():
+                return (
+                    jsonify(
+                        {
+                            "error": f"{label} advertiser ID must be numeric (got: '{advertiser_id}'). "
+                            "Please select a valid advertiser."
+                        }
+                    ),
+                    400,
+                )
 
         with get_db_session() as db_session:
             principal = db_session.scalars(

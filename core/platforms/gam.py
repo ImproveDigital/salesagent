@@ -47,6 +47,7 @@ from adcp.decisioning.capabilities import (
 )
 
 from core.idempotency import get_idempotency_store, translate_idempotency_conflict
+from core.platforms._canonical_formats import canonical_format_legacy_resolver, legacy_format_converter
 from core.platforms._delegate import (
     _delegate_create_media_buy,
     _delegate_get_media_buy_delivery,
@@ -78,6 +79,10 @@ class GamPlatform(DecisioningPlatform):
     """Thin platform shell — every method forwards to the existing
     salesagent _impl chain, which routes to ``src/adapters/gam`` via
     ``get_adapter()`` based on the tenant's ``ad_server`` config."""
+
+    # adcp 7 creative-dialect hooks (see core/platforms/_canonical_formats.py).
+    legacy_format_converter = staticmethod(legacy_format_converter)
+    canonical_format_legacy_resolver = staticmethod(canonical_format_legacy_resolver)
 
     capabilities = DecisioningCapabilities(
         specialisms=["sales-non-guaranteed", "signal-owned"],
@@ -141,7 +146,7 @@ class GamPlatform(DecisioningPlatform):
     ) -> dict[str, Any]:
         return await _delegate_get_media_buy_delivery(req, ctx)
 
-    async def list_creative_formats(
+    async def list_creative_formats_legacy(
         self,
         req: Any,
         ctx: RequestContext[Any],

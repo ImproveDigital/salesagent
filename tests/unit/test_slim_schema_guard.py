@@ -9,7 +9,7 @@ See src/core/slim_schemas.py for the slim schema definitions and rationale.
 """
 
 import pytest
-from adcp.types import CreateMediaBuyRequest
+from adcp.types.legacy import LegacyCreateMediaBuyRequest as CreateMediaBuyRequest
 
 from src.core.schemas import UpdateMediaBuyRequest
 from src.core.slim_schemas import (

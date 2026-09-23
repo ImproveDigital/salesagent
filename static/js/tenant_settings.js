@@ -1062,51 +1062,90 @@ function editPrincipalMappings(principalId, principalName) {
     });
 }
 
-// Display the principal mappings form
+// Escape a platform-mapping value before interpolating it into modal HTML.
+function escapePrincipalHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Display the principal mappings form.
+// Only the tenant's live adapter gets a control: the GAM picker, the
+// Improve Digital advertiser id, or (mock / no adapter) the Mock toggle.
 function displayPrincipalMappingsForm(principal) {
     const formContainer = document.getElementById('editPrincipalForm');
     const platformMappings = principal.platform_mappings || {};
+    const activeAdapter = config.activeAdapter || 'mock';
+    const isGam = activeAdapter === 'google_ad_manager';
+    const isImproveDigital = activeAdapter === 'improvedigital';
 
-    let formHtml = '<div class="mb-3"><p class="text-muted">Configure how this advertiser maps to your ad server platforms.</p></div>';
+    let formHtml = '<div class="mb-3"><p class="text-muted">Configure how this buyer agent maps to your ad server.</p></div>';
 
     // GAM mapping
     const gamMapping = platformMappings.google_ad_manager || {};
-    formHtml += `
-        <div class="mb-3">
-            <label class="form-label"><strong>Google Ad Manager</strong></label>
-            <div class="form-check mb-2">
-                <input class="form-check-input" type="checkbox" id="gam_enabled" ${gamMapping.enabled ? 'checked' : ''}>
-                <label class="form-check-label" for="gam_enabled">
-                    Enable GAM integration
-                </label>
+    if (isGam) {
+        const escapedGamId = escapePrincipalHtml(gamMapping.advertiser_id || '');
+        formHtml += `
+            <div class="mb-3">
+                <label class="form-label"><strong>Google Ad Manager</strong></label>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="gam_enabled" ${gamMapping.enabled ? 'checked' : ''}>
+                    <label class="form-check-label" for="gam_enabled">
+                        Enable GAM integration
+                    </label>
+                </div>
+                <div id="gam_config" style="${gamMapping.enabled ? '' : 'display: none;'}">
+                    <label for="gam_advertiser_select" class="form-label">GAM Advertiser</label>
+                    <select class="form-select" id="gam_advertiser_select" style="width: 100%;">
+                        ${escapedGamId ? `<option value="${escapedGamId}" selected>${escapedGamId}</option>` : ''}
+                    </select>
+                    <small class="form-text text-muted">Search for a GAM advertiser by name or ID</small>
+                    <input type="hidden" id="gam_advertiser_id" value="${escapedGamId}">
+                </div>
             </div>
-            <div id="gam_config" style="${gamMapping.enabled ? '' : 'display: none;'}">
-                <label for="gam_advertiser_select" class="form-label">GAM Advertiser</label>
-                <select class="form-select" id="gam_advertiser_select" style="width: 100%;">
-                    ${gamMapping.advertiser_id ? `<option value="${gamMapping.advertiser_id}" selected>${gamMapping.advertiser_id}</option>` : ''}
-                </select>
-                <small class="form-text text-muted">Search for a GAM advertiser by name or ID</small>
-                <input type="hidden" id="gam_advertiser_id" value="${gamMapping.advertiser_id || ''}">
-            </div>
-        </div>
-        <hr>
-    `;
+            <hr>
+        `;
+    }
 
-    // Mock mapping
-    const mockMapping = platformMappings.mock || {};
-    formHtml += `
-        <div class="mb-3">
-            <label class="form-label"><strong>Mock Adapter (Testing)</strong></label>
-            <div class="form-check mb-2">
-                <input class="form-check-input" type="checkbox" id="mock_enabled" ${mockMapping.enabled ? 'checked' : ''}>
-                <label class="form-check-label" for="mock_enabled">
-                    Enable Mock adapter for testing
-                </label>
+    // Improve Digital mapping: nothing to edit — the reference numbers equal
+    // the buyer agent id and the advertiser comes from the tenant config.
+    const improveMapping = platformMappings.improvedigital || {};
+    if (isImproveDigital) {
+        const reference = improveMapping.campaign_reference_number || principal.principal_id || '';
+        formHtml += `
+            <div class="mb-3">
+                <label class="form-label"><strong>Improve Digital</strong></label>
+                <input type="hidden" id="improvedigital_mapping" value="1">
+                <p class="form-text text-muted mb-0">Campaign &amp; line item reference number: <code>${escapePrincipalHtml(reference)}</code> (the buyer agent id, read-only).</p>
             </div>
-        </div>
-    `;
+            <hr>
+        `;
+    }
+
+    // Mock mapping — only meaningful when no real ad server is live
+    const mockMapping = platformMappings.mock || {};
+    if (!isGam && !isImproveDigital) {
+        formHtml += `
+            <div class="mb-3">
+                <label class="form-label"><strong>Mock Adapter (Testing)</strong></label>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="mock_enabled" ${mockMapping.enabled ? 'checked' : ''}>
+                    <label class="form-check-label" for="mock_enabled">
+                        Enable Mock adapter for testing
+                    </label>
+                </div>
+            </div>
+        `;
+    }
 
     formContainer.innerHTML = formHtml;
+
+    if (!isGam) {
+        return;
+    }
 
     // Add event listener to toggle GAM config visibility
     document.getElementById('gam_enabled').addEventListener('change', function() {
@@ -1145,12 +1184,22 @@ function displayPrincipalMappingsForm(principal) {
             },
             transport: function(params, success, failure) {
                 const request = fetch(params.url, {
-                    method: params.type,
+                    method: params.method || params.type || 'POST',
                     headers: params.headers,
                     credentials: 'same-origin',
                     body: params.data
                 });
-                request.then(response => response.json()).then(success).catch(failure);
+                request
+                    .then(response => {
+                        if (!response.ok) {
+                            return response.text().then(text => {
+                                throw new Error(`HTTP ${response.status}: ${text.substring(0, 200)}`);
+                            });
+                        }
+                        return response.json();
+                    })
+                    .then(success)
+                    .catch(failure);
                 return request;
             }
         }
@@ -1194,13 +1243,27 @@ function savePrincipalMappings() {
         }
     }
 
+    // Improve Digital mapping: reference numbers are the buyer agent id
+    if (document.getElementById('improvedigital_mapping')) {
+        platformMappings.improvedigital = {
+            enabled: true,
+            campaign_reference_number: principalId,
+            line_item_reference_number: principalId
+        };
+    }
+
     // Mock mapping
-    const mockEnabled = document.getElementById('mock_enabled').checked;
-    if (mockEnabled) {
+    const mockEnabledField = document.getElementById('mock_enabled');
+    if (mockEnabledField && mockEnabledField.checked) {
         platformMappings.mock = {
             advertiser_id: `mock_${principalId}`,
             enabled: true
         };
+    }
+
+    if (Object.keys(platformMappings).length === 0) {
+        alert('At least one ad server mapping is required');
+        return;
     }
 
     // Save via API

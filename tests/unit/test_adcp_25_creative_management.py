@@ -125,7 +125,7 @@ class TestListCreativesPluralFilters:
 
     def test_creative_filters_accepts_plural_media_buy_ids(self):
         """Test CreativeFilters accepts plural media_buy_ids parameter."""
-        from adcp.types import CreativeFilters as LibraryCreativeFilters
+        from adcp.types.legacy import LegacyCreativeFilters as LibraryCreativeFilters
 
         from src.core.schemas import ListCreativesRequest
 
@@ -142,14 +142,14 @@ class TestListCreativesPluralFilters:
 
     def test_creative_filters_buyer_refs_removed(self):
         """buyer_refs removed from CreativeFilters in adcp 3.12."""
-        from adcp.types import CreativeFilters as LibraryCreativeFilters
+        from adcp.types.legacy import LegacyCreativeFilters as LibraryCreativeFilters
 
         # buyer_refs is no longer a field on CreativeFilters
         assert "buyer_refs" not in LibraryCreativeFilters.model_fields
 
     def test_creative_filters_accepts_both_media_buy_ids_and_buyer_refs(self):
         """Test CreativeFilters accepts both filter types together."""
-        from adcp.types import CreativeFilters as LibraryCreativeFilters
+        from adcp.types.legacy import LegacyCreativeFilters as LibraryCreativeFilters
 
         from src.core.schemas import ListCreativesRequest
 
@@ -288,7 +288,7 @@ class TestAdCP25SchemaCompliance:
 
     def test_adcp_library_sync_creatives_request_compatibility(self):
         """Verify our schema matches adcp library's SyncCreativesRequest."""
-        from adcp.types import SyncCreativesRequest as LibrarySyncCreativesRequest
+        from adcp.types.legacy import LegacySyncCreativesRequest as LibrarySyncCreativesRequest
 
         lib_fields = LibrarySyncCreativesRequest.model_fields
 
@@ -298,7 +298,7 @@ class TestAdCP25SchemaCompliance:
 
     def test_adcp_library_creative_filters_has_plural_fields(self):
         """Verify adcp library's CreativeFilters has plural filter fields."""
-        from adcp.types import CreativeFilters
+        from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 
         fields = CreativeFilters.model_fields
 
@@ -470,7 +470,7 @@ class TestListCreativesErrorCases:
         - media_buy_ids=None: No filter on media_buy_ids
         - media_buy_ids=[id, ...]: Filter to specific media buy IDs
         """
-        from adcp.types import CreativeFilters as LibraryCreativeFilters
+        from adcp.types.legacy import LegacyCreativeFilters as LibraryCreativeFilters
         from pydantic import ValidationError
 
         from src.core.schemas import ListCreativesRequest

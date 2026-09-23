@@ -16,15 +16,11 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from adcp.types.generated_poc.core.format import (
-    Assets,
-    Assets5,
-    Dimensions,
-    Renders,
-)
+from adcp.types.generated_poc.core.format import Assets, Dimensions, Renders
+from adcp.types.generated_poc.core.format import Assets10 as Assets5
 from adcp.types.generated_poc.enums.asset_content_type import AssetContentType
 from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from src.core.schemas import (
     Format,

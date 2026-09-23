@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from adcp.types import FormatId as LibraryFormatId
+from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 from pydantic import ValidationError
 
 from src.core.canonical_formats import canonicalize_creative_agent_url, normalize_creative_agent_url

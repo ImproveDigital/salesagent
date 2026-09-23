@@ -17,9 +17,9 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from src.app import app
 from starlette.testclient import TestClient
 
-from src.app import app
 from src.core.resolved_identity import ResolvedIdentity
 
 _MOCK_IDENTITY = ResolvedIdentity(
@@ -281,7 +281,7 @@ class TestA2AResponseShape:
     @patch("src.core.tools.media_buy_create._create_media_buy_impl")
     def test_create_media_buy_response_shape(self, mock_impl, mock_resolve, client, auth_headers):
         """create_media_buy response must have media_buy_id and buyer_ref."""
-        from adcp.types.aliases import CreateMediaBuySuccessResponse
+        from adcp.types.legacy import LegacyCreateMediaBuyResponse1 as CreateMediaBuySuccessResponse
 
         mock_impl.return_value = CreateMediaBuySuccessResponse(
             media_buy_id="mb-test-1",
@@ -362,7 +362,7 @@ class TestA2AResponseShape:
     @patch("src.a2a_server.adcp_a2a_server.core_update_media_buy_tool")
     def test_update_media_buy_response_shape(self, mock_impl, mock_resolve, client, auth_headers):
         """update_media_buy response must have media_buy_id."""
-        from adcp.types.aliases import UpdateMediaBuySuccessResponse
+        from adcp.types.legacy import LegacyUpdateMediaBuyResponse1 as UpdateMediaBuySuccessResponse
 
         mock_impl.return_value = UpdateMediaBuySuccessResponse(
             media_buy_id="mb-test-1",

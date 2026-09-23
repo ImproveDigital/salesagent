@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from adcp.types import GetProductsResponse
+from adcp.types.legacy import LegacyGetProductsResponse as GetProductsResponse
 
 from tests.helpers.adcp_factories import create_test_product
 

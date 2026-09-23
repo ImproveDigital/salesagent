@@ -46,27 +46,6 @@ from sqlalchemy import inspect as sa_inspect
 # our local override deliberately makes optional. Every entry must have a
 # documented reason. The set should shrink over time, never grow.
 def _build_required_field_parity_pairs() -> list[tuple[str, type, type, set[str], str]]:
-    from adcp import (
-        CreateMediaBuyRequest as LibCreateMediaBuyRequest,
-    )
-    from adcp import (
-        ListCreativeFormatsRequest as LibListCreativeFormatsRequest,
-    )
-    from adcp import (
-        ListCreativesRequest as LibListCreativesRequest,
-    )
-    from adcp import (
-        SyncCreativesRequest as LibSyncCreativesRequest,
-    )
-    from adcp.types import (
-        Creative as LibCreative,
-    )
-    from adcp.types import (
-        Format as LibFormat,
-    )
-    from adcp.types import (
-        FormatId as LibFormatId,
-    )
     from adcp.types import (
         FrequencyCap as LibFrequencyCap,
     )
@@ -76,21 +55,19 @@ def _build_required_field_parity_pairs() -> list[tuple[str, type, type, set[str]
     from adcp.types import (
         Measurement as LibMeasurement,
     )
-    from adcp.types import (
-        Package as LibPackage,
+    from adcp.types.generated_poc.creative.get_creative_delivery_response import (
+        Creative as LibCreative,
     )
-    from adcp.types import (
-        PackageRequest as LibPackageRequest,
-    )
-    from adcp.types import (
-        Placement as LibPlacement,
-    )
-    from adcp.types import (
-        Product as LibProduct,
-    )
-    from adcp.types import (
-        UpdateMediaBuyRequest as LibUpdateMediaBuyRequest,
-    )
+    from adcp.types.legacy import LegacyCreateMediaBuyRequest as LibCreateMediaBuyRequest
+    from adcp.types.legacy import LegacyFormat as LibFormat
+    from adcp.types.legacy import LegacyListCreativeFormatsRequest as LibListCreativeFormatsRequest
+    from adcp.types.legacy import LegacyListCreativesRequest as LibListCreativesRequest
+    from adcp.types.legacy import LegacyPackage as LibPackage
+    from adcp.types.legacy import LegacyPackageRequest as LibPackageRequest
+    from adcp.types.legacy import LegacyPlacement as LibPlacement
+    from adcp.types.legacy import LegacyProduct as LibProduct
+    from adcp.types.legacy import LegacySyncCreativesRequest as LibSyncCreativesRequest
+    from adcp.types.legacy import LegacyUpdateMediaBuyRequest as LibUpdateMediaBuyRequest
 
     from src.core.schemas import (
         CreateMediaBuyRequest,
@@ -108,6 +85,7 @@ def _build_required_field_parity_pairs() -> list[tuple[str, type, type, set[str]
         SyncCreativesRequest,
         UpdateMediaBuyRequest,
     )
+    from src.core.schemas import FormatId as LibFormatId
     from src.core.schemas.product import Placement
 
     return [
@@ -279,7 +257,7 @@ def _build_minimal_creative() -> Any:
 
 
 def _build_get_products_response() -> tuple[Any, type]:
-    from adcp import GetProductsResponse as LibResponse
+    from adcp.types.legacy import LegacyGetProductsResponse as LibResponse
 
     from src.core.schemas import GetProductsResponse
 
@@ -370,7 +348,7 @@ def _build_sync_creatives_response() -> tuple[Any, type]:
 
 
 def _build_get_media_buy_delivery_response() -> tuple[Any, type]:
-    from adcp.types import GetMediaBuyDeliveryResponse as LibResponse
+    from adcp.types.legacy import LegacyGetMediaBuyDeliveryResponse as LibResponse
 
     from src.core.schemas import GetMediaBuyDeliveryResponse
 
@@ -387,7 +365,7 @@ def _build_get_media_buy_delivery_response() -> tuple[Any, type]:
 
 
 def _build_list_creatives_response() -> tuple[Any, type]:
-    from adcp import ListCreativesResponse as LibResponse
+    from adcp.types.legacy import LegacyListCreativesResponse as LibResponse
 
     from src.core.schemas import ListCreativesResponse
     from src.core.schemas.creative import Pagination, QuerySummary
@@ -405,7 +383,7 @@ def _build_list_creatives_response() -> tuple[Any, type]:
 
 
 def _build_list_creative_formats_response() -> tuple[Any, type]:
-    from adcp import ListCreativeFormatsResponse as LibResponse
+    from adcp.types.legacy import LegacyListCreativeFormatsResponse as LibResponse
 
     from src.core.schemas import ListCreativeFormatsResponse
 
@@ -424,8 +402,8 @@ def _build_get_media_buys_response_with_list_targeting() -> tuple[Any, type]:
     ``Platform method 'get_media_buys' raised AdCPValidationError`` in
     production before our fix.
     """
-    from adcp.types import GetMediaBuysResponse as LibResponse
     from adcp.types import MediaBuyStatus
+    from adcp.types.legacy import LegacyGetMediaBuysResponse as LibResponse
 
     from src.core.schemas import (
         GetMediaBuysMediaBuy,
@@ -693,7 +671,7 @@ class TestConvertProductHandlesNullableColumns:
 
     @pytest.mark.parametrize("nullable_column", _product_nullable_columns())
     def test_null_orm_column_produces_valid_wire_output(self, nullable_column: str) -> None:
-        from adcp.types import Product as LibProduct
+        from adcp.types.legacy import LegacyProduct as LibProduct
 
         from src.core.product_conversion import convert_product_model_to_schema
 

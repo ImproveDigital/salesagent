@@ -37,7 +37,7 @@ class TestSchemaLibraryInheritance:
 
     def test_get_products_response_extends_library(self):
         """GetProductsResponse must extend library type."""
-        from adcp.types import GetProductsResponse as LibraryResponse
+        from adcp.types.legacy import LegacyGetProductsResponse as LibraryResponse
 
         from src.core.schemas import GetProductsResponse
 

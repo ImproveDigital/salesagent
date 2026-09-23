@@ -34,7 +34,6 @@ from typing import Any, ClassVar
 
 from adcp.decisioning import RequestContext
 from adcp.decisioning.proposal_manager import ProposalCapabilities
-from adcp.types import GetProductsRequest, GetProductsResponse
 from adcp.types.generated_poc.core.product_allocation import ProductAllocation
 from adcp.types.generated_poc.core.proposal import Proposal
 from adcp.types.generated_poc.media_buy.get_products_response import (
@@ -43,8 +42,17 @@ from adcp.types.generated_poc.media_buy.get_products_response import (
     RefinementApplied2,
     RefinementApplied3,
 )
+from adcp.types.legacy import LegacyGetProductsRequest as GetProductsRequest
+from adcp.types.legacy import LegacyGetProductsResponse as GetProductsResponse
 
-from core.platforms._delegate import _build_identity, _coerce_to_request_model, translate_adcp_errors
+from core.platforms._canonical_formats import canonicalize_wire_response
+from core.platforms._delegate import (
+    _build_identity,
+    _coerce_to_request_model,
+    _legacy_request_body,
+    _to_wire,
+    translate_adcp_errors,
+)
 from src.core.embedded_runtime import mark_compose_disabled, publisher_owns_compose_products
 from src.core.exceptions import AdCPNotImplementedInEmbeddedError
 from src.core.tools.products import _get_products_impl
@@ -123,11 +131,13 @@ class SalesAgentProposalManager:
         ``adcp_major_version`` negotiation check before the impl runs.
         """
         identity = _build_identity(ctx)
-        req_model = _coerce_to_request_model(req, GetProductsRequest)
+        req_model = _coerce_to_request_model(_legacy_request_body("get_products", req), GetProductsRequest)
         response = await _get_products_impl(req_model, identity)
 
         if not publisher_owns_compose_products():
-            return mark_compose_disabled(response)
+            return canonicalize_wire_response(
+                "get_products", _to_wire(mark_compose_disabled(response)), tenant_id=identity.tenant_id
+            )
 
         # Decorate brief-mode responses with a v1 proposal (#352).
         # ``buying_mode='wholesale'`` and ``buying_mode='refine'`` opt out
@@ -144,7 +154,9 @@ class SalesAgentProposalManager:
             proposal = _build_v1_brief_proposal(response)
             if proposal is not None:
                 response.proposals = [proposal]
-        return response
+        # Same wire projection as ``_delegate_get_products``: the framework accepts
+        # a dict here and expects canonical creative identity (adcp 7).
+        return canonicalize_wire_response("get_products", _to_wire(response), tenant_id=identity.tenant_id)
 
     @translate_adcp_errors
     async def refine_products(
@@ -180,14 +192,16 @@ class SalesAgentProposalManager:
             )
 
         identity = _build_identity(ctx)
-        req_model = _coerce_to_request_model(req, GetProductsRequest)
+        req_model = _coerce_to_request_model(_legacy_request_body("get_products", req), GetProductsRequest)
         response = await _get_products_impl(req_model, identity)
         proposal = _build_v1_brief_proposal(response)
         if proposal is not None:
             response.proposals = [proposal]
         refine_entries = getattr(req_model, "refine", None) or []
         response.refinement_applied = _build_v1_refinement_applied(refine_entries)
-        return response
+        # Same wire projection as ``_delegate_get_products``: the framework accepts
+        # a dict here and expects canonical creative identity (adcp 7).
+        return canonicalize_wire_response("get_products", _to_wire(response), tenant_id=identity.tenant_id)
 
 
 def _build_v1_brief_proposal(response: GetProductsResponse) -> Proposal | None:

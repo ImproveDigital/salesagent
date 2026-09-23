@@ -10,7 +10,7 @@ Uses historical GAM reporting data aggregated by country + creative format.
 import logging
 from datetime import UTC, datetime, timedelta
 
-from adcp import FormatId
+from adcp.types.legacy import LegacyFormatId as FormatId
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
