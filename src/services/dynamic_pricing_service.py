@@ -95,8 +95,10 @@ class DynamicPricingService:
             # Pydantic validation may return dict, object, or string depending on context
             if isinstance(format_id, dict):
                 format_id_str = format_id.get("id", "")
-            elif isinstance(format_id, FormatId):
-                format_id_str = format_id.id
+            elif isinstance(format_id, FormatId) or hasattr(format_id, "id"):
+                # adcp 7: product format refs may be the generated
+                # FormatReferenceStructuredObject, not a LegacyFormatId subclass.
+                format_id_str = str(format_id.id)
             else:
                 format_id_str = str(format_id)
 
