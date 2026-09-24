@@ -16,8 +16,10 @@ Run as a module from the repo root, so that ``buyer_agent`` is importable:
 
 import argparse
 import asyncio
+import itertools
 import json
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 from dotenv import load_dotenv
@@ -32,14 +34,26 @@ from buyer_agent.registry import ToolEntry, build_registry
 
 load_dotenv()
 
-SYSTEM_PROMPT = """You are a media buyer working with an advertising sales agent through tools.
+SYSTEM_PROMPT_TEMPLATE = """You are a media buyer working with an advertising sales agent through tools.
+Today's date is {today} (UTC). Use it to resolve relative dates such as "tomorrow".
 Work towards the user's goal by calling tools. Never invent IDs, domains, budgets or dates:
 if a value is missing, discover it with a read-only tool or ask the user with ask_user.
 Before calling a tool that creates or changes something, summarise what you are about to do
 and confirm with the user via ask_user.
 When the goal is achieved, or cannot be, reply in plain text with a short summary."""
 
-MAX_TURNS = 10
+
+def system_prompt() -> str:
+    return SYSTEM_PROMPT_TEMPLATE.format(today=datetime.now(UTC).date().isoformat())
+
+
+# Turn budget. A turn that involves a human (ask_user, or the confirmation
+# gate) cannot run away, so it resets the autonomous counter. Only a streak of
+# model-only turns counts towards the limit, and reaching it asks the operator
+# rather than aborting. The total ceiling is the last safety net.
+MAX_AUTONOMOUS_TURNS = 8
+MAX_TOTAL_TURNS = 60
+STALL_REPEATS = 3  # same tool + same arguments this many times in a row = stuck
 
 
 def connect() -> Client:
@@ -95,6 +109,19 @@ def print_history(history: list[types.Content]) -> None:
                 print(f"  {i}. {content.role:5} result: {part.function_response.name} {body[:200]}")
 
 
+def involves_human(registry: dict[str, ToolEntry], name: str) -> bool:
+    entry = registry.get(name)
+    return name == "ask_user" or bool(entry and entry.requires_confirmation)
+
+
+async def grant_more_turns(streak: int, recent: list[str]) -> bool:
+    print(f"\n[budget] {streak} model turns in a row without involving you. Recent calls:")
+    for line in recent[-5:]:
+        print(f"  {line}")
+    reply = await asyncio.to_thread(input, f"[budget] allow {MAX_AUTONOMOUS_TURNS} more? [y/N] > ")
+    return reply.strip().lower() in {"y", "yes"}
+
+
 async def run_agent(
     registry: dict[str, ToolEntry],
     goal: str,
@@ -102,9 +129,9 @@ async def run_agent(
 ) -> str:
     """The agent loop: model proposes, harness executes, result goes back. Repeat.
 
-    Ends when the model replies with text instead of tool calls, or when the
-    turn limit is hit. The limit lives here, not in the prompt, so a confused
-    model cannot run forever.
+    Ends when the model replies with text, when the operator declines more
+    autonomous turns, when the same call repeats STALL_REPEATS times in a row,
+    or at the absolute ceiling. All of these live here, not in the prompt.
 
     Tool schemas go to Gemini exactly as the sales agent serves them. If Gemini
     rejects the request, the error propagates: that is a test result.
@@ -112,11 +139,24 @@ async def run_agent(
     client = llm.make_client()
     gemini_tools = [entry.to_gemini() for entry in registry.values()]
     history: list[types.Content] = [llm.user_turn(goal)]
+    system = system_prompt()
 
-    for turn in range(1, MAX_TURNS + 1):
+    autonomous_streak = 0
+    recent_calls: list[str] = []
+    last_signature: str | None = None
+    repeats = 0
+
+    for turn in itertools.count(1):
+        if turn > MAX_TOTAL_TURNS:
+            return f"(stopped: absolute ceiling of {MAX_TOTAL_TURNS} turns reached)"
+        if autonomous_streak >= MAX_AUTONOMOUS_TURNS:
+            if not await grant_more_turns(autonomous_streak, recent_calls):
+                return "(stopped by the operator at the autonomous turn budget)"
+            autonomous_streak = 0
+
         if show_history:
             print_history(history)
-        response = await llm.step(client, history, gemini_tools, SYSTEM_PROMPT)
+        response = await llm.step(client, history, gemini_tools, system)
         model_turn = response.candidates[0].content
         history.append(model_turn)
 
@@ -126,16 +166,26 @@ async def run_agent(
 
         print(f"\n--- turn {turn}: {len(calls)} tool call(s) ---")
         result_parts: list[types.Part] = []
+        human_this_turn = False
         for call in calls:
             arguments = dict(call.args or {})
-            print(f"  -> {call.name} {json.dumps(arguments)}")
+            signature = f"{call.name} {json.dumps(arguments, sort_keys=True)}"
+            repeats = repeats + 1 if signature == last_signature else 1
+            last_signature = signature
+            if repeats >= STALL_REPEATS:
+                return f"(stopped: {call.name} called with identical arguments {repeats} times in a row)"
+
+            print(f"  -> {signature}")
+            recent_calls.append(signature[:120])
+            human_this_turn = human_this_turn or involves_human(registry, call.name)
             result = await execute(registry, call.name, arguments)
             print(f"  <- {json.dumps(result)[:500]}")
             result_parts.append(llm.tool_result_part(call.name, result))
 
         history.append(llm.tool_results_turn(result_parts))
+        autonomous_streak = 0 if human_this_turn else autonomous_streak + 1
 
-    return f"(stopped after {MAX_TURNS} turns without a final answer)"
+    return "(unreachable)"
 
 
 def parse_args() -> argparse.Namespace:

@@ -79,7 +79,6 @@ async def build_registry(
     local_tools: dict[str, LocalTool],
     allow: set[str] | None = None,
 ) -> dict[str, ToolEntry]:
-
     registry: dict[str, ToolEntry] = {}
 
     for tool in await mcp.list_tools():
@@ -88,7 +87,7 @@ async def build_registry(
         registry[tool.name] = ToolEntry(
             name=tool.name,
             description=tool.description or "",
-            input_schema=tool.inputSchema,
+            input_schema=tool.input_schema,
             run=_mcp_runner(mcp, tool.name),
             source="mcp",
             requires_confirmation=tool.name in WRITE_TOOLS,
