@@ -14,6 +14,7 @@ from adcp.types.legacy import LegacyCreateMediaBuyRequest as CreateMediaBuyReque
 from src.core.schemas import UpdateMediaBuyRequest
 from src.core.slim_schemas import (
     CREATE_MEDIA_BUY_SLIM_SCHEMA,
+    SLIM_INPUT_SCHEMAS,
     UPDATE_MEDIA_BUY_SLIM_SCHEMA,
     compact_tool_schemas,
 )
@@ -99,7 +100,10 @@ def test_compact_tool_schemas_replaces_input_and_strips_output() -> None:
             "outputSchema": {"type": "object", "properties": {"huge": {}}},
         },
         {
-            "name": "list_creatives",
+            # Control: a real SDK tool with no slim replacement.  Must stay
+            # out of SLIM_INPUT_SCHEMAS (asserted below) so that slimming it
+            # later fails with a clear message rather than a schema dict diff.
+            "name": "list_creative_formats",
             "inputSchema": {"type": "object", "properties": {"kept": {}}},
             "outputSchema": {"type": "object", "properties": {"huge": {}}},
         },
@@ -109,12 +113,16 @@ def test_compact_tool_schemas_replaces_input_and_strips_output() -> None:
         },
     ]
 
+    assert "list_creative_formats" not in SLIM_INPUT_SCHEMAS, (
+        "The control tool gained a slim schema; pick another un-slimmed tool for this test."
+    )
+
     compact_tool_schemas(tool_defs)
 
     by_name = {t["name"]: t for t in tool_defs}
     # Tools with a slim replacement get it; others keep their inputSchema.
     assert by_name["create_media_buy"]["inputSchema"] is CREATE_MEDIA_BUY_SLIM_SCHEMA
-    assert by_name["list_creatives"]["inputSchema"] == {
+    assert by_name["list_creative_formats"]["inputSchema"] == {
         "type": "object",
         "properties": {"kept": {}},
     }

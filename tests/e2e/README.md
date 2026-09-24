@@ -20,9 +20,8 @@ tests/e2e/
 ├── test_adcp_schema_compliance.py     # Schema validation compliance tests
 ├── test_schema_validation_standalone.py  # Standalone schema validation tests
 ├── test_testing_hooks.py              # Testing hooks implementation (PR #34)
-├── adcp_schema_validator.py            # AdCP schema validation system
-├── schemas/                           # Versioned schema cache for offline validation
-│   └── v1/                           # AdCP v1 schemas (37 files, ~160KB)
+├── adcp_schema_validator.py            # AdCP schema validation (SDK-bundled schemas)
+├── schemas/                           # Compliance report output (gitignored)
 └── README.md                          # This file
 ```
 
@@ -183,10 +182,12 @@ pytest tests/e2e/test_adcp_schema_compliance.py -v
 pytest tests/e2e/test_schema_validation_standalone.py -v
 ```
 
-### Cached Schemas
-- **Location**: `tests/e2e/schemas/v1/` (37 schemas, ~160KB)
-- **Purpose**: Offline validation, CI reliability, version pinning
-- **Update**: Manual updates when AdCP specification changes
+### Schema Source
+- **Location**: the `adcp` SDK wheel (`adcp/_schemas/<major.minor>/`), selected from
+  `adcp.get_adcp_spec_version()` — the exact AdCP release the server speaks
+- **Purpose**: Offline validation, CI reliability, no drift between server and validator
+- **Update**: Automatic — bump the `adcp` dependency and the bundle moves with it
+  (the public `/schemas/v1` registry alias is not used; it now points at a 3.2 prerelease)
 
 ### Multi-Version Support
 ```python

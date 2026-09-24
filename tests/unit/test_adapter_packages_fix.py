@@ -9,10 +9,10 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
 import pytest
-
 from src.adapters.kevel import Kevel
 from src.adapters.triton_digital import TritonDigital
 from src.adapters.xandr import XandrAdapter
+
 from src.core.schemas import CreateMediaBuyRequest, FormatId, MediaPackage
 
 

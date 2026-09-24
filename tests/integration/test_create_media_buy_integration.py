@@ -61,7 +61,7 @@ def _make_keyed_request(idempotency_key: str, **overrides) -> CreateMediaBuyRequ
     )
 
 
-def _identity_for(sample_tenant: dict, principal_id: str, *, bypass_setup: bool = False) -> "ResolvedIdentity":  # noqa: F821
+def _identity_for(sample_tenant: dict, principal_id: str, *, bypass_setup: bool = False) -> ResolvedIdentity:  # noqa: F821
     """Build a ResolvedIdentity from the sample_tenant fixture dict."""
     tenant_dict = _get_tenant_dict(sample_tenant["tenant_id"])
     return make_lifecycle_identity(
@@ -84,9 +84,7 @@ class TestIdempotency:
     actual enforcement mechanism and that the replay path returns the correct data.
     """
 
-    async def test_first_create_with_idempotency_key_succeeds(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_first_create_with_idempotency_key_succeeds(self, sample_tenant, sample_principal, sample_products):
         """TC-IDEM-001: first request with a fresh idempotency_key creates a new media buy.
 
         WHY THIS TEST EXISTS:
@@ -105,15 +103,12 @@ class TestIdempotency:
         result = await _create_media_buy_impl(req=req, identity=identity)
 
         assert not isinstance(result.response, CreateMediaBuyError), (
-            f"First create with fresh key must succeed. Errors: "
-            f"{getattr(result.response, 'errors', None)}"
+            f"First create with fresh key must succeed. Errors: {getattr(result.response, 'errors', None)}"
         )
         assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id, "Response must contain a media_buy_id."
 
-    async def test_retry_with_same_key_returns_original_buy(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_retry_with_same_key_returns_original_buy(self, sample_tenant, sample_principal, sample_products):
         """TC-IDEM-002: second request with the same idempotency_key returns the same media_buy_id.
 
         WHY THIS TEST EXISTS:
@@ -152,9 +147,7 @@ class TestIdempotency:
             f"not a new one {result2.response.media_buy_id!r}."
         )
 
-    async def test_same_key_different_principal_creates_new_buy(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_same_key_different_principal_creates_new_buy(self, sample_tenant, sample_principal, sample_products):
         """TC-IDEM-003: same idempotency_key used by a different principal creates a new buy.
 
         WHY THIS TEST EXISTS:
@@ -214,9 +207,7 @@ class TestIdempotency:
 class TestProductValidation:
     """Product lookup hits the real DB — the repository returns None for missing products."""
 
-    async def test_unknown_product_id_raises_product_not_found(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_unknown_product_id_raises_product_not_found(self, sample_tenant, sample_principal, sample_products):
         """TC-PROD-004: product_id not present in the DB → AdCPProductNotFoundError.
 
         WHY THIS TEST EXISTS:
@@ -283,8 +274,8 @@ class TestCurrencyValidation:
         does not have all the required setup artifacts (GAMInventory, TenantAuthConfig,
         AuthorizedProperty etc.) — only the currency check is under test here.
         """
-        from src.core.database.models import Principal, Product, Tenant
         from src.core.database.models import PricingOption as PricingOptionModel
+        from src.core.database.models import Principal, Product, Tenant
         from src.core.testing_hooks import AdCPTestContext
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
@@ -295,24 +286,28 @@ class TestCurrencyValidation:
         # Minimal tenant — no CurrencyLimit rows (the condition under test).
         with get_db_session() as session:
             now = datetime.now(UTC)
-            session.add(Tenant(
-                tenant_id=tenant_id,
-                name=f"No-Currency Tenant {suffix}",
-                subdomain=f"no-curr-{suffix}",
-                is_active=True,
-                ad_server="mock",
-                human_review_required=False,
-                created_at=now,
-                updated_at=now,
-            ))
-            session.add(Principal(
-                tenant_id=tenant_id,
-                principal_id=principal_id,
-                name="Test Agent",
-                access_token=f"tok_{suffix}",
-                platform_mappings={"mock": {"id": "adv_test"}},
-                created_at=now,
-            ))
+            session.add(
+                Tenant(
+                    tenant_id=tenant_id,
+                    name=f"No-Currency Tenant {suffix}",
+                    subdomain=f"no-curr-{suffix}",
+                    is_active=True,
+                    ad_server="mock",
+                    human_review_required=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                Principal(
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    name="Test Agent",
+                    access_token=f"tok_{suffix}",
+                    platform_mappings={"mock": {"id": "adv_test"}},
+                    created_at=now,
+                )
+            )
             product = Product(
                 tenant_id=tenant_id,
                 product_id="display_usd",
@@ -325,14 +320,16 @@ class TestCurrencyValidation:
             session.add(product)
             session.commit()
             # Add a USD pricing option to the product.
-            session.add(PricingOptionModel(
-                product_id="display_usd",
-                tenant_id=tenant_id,
-                pricing_model="cpm",
-                currency="USD",
-                rate=5.0,
-                is_fixed=True,
-            ))
+            session.add(
+                PricingOptionModel(
+                    product_id="display_usd",
+                    tenant_id=tenant_id,
+                    pricing_model="cpm",
+                    currency="USD",
+                    rate=5.0,
+                    is_fixed=True,
+                )
+            )
             session.commit()
 
         tenant_dict = _get_tenant_dict(tenant_id)
@@ -355,9 +352,7 @@ class TestCurrencyValidation:
             brand={"domain": "testbrand.com"},
             start_time=_future(1),
             end_time=_future(8),
-            packages=[
-                {"product_id": "display_usd", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}
-            ],
+            packages=[{"product_id": "display_usd", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
         )
 
         result = await _create_media_buy_impl(req=req, identity=identity)
@@ -384,9 +379,7 @@ class TestDatabasePersistence:
     read the rows back to confirm the data was actually committed.
     """
 
-    async def test_successful_creation_persists_media_buy_row(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_successful_creation_persists_media_buy_row(self, sample_tenant, sample_principal, sample_products):
         """TC-DB-001: CreateMediaBuySuccess → MediaBuy row with correct fields in DB.
 
         WHY THIS TEST EXISTS:
@@ -405,22 +398,15 @@ class TestDatabasePersistence:
         result = await _create_media_buy_impl(req=req, identity=identity)
 
         assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Expected success to verify persistence. Errors: "
-            f"{getattr(result.response, 'errors', None)}"
+            f"Expected success to verify persistence. Errors: {getattr(result.response, 'errors', None)}"
         )
         media_buy_id = result.response.media_buy_id
 
         with get_db_session() as session:
-            row = session.scalars(
-                select(DBMediaBuy).where(DBMediaBuy.media_buy_id == media_buy_id)
-            ).first()
+            row = session.scalars(select(DBMediaBuy).where(DBMediaBuy.media_buy_id == media_buy_id)).first()
 
-        assert row is not None, (
-            f"MediaBuy row {media_buy_id!r} not found in DB after successful create."
-        )
-        assert row.tenant_id == sample_tenant["tenant_id"], (
-            "Persisted tenant_id must match the requesting tenant."
-        )
+        assert row is not None, f"MediaBuy row {media_buy_id!r} not found in DB after successful create."
+        assert row.tenant_id == sample_tenant["tenant_id"], "Persisted tenant_id must match the requesting tenant."
         assert row.principal_id == sample_principal["principal_id"], (
             "Persisted principal_id must match the requesting principal."
         )
@@ -452,20 +438,15 @@ class TestDatabasePersistence:
         result = await _create_media_buy_impl(req=req, identity=identity)
 
         assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Expected success to verify package persistence. Errors: "
-            f"{getattr(result.response, 'errors', None)}"
+            f"Expected success to verify package persistence. Errors: {getattr(result.response, 'errors', None)}"
         )
         media_buy_id = result.response.media_buy_id
 
         with get_db_session() as session:
-            packages = session.scalars(
-                select(DBMediaPackage).where(DBMediaPackage.media_buy_id == media_buy_id)
-            ).all()
+            packages = session.scalars(select(DBMediaPackage).where(DBMediaPackage.media_buy_id == media_buy_id)).all()
 
         assert len(packages) == 1, (
             f"Expected 1 MediaPackage row for 1 requested package, "
             f"got {len(packages)} for media_buy_id={media_buy_id!r}."
         )
-        assert packages[0].media_buy_id == media_buy_id, (
-            "MediaPackage.media_buy_id FK must match the created MediaBuy."
-        )
+        assert packages[0].media_buy_id == media_buy_id, "MediaPackage.media_buy_id FK must match the created MediaBuy."

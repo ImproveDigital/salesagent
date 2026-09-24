@@ -1,30 +1,37 @@
 """Test format ID validation with AnyUrl objects in media buy creation.
 
-This test specifically verifies that FormatId objects with AnyUrl fields
-are handled correctly during format validation in create_media_buy.
+This test specifically verifies that FormatId objects built from AnyUrl values
+are handled correctly during format validation in create_media_buy. Since adcp 7,
+``LegacyFormatId.agent_url`` is a wire-preserving ``str`` (AnyUrl would append a
+trailing slash and change the normative tuple), so ``FormatId`` coerces AnyUrl
+inputs to ``str`` and downstream code normalizes spelling before comparing.
 """
 
 from src.core.schemas import FormatId
 
 
 def test_format_validation_with_anyurl_objects():
-    """Test that format validation handles FormatId with AnyUrl correctly.
+    """Test that format validation handles FormatId built from AnyUrl correctly.
 
     This is a regression test for the bug where calling .rstrip() on
-    AnyUrl objects caused AttributeError.
+    AnyUrl objects caused AttributeError. On adcp 7 ``LegacyFormatId.agent_url``
+    is a wire-preserving ``str``; ``FormatId._coerce_agent_url`` turns AnyUrl
+    callers into that string without rewriting the spelling.
     """
     from pydantic import AnyUrl
 
-    # Create FormatId objects with AnyUrl (matches real usage)
-    product_format = FormatId(agent_url="https://creative.adcontextprotocol.org/", id="display_300x250")
+    # Create FormatId objects; one caller passes an AnyUrl instance (matches real usage)
+    product_format = FormatId(agent_url=AnyUrl("https://creative.adcontextprotocol.org/"), id="display_300x250")
     package_format = FormatId(
         agent_url="https://creative.adcontextprotocol.org",
         id="display_300x250",  # No trailing slash
     )
 
-    # Verify AnyUrl type
-    assert isinstance(product_format.agent_url, AnyUrl), "Should be AnyUrl object"
-    assert isinstance(package_format.agent_url, AnyUrl), "Should be AnyUrl object"
+    # adcp 7: agent_url is stored as a plain str with the wire spelling preserved
+    assert isinstance(product_format.agent_url, str), "Should be str (adcp 7 wire-preserving)"
+    assert isinstance(package_format.agent_url, str), "Should be str (adcp 7 wire-preserving)"
+    assert product_format.agent_url == "https://creative.adcontextprotocol.org/"
+    assert package_format.agent_url == "https://creative.adcontextprotocol.org"
 
     # Simulate what the format validation code does:
     # Build set of product format keys
@@ -51,14 +58,14 @@ def test_format_validation_with_anyurl_objects():
 
 
 def test_format_display_with_anyurl():
-    """Test that format_display helper handles AnyUrl objects correctly."""
+    """Test that format_display helper handles AnyUrl-sourced agent_url correctly."""
     from pydantic import AnyUrl
 
-    # Create FormatId with AnyUrl
-    format_id = FormatId(agent_url="https://creative.adcontextprotocol.org/", id="display_300x250")
+    # Create FormatId from an AnyUrl instance
+    format_id = FormatId(agent_url=AnyUrl("https://creative.adcontextprotocol.org/"), id="display_300x250")
 
-    # Verify it's AnyUrl
-    assert isinstance(format_id.agent_url, AnyUrl)
+    # adcp 7 stores it as a wire-preserving str
+    assert isinstance(format_id.agent_url, str)
 
     # The format_display function should handle AnyUrl by converting to string
     # This is implicitly tested in the above test, but we can verify the pattern:
@@ -72,14 +79,14 @@ def test_format_display_with_anyurl():
 
 
 def test_normalize_agent_url_with_anyurl():
-    """Test URL normalization works with AnyUrl objects."""
+    """Test URL normalization works with AnyUrl-sourced agent_url."""
     from pydantic import AnyUrl
 
-    # Create FormatId with trailing slash
-    format_id = FormatId(agent_url="https://creative.adcontextprotocol.org/", id="display_300x250")
+    # Create FormatId from an AnyUrl instance with trailing slash
+    format_id = FormatId(agent_url=AnyUrl("https://creative.adcontextprotocol.org/"), id="display_300x250")
 
     agent_url = format_id.agent_url
-    assert isinstance(agent_url, AnyUrl)
+    assert isinstance(agent_url, str)  # adcp 7: wire-preserving str, not AnyUrl
 
     # Normalize by converting to string first, then rstrip
     normalized = str(agent_url).rstrip("/")

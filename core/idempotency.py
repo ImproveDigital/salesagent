@@ -131,6 +131,7 @@ def translate_idempotency_conflict[F: Callable[..., Awaitable[Any]]](handler: F)
 _LOCK = threading.Lock()
 _STORE: IdempotencyStore | None = None
 _POOL = None  # AsyncConnectionPool, kept around so the GC doesn't close it
+_LOCK_POOL = None  # second AsyncConnectionPool: PgBackend's advisory-lock connections
 
 
 def _build_pool():

@@ -27,9 +27,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # Adapter stub helpers
 # ---------------------------------------------------------------------------
@@ -46,6 +43,7 @@ def _gam_adapter(
     first guard. A named class is required because MagicMock's class name doesn't
     match the string literal the code checks against.
     """
+
     class GoogleAdManager:
         pass
 
@@ -56,6 +54,7 @@ def _gam_adapter(
 
 def _non_gam_adapter() -> object:
     """Adapter stub with a class name that is NOT 'GoogleAdManager'."""
+
     class MockAdapter:
         pass
 
@@ -100,7 +99,6 @@ _PATCH_FORECAST_MGR = "src.adapters.gam.managers.forecast.GAMForecastManager"
 
 
 class TestOverbookGuards:
-
     def test_non_gam_adapter_skips_check(self):
         """TC-GAMW-004: adapter is not GoogleAdManager → [] without any forecast call.
 

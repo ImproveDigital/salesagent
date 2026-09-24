@@ -296,6 +296,65 @@ def canonical_body_for_format(fmt: Any, ref: LegacyFormatId) -> dict[str, Any] |
     return {"format_kind": kind, "params": params}
 
 
+# Ad-server-owned ("adapter") formats carry a non-HTTP ``agent_url`` (see
+# src/core/tools/creatives/_validation.py). adcp 7 only projects legacy tuples
+# whose owner is a public HTTPS host, so on the way in we spell such owners as
+# a synthetic HTTPS URL the SDK accepts, and map back to the original tuple
+# through the option-id index; on the way out we describe them directly as
+# ``custom`` formats keyed by the legacy id. Nothing synthetic reaches impls
+# or buyers.
+_ADAPTER_OWNER = "https://adapter-format.adcp-salesagent.example"
+
+
+def _is_adapter_scheme(agent_url: Any) -> bool:
+    url = str(agent_url)
+    return "://" in url and not url.lower().startswith(("http://", "https://"))
+
+
+def _encode_adapter_owner(agent_url: Any) -> str:
+    scheme, _, rest = str(agent_url).partition("://")
+    return f"{_ADAPTER_OWNER}/{scheme}/{rest.strip('/')}"
+
+
+def _decode_adapter_owner(agent_url: Any) -> str | None:
+    url = str(agent_url)
+    prefix = _ADAPTER_OWNER + "/"
+    if not url.startswith(prefix):
+        return None
+    scheme, _, rest = url[len(prefix) :].partition("/")
+    return f"{scheme}://{rest}" if scheme else None
+
+
+def _adapter_format_body(ref: LegacyFormatId) -> dict[str, Any]:
+    return {"format_kind": "custom", "format_shape": ref.id, "params": {}}
+
+
+def _rewrite_adapter_ref(ref: Mapping[str, Any]) -> dict[str, Any]:
+    url = ref.get("agent_url")
+    if url is None or not _is_adapter_scheme(url):
+        return dict(ref)
+    return {**ref, "agent_url": _encode_adapter_owner(url)}
+
+
+def _rewrite_adapter_refs(value: Any) -> Any:
+    """Return ``value`` with adapter-scheme ``format_id``/``format_ids`` owners re-spelled."""
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for key, child in value.items():
+            if key in {"context", "ext"}:
+                out[key] = child
+            elif key == "format_id" and isinstance(child, Mapping):
+                out[key] = _rewrite_adapter_ref(child)
+            elif key == "format_ids" and isinstance(child, list):
+                out[key] = [_rewrite_adapter_ref(c) if isinstance(c, Mapping) else c for c in child]
+            else:
+                out[key] = _rewrite_adapter_refs(child)
+        return out
+    if isinstance(value, list):
+        return [_rewrite_adapter_refs(c) for c in value]
+    return value
+
+
 def legacy_format_converter(context: LegacyFormatConversionContext) -> Mapping[str, Any] | None:
     """SDK hook: project a named format the bundled AAO catalog cannot resolve.
 
@@ -304,6 +363,10 @@ def legacy_format_converter(context: LegacyFormatConversionContext) -> Mapping[s
     those, rejects the request with a precise diagnostic. Raising here would
     surface as ``custom_converter_failed`` and mask that fallback.
     """
+    original_url = _decode_adapter_owner(context.format_id.agent_url)
+    if original_url is not None:
+        original = context.format_id.model_copy(update={"agent_url": original_url})
+        return {**_adapter_format_body(original), "format_option_id": _INDEX.register(original)}
     fmt = _salesagent_format_for(context.format_id, _current_tenant_id())
     if fmt is None or not isinstance(fmt, (BaseModel, Mapping)):
         # Unknown to every catalog we can reach (e.g. a creative agent that is
@@ -420,6 +483,14 @@ def declaration_for_legacy_ref(
         ref = legacy_ref(value)
     except Exception:
         return None
+    if _is_adapter_scheme(ref.agent_url):
+        adapter_declaration = CanonicalFormat(
+            format_option_id=migrated_format_option_id(ref),
+            v1_format_ref=[ref.model_dump(mode="json", exclude_none=True)],
+            **_adapter_format_body(ref),
+        )
+        _INDEX.register(ref, adapter_declaration.format_option_id)
+        return adapter_declaration
     projected = project_legacy_format_id(
         ref,
         product_id=product_id or "",
@@ -495,11 +566,18 @@ def prepare_legacy_request(tool_name: str, params: dict[str, Any]) -> dict[str, 
         if not versioned:
             out["adcp_version"] = "3.1"
         return out
+    adapter_refs = False
     for raw in refs:
         try:
-            _INDEX.register(legacy_ref(raw))
+            ref = legacy_ref(raw)
         except Exception:  # malformed tuple — the SDK reports it with a field path
             continue
+        _INDEX.register(ref)
+        adapter_refs = adapter_refs or _is_adapter_scheme(ref.agent_url)
+    if adapter_refs:
+        # Ad-server-owned formats: give the SDK an HTTPS owner it will project;
+        # ``legacy_format_converter`` maps it back to the original tuple.
+        out = _rewrite_adapter_refs(out)
     if not versioned:
         out["adcp_version"] = "3.0"
     return out
@@ -587,6 +665,14 @@ def _legacy_packages(packages: Any, *, field: str, tenant_id: str | None) -> Any
             body["format_ids"] = _refs_from_option_refs(
                 option_refs, field=f"{field}[{index}].format_option_refs", tenant_id=tenant_id
             )
+        # Inline creatives (create/update_media_buy ``packages[].creatives``) are
+        # normalised to canonical identity by the SDK exactly like sync_creatives.
+        creatives = body.get("creatives")
+        if isinstance(creatives, list):
+            body["creatives"] = [
+                legacy_creative_payload(c, field=f"{field}[{index}].creatives[{j}]", tenant_id=tenant_id)
+                for j, c in enumerate(creatives)
+            ]
         out.append(body)
     return out
 

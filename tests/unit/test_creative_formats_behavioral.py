@@ -8,16 +8,17 @@ these tests will catch it.
 Each test references its upstream BDD scenario ID for traceability.
 """
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types.generated_poc.core.format import Assets, Dimensions, Renders
 from adcp.types.generated_poc.core.format import Assets10 as Assets5
 
-# adcp 3.9: Assets classes are type-discriminated by asset_type + item_type.
-# Assets = individual image, Assets5 = individual video
-# Assets18 = repeatable_group (has nested assets, no asset_type)
-# Nested group assets: Assets19 (image), Assets20 (video), Assets22 (text), etc.
+# adcp 7: Assets classes are type-discriminated by asset_type + item_type.
+# Assets = individual image, Assets10 (aliased Assets5 here) = individual video
+# Assets24 = repeatable_group (has nested assets, no asset_type)
+# Nested group assets (Assets25 union): Assets26 (image), Assets27 (video), Assets29 (text), etc.
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest
 from tests.factories import PrincipalFactory
 
@@ -191,21 +192,22 @@ class TestAssetTypesFilterChecksGroupAssets:
 
     def test_asset_types_filter_finds_type_in_group_assets(self):
         """Format with group assets containing requested type should be included."""
-        # adcp 3.9: repeatable_group uses Assets18, nested items use Assets19+ variants
-        from adcp.types.generated_poc.core.format import Assets18, Assets19, Assets22
+        # adcp 7: repeatable_group uses Assets24, nested items use the Assets25 union
+        # (Assets26 = image, Assets29 = text)
+        from adcp.types.generated_poc.core.format import Assets24, Assets26, Assets29
 
-        group_asset = Assets18(
+        group_asset = Assets24(
             item_type="repeatable_group",
             asset_group_id="product_group",
             required=True,
             min_count=1,
             max_count=5,
             assets=[
-                Assets19(
+                Assets26(
                     asset_id="product_image",
                     required=True,
                 ),
-                Assets22(
+                Assets29(
                     asset_id="product_title",
                     required=True,
                 ),
@@ -228,17 +230,17 @@ class TestAssetTypesFilterChecksGroupAssets:
 
     def test_asset_types_filter_excludes_group_without_match(self):
         """Format with group assets NOT containing requested type should be excluded."""
-        # adcp 3.9: repeatable_group uses Assets18, nested text items use Assets22
-        from adcp.types.generated_poc.core.format import Assets18, Assets22
+        # adcp 7: repeatable_group uses Assets24, nested text items use Assets29
+        from adcp.types.generated_poc.core.format import Assets24, Assets29
 
-        group_asset = Assets18(
+        group_asset = Assets24(
             item_type="repeatable_group",
             asset_group_id="text_group",
             required=True,
             min_count=1,
             max_count=3,
             assets=[
-                Assets22(
+                Assets29(
                     asset_id="headline",
                     required=True,
                 ),
@@ -260,22 +262,22 @@ class TestAssetTypesFilterChecksGroupAssets:
 
     def test_asset_types_filter_mixed_individual_and_group(self):
         """Format with both individual and group assets: filter checks both."""
-        # adcp 3.9: Assets5 = individual video, Assets18 = repeatable_group
-        # Assets18 nested assets use Assets19+ classes (image=Assets19)
-        from adcp.types.generated_poc.core.format import Assets18, Assets19
+        # adcp 7: Assets5 (= Assets10) = individual video, Assets24 = repeatable_group
+        # Assets24 nested assets use the Assets25 union (image = Assets26)
+        from adcp.types.generated_poc.core.format import Assets24, Assets26
 
         individual_asset = Assets5(
             asset_id="hero_video",
             required=True,
         )
-        group_asset = Assets18(
+        group_asset = Assets24(
             item_type="repeatable_group",
             asset_group_id="product_group",
             required=False,
             min_count=0,
             max_count=5,
             assets=[
-                Assets19(
+                Assets26(
                     asset_id="product_image",
                     required=True,
                 ),
@@ -504,93 +506,136 @@ class TestAssetTypesFilterExclusion:
 
 
 class TestBroadstreetTemplateAssetParsing:
-    """Regression: Broadstreet templates must parse with real assets.
+    """Regression: Broadstreet formats must parse with real, typed assets.
 
-    The production code uses _make_asset() to construct the correct Assets
-    variant class (Assets for image, Assets5 for video, etc.) for each
-    template asset. Previously, the code used Assets(asset_type=AssetContentType(...))
-    which failed because Assets.asset_type is Literal['image'], not an enum.
+    Sales Agent 2.0 replaced the per-template ``_infer_asset_type()`` /
+    ``_make_asset()`` builders with canonical reference-agent formats
+    (``src/adapters/broadstreet/formats.py:broadstreet_creative_format_models``).
+    Each Broadstreet template type maps onto one canonical format, and every
+    asset those formats declare must carry a spec ``asset_type`` literal. The
+    original bug constructed ``Assets(asset_type=AssetContentType(...))`` against
+    a ``Literal['image']`` field, which failed validation and left formats with
+    no assets.
     """
 
+    @staticmethod
+    def _leaf_assets(fmt: Format) -> list:
+        """Flatten a format's asset declarations (expanding repeatable groups)."""
+        from adcp.utils.format_assets import get_format_assets
+
+        leaves = []
+        for entry in get_format_assets(fmt):
+            nested = getattr(entry, "assets", None)
+            leaves.extend(list(nested) if nested else [entry])
+        return leaves
+
     def test_all_broadstreet_templates_produce_formats_with_assets(self):
-        """Every Broadstreet template must produce a Format with non-empty assets."""
+        """Every Broadstreet template with a canonical format must produce a Format with non-empty, typed assets."""
         from src.adapters.broadstreet.config_schema import BROADSTREET_TEMPLATES
-        from src.core.tools.creative_formats import _infer_asset_type, _make_asset
+        from src.adapters.broadstreet.formats import (
+            BROADSTREET_TEMPLATE_CANONICAL_FORMAT_IDS,
+            broadstreet_creative_format_models,
+            broadstreet_template_canonical_format_id,
+        )
 
-        for tid, tmpl in BROADSTREET_TEMPLATES.items():
-            assets_list = []
-            for asset_id in tmpl.get("required_assets", []):
-                at = _infer_asset_type(asset_id)
-                assets_list.append(_make_asset(asset_id, at, required=True))
-            for asset_id in tmpl.get("optional_assets", []):
-                at = _infer_asset_type(asset_id)
-                assets_list.append(_make_asset(asset_id, at, required=False))
+        formats_by_id = {fmt.format_id.id: fmt for fmt in broadstreet_creative_format_models()}
+        assert formats_by_id, "Broadstreet must advertise at least one canonical format"
 
-            fmt = Format(
-                format_id=FormatId(id=f"broadstreet_{tid}", agent_url="broadstreet://test"),
-                name=str(tmpl["name"]),
-                assets=assets_list if assets_list else None,
-                is_standard=False,
-            )
-            assert fmt.assets, f"Template {tid} must have non-empty assets list"
-            assert len(fmt.assets) == len(tmpl.get("required_assets", [])) + len(tmpl.get("optional_assets", [])), (
-                f"Template {tid} asset count mismatch"
-            )
+        # Every advertised format declares assets, each carrying a spec asset_type literal
+        for format_id, fmt in formats_by_id.items():
+            assert fmt.assets, f"Format {format_id} must have non-empty assets list"
+            leaves = self._leaf_assets(fmt)
+            assert leaves, f"Format {format_id} must declare at least one leaf asset"
+            for leaf in leaves:
+                asset_type = getattr(leaf, "asset_type", None)
+                assert isinstance(asset_type, str) and asset_type, (
+                    f"Format {format_id} asset {getattr(leaf, 'asset_id', None)!r} must carry an asset_type literal"
+                )
+
+        # The template -> canonical mapping only names real templates, and every mapped
+        # template resolves to one of the advertised formats.
+        assert set(BROADSTREET_TEMPLATE_CANONICAL_FORMAT_IDS) <= set(BROADSTREET_TEMPLATES)
+        mapped = {tid: broadstreet_template_canonical_format_id(tid) for tid in BROADSTREET_TEMPLATES}
+        assert any(canonical_id is not None for canonical_id in mapped.values())
+        for tid, canonical_id in mapped.items():
+            if canonical_id is None:
+                continue  # template has no canonical reference-agent equivalent; not advertised
+            assert canonical_id in formats_by_id, f"Template {tid} maps to unadvertised format {canonical_id}"
 
     def test_asset_type_literals_match_inferred_type(self):
-        """Each constructed asset must have asset_type matching the inferred string."""
-        from src.core.tools.creative_formats import _infer_asset_type, _make_asset
+        """Each declared asset must have an asset_type literal matching its asset role."""
+        from src.adapters.broadstreet.formats import broadstreet_creative_format_models
 
-        for asset_id, expected_type in [
-            ("front_image", "image"),
-            ("logo", "image"),
-            ("youtube_url", "video"),
-            ("click_url", "url"),
-            ("headline", "text"),
-            ("html", "html"),
+        formats_by_id = {fmt.format_id.id: fmt for fmt in broadstreet_creative_format_models()}
+
+        for format_id, asset_id, expected_type in [
+            ("display_image", "banner_image", "image"),
+            ("display_image", "click_url", "url"),
+            ("display_html", "html_creative", "html"),
+            ("display_js", "js_creative", "javascript"),
+            ("native_standard", "title", "text"),
+            ("native_standard", "main_image", "image"),
         ]:
-            inferred = _infer_asset_type(asset_id)
-            assert inferred == expected_type, f"{asset_id}: expected {expected_type}, got {inferred}"
-            asset = _make_asset(asset_id, inferred, required=True)
+            assert format_id in formats_by_id, f"Broadstreet must advertise {format_id}"
+            by_asset_id = {getattr(a, "asset_id", None): a for a in self._leaf_assets(formats_by_id[format_id])}
+            assert asset_id in by_asset_id, f"{format_id} must declare asset {asset_id!r}"
+            asset = by_asset_id[asset_id]
             assert asset.asset_type == expected_type, (
-                f"{asset_id}: asset_type should be '{expected_type}', got '{asset.asset_type}'"
+                f"{format_id}/{asset_id}: asset_type should be '{expected_type}', got '{asset.asset_type}'"
             )
 
 
 class TestMCPWrapperStringCoercion:
-    """Regression: MCP wrapper must handle raw string inputs for enum params.
+    """Regression: the transport boundary must coerce raw string enum params.
 
-    The MCP wrapper (list_creative_formats) does type.value and at.value
-    to extract enum values. If called directly with raw strings (bypassing
-    FastMCP's auto-coercion), this crashes with AttributeError.
-    The wrapper must coerce strings to enums before accessing .value.
+    The legacy MCP wrapper did ``type.value`` / ``at.value`` and crashed with
+    AttributeError when handed raw strings. In Sales Agent 2.0 the boundary is
+    ``core/platforms/_delegate.py:_delegate_list_creative_formats`` (dispatched
+    by the adcp SDK server for both MCP and A2A), which coerces the wire dict
+    into ``ListCreativeFormatsRequest`` — enum fields validated by pydantic —
+    before calling ``_list_creative_formats_impl``.
     """
 
-    @pytest.mark.asyncio
-    async def test_mcp_wrapper_handles_string_type(self):
-        """MCP wrapper must not crash when type is a raw string instead of FormatCategory enum."""
-        from src.core.tools.creative_formats import list_creative_formats
+    @staticmethod
+    def _dispatch(req) -> MagicMock:
+        """Run the delegate on a wire dict with identity + impl stubbed; return the impl mock."""
+        from core.platforms import _delegate
+        from src.core.schemas import ListCreativeFormatsResponse
 
-        # Calling with a raw string bypasses FastMCP's enum coercion
-        # This should NOT raise AttributeError
-        try:
-            await list_creative_formats(ctx=None)
-        except AttributeError:
-            pytest.fail("MCP wrapper crashed on raw string type — must coerce to enum first")
-        except Exception:
-            pass  # Other errors (no identity, etc.) are fine — we're testing type handling
+        identity = PrincipalFactory.make_identity(
+            principal_id=None,
+            tenant_id=MOCK_TENANT["tenant_id"],
+            tenant=MOCK_TENANT,
+        )
+        with (
+            patch.object(_delegate, "_build_identity", return_value=identity),
+            patch.object(
+                _delegate, "_list_creative_formats_impl", return_value=ListCreativeFormatsResponse(formats=[])
+            ) as mock_impl,
+        ):
+            asyncio.run(_delegate._delegate_list_creative_formats(req, object()))
+        return mock_impl
 
-    @pytest.mark.asyncio
-    async def test_mcp_wrapper_handles_string_asset_types(self):
-        """MCP wrapper must not crash when asset_types contains raw strings."""
-        from src.core.tools.creative_formats import list_creative_formats
+    def test_mcp_wrapper_handles_string_type(self):
+        """Boundary must not crash on a bare wire dict and must hand _impl a request model."""
+        # A raw wire dict (no FastMCP enum coercion) must not raise AttributeError
+        mock_impl = self._dispatch({})
 
-        try:
-            await list_creative_formats(asset_types=["image", "video"], ctx=None)
-        except AttributeError:
-            pytest.fail("MCP wrapper crashed on raw string asset_types — must coerce to enum first")
-        except Exception:
-            pass  # Other errors are fine
+        mock_impl.assert_called_once()
+        req_model, _identity = mock_impl.call_args.args
+        assert isinstance(req_model, ListCreativeFormatsRequest)
+        assert req_model.asset_types is None
+
+    def test_mcp_wrapper_handles_string_asset_types(self):
+        """Boundary must coerce raw string asset_types into AssetContentType enums before _impl."""
+        from adcp.types.generated_poc.enums.asset_content_type import AssetContentType
+
+        mock_impl = self._dispatch({"asset_types": ["image", "video"]})
+
+        mock_impl.assert_called_once()
+        req_model, _identity = mock_impl.call_args.args
+        assert isinstance(req_model, ListCreativeFormatsRequest)
+        assert req_model.asset_types == [AssetContentType.image, AssetContentType.video]
 
 
 # ---------------------------------------------------------------------------

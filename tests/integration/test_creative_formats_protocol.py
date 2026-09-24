@@ -12,15 +12,11 @@ Obligation IDs:
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 from adcp.types.generated_poc.core.format import Assets, Dimensions, Renders
 from adcp.types.generated_poc.core.format import Assets10 as Assets5
 from adcp.types.generated_poc.enums.asset_content_type import AssetContentType
-from fastmcp.server.context import Context
-from fastmcp.tools import ToolResult
+from fastmcp.client.client import CallToolResult
 
 from src.core.schemas import (
     Format,
@@ -194,17 +190,22 @@ class TestCombinedFilters:
 
 
 class TestMcpToolResultWrapping:
-    """Covers: UC-005-MAIN-MCP-17 -- MCP response wraps response as ToolResult."""
+    """Covers: UC-005-MAIN-MCP-17 -- MCP response wraps response as ToolResult.
+
+    Tools are dispatched by the adcp SDK server built in ``core/main.py``
+    (platform handler ``list_creative_formats_legacy``), so the tool-result
+    envelope is observed from the client side: ``env.call_mcp_raw()`` drives
+    the real fastmcp ``Client`` against the in-process app and returns the
+    ``CallToolResult`` with ``content`` + ``structured_content``.
+    """
 
     def test_mcp_returns_tool_result_with_structured_content(self, integration_db):
-        """UC-005-MAIN-MCP-17: MCP wrapper returns ToolResult with structured content.
+        """UC-005-MAIN-MCP-17: MCP tool call returns a tool result with structured content.
 
-        The MCP wrapper must return a ToolResult object whose
+        The MCP surface must return a tool result whose
         structured_content is the ListCreativeFormatsResponse data,
         parseable as JSON.
         """
-        from src.core.tools.creative_formats import list_creative_formats
-
         formats = [
             _make_format("display_300", "Medium Rectangle"),
             _make_format("video_15s", "Pre-roll 15s"),
@@ -213,43 +214,31 @@ class TestMcpToolResultWrapping:
         with CreativeFormatsEnv() as env:
             TenantFactory(tenant_id="test_tenant")
             env.set_registry_formats(formats)
-            env._commit_factory_data()
 
-            from tests.harness.transport import Transport
+            tool_result = env.call_mcp_raw()
 
-            mock_ctx = MagicMock(spec=Context)
-            mock_ctx.get_state = AsyncMock(return_value=env.identity_for(Transport.MCP))
-
-            tool_result = asyncio.run(list_creative_formats(ctx=mock_ctx))
-
-        # Verify it is a ToolResult
-        assert isinstance(tool_result, ToolResult)
+        # Verify it is the MCP tool-result envelope
+        assert isinstance(tool_result, CallToolResult)
+        assert tool_result.is_error is False
 
         # Verify structured_content is present and is a dict-like object
         sc = tool_result.structured_content
         assert sc is not None
+        assert isinstance(sc, dict)
 
         # Verify it can be parsed as ListCreativeFormatsResponse
         parsed = ListCreativeFormatsResponse(**sc)
         assert len(parsed.formats) == 2
 
     def test_mcp_tool_result_content_is_text(self, integration_db):
-        """UC-005-MAIN-MCP-17: ToolResult.content contains displayable text."""
-        from src.core.tools.creative_formats import list_creative_formats
-
+        """UC-005-MAIN-MCP-17: tool result content contains displayable text."""
         formats = [_make_format("test_fmt", "Test Format")]
 
         with CreativeFormatsEnv() as env:
             TenantFactory(tenant_id="test_tenant")
             env.set_registry_formats(formats)
-            env._commit_factory_data()
 
-            from tests.harness.transport import Transport
-
-            mock_ctx = MagicMock(spec=Context)
-            mock_ctx.get_state = AsyncMock(return_value=env.identity_for(Transport.MCP))
-
-            tool_result = asyncio.run(list_creative_formats(ctx=mock_ctx))
+            tool_result = env.call_mcp_raw()
 
         # content is a list of TextContent objects with displayable text
         assert tool_result.content is not None
@@ -260,8 +249,6 @@ class TestMcpToolResultWrapping:
 
     def test_mcp_structured_content_includes_formats_array(self, integration_db):
         """UC-005-MAIN-MCP-17: structured_content contains 'formats' key."""
-        from src.core.tools.creative_formats import list_creative_formats
-
         formats = [
             _make_format("fmt_a", "Format A"),
             _make_format("fmt_b", "Format B"),
@@ -270,16 +257,11 @@ class TestMcpToolResultWrapping:
         with CreativeFormatsEnv() as env:
             TenantFactory(tenant_id="test_tenant")
             env.set_registry_formats(formats)
-            env._commit_factory_data()
 
-            from tests.harness.transport import Transport
-
-            mock_ctx = MagicMock(spec=Context)
-            mock_ctx.get_state = AsyncMock(return_value=env.identity_for(Transport.MCP))
-
-            tool_result = asyncio.run(list_creative_formats(ctx=mock_ctx))
+            tool_result = env.call_mcp_raw()
 
         sc = tool_result.structured_content
+        assert sc is not None
         assert "formats" in sc
         assert isinstance(sc["formats"], list)
         assert len(sc["formats"]) == 2

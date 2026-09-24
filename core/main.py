@@ -34,8 +34,8 @@ import asyncio
 import logging
 import os
 import re
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, cast
 
 from a2wsgi import WSGIMiddleware
 from adcp.decisioning import (
@@ -71,6 +71,7 @@ from adcp.server.mcp_tools import (
     _ensure_pydantic_schemas_applied,
 )
 from adcp.server.spec_compat import _spec_compat_hooks_impl
+from starlette.middleware.cors import CORSMiddleware
 
 from src.core.auth import get_principal_from_context
 from src.core.slim_schemas import compact_tool_schemas
@@ -257,16 +258,25 @@ def _strict_request_fields_by_tool() -> dict[str, set[str]]:
     }
 
 
+_HookSpec = PreValidationHook | Sequence[PreValidationHook]
+
+
 def _with_dev_unknown_field_rejection(
-    hooks: dict[str, PreValidationHook],
-) -> dict[str, PreValidationHook]:
+    hooks: Mapping[str, _HookSpec],
+) -> dict[str, _HookSpec]:
     """Compose SDK spec-compat hooks with salesagent strict-extra checks."""
     fields_by_tool = _strict_request_fields_by_tool()
-    wrapped: dict[str, PreValidationHook] = dict(hooks)
+    wrapped: dict[str, _HookSpec] = dict(hooks)
 
-    def make_hook(tool_name: str, base_hook: PreValidationHook | None, known_fields: set[str]) -> PreValidationHook:
+    def make_hook(tool_name: str, base_hook: _HookSpec | None, known_fields: set[str]) -> PreValidationHook:
+        base_hooks: list[PreValidationHook] = (
+            [] if base_hook is None else ([base_hook] if callable(base_hook) else list(base_hook))
+        )
+
         def hook(name: str, params: dict[str, Any]) -> dict[str, Any]:
-            normalized = base_hook(name, params) if base_hook is not None else params
+            normalized = params
+            for base in base_hooks:
+                normalized = base(name, normalized)
             from core.platforms._canonical_formats import prepare_legacy_request
             from src.core.request_compat import normalize_request_params
 
@@ -382,6 +392,12 @@ def _validate_token(token: str) -> Principal | None:
     """
     if not token:
         return None
+    # The ``x-adcp-auth`` alias carries a raw token, but buyers configured with
+    # ``auth_type="bearer"`` on that header (adcp Python client) send
+    # ``Bearer <token>``; tolerate the scheme instead of failing the lookup.
+    scheme, _, rest = token.strip().partition(" ")
+    if scheme.lower() == "bearer" and rest.strip():
+        token = rest.strip()
     embedded_identity = resolve_embedded_identity_token(token)
     if embedded_identity is not None:
         return Principal(
@@ -486,7 +502,7 @@ def _anonymous_context_with_tenant(ctx: ToolContext, request: Any) -> ToolContex
     try:
         headers = dict(request.headers)
         _principal_id, tenant_context = get_principal_from_context(
-            SimpleNamespace(headers=headers), require_valid_token=False
+            cast(Any, SimpleNamespace(headers=headers)), require_valid_token=False
         )
     except Exception:  # never block discovery on tenant hint problems
         logger.debug("anonymous tenant resolution from headers failed", exc_info=True)
@@ -530,8 +546,31 @@ async def build_platform_for_tenant(tenant_id: str) -> DecisioningPlatform:
     return MockSellerPlatform()
 
 
+class _DefaultingProposalManagers(dict[str, Any]):
+    """``{tenant_id: ProposalManager}`` that falls back to a shared manager.
+
+    The SDK router resolves proposal managers with ``.get(tenant_id)`` on a
+    plain dict it copies at construction, so tenants created after boot
+    would silently fall through to the platform's own ``get_products`` (no
+    proposal persisted). Every salesagent tenant shares one stateless
+    manager, so unknown tenants resolve to it too.
+    """
+
+    def __init__(self, managers: Mapping[str, Any], default: Any) -> None:
+        super().__init__(managers)
+        self._default = default
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return super().get(key, self._default if default is None else default)
+
+
 class SalesagentPlatformRouter(LazyPlatformRouter):
     """Lazy tenant router with SDK-native request-scoped capabilities."""
+
+    def __init__(self, *args: Any, default_proposal_manager: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if default_proposal_manager is not None:
+            self._proposal_managers = _DefaultingProposalManagers(self._proposal_managers, default_proposal_manager)
 
     def get_adcp_capabilities_for_request(
         self,
@@ -543,16 +582,13 @@ class SalesagentPlatformRouter(LazyPlatformRouter):
         return capabilities_for_request(self.capabilities, params=params, context=context)
 
 
-def _build_proposal_managers() -> dict[str, SalesAgentProposalManager]:
-    """Bind a :class:`SalesAgentProposalManager` to every active
-    tenant. Same instance shared across tenants — v1 of the manager
-    has no per-tenant configuration. Tenants registered AFTER boot
-    don't pick up the manager until restart; that's acceptable while
-    the surface is stateless. Persistent DRAFT proposals (v2) move
-    this mapping to a runtime-resolvable structure or a default
-    factory.
+def _build_proposal_managers(shared: SalesAgentProposalManager) -> dict[str, SalesAgentProposalManager]:
+    """Bind ``shared`` to every tenant active at boot.
+
+    The same instance serves every tenant (the manager has no per-tenant
+    configuration). Tenants registered after boot resolve to it as well via
+    :class:`_DefaultingProposalManagers` on :class:`SalesagentPlatformRouter`.
     """
-    shared = SalesAgentProposalManager()
     with get_db_session() as session:
         rows = session.scalars(select(TenantRow).filter_by(is_active=True)).all()
     return {row.tenant_id: shared for row in rows}
@@ -614,7 +650,8 @@ def build_router() -> LazyPlatformRouter:
     # manager's capabilities declare it; v1 of the manager doesn't,
     # so refine falls through to get_products (the buyer-side wire
     # contract is unchanged).
-    proposal_managers = _build_proposal_managers()
+    shared_proposal_manager = SalesAgentProposalManager()
+    proposal_managers = _build_proposal_managers(shared_proposal_manager)
     # Single shared ProposalStore returned by the factory for every
     # tenant — tenant isolation runs inside the store on
     # ``expected_account_id`` (the framework passes the principal's
@@ -651,6 +688,7 @@ def build_router() -> LazyPlatformRouter:
         factory=build_platform_for_tenant,
         capabilities=capabilities,
         proposal_managers=proposal_managers,
+        default_proposal_manager=shared_proposal_manager,
         proposal_store_factory=lambda _tenant_id: get_proposal_store(),
     )
     # validate_idempotency_wiring inspects the platform handed to serve()
@@ -904,6 +942,23 @@ def _serve_kwargs(
     asgi_middleware: list = [
         (TracingMiddleware, {}),
         (AdminWSGIMount, {"wsgi_app": admin_wsgi}),
+        # CORS for browser-origin buyers on the protocol surfaces (A2A root,
+        # ``/.well-known/*`` discovery, ``/mcp``). The SDK's BearerTokenAuth
+        # deliberately passes OPTIONS preflights through so an operator
+        # middleware can answer them; without this entry preflights 404 and
+        # simple requests carry no ``Access-Control-Allow-Origin``. Sits
+        # after AdminWSGIMount so the same-origin Flask admin is untouched,
+        # and mirrors the retired FastAPI app's config (explicit origins
+        # from ``ALLOWED_ORIGINS`` — never ``*`` — with credentials).
+        (
+            CORSMiddleware,
+            {
+                "allow_origins": allowed_origins,
+                "allow_credentials": True,
+                "allow_methods": ["*"],
+                "allow_headers": ["*"],
+            },
+        ),
         (EmbeddedBuyerAuthBridgeMiddleware, {}),
         # DualCredentialAuditMiddleware logs WARNING when an inbound
         # request carries two different bearer tokens (one in

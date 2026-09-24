@@ -178,7 +178,7 @@ class TestBuildAgentConfig:
 
         agent = _FakeAgent(
             name="secure-agent",
-            agent_url="http://x",
+            agent_url="http://localhost",  # adcp 7: auth_token over plain http needs a loopback host
             auth={"type": "bearer", "credentials": "secret-token-123"},
             auth_header=None,
             timeout=30,
@@ -193,7 +193,7 @@ class TestBuildAgentConfig:
 
         agent = _FakeAgent(
             name="a",
-            agent_url="http://x",
+            agent_url="http://localhost",  # adcp 7: auth_token over plain http needs a loopback host
             auth={"credentials": "tok"},
             auth_header=None,
             timeout=30,

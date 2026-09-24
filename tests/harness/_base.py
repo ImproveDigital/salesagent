@@ -92,7 +92,33 @@ def _adcp_error_from_code(
     return reconstructed
 
 
-def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
+def _bearer_401_as_auth_error() -> Exception:
+    """In-band equivalent of the bearer middleware's HTTP 401.
+
+    ``adcp.server.auth.BearerTokenAuthMiddleware`` rejects a missing or
+    invalid token for non-discovery tools at the transport (HTTP 401 +
+    ``WWW-Authenticate: Bearer realm="adcp", error="invalid_token"``) before
+    the tool runs. The impls raise ``AdCPAuthenticationError``
+    (``AUTH_TOKEN_INVALID``) for the same condition, so transport-agnostic
+    assertions see one shape on every transport.
+    """
+    message = "Authentication failed: a valid ADCP auth token is required."
+    return _adcp_error_from_code(
+        "AUTH_TOKEN_INVALID",
+        message,
+        recovery="correctable",
+        details={"suggestion": message},
+    )
+
+
+def _is_bearer_challenge(www_authenticate: str | None) -> bool:
+    """True for an RFC 6750 ``WWW-Authenticate: Bearer ...`` challenge."""
+    if not www_authenticate:
+        return False
+    return www_authenticate.strip().lower().startswith("bearer")
+
+
+def _unwrap_mcp_tool_error(exc: Exception, *, bearer_401: str | None = None) -> Exception:
     """Translate FastMCP ToolError back to the corresponding AdCPError.
 
     The MCP tool wrappers (via with_error_logging) convert AdCPError to
@@ -103,6 +129,13 @@ def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
     This parses the string back to a tuple via ast.literal_eval and
     reconstructs the AdCPError subclass.
 
+    ``bearer_401`` is the ``WWW-Authenticate`` value of a 401 observed on the
+    httpx client during this call. mcp>=2 no longer raises
+    ``httpx.HTTPStatusError`` for a non-2xx ``tools/call`` response — it
+    surfaces a status-less JSON-RPC ``INTERNAL_ERROR`` ("Server returned an
+    error response") instead — so ``_run_mcp_client`` records the 401 via an
+    httpx response hook and hands the challenge in here.
+
     If the exception is not a ToolError or can't be parsed, returns it unchanged.
     """
     import ast
@@ -111,13 +144,9 @@ def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
     from fastmcp.exceptions import ToolError
 
     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
-        message = "Authentication failed: a valid ADCP auth token is required."
-        return _adcp_error_from_code(
-            "AUTH_TOKEN_INVALID",
-            message,
-            recovery="correctable",
-            details={"suggestion": message},
-        )
+        return _bearer_401_as_auth_error()
+    if _is_bearer_challenge(bearer_401):
+        return _bearer_401_as_auth_error()
 
     if not isinstance(exc, ToolError):
         return exc
@@ -490,11 +519,21 @@ class BaseTestEnv:
         if mcp_identity and mcp_identity.tenant_id:
             request_headers["x-adcp-tenant"] = mcp_identity.tenant_id
 
+        # mcp>=2 collapses a non-2xx ``tools/call`` response into a status-less
+        # JSON-RPC error, so the bearer middleware's 401 is only visible on the
+        # httpx response. Record its challenge for ``_unwrap_mcp_tool_error``.
+        observed_401: dict[str, str | None] = {}
+
+        async def _record_401(response: httpx.Response) -> None:
+            if response.status_code == 401:
+                observed_401["www_authenticate"] = response.headers.get("www-authenticate")
+
         def _factory(app: Any):
             def httpx_factory(**hk: Any) -> httpx.AsyncClient:
                 hk.setdefault("timeout", 30.0)
                 hk["transport"] = httpx.ASGITransport(app=app)
                 hk["base_url"] = "http://testserver"
+                hk.setdefault("event_hooks", {}).setdefault("response", []).append(_record_401)
                 return httpx.AsyncClient(**hk)
 
             transport = StreamableHttpTransport(
@@ -553,7 +592,7 @@ class BaseTestEnv:
                         return run_on_app_loop(_factory)
                 return run_on_app_loop(_factory)
             except Exception as exc:
-                raise _unwrap_mcp_tool_error(exc) from exc
+                raise _unwrap_mcp_tool_error(exc, bearer_401=observed_401.get("www_authenticate")) from exc
         finally:
             if hang_dump_after > 0:
                 faulthandler.cancel_dump_traceback_later()

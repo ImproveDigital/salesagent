@@ -39,7 +39,6 @@ from src.core.schemas import CreateMediaBuyError, CreateMediaBuyRequest
 from src.core.testing_hooks import AdCPTestContext
 from tests.factories.spec_required_kwargs import required_request_kwargs
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -61,7 +60,8 @@ def _make_identity(*, tenant: dict | None = None) -> ResolvedIdentity:
     return ResolvedIdentity(
         principal_id="principal_1",
         tenant_id="test_tenant",
-        tenant=tenant or {
+        tenant=tenant
+        or {
             "tenant_id": "test_tenant",
             "human_review_required": False,
             "auto_create_media_buys": True,
@@ -344,9 +344,7 @@ class TestPackageValidation:
         assert "Duplicate product_id" in error_message, (
             f"Error must name the problem as a duplicate. Got: {error_message!r}"
         )
-        assert "prod_video" in error_message, (
-            "Error must name the offending product_id so the buyer can fix it."
-        )
+        assert "prod_video" in error_message, "Error must name the offending product_id so the buyer can fix it."
 
 
 # ===========================================================================
@@ -382,11 +380,7 @@ class TestBudgetBoundaryValidation:
         """
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
-        req = _make_request(
-            packages=[
-                {"product_id": "prod_1", "budget": 0.0, "pricing_option_id": "cpm_usd"}
-            ]
-        )
+        req = _make_request(packages=[{"product_id": "prod_1", "budget": 0.0, "pricing_option_id": "cpm_usd"}])
         identity = _make_identity()
 
         with (
@@ -418,11 +412,7 @@ class TestBudgetBoundaryValidation:
         """
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
-        req = _make_request(
-            packages=[
-                {"product_id": "prod_sandbox", "budget": 0.0, "pricing_option_id": "cpm_usd"}
-            ]
-        )
+        req = _make_request(packages=[{"product_id": "prod_sandbox", "budget": 0.0, "pricing_option_id": "cpm_usd"}])
         identity = _make_identity()
 
         with (

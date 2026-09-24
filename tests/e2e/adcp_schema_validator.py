@@ -1,35 +1,56 @@
 """
 AdCP JSON Schema Validator for E2E Tests
 
-This module provides comprehensive JSON schema validation for all AdCP protocol
-requests and responses against the official AdCP specification schemas.
+Validates AdCP protocol requests and responses against the official AdCP
+JSON schemas **bundled with the installed ``adcp`` SDK** (``adcp/_schemas/
+<major.minor>/``). The bundle is the exact spec release the server speaks
+(``adcp.get_adcp_spec_version()``), so the validator can never drift from the
+implementation the way a network-cached copy of ``/schemas/v1`` (which now
+aliases a 3.2 prerelease) did.
 
 Key Features:
-- Downloads and caches AdCP schemas from official registry
-- Validates requests and responses against AdCP spec
-- Performance-optimized with compiled validators
-- Detailed error reporting with JSON path locations
-- Support for offline validation with cached schemas
+- Zero network access: schemas come from the SDK wheel, so ``offline_mode``
+  is always effectively on and CI cannot be broken by the registry moving.
+- Full ``$ref`` resolution across the bundle (``../core/*.json``, enums,
+  pricing options, ...) through a ``referencing`` registry.
+- Performance-optimized with compiled validators.
+- Detailed error reporting with JSON path locations.
 
 Usage:
     validator = AdCPSchemaValidator()
     await validator.validate_response("get-products", response_data)
 """
 
-import asyncio
+from __future__ import annotations
+
 import functools
 import hashlib
 import json
-from datetime import datetime
+import re
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
-import httpx
 import pytest
 import referencing
+from adcp import get_adcp_spec_version
+from adcp.validation.version import resolve_bundle_key
 from jsonschema.validators import Draft7Validator
+from referencing.exceptions import NoSuchResource
 from referencing.jsonschema import DRAFT7
+
+# Canonical host of the published spec. Only used to give every bundled
+# schema a stable ``$id`` so relative ``$ref`` values resolve, and to accept
+# absolute registry URLs in ``get_schema()``.
+SCHEMA_HOST = "https://adcontextprotocol.org"
+
+# ``/schemas/<version>/<rel>`` — the ``<version>`` segment may be ``v1``,
+# ``latest``, ``3.1``, ``3.1.15`` ...; every spelling maps onto the bundle.
+_REGISTRY_PATH_RE = re.compile(r"^/?schemas/[^/]+/(?P<rel>.+)$")
+
+# Aliases callers historically passed as ``adcp_version``; all of them mean
+# "the spec release the installed SDK implements".
+_SDK_VERSION_ALIASES = frozenset({"", "v1", "latest", "current", "sdk"})
 
 
 class SchemaError(Exception):
@@ -39,7 +60,11 @@ class SchemaError(Exception):
 
 
 class SchemaDownloadError(SchemaError):
-    """Raised when schema download fails."""
+    """Raised when a schema cannot be located in the SDK bundle.
+
+    The name is historical (schemas used to be downloaded); it is kept so
+    callers that catch it keep working.
+    """
 
     pass
 
@@ -53,42 +78,62 @@ class SchemaValidationError(SchemaError):
         self.json_path = json_path
 
 
+def _sdk_bundle_key() -> str:
+    """Bundle key (``MAJOR.MINOR``) of the spec release the installed SDK speaks."""
+    return resolve_bundle_key(get_adcp_spec_version())
+
+
+def _locate_bundle(bundle_key: str) -> Path:
+    """Return the on-disk root of the SDK's schema bundle for ``bundle_key``."""
+    try:
+        packaged = files("adcp") / "_schemas" / bundle_key
+        with as_file(packaged) as path:
+            root = Path(path)
+    except (ModuleNotFoundError, FileNotFoundError, OSError) as exc:
+        raise SchemaDownloadError(f"adcp SDK does not bundle schemas for AdCP {bundle_key}: {exc}") from exc
+    if not (root / "index.json").is_file():
+        raise SchemaDownloadError(f"adcp SDK bundle for AdCP {bundle_key} has no index.json at {root}")
+    return root
+
+
 class AdCPSchemaValidator:
     """
     Validator for AdCP protocol JSON schemas.
 
-    Automatically downloads, caches, and validates against official AdCP schemas.
+    Loads the schema bundle shipped inside the installed ``adcp`` package and
+    validates against it. The public surface (``get_schema_index``,
+    ``get_schema``, ``validate_request``, ``validate_response``) is unchanged
+    from the network-backed predecessor so existing tests keep working.
     """
-
-    BASE_SCHEMA_URL = "https://adcontextprotocol.org/schemas/v1"
-    INDEX_URL = "https://adcontextprotocol.org/schemas/v1/index.json"
 
     def __init__(self, cache_dir: Path | None = None, offline_mode: bool = False, adcp_version: str = "v1"):
         """
         Initialize the schema validator.
 
         Args:
-            cache_dir: Directory to cache schemas. Defaults to schemas/{version}
-            offline_mode: If True, only use cached schemas (no downloads)
-            adcp_version: AdCP schema version to use (e.g., "v1", "v2")
+            cache_dir: Ignored (kept for signature compatibility). Schemas are
+                read from the SDK wheel, never from a writable cache.
+            offline_mode: Ignored (kept for signature compatibility). The
+                validator never touches the network.
+            adcp_version: Spec release to validate against. ``"v1"`` /
+                ``"latest"`` (the historical defaults) mean the release the
+                installed SDK implements; a concrete release (``"3.1"``,
+                ``"3.0.2"``) selects that bundle if the SDK ships it.
         """
-        self.offline_mode = offline_mode
-        self.adcp_version = adcp_version
+        # Always offline by construction: nothing is ever fetched over the network.
+        self.offline_mode = True
+        requested = (adcp_version or "").strip()
+        self.bundle_key = _sdk_bundle_key() if requested in _SDK_VERSION_ALIASES else resolve_bundle_key(requested)
+        self.adcp_version = self.bundle_key
+        self.schema_root = _locate_bundle(self.bundle_key)
+        # ``cache_dir`` is retained as an attribute for callers that print it.
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else self.schema_root
 
-        # Set up versioned cache directory
-        if cache_dir is None:
-            project_root = Path(__file__).parent.parent.parent
-            cache_dir = project_root / "schemas" / adcp_version
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Schema registry and compiled validators cache
+        # Schema registry (keyed by bundle-relative path) and compiled validators cache
         self._schema_registry: dict[str, dict] = {}
         self._compiled_validators: dict[str, Draft7Validator] = {}
         self._index_cache: dict | None = None
-
-        # HTTP client for downloads
-        self._http_client = httpx.AsyncClient(timeout=30.0)
+        self._basename_index: dict[str, list[str]] | None = None
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -96,246 +141,93 @@ class AdCPSchemaValidator:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
-        await self._http_client.aclose()
+        return None
 
-    def _get_cache_path(self, schema_ref: str) -> Path:
-        """Get local cache path for a schema reference."""
-        # Convert schema reference to safe filename
-        safe_name = schema_ref.replace("/", "_").replace(".", "_") + ".json"
+    # ------------------------------------------------------------------
+    # Reference normalisation
+    # ------------------------------------------------------------------
 
-        # Try main cache directory first
-        main_cache_path = self.cache_dir / safe_name
-        if main_cache_path.exists():
-            return main_cache_path
+    def _relative_ref(self, schema_ref: str) -> str:
+        """Normalise any accepted ``$ref`` spelling to a bundle-relative path.
 
-        # Try cache subdirectory (legacy location)
-        cache_subdir_path = self.cache_dir / "cache" / safe_name
-        if cache_subdir_path.exists():
-            return cache_subdir_path
-
-        # Return main path for new files
-        return main_cache_path
-
-    def _get_cache_metadata_path(self, cache_path: Path) -> Path:
-        """Get path for cache metadata file (stores ETag, last-modified, etc)."""
-        return cache_path.with_suffix(cache_path.suffix + ".meta")
-
-    async def _download_schema_index(self) -> dict[str, Any]:
+        Accepts ``media-buy/x.json`` (index refs), ``../core/x.json``
+        (intra-bundle refs), ``/schemas/v1/media-buy/x.json`` (registry
+        paths) and ``https://adcontextprotocol.org/schemas/3.1/...``
+        (absolute registry URLs). Fragments are dropped.
         """
-        Download the main schema index/registry with ETag-based caching.
+        ref = schema_ref.split("#", 1)[0].strip()
+        if ref.startswith(SCHEMA_HOST):
+            ref = ref[len(SCHEMA_HOST) :]
+        match = _REGISTRY_PATH_RE.match(ref)
+        if match:
+            ref = match.group("rel")
+        ref = ref.lstrip("/")
+        while ref.startswith("./"):
+            ref = ref[2:]
+        return ref
 
-        Uses conditional GET with If-None-Match header to avoid re-downloading
-        unchanged schemas. Falls back to cached version if server unavailable.
+    def _schema_id(self, rel: str) -> str:
+        """Stable ``$id`` for a bundle-relative path (base for relative refs)."""
+        return f"{SCHEMA_HOST}/schemas/{self.bundle_key}/{rel}"
 
-        Now includes content hash verification to prevent meta file updates when
-        only weak ETags change but content is identical.
+    def _basename_lookup(self, rel: str) -> str | None:
+        """Find ``rel``'s basename elsewhere in the bundle.
+
+        The registry historically served every task under ``media-buy/``;
+        the bundle files creative and signals tasks under their own groups
+        (``creative/sync-creatives-request.json``). Resolve by basename when
+        the requested group is wrong, ignoring the self-contained
+        ``bundled/`` copies so one canonical file backs each ref.
         """
-        cache_path = self.cache_dir / "index.json"
-        meta_path = self._get_cache_metadata_path(cache_path)
+        if self._basename_index is None:
+            index: dict[str, list[str]] = {}
+            for path in sorted(self.schema_root.rglob("*.json")):
+                relative = path.relative_to(self.schema_root).as_posix()
+                if relative.startswith("bundled/"):
+                    continue
+                index.setdefault(path.name, []).append(relative)
+            self._basename_index = index
+        candidates = self._basename_index.get(Path(rel).name, [])
+        return candidates[0] if len(candidates) == 1 else None
 
-        # In offline mode, use cache only
-        if self.offline_mode:
-            if cache_path.exists():
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
-                    raise SchemaDownloadError(f"Offline mode enabled but cached index is invalid: {cache_path}") from e
-            raise SchemaDownloadError("Offline mode enabled but no valid cached index found")
-
-        # Load cached metadata (ETag, Last-Modified, content hash)
-        cached_etag = None
-        cached_content_hash = None
-        if meta_path.exists():
-            try:
-                with open(meta_path) as f:
-                    metadata = json.load(f)
-                    cached_etag = metadata.get("etag")
-                    cached_content_hash = metadata.get("content_hash")
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        # Download with conditional GET
+    def _load_schema_file(self, schema_ref: str) -> tuple[str, dict[str, Any]]:
+        """Load a schema from the bundle, returning ``(relative_path, schema)``."""
+        rel = self._relative_ref(schema_ref)
+        path = self.schema_root / rel
+        if not path.is_file():
+            alternative = self._basename_lookup(rel)
+            if alternative is None:
+                raise SchemaDownloadError(
+                    f"Schema {schema_ref!r} not found in adcp SDK bundle for AdCP {self.bundle_key} ({self.schema_root})"
+                )
+            rel, path = alternative, self.schema_root / alternative
+        if rel in self._schema_registry:
+            return rel, self._schema_registry[rel]
         try:
-            headers = {}
-            if cached_etag:
-                headers["If-None-Match"] = cached_etag
+            with open(path) as f:
+                schema = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            raise SchemaDownloadError(f"Bundled schema {rel} is unreadable: {exc}") from exc
+        # Bundled files carry no ``$id``; inject the registry-shaped one so
+        # ``../core/*.json`` refs resolve against the right base.
+        schema.setdefault("$id", self._schema_id(rel))
+        self._schema_registry[rel] = schema
+        return rel, schema
 
-            response = await self._http_client.get(self.INDEX_URL, headers=headers)
-
-            # 304 Not Modified - use cache
-            if response.status_code == 304:
-                if cache_path.exists():
-                    with open(cache_path) as f:
-                        return json.load(f)
-                # Fallthrough to re-download if cache missing
-
-            response.raise_for_status()
-            index_data = response.json()
-
-            # Compute content hash to detect actual changes (weak ETags can change without content changes)
-            content_str = json.dumps(index_data, sort_keys=True)
-            content_hash = hashlib.sha256(content_str.encode()).hexdigest()
-
-            # Check if content actually changed
-            if cached_content_hash and content_hash == cached_content_hash:
-                # Content is identical despite new ETag (weak ETag changed, content didn't)
-                # Return cached data without updating files to avoid git noise
-                if cache_path.exists():
-                    with open(cache_path) as f:
-                        return json.load(f)
-                # If cache missing somehow, fall through to save
-
-            # Content changed (or first download) - update cache and metadata
-
-            # Delete old metadata first (prevents stale ETag issues)
-            if meta_path.exists():
-                meta_path.unlink()
-
-            # Save to cache
-            with open(cache_path, "w") as f:
-                json.dump(index_data, f, indent=2)
-                f.write("\n")  # Add trailing newline for pre-commit compatibility
-
-            # Save new metadata with content hash
-            metadata = {
-                "etag": response.headers.get("etag"),
-                "last-modified": response.headers.get("last-modified"),
-                "downloaded_at": datetime.now().isoformat(),
-                "content_hash": content_hash,
-            }
-            with open(meta_path, "w") as f:
-                json.dump(metadata, f, indent=2)
-                f.write("\n")  # Add trailing newline for pre-commit compatibility
-
-            return index_data
-
-        except (httpx.HTTPError, json.JSONDecodeError) as e:
-            # If download fails but we have cache, use it
-            if cache_path.exists():
-                print(f"Warning: Failed to download index, using cached version: {e}")
-                with open(cache_path) as f:
-                    return json.load(f)
-
-            raise SchemaDownloadError(f"Failed to download schema index: {e}") from e
-
-    async def _download_schema(self, schema_ref: str) -> dict[str, Any]:
-        """
-        Download a specific schema by reference with ETag-based caching.
-
-        Uses conditional GET with If-None-Match header to avoid re-downloading
-        unchanged schemas. Falls back to cached version if server unavailable.
-
-        Now includes content hash verification to prevent meta file updates when
-        only weak ETags change but content is identical.
-        """
-        cache_path = self._get_cache_path(schema_ref)
-        meta_path = self._get_cache_metadata_path(cache_path)
-
-        # In offline mode, use cache only
-        if self.offline_mode:
-            if cache_path.exists():
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
-                    raise SchemaDownloadError(f"Offline mode enabled but cached schema is invalid: {cache_path}") from e
-            raise SchemaDownloadError(f"Offline mode enabled but no valid cached schema: {schema_ref}")
-
-        # Load cached metadata (ETag, Last-Modified, content hash)
-        cached_etag = None
-        cached_content_hash = None
-        if meta_path.exists():
-            try:
-                with open(meta_path) as f:
-                    metadata = json.load(f)
-                    cached_etag = metadata.get("etag")
-                    cached_content_hash = metadata.get("content_hash")
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        # Construct full URL
-        if schema_ref.startswith("/"):
-            schema_url = f"https://adcontextprotocol.org{schema_ref}"
-        else:
-            schema_url = urljoin(self.BASE_SCHEMA_URL, schema_ref)
-
-        # Download with conditional GET
-        try:
-            headers = {}
-            if cached_etag:
-                headers["If-None-Match"] = cached_etag
-
-            response = await self._http_client.get(schema_url, headers=headers)
-
-            # 304 Not Modified - use cache
-            if response.status_code == 304:
-                if cache_path.exists():
-                    with open(cache_path) as f:
-                        return json.load(f)
-                # Fallthrough to re-download if cache missing
-
-            response.raise_for_status()
-            schema_data = response.json()
-
-            # Compute content hash to detect actual changes (weak ETags can change without content changes)
-            content_str = json.dumps(schema_data, sort_keys=True)
-            content_hash = hashlib.sha256(content_str.encode()).hexdigest()
-
-            # Check if content actually changed
-            if cached_content_hash and content_hash == cached_content_hash:
-                # Content is identical despite new ETag (weak ETag changed, content didn't)
-                # Return cached data without updating files to avoid git noise
-                if cache_path.exists():
-                    with open(cache_path) as f:
-                        return json.load(f)
-                # If cache missing somehow, fall through to save
-
-            # Content changed (or first download) - update cache and metadata
-
-            # Delete old metadata first (prevents stale ETag issues)
-            if meta_path.exists():
-                meta_path.unlink()
-
-            # Save to cache
-            with open(cache_path, "w") as f:
-                json.dump(schema_data, f, indent=2)
-                f.write("\n")  # Add trailing newline for pre-commit compatibility
-
-            # Save new metadata with content hash
-            metadata = {
-                "etag": response.headers.get("etag"),
-                "last-modified": response.headers.get("last-modified"),
-                "downloaded_at": datetime.now().isoformat(),
-                "schema_ref": schema_ref,
-                "content_hash": content_hash,
-            }
-            with open(meta_path, "w") as f:
-                json.dump(metadata, f, indent=2)
-                f.write("\n")  # Add trailing newline for pre-commit compatibility
-
-            return schema_data
-
-        except (httpx.HTTPError, json.JSONDecodeError) as e:
-            # If download fails but we have cache, use it
-            if cache_path.exists():
-                print(f"Warning: Failed to download {schema_ref}, using cached version: {e}")
-                with open(cache_path) as f:
-                    return json.load(f)
-
-            raise SchemaDownloadError(f"Failed to download schema {schema_ref}: {e}") from e
+    # ------------------------------------------------------------------
+    # Public loading API
+    # ------------------------------------------------------------------
 
     async def get_schema_index(self) -> dict[str, Any]:
-        """Get the schema index, using cache when possible."""
+        """Get the schema index shipped with the SDK bundle."""
         if self._index_cache is None:
-            self._index_cache = await self._download_schema_index()
+            _rel, self._index_cache = self._load_schema_file("index.json")
         return self._index_cache
 
     async def get_schema(self, schema_ref: str) -> dict[str, Any]:
-        """Get a schema by reference, using cache when possible."""
-        if schema_ref not in self._schema_registry:
-            self._schema_registry[schema_ref] = await self._download_schema(schema_ref)
-        return self._schema_registry[schema_ref]
+        """Get a schema by reference (same object on repeated calls)."""
+        _rel, schema = self._load_schema_file(schema_ref)
+        return schema
 
     def _get_compiled_validator(self, schema: dict[str, Any]) -> Draft7Validator:
         """Get a compiled validator for a schema, with caching."""
@@ -345,13 +237,11 @@ class AdCPSchemaValidator:
         if schema_hash not in self._compiled_validators:
 
             def _retrieve(uri: str) -> referencing.Resource:
-                """Retrieve a schema by URI for the referencing registry."""
-                if "adcontextprotocol.org" in uri:
-                    resolved = self._resolve_http_schema_ref(uri)
-                elif uri.startswith(("http://", "https://")):
-                    resolved = self._resolve_http_schema_ref(uri)
-                else:
-                    resolved = self._resolve_adcp_schema_ref(uri)
+                """Retrieve a referenced schema from the SDK bundle."""
+                try:
+                    _rel, resolved = self._load_schema_file(uri)
+                except SchemaDownloadError as exc:
+                    raise NoSuchResource(ref=uri) from exc
                 return DRAFT7.create_resource(resolved)
 
             registry = referencing.Registry(retrieve=_retrieve)
@@ -365,54 +255,24 @@ class AdCPSchemaValidator:
 
         return self._compiled_validators[schema_hash]
 
-    def _resolve_adcp_schema_ref(self, url: str) -> dict[str, Any]:
-        """Resolve an AdCP schema reference synchronously."""
-        # This is called during validation, so we need a sync version
-        # We'll try to get from cache first, then fail gracefully if not available
-        cache_path = self._get_cache_path(url)
-        if cache_path.exists():
-            try:
-                with open(cache_path) as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        # If not in cache, we can't resolve it synchronously
-        # Use a strict schema instead of permissive one to catch more validation issues
-        print(f"Warning: Could not resolve schema reference {url} - using strict fallback")
-        return {"type": "object", "additionalProperties": False, "properties": {}}
-
-    def _resolve_http_schema_ref(self, url: str) -> dict[str, Any]:
-        """Resolve HTTP schema reference synchronously."""
-        # For HTTP references, fall back to the AdCP resolver
-        # Extract the path part and resolve as AdCP schema
-        if "adcontextprotocol.org" in url:
-            path_part = url.split("adcontextprotocol.org")[-1]
-            return self._resolve_adcp_schema_ref(path_part)
-
-        # Unknown HTTP reference - use strict fallback
-        print(f"Warning: Could not resolve HTTP schema reference {url} - using strict fallback")
-        return {"type": "object", "additionalProperties": False, "properties": {}}
-
     async def _find_schema_ref_for_task(self, task_name: str, request_or_response: str) -> str | None:
         """Find the schema reference for a specific task and type."""
         index = await self.get_schema_index()
+        groups = index.get("schemas", {})
 
-        # Look in media-buy tasks first
-        media_buy_tasks = index.get("schemas", {}).get("media-buy", {}).get("tasks", {})
-        if task_name in media_buy_tasks:
-            task_info = media_buy_tasks[task_name]
-            if request_or_response in task_info:
-                return task_info[request_or_response]["$ref"]
-
-        # Look in signals tasks
-        signals_tasks = index.get("schemas", {}).get("signals", {}).get("tasks", {})
-        if task_name in signals_tasks:
-            task_info = signals_tasks[task_name]
-            if request_or_response in task_info:
+        # Task groups in registry order: media-buy first (historical home of
+        # every task), then the groups the spec later split out.
+        for group in ("media-buy", "creative", "signals", "account"):
+            tasks = groups.get(group, {}).get("tasks", {})
+            task_info = tasks.get(task_name)
+            if task_info and request_or_response in task_info:
                 return task_info[request_or_response]["$ref"]
 
         return None
+
+    # ------------------------------------------------------------------
+    # Validation API
+    # ------------------------------------------------------------------
 
     async def validate_request(self, task_name: str, request_data: dict[str, Any]) -> None:
         """
@@ -431,9 +291,7 @@ class AdCPSchemaValidator:
             print(f"Warning: No request schema found for task '{task_name}'")
             return
 
-        # Preload any referenced schemas before validation
         await self._preload_schema_references(schema_ref)
-
         await self._validate_against_schema(schema_ref, request_data, f"{task_name} request")
 
     async def validate_response(self, task_name: str, response_data: dict[str, Any]) -> None:
@@ -459,9 +317,7 @@ class AdCPSchemaValidator:
         # Extract AdCP payload from protocol wrapper if present
         adcp_payload = self._extract_adcp_payload(response_data)
 
-        # Preload any referenced schemas before validation
         await self._preload_schema_references(schema_ref)
-
         await self._validate_against_schema(schema_ref, adcp_payload, f"{task_name} response")
 
     def _extract_adcp_payload(self, response_data: dict[str, Any]) -> dict[str, Any]:
@@ -503,40 +359,28 @@ class AdCPSchemaValidator:
 
     async def _preload_schema_references(self, schema_ref: str, _visited: set[str] | None = None) -> None:
         """
-        Recursively preload all schemas referenced by the given schema.
+        Recursively load every schema referenced by ``schema_ref``.
 
-        Args:
-            schema_ref: The schema reference to preload
-            _visited: Set of already-visited refs to avoid infinite recursion (internal use)
+        Loading is local and cheap; doing it up front surfaces a broken
+        bundle reference as a clear ``SchemaDownloadError`` instead of an
+        opaque resolution failure mid-validation.
         """
         if _visited is None:
             _visited = set()
 
-        # Avoid infinite recursion
-        if schema_ref in _visited:
+        rel, schema = self._load_schema_file(schema_ref)
+        if rel in _visited:
             return
-        _visited.add(schema_ref)
+        _visited.add(rel)
 
-        try:
-            schema = await self.get_schema(schema_ref)
-            refs_to_load = self._find_schema_references(schema)
-
-            # Recursively load all referenced schemas (download them so they're in cache for validation)
-            for ref in refs_to_load:
-                try:
-                    await self.get_schema(ref)
-                    # Recursively preload refs within this schema
-                    await self._preload_schema_references(ref, _visited)
-                except SchemaDownloadError as e:
-                    # Schema download failed - log but continue
-                    # (validation will use strict fallback for this ref)
-                    print(f"Warning: Could not preload referenced schema {ref}: {e}")
-                except Exception as e:
-                    # Unexpected error - log but continue
-                    print(f"Warning: Unexpected error preloading schema {ref}: {e}")
-
-        except Exception as e:
-            print(f"Warning: Could not preload schema references for {schema_ref}: {e}")
+        base_dir = Path(rel).parent
+        for ref in self._find_schema_references(schema):
+            if ref.startswith("#"):
+                continue  # intra-document pointer
+            target = ref if ("://" in ref or ref.startswith("/")) else (base_dir / ref.split("#", 1)[0]).as_posix()
+            # Collapse ``a/../b`` produced by relative refs.
+            target = Path(target).as_posix() if "://" in target else _normalize_posix(target)
+            await self._preload_schema_references(target, _visited)
 
     def _find_schema_references(self, schema: dict[str, Any]) -> list[str]:
         """Find all $ref references in a schema recursively."""
@@ -544,7 +388,7 @@ class AdCPSchemaValidator:
 
         def find_refs_recursive(obj):
             if isinstance(obj, dict):
-                if "$ref" in obj:
+                if "$ref" in obj and isinstance(obj["$ref"], str):
                     refs.append(obj["$ref"])
                 for value in obj.values():
                     find_refs_recursive(value)
@@ -593,13 +437,27 @@ class AdCPSchemaValidator:
                 )
 
         except SchemaDownloadError:
-            # Re-raise schema download errors
+            # Re-raise schema lookup errors
             raise
         except SchemaValidationError:
             # Re-raise schema validation errors without wrapping them
             raise
         except Exception as e:
             raise SchemaValidationError(f"Unexpected error validating {context}: {e}", [str(e)]) from e
+
+
+def _normalize_posix(path: str) -> str:
+    """Collapse ``.`` / ``..`` segments of a bundle-relative POSIX path."""
+    parts: list[str] = []
+    for segment in path.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(segment)
+    return "/".join(parts)
 
 
 # Decorator functions for easy integration with tests
@@ -677,78 +535,42 @@ async def adcp_validator_offline():
 # Utility functions for test setup
 
 
-async def preload_schemas(task_names: list[str] = None, load_all: bool = True, adcp_version: str = "v1"):
+async def preload_schemas(task_names: list[str] | None = None, load_all: bool = True, adcp_version: str = "v1"):
     """
-    Preload schemas for faster test execution.
+    Load (and report on) the bundled task schemas.
+
+    Kept for CLI/debugging parity with the network-backed predecessor: it
+    walks the index and loads every task request/response schema so a
+    broken bundle reference is reported eagerly.
 
     Args:
-        task_names: List of task names to preload. If None, loads common tasks.
-        load_all: If True, loads all schemas from registry (core, enums, tasks).
-        adcp_version: AdCP schema version to use (e.g., "v1", "v2")
+        task_names: List of task names to load. If None, loads common tasks.
+        load_all: If True, loads all task schemas from the index.
+        adcp_version: AdCP schema version to use (``"v1"`` = SDK release).
     """
     async with AdCPSchemaValidator(adcp_version=adcp_version) as validator:
-        # Preload index
         index = await validator.get_schema_index()
+        groups = index.get("schemas", {})
 
         if load_all:
-            print("📥 Loading ALL AdCP schemas from registry...")
-
-            # Load core schemas
-            print("\n📁 CORE SCHEMAS:")
-            core_schemas = index.get("schemas", {}).get("core", {}).get("schemas", {})
-            for name, info in core_schemas.items():
-                try:
-                    schema_ref = info["$ref"]
-                    await validator.get_schema(schema_ref)
-                    print(f"  ✓ {name}")
-                except Exception as e:
-                    print(f"  ⚠ {name}: {e}")
-
-            # Load enum schemas
-            print("\n📁 ENUM SCHEMAS:")
-            enum_schemas = index.get("schemas", {}).get("enums", {}).get("schemas", {})
-            for name, info in enum_schemas.items():
-                try:
-                    schema_ref = info["$ref"]
-                    await validator.get_schema(schema_ref)
-                    print(f"  ✓ {name}")
-                except Exception as e:
-                    print(f"  ⚠ {name}: {e}")
-
-            # Load media-buy task schemas
-            print("\n📁 MEDIA-BUY TASK SCHEMAS:")
-            media_tasks = index.get("schemas", {}).get("media-buy", {}).get("tasks", {})
-            for task_name, task_info in media_tasks.items():
-                for req_resp in ["request", "response"]:
-                    if req_resp in task_info:
-                        try:
-                            schema_ref = task_info[req_resp]["$ref"]
-                            await validator.get_schema(schema_ref)
-                            print(f"  ✓ {task_name}-{req_resp}")
-                        except Exception as e:
-                            print(f"  ⚠ {task_name}-{req_resp}: {e}")
-
-            # Load signals task schemas
-            print("\n📁 SIGNALS TASK SCHEMAS:")
-            signals_tasks = index.get("schemas", {}).get("signals", {}).get("tasks", {})
-            for task_name, task_info in signals_tasks.items():
-                for req_resp in ["request", "response"]:
-                    if req_resp in task_info:
-                        try:
-                            schema_ref = task_info[req_resp]["$ref"]
-                            await validator.get_schema(schema_ref)
-                            print(f"  ✓ {task_name}-{req_resp}")
-                        except Exception as e:
-                            print(f"  ⚠ {task_name}-{req_resp}: {e}")
-
+            print(f"📥 Loading ALL AdCP {validator.bundle_key} task schemas from the SDK bundle...")
+            for group_name in ("media-buy", "creative", "signals"):
+                print(f"\n📁 {group_name.upper()} TASK SCHEMAS:")
+                for task_name, task_info in groups.get(group_name, {}).get("tasks", {}).items():
+                    for req_resp in ["request", "response"]:
+                        if req_resp in task_info:
+                            try:
+                                await validator.get_schema(task_info[req_resp]["$ref"])
+                                print(f"  ✓ {task_name}-{req_resp}")
+                            except Exception as e:
+                                print(f"  ⚠ {task_name}-{req_resp}: {e}")
         else:
-            # Legacy behavior - only load specific tasks
             if task_names is None:
                 task_names = [
                     "get-products",
                     "list-creative-formats",
                     "create-media-buy",
-                    "add-creative-assets",
+                    "sync-creatives",
                     "update-media-buy",
                     "get-media-buy-delivery",
                 ]
@@ -760,26 +582,22 @@ async def preload_schemas(task_names: list[str] = None, load_all: bool = True, a
                         schema_ref = await validator._find_schema_ref_for_task(task_name, req_resp)
                         if schema_ref:
                             await validator.get_schema(schema_ref)
-                            print(f"✓ Preloaded {task_name} {req_resp} schema")
+                            print(f"✓ Loaded {task_name} {req_resp} schema")
                 except Exception as e:
-                    print(f"⚠ Failed to preload {task_name}: {e}")
+                    print(f"⚠ Failed to load {task_name}: {e}")
 
-        print("\n🎉 Schema preloading completed!")
-
-        # Show cache status
-        cache_dir = validator.cache_dir
-        cached_files = list(cache_dir.glob("*.json"))
-        print(f"📦 Total schemas cached: {len(cached_files)}")
-        print(f"💾 Cache location: {cache_dir}")
+        print("\n🎉 Schema loading completed!")
+        print(f"📦 Total schemas loaded: {len(validator._schema_registry)}")
+        print(f"💾 Bundle location: {validator.schema_root}")
 
 
 if __name__ == "__main__":
-    """CLI for testing and preloading schemas."""
+    """CLI for checking the bundled schemas."""
     import asyncio
 
     async def main():
-        print("AdCP Schema Validator - Preloading common schemas...")
+        print("AdCP Schema Validator - loading bundled schemas...")
         await preload_schemas()
-        print("Schema preloading completed!")
+        print("Schema loading completed!")
 
     asyncio.run(main())

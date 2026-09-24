@@ -13,6 +13,12 @@ Resolution order:
    storyboards/dev.
 4. Reject with ``ACCOUNT_NOT_FOUND``.
 
+The resolved ``Account.id`` is always ``"<tenant_id>:<suffix>"``: a bare
+buyer ``account_id`` (``acc_...``) is composed with the resolved tenant,
+an already-prefixed id is kept verbatim, and no ref yields
+``"<tenant_id>:default"``. The proposals schema derives its FK-bearing
+``tenant_id`` from that prefix.
+
 The resolved Account's ``metadata['tenant_id']`` is what
 :class:`PlatformRouter` reads to pick the per-tenant ``DecisioningPlatform``.
 
@@ -87,6 +93,17 @@ class SalesagentAccountStore:
         account_id = (ref or {}).get("account_id") if isinstance(ref, dict) else None
         if not account_id:
             account_id = f"{tenant_id}:default"
+        elif not account_id.startswith(f"{tenant_id}:"):
+            # ``Account.id`` is the framework's per-deployment scope key
+            # (proposal store rows, idempotency cache scope, task registry).
+            # Buyers pass their bare salesagent ``acc_...`` id; compose the
+            # resolved tenant in so the id is globally unique and so
+            # ``proposals.tenant_id`` (``split_part(account_id, ':', 1)``,
+            # FK → tenants) resolves to a real tenant instead of failing the
+            # FK. The wire ``account.account_id`` on the request is untouched
+            # — ``_impl`` code resolves the buyer's account from the request
+            # ref, never from this id.
+            account_id = f"{tenant_id}:{account_id}"
 
         return Account(
             id=account_id,

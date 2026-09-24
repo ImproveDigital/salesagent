@@ -46,14 +46,16 @@ GAPS identified in this surface (skip-stubbed below):
   - BR-RULE-037 INV-1: Default approval_mode is require-human
   - delete_missing parameter handling
   - dry_run parameter handling
-  - list_creatives_raw boundary-completeness (FIXME salesagent-v0kb)
+  - list_creatives platform-delegate boundary-completeness (FIXME salesagent-v0kb)
   - Creative webhook delivery on approval
 """
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from adcp.types import Error
 from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
 from adcp.types.generated_poc.enums.creative_action import CreativeAction
 
@@ -75,6 +77,7 @@ from src.core.schemas import (
 )
 from src.core.schemas import FormatId as AdcpFormatId
 from tests.factories import PrincipalFactory
+from tests.factories.spec_required_kwargs import required_request_kwargs
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -139,6 +142,29 @@ def _make_mock_creative_repo(creative_id: str = "c_test_1") -> MagicMock:
     fake_db.status = "pending_review"
     mock_repo.create.return_value = fake_db
     return mock_repo
+
+
+def _empty_list_creatives_response() -> ListCreativesResponse:
+    """Minimal valid ``ListCreativesResponse`` for boundary tests that stub the impl."""
+    return ListCreativesResponse(
+        creatives=[],
+        pagination=Pagination(has_more=False),
+        query_summary=QuerySummary(returned=0, total_matching=0),
+    )
+
+
+def _call_delegate(delegate_fn, req, identity):
+    """Invoke a ``core/platforms/_delegate.py`` handler with identity resolution stubbed.
+
+    Sales Agent 2.0 replaced the per-transport ``*_raw`` wrappers with one async
+    delegate per tool that both MCP and A2A dispatch into. ``_build_identity``
+    (which reads the framework ``RequestContext`` and hydrates the tenant from the
+    DB) is patched so the boundary can be exercised with a factory identity.
+    """
+    from core.platforms import _delegate
+
+    with patch.object(_delegate, "_build_identity", return_value=identity):
+        return asyncio.run(delegate_fn(req, object()))
 
 
 # ============================================================================
@@ -214,7 +240,10 @@ class TestCreativeSchemaCompliance:
             format={"agent_url": DEFAULT_AGENT_URL, "id": "display_728x90"},
         )
         assert creative.format_id is not None
-        assert creative.format_id.id == "display_728x90"
+        # adcp 7 canonical identity: the legacy fixed-size reference-agent id is
+        # upgraded to the parameterised canonical format (display_image + width/height).
+        assert creative.format_id.id == "display_image"
+        assert (creative.format_id.width, creative.format_id.height) == (728, 90)
         assert str(creative.format_id.agent_url).rstrip("/") == DEFAULT_AGENT_URL
 
     def test_creative_format_property_aliases(self):
@@ -225,7 +254,9 @@ class TestCreativeSchemaCompliance:
         """
         creative = _make_creative()
         assert creative.format is not None
-        assert creative.format_id_str == "display_300x250_image"
+        # adcp 7 canonical identity: display_300x250_image -> display_image @ 300x250
+        assert creative.format_id_str == "display_image"
+        assert (creative.format.width, creative.format.height) == (300, 250)
         assert DEFAULT_AGENT_URL in (creative.format_agent_url or "")
 
     def test_all_creative_status_enum_values_serialize(self):
@@ -375,7 +406,9 @@ class TestSyncCreativesResponseSchema:
             creatives=[
                 SyncCreativeResult(creative_id="c_1", action="created"),
                 SyncCreativeResult(creative_id="c_2", action="updated"),
-                SyncCreativeResult(creative_id="c_3", action="failed", errors=["bad"]),
+                SyncCreativeResult(
+                    creative_id="c_3", action="failed", errors=[Error(code="validation_failed", message="bad")]
+                ),
             ],
         )
         msg = str(response)
@@ -478,6 +511,7 @@ class TestSyncCreativesRequestSchema:
         """
         creative = _make_creative()
         req = SyncCreativesRequest(
+            **required_request_kwargs(),
             creatives=[creative],
             creative_ids=["c_test_1"],
         )
@@ -494,6 +528,7 @@ class TestSyncCreativesRequestSchema:
 
         creative = _make_creative()
         req = SyncCreativesRequest(
+            **required_request_kwargs(),
             creatives=[creative],
             assignments=[
                 Assignment(creative_id="c_test_1", package_id="pkg_1"),
@@ -1486,75 +1521,69 @@ class TestListCreativesValidation:
 
 
 class TestListCreativesRawBoundaryCompleteness:
-    """list_creatives_raw boundary completeness.
+    """list_creatives transport-boundary completeness.
 
     Spec: UNSPECIFIED (implementation-defined transport boundary).
-    Ref: FIXME(salesagent-v0kb) at listing.py:581.
+    Ref: FIXME(salesagent-v0kb). Sales Agent 2.0 replaced ``list_creatives_raw``
+    with ``core/platforms/_delegate.py:_delegate_list_creatives`` — the single
+    boundary both MCP and A2A dispatch through — which must forward every wire
+    field to ``_list_creatives_impl``.
     """
 
     def test_raw_forwards_filters_to_impl(self):
-        """list_creatives_raw must forward filters parameter to _list_creatives_impl.
+        """_delegate_list_creatives must forward filters parameter to _list_creatives_impl.
 
         Covers: UC-006-MAIN-REST-01
         """
         from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 
-        from src.core.tools.creatives.listing import list_creatives_raw
+        from core.platforms import _delegate
 
         test_filters = CreativeFilters()
         identity = PrincipalFactory.make_identity(
             principal_id="principal_1", tenant_id="tenant_1", approval_mode="auto-approve", slack_webhook_url=None
         )
 
-        with patch("src.core.tools.creatives.listing._list_creatives_impl") as mock_impl:
-            mock_impl.return_value = ListCreativesResponse(
-                creatives=[],
-                pagination=Pagination(has_more=False),
-                query_summary=QuerySummary(returned=0, total_matching=0),
-            )
-            list_creatives_raw(filters=test_filters, identity=identity)
+        with patch.object(
+            _delegate, "_list_creatives_impl", return_value=_empty_list_creatives_response()
+        ) as mock_impl:
+            _call_delegate(_delegate._delegate_list_creatives, {"filters": test_filters}, identity)
             mock_impl.assert_called_once()
             assert mock_impl.call_args.kwargs["filters"] is test_filters
 
     def test_raw_forwards_include_performance(self):
-        """list_creatives_raw must forward include_performance parameter to _list_creatives_impl.
+        """_delegate_list_creatives must forward include_performance parameter to _list_creatives_impl.
 
         Covers: UC-006-MAIN-REST-01
         """
-        from src.core.tools.creatives.listing import list_creatives_raw
+        from core.platforms import _delegate
 
         identity = PrincipalFactory.make_identity(
             principal_id="principal_1", tenant_id="tenant_1", approval_mode="auto-approve", slack_webhook_url=None
         )
 
-        with patch("src.core.tools.creatives.listing._list_creatives_impl") as mock_impl:
-            mock_impl.return_value = ListCreativesResponse(
-                creatives=[],
-                pagination=Pagination(has_more=False),
-                query_summary=QuerySummary(returned=0, total_matching=0),
-            )
-            list_creatives_raw(include_performance=True, identity=identity)
+        with patch.object(
+            _delegate, "_list_creatives_impl", return_value=_empty_list_creatives_response()
+        ) as mock_impl:
+            _call_delegate(_delegate._delegate_list_creatives, {"include_performance": True}, identity)
             mock_impl.assert_called_once()
             assert mock_impl.call_args.kwargs["include_performance"] is True
 
     def test_raw_forwards_include_assignments(self):
-        """list_creatives_raw must forward include_assignments parameter to _list_creatives_impl.
+        """_delegate_list_creatives must forward include_assignments parameter to _list_creatives_impl.
 
         Covers: UC-006-MAIN-REST-01
         """
-        from src.core.tools.creatives.listing import list_creatives_raw
+        from core.platforms import _delegate
 
         identity = PrincipalFactory.make_identity(
             principal_id="principal_1", tenant_id="tenant_1", approval_mode="auto-approve", slack_webhook_url=None
         )
 
-        with patch("src.core.tools.creatives.listing._list_creatives_impl") as mock_impl:
-            mock_impl.return_value = ListCreativesResponse(
-                creatives=[],
-                pagination=Pagination(has_more=False),
-                query_summary=QuerySummary(returned=0, total_matching=0),
-            )
-            list_creatives_raw(include_assignments=True, identity=identity)
+        with patch.object(
+            _delegate, "_list_creatives_impl", return_value=_empty_list_creatives_response()
+        ) as mock_impl:
+            _call_delegate(_delegate._delegate_list_creatives, {"include_assignments": True}, identity)
             mock_impl.assert_called_once()
             assert mock_impl.call_args.kwargs["include_assignments"] is True
 
@@ -1887,10 +1916,13 @@ class TestGenerativeCreativeBuild:
             creative = _make_creative_asset(
                 assets={
                     "message": {"content": "Create a banner ad for shoes"},
-                    "brief": {"content": "Shoes ad brief"},
+                    # adcp 7 ``brief`` is a typed BriefAsset (``name`` required); the
+                    # free-text ``content`` the prompt extractor reads rides as an extra.
+                    "brief": {"name": "Shoes brief", "content": "Shoes ad brief"},
                     "prompt": {"content": "Shoes prompt"},
                 }
             )
+            mock_registry = MagicMock()
             result, _ = _create_new_creative(
                 creative=creative,
                 creative_repo=mock_session,
@@ -1900,15 +1932,13 @@ class TestGenerativeCreativeBuild:
                 webhook_url=None,
                 context=None,
                 all_formats=[mock_format_obj],
-                registry=MagicMock(),
+                registry=mock_registry,
                 principal_id="p1",
             )
 
             # Verify build_creative was called with the message content (first priority)
-            call_args = mock_run_async.call_args
-            # The coroutine passed to run_async_in_sync_context is registry.build_creative(...)
-            # We check that it was called (message extraction happened)
             assert mock_run_async.called
+            assert mock_registry.build_creative.call_args.kwargs["message"] == "Create a banner ad for shoes"
             action_val = result.action
             if hasattr(action_val, "value"):
                 action_val = action_val.value
@@ -1942,8 +1972,10 @@ class TestGenerativeCreativeBuild:
                 "creative_output": {"assets": {}, "output_format": {"url": "https://ai.example.com/output.png"}},
             }
 
-            # Only 'brief' role, no 'message'
-            creative = _make_creative_asset(assets={"brief": {"content": "Shoes ad brief"}})
+            # Only 'brief' role, no 'message'. adcp 7 ``brief`` is a typed BriefAsset
+            # (``name`` required); the free-text ``content`` rides as an extra field.
+            creative = _make_creative_asset(assets={"brief": {"name": "Shoes brief", "content": "Shoes ad brief"}})
+            mock_registry = MagicMock()
             result, _ = _create_new_creative(
                 creative=creative,
                 creative_repo=mock_session,
@@ -1953,11 +1985,12 @@ class TestGenerativeCreativeBuild:
                 webhook_url=None,
                 context=None,
                 all_formats=[mock_format_obj],
-                registry=MagicMock(),
+                registry=mock_registry,
                 principal_id="p1",
             )
 
             assert mock_run_async.called
+            assert mock_registry.build_creative.call_args.kwargs["message"] == "Shoes ad brief"
             action_val = result.action
             if hasattr(action_val, "value"):
                 action_val = action_val.value
@@ -2291,7 +2324,7 @@ class TestGenerativeCreativeBuild:
             if hasattr(action_val, "value"):
                 action_val = action_val.value
             assert action_val == "failed"
-            assert any("GEMINI_API_KEY" in e for e in (result.errors or []))
+            assert any("GEMINI_API_KEY" in e.message for e in (result.errors or []))
 
 
 # ============================================================================
@@ -2832,52 +2865,6 @@ class TestFormatIdSchema:
 
 
 # ============================================================================
-# 16. REST API TRANSPORT (api_v1 routes)
-# ============================================================================
-
-
-class TestRESTCreativeRoutes:
-    """REST API routes for creative operations.
-
-    Spec: UNSPECIFIED (implementation-defined transport layer).
-    Existing: test_rest_api_endpoints.py covers route registration.
-    These verify route existence without hitting the full stack.
-    """
-
-    def test_creative_formats_route_exists(self):
-        """POST /creative-formats route is registered on the api_v1 router.
-
-        GAP: Needs FastAPI TestClient setup for /creative-formats route test.
-        Verifies route registration via router introspection (no TestClient needed).
-        """
-        from src.routes.api_v1 import router
-
-        paths = [route.path for route in router.routes]
-        assert any(p.endswith("/creative-formats") for p in paths)
-
-    def test_sync_creatives_route_exists(self):
-        """POST /creatives/sync route is registered on the api_v1 router.
-
-        GAP: Needs FastAPI TestClient setup for /creatives/sync route test.
-        """
-        from src.routes.api_v1 import router
-
-        paths = [route.path for route in router.routes]
-        assert any(p.endswith("/creatives/sync") for p in paths)
-
-    def test_list_creatives_route_exists(self):
-        """POST /creatives route is registered on the api_v1 router.
-
-        GAP: Needs FastAPI TestClient setup for /creatives route test.
-        """
-        from src.routes.api_v1 import router
-
-        paths = [route.path for route in router.routes]
-        # Check for exact /creatives path (not /creatives/sync)
-        assert any(p.endswith("/creatives") for p in paths)
-
-
-# ============================================================================
 # 17. CREATIVE SCHEMA: salesagent-goy2 (Wrong Base Class) -- P0 stubs
 # ============================================================================
 
@@ -2976,38 +2963,44 @@ class TestCreativeWrongBaseClass:
 class TestCreativeAssetTypes:
     """BR-UC-006 schema P1: CreativeAsset asset type coverage.
 
-    Spec: CONFIRMED -- creative-asset.json assets field oneOf lists 10 types;
-    format.json assets array lists 13 individual asset types (image, video,
-    audio, text, markdown, html, css, javascript, vast, daast,
-    promoted_offerings, url, webhook).
+    Spec: CONFIRMED -- adcp 7 creative-asset.json ``assets`` values are the
+    ``AssetVariant`` union discriminated by ``asset_type`` (image, video,
+    audio, text, markdown, html, css, javascript, vast, daast, url, webhook,
+    zip, brief, catalog, ...). ``promoted_offerings`` was dropped from the
+    union; ``catalog`` is its adcp 7 successor.
     https://github.com/adcontextprotocol/adcp/blob/8f26baf3549c00d2638341fed1d80abacb5d894a/dist/schemas/3.0.0-beta.3/core/creative-asset.json
     """
 
+    # Minimal spec-valid payload per asset type (required fields only).
+    _MINIMAL_ASSETS: dict[str, dict] = {
+        "image": {"url": "https://example.com/test.png", "width": 300, "height": 250},
+        "video": {"url": "https://example.com/test.mp4", "width": 1920, "height": 1080},
+        "audio": {"url": "https://example.com/test.mp3"},
+        "text": {"content": "test text content"},
+        "markdown": {"content": "# test markdown content"},
+        "html": {"content": "<div>test html content</div>"},
+        "css": {"content": ".ad { color: red; }"},
+        "javascript": {"content": "console.log('test javascript content');"},
+        "vast": {"delivery_type": "url", "url": "https://example.com/vast.xml"},
+        "daast": {"delivery_type": "url", "url": "https://example.com/daast.xml"},
+        "catalog": {"type": "product"},
+    }
+
     def test_all_11_asset_types_accepted(self):
         """Each asset type should be accepted without validation error."""
-        asset_types = [
-            "image",
-            "video",
-            "audio",
-            "text",
-            "markdown",
-            "html",
-            "css",
-            "javascript",
-            "vast",
-            "daast",
-            "promoted_offerings",
-        ]
-        for asset_type in asset_types:
-            # CreativeAsset accepts arbitrary string-keyed assets dict
+        assert len(self._MINIMAL_ASSETS) == 11
+        for asset_type, payload in self._MINIMAL_ASSETS.items():
             creative = CreativeAsset(
                 creative_id=f"c_{asset_type}",
                 name=f"Test {asset_type}",
                 format_id=_adcp_format_id(),
-                assets={asset_type: {"content": f"test {asset_type} content"}},
+                assets={asset_type: payload},
             )
             assert creative.assets is not None
             assert asset_type in creative.assets
+            # The asset key is backfilled as the ``asset_type`` discriminator and the
+            # value validates as that spec variant (not silently demoted to another type).
+            assert creative.assets[asset_type].asset_type == asset_type
 
 
 # ============================================================================
@@ -3146,7 +3139,7 @@ class TestValidationModeSemantics:
             mock_media_buy.status = "draft"
             mock_media_buy.approved_at = None
 
-            def find_pkg(package_id):
+            def find_pkg(package_id, principal_id=None):
                 if package_id == "pkg_ok":
                     return (mock_package, mock_media_buy)
                 return None
@@ -3187,7 +3180,7 @@ class TestValidationModeSemantics:
         Covers: UC-006-MAIN-MCP-08
         """
         creative = _make_creative()
-        req = SyncCreativesRequest(creatives=[creative])
+        req = SyncCreativesRequest(**required_request_kwargs(), creatives=[creative])
         assert req.validation_mode is not None
         # validation_mode is an enum; compare by value
         assert req.validation_mode.value == "strict", (
@@ -3562,8 +3555,21 @@ class TestMediaBuyStatusTransition:
     Existing: test_sync_creatives_behavioral.py covers basic transitions.
     """
 
-    def _run_assignment_with_media_buy(self, mock_db, *, media_buy_status, approved_at, existing_assignment=None):
-        """Run _process_assignments and return the mock media buy for status inspection."""
+    def _run_assignment_with_media_buy(
+        self,
+        mock_db,
+        *,
+        media_buy_status,
+        approved_at,
+        existing_assignment=None,
+        start_time=None,
+        end_time=None,
+    ):
+        """Run _process_assignments and return the mock media buy for status inspection.
+
+        ``start_time``/``end_time`` are the flight dates that
+        ``_status_after_creative_attachment`` uses to pick the date-based status.
+        """
         mock_uow = MagicMock()
         mock_assignment_repo = MagicMock()
         mock_uow.assignments = mock_assignment_repo
@@ -3579,6 +3585,8 @@ class TestMediaBuyStatusTransition:
         mock_media_buy.media_buy_id = "mb_1"
         mock_media_buy.status = media_buy_status
         mock_media_buy.approved_at = approved_at
+        mock_media_buy.start_time = start_time
+        mock_media_buy.end_time = end_time
 
         mock_assignment_repo.find_package_with_media_buy.return_value = (mock_package, mock_media_buy)
         mock_assignment_repo.get_creative_by_id.return_value = None
@@ -3605,20 +3613,37 @@ class TestMediaBuyStatusTransition:
         return mock_media_buy
 
     def test_draft_with_approved_at_transitions(self):
-        """Draft media buy with approved_at transitions to pending_creatives.
+        """Draft media buy with approved_at transitions to its date-based status.
 
         Spec: UNSPECIFIED (implementation-defined status machine).
         When a draft media buy has approved_at set and receives a creative
-        assignment, it transitions to pending_creatives (line 220-221 of _assignments.py).
+        assignment, attaching creatives clears the creative-blocked state and
+        ``_status_after_creative_attachment`` picks the flight-date status:
+        ``active`` for an in-flight buy, ``pending_start`` for a future one.
         Covers: UC-006-MEDIA-BUY-STATUS-01
         """
+        approved_at = datetime(2026, 1, 1, tzinfo=UTC)
+        now = datetime.now(UTC)
+
         with patch("src.core.tools.creatives._assignments.CreativeUoW") as mock_db:
-            mock_mb = self._run_assignment_with_media_buy(
+            in_flight = self._run_assignment_with_media_buy(
                 mock_db,
                 media_buy_status="draft",
-                approved_at=datetime(2026, 1, 1, tzinfo=UTC),
+                approved_at=approved_at,
+                start_time=now - timedelta(days=1),
+                end_time=now + timedelta(days=30),
             )
-            assert mock_mb.status == "pending_creatives"
+            assert in_flight.status == "active"
+
+        with patch("src.core.tools.creatives._assignments.CreativeUoW") as mock_db:
+            scheduled = self._run_assignment_with_media_buy(
+                mock_db,
+                media_buy_status="draft",
+                approved_at=approved_at,
+                start_time=now + timedelta(days=7),
+                end_time=now + timedelta(days=37),
+            )
+            assert scheduled.status == "pending_start"
 
     def test_draft_without_approved_at_stays_draft(self):
         """Draft media buy without approved_at does NOT transition.
@@ -3667,15 +3692,18 @@ class TestMediaBuyStatusTransition:
         existing_assignment.creative_id = "c1"
         existing_assignment.weight = 50  # Different from 100 to trigger update
 
+        now = datetime.now(UTC)
         with patch("src.core.tools.creatives._assignments.CreativeUoW") as mock_db:
             mock_mb = self._run_assignment_with_media_buy(
                 mock_db,
                 media_buy_status="draft",
                 approved_at=datetime(2026, 1, 1, tzinfo=UTC),
                 existing_assignment=existing_assignment,
+                start_time=now - timedelta(days=1),
+                end_time=now + timedelta(days=30),
             )
-            # Transition should still fire even on upsert
-            assert mock_mb.status == "pending_creatives"
+            # Transition should still fire even on upsert (in-flight buy -> active)
+            assert mock_mb.status == "active"
             # Weight should be reset to 100
             assert existing_assignment.weight == 100
 
@@ -4274,7 +4302,9 @@ class TestExtensionGaps:
                 creative_result.action.value if hasattr(creative_result.action, "value") else creative_result.action
             )
             assert action_val == "failed"
-            assert any("list_creative_formats" in e for e in (creative_result.errors or []))
+            messages = [e.message for e in (creative_result.errors or [])]
+            assert any("Unknown format" in m for m in messages)
+            assert any("list_creative_formats" in m for m in messages)
 
     def test_ext_g_unreachable_agent_retry(self):
         """Agent unreachable => action=failed with 'try again later' suggestion.
@@ -4327,7 +4357,8 @@ class TestExtensionGaps:
                 creative_result.action.value if hasattr(creative_result.action, "value") else creative_result.action
             )
             assert action_val == "failed"
-            assert any("unreachable" in e.lower() for e in (creative_result.errors or []))
+            messages = [e.message for e in (creative_result.errors or [])]
+            assert any("unreachable" in m.lower() for m in messages)
 
     def test_ext_j_package_not_found_lenient(self):
         """Lenient mode: missing package logged in assignment_errors, others continue.
@@ -4493,17 +4524,28 @@ class TestA2ATransportGaps:
     Spec: UNSPECIFIED (implementation-defined transport layer).
     """
 
-    def test_sync_creatives_via_a2a(self):
-        """A2A sync_creatives_raw returns valid SyncCreativesResponse payload.
+    def test_sync_creatives_via_a2a(self, monkeypatch):
+        """A2A dispatch of sync_creatives returns a valid SyncCreativesResponse payload.
 
         STUB: BR-UC-006-main-rest -- sync_creatives via A2A endpoint.
-        sync_creatives_raw delegates to _sync_creatives_impl with identity.
+        Sales Agent 2.0 routes both A2A and MCP through
+        ``core/platforms/_delegate.py:_delegate_sync_creatives`` (which replaced
+        ``sync_creatives_raw``); it delegates to _sync_creatives_impl with the
+        resolved identity and returns the canonical wire payload.
         Covers: UC-006-MAIN-REST-01
         """
-        from src.core.tools.creatives.sync_wrappers import sync_creatives_raw
+        from core.platforms import _delegate
+
+        # Publisher-domain namespace for canonical creative identity on the wire
+        # (skips the single-tenant DB lookup fallback).
+        monkeypatch.setenv("SALES_AGENT_DOMAIN", "seller.example.com")
 
         identity = PrincipalFactory.make_identity(
-            principal_id="principal_1", tenant_id="tenant_1", approval_mode="auto-approve", slack_webhook_url=None
+            principal_id="principal_1",
+            tenant_id="tenant_1",
+            protocol="a2a",
+            approval_mode="auto-approve",
+            slack_webhook_url=None,
         )
 
         with (
@@ -4519,6 +4561,7 @@ class TestA2ATransportGaps:
             patch("src.core.tools.creatives._sync.log_tool_activity"),
             patch("src.core.tools.creatives._workflow.get_audit_logger"),
             patch("src.core.tools.creatives._workflow.WorkflowUoW"),
+            patch("src.admin.services.webhook_publisher.emit_event"),
         ):
             mock_reg = MagicMock()
             mock_run_async.return_value = []
@@ -4538,12 +4581,16 @@ class TestA2ATransportGaps:
             mock_db.return_value.__enter__.return_value = mock_uow
             mock_db.return_value.__exit__.return_value = None
 
-            result = sync_creatives_raw(
-                creatives=[_make_creative_asset()],
-                identity=identity,
+            wire = _call_delegate(
+                _delegate._delegate_sync_creatives,
+                {"creatives": [_make_creative_asset()]},
+                identity,
             )
 
-            assert isinstance(result, SyncCreativesResponse)
+            # The delegate hands the framework a JSON wire dict that parses as a
+            # spec SyncCreativesResponse carrying per-creative results.
+            assert isinstance(wire, dict)
+            result = SyncCreativesResponse.model_validate(wire)
             assert len(result.creatives) == 1
             assert result.creatives[0].creative_id == "c_test_1"
 
@@ -4593,31 +4640,30 @@ class TestA2ATransportGaps:
             mock_notifier_getter.assert_not_called()
 
     def test_list_creatives_raw_boundary(self):
-        """list_creatives_raw forwards parameters to _list_creatives_impl.
+        """_delegate_list_creatives forwards parameters to _list_creatives_impl.
 
-        STUB: list_creatives A2A boundary -- list_creatives_raw forwards all params.
+        STUB: list_creatives A2A boundary -- the 2.0 platform delegate (which
+        replaced ``list_creatives_raw``) forwards all wire params plus the
+        resolved identity.
         Covers: UC-006-MAIN-REST-01
         """
-        from src.core.tools.creatives.listing import list_creatives_raw
+        from core.platforms import _delegate
 
         identity = PrincipalFactory.make_identity(
             principal_id="principal_1", tenant_id="tenant_1", approval_mode="auto-approve", slack_webhook_url=None
         )
 
-        with patch("src.core.tools.creatives.listing._list_creatives_impl") as mock_impl:
-            mock_impl.return_value = MagicMock()
-
-            list_creatives_raw(
-                media_buy_id="mb_1",
-                status="approved",
-                format="display",
-                page=2,
-                limit=25,
-                identity=identity,
+        with patch.object(
+            _delegate, "_list_creatives_impl", return_value=_empty_list_creatives_response()
+        ) as mock_impl:
+            _call_delegate(
+                _delegate._delegate_list_creatives,
+                {"media_buy_id": "mb_1", "status": "approved", "format": "display", "page": 2, "limit": 25},
+                identity,
             )
 
             mock_impl.assert_called_once()
-            call_kwargs = mock_impl.call_args[1]
+            call_kwargs = mock_impl.call_args.kwargs
             assert call_kwargs["media_buy_id"] == "mb_1"
             assert call_kwargs["status"] == "approved"
             assert call_kwargs["format"] == "display"
@@ -4626,12 +4672,14 @@ class TestA2ATransportGaps:
             assert call_kwargs["identity"] is identity
 
     def test_list_creative_formats_raw_boundary(self):
-        """list_creative_formats_raw forwards filter params to _list_creative_formats_impl.
+        """_delegate_list_creative_formats forwards the request to _list_creative_formats_impl.
 
-        STUB: list_creative_formats A2A boundary -- forwards filters to _impl.
+        STUB: list_creative_formats A2A boundary -- the 2.0 platform delegate
+        (which replaced ``list_creative_formats_raw``) forwards the coerced
+        request model and the resolved identity to _impl.
         Covers: UC-006-MAIN-REST-01
         """
-        from src.core.tools.creative_formats import list_creative_formats_raw
+        from core.platforms import _delegate
 
         identity = PrincipalFactory.make_identity(
             principal_id="principal_1", tenant_id="tenant_1", approval_mode="auto-approve", slack_webhook_url=None
@@ -4639,10 +4687,10 @@ class TestA2ATransportGaps:
         # type filter removed in adcp 3.12
         req = ListCreativeFormatsRequest()
 
-        with patch("src.core.tools.creative_formats._list_creative_formats_impl") as mock_impl:
-            mock_impl.return_value = MagicMock()
-
-            list_creative_formats_raw(req=req, identity=identity)
+        with patch.object(
+            _delegate, "_list_creative_formats_impl", return_value=ListCreativeFormatsResponse(formats=[])
+        ) as mock_impl:
+            _call_delegate(_delegate._delegate_list_creative_formats, req, identity)
 
             mock_impl.assert_called_once_with(req, identity)
 
@@ -4661,19 +4709,25 @@ class TestAsyncLifecycle:
     """
 
     def test_async_submitted_response(self):
-        """Async submitted acknowledgment conforms to adcp 3.6.0 schema."""
+        """Async submitted acknowledgment conforms to the adcp 7 schema."""
         from adcp.types.generated_poc.creative.sync_creatives_async_response_submitted import (
             SyncCreativesSubmitted,
         )
+        from pydantic import ValidationError
 
-        # Schema accepts context and ext fields
-        response = SyncCreativesSubmitted(context=None, ext=None)
+        # Schema carries the optional context and ext fields
         assert "context" in SyncCreativesSubmitted.model_fields
         assert "ext" in SyncCreativesSubmitted.model_fields
 
-        # Can be constructed with no args (all optional)
-        empty = SyncCreativesSubmitted()
-        assert empty.context is None
+        # adcp 7: task_id is the required correlation handle; status is fixed to "submitted"
+        response = SyncCreativesSubmitted(task_id="task_1")
+        assert response.task_id == "task_1"
+        assert response.status == "submitted"
+        assert response.context is None
+        assert response.ext is None
+
+        with pytest.raises(ValidationError, match="task_id"):
+            SyncCreativesSubmitted()
 
     def test_async_working_response(self):
         """Async working response includes progress percentage and counts."""
@@ -5176,7 +5230,10 @@ class TestTypedCreativeAssignments:
     placement_ids, weight), never as dict[str, list[str]].
 
     salesagent-e5ao removed the legacy untyped LegacyUpdateMediaBuyRequest
-    and consolidated the in-memory dict to use typed CreativeAssignment.
+    and consolidated the in-memory dict to use typed CreativeAssignment; the
+    in-memory ``creative_assignments_v2`` dict itself went away with
+    ``src/core/main.py`` in Sales Agent 2.0, so only the wire-facing schemas
+    remain under test here.
     """
 
     def test_package_creative_assignments_is_typed_list(self):
@@ -5239,26 +5296,3 @@ class TestTypedCreativeAssignments:
             "LegacyUpdateMediaBuyRequest should be removed — it used untyped "
             "dict[str, list[str]] for creative_assignments"
         )
-
-    def test_in_memory_assignments_dict_is_typed(self):
-        """In-memory creative_assignments dict values are CreativeAssignment.
-
-        The module-level dict was consolidated from two dicts (untyped v1 +
-        typed v2) into a single typed dict[str, CreativeAssignment].
-        Covers: salesagent-e5ao-04
-        """
-        import typing
-
-        import src.core.main as main_module
-
-        # Verify the typed dict exists (creative_assignments_v2)
-        assert hasattr(main_module, "creative_assignments_v2")
-        hints = typing.get_type_hints(main_module)
-        ca_type = hints.get("creative_assignments_v2")
-        # Should be dict[str, CreativeAssignment]
-        assert ca_type is not None
-        origin = typing.get_origin(ca_type)
-        assert origin is dict
-        args = typing.get_args(ca_type)
-        assert args[0] is str
-        assert args[1] is CreativeAssignment

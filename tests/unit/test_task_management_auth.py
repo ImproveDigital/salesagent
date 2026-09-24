@@ -9,10 +9,10 @@ immediately after the tenant check.
 """
 
 import pytest
+from src.core.tools.task_management import complete_task, get_task, list_tasks
 
 from src.core.exceptions import AdCPAuthenticationError
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.tools.task_management import complete_task, get_task, list_tasks
 
 
 def _identity_no_principal() -> ResolvedIdentity:

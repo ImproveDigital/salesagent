@@ -297,9 +297,9 @@ class TestRestGetProductsWrapper:
             new_callable=AsyncMock,
             return_value=_mock_response(),
         ):
+            from src.app import app
             from starlette.testclient import TestClient
 
-            from src.app import app
             from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
 
             app.dependency_overrides[_require_auth_dep] = lambda: identity
@@ -331,9 +331,9 @@ class TestRestGetProductsWrapper:
         ):
             mock_compat.return_value = {"products": [], "legacy": True}
 
+            from src.app import app
             from starlette.testclient import TestClient
 
-            from src.app import app
             from src.core.auth_context import _require_auth_dep, _resolve_auth_dep
 
             app.dependency_overrides[_require_auth_dep] = lambda: identity

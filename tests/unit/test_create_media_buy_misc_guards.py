@@ -55,9 +55,7 @@ class TestSpringServeTagModeGuards:
         adapter.adapter_name = "springserve"
         adapter.demand_class = "standard"  # not "tag"
 
-        assert not _is_springserve_tag_mode(adapter), (
-            "SpringServe with demand_class='standard' must NOT be tag mode."
-        )
+        assert not _is_springserve_tag_mode(adapter), "SpringServe with demand_class='standard' must NOT be tag mode."
 
     def test_non_springserve_adapter_is_not_tag_mode(self):
         """TC-SS-008a: GAM adapter → not tag mode, _is_springserve_tag_mode returns False.
@@ -99,12 +97,8 @@ class TestSpringServeTagModeGuards:
 
         result = _prepare_springserve_tag_mode_packages(adapter, packages, "tenant_1", mock_session)
 
-        assert result is packages, (
-            "Non-tag SpringServe must return the SAME packages list object unchanged."
-        )
-        mock_session.scalars.assert_not_called(), (
-            "No DB query must be made when adapter is not in tag mode."
-        )
+        assert result is packages, "Non-tag SpringServe must return the SAME packages list object unchanged."
+        mock_session.scalars.assert_not_called(), ("No DB query must be made when adapter is not in tag mode.")
 
     def test_non_springserve_adapter_returns_packages_unchanged(self):
         """TC-SS-008: _prepare_springserve_tag_mode_packages with GAM adapter → same list.
@@ -149,8 +143,8 @@ class TestReportingWebhookFrequencyWarning:
         """TC-MCP-004: reporting_webhook.reporting_frequency='hourly' → accepted (no error)."""
         import logging
 
-        from src.core.tools.media_buy_create import _create_media_buy_impl
         from src.core.exceptions import AdCPProductNotFoundError
+        from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = CreateMediaBuyRequest(
             **required_request_kwargs(),
@@ -194,8 +188,10 @@ class TestReportingWebhookFrequencyWarning:
             patch("src.core.tools.media_buy_create.get_principal_object", return_value=mock_principal),
             patch("src.core.database.repositories.MediaBuyUoW", return_value=mock_uow),
             patch("src.core.tools.media_buy_create.get_context_manager", return_value=mock_ctx_mgr),
-            patch("src.core.tools.media_buy_create.sandbox_mode_for_request",
-                  return_value=MagicMock(active=False, diagnostic="")),
+            patch(
+                "src.core.tools.media_buy_create.sandbox_mode_for_request",
+                return_value=MagicMock(active=False, diagnostic=""),
+            ),
             caplog.at_level(logging.WARNING, logger="src.core.tools.media_buy_create"),
         ):
             # Function proceeds past the webhook frequency check and fails later
@@ -206,7 +202,9 @@ class TestReportingWebhookFrequencyWarning:
                 pass  # expected: product not found in mock DB
 
         # The function must log a warning about unsupported frequency, NOT raise.
-        frequency_warnings = [r for r in caplog.records if "hourly" in r.message.lower() or "frequency" in r.message.lower()]
+        frequency_warnings = [
+            r for r in caplog.records if "hourly" in r.message.lower() or "frequency" in r.message.lower()
+        ]
         assert frequency_warnings, (
             "A warning must be logged for unsupported 'hourly' reporting frequency. "
             "The warning keeps buyers informed without blocking their request."

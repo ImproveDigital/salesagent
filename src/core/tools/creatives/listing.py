@@ -1,13 +1,16 @@
 """List creatives implementation, MCP wrapper, and A2A raw function."""
 
+import base64
+import binascii
 import logging
 import time
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from adcp.types import (
     ContextObject,
 )
+from adcp.types.generated_poc.creative.list_creatives_response import AssignedPackage, Assignments
 from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 from pydantic import ValidationError
 
@@ -23,7 +26,42 @@ from src.core.schemas import (
 from src.core.tracing import traced
 from src.core.validation_helpers import format_validation_error
 
+if TYPE_CHECKING:
+    from src.core.database.models import CreativeAssignment as CreativeAssignmentRow
+
 logger = logging.getLogger(__name__)
+
+_CURSOR_PREFIX = "offset:"
+
+
+def _encode_cursor(offset: int) -> str:
+    """Opaque wire cursor for the next page (encodes the DB offset)."""
+    return base64.urlsafe_b64encode(f"{_CURSOR_PREFIX}{offset}".encode()).decode("ascii")
+
+
+def _decode_cursor(cursor: str) -> int:
+    """Inverse of :func:`_encode_cursor`; rejects anything this server did not mint."""
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("ascii")
+        if not decoded.startswith(_CURSOR_PREFIX):
+            raise ValueError(decoded)
+        offset = int(decoded[len(_CURSOR_PREFIX) :])
+    except (ValueError, UnicodeError, binascii.Error) as e:
+        raise AdCPValidationError(f"Invalid pagination cursor: {cursor!r}", recovery="correctable") from e
+    if offset < 0:
+        raise AdCPValidationError(f"Invalid pagination cursor: {cursor!r}", recovery="correctable")
+    return offset
+
+
+def _build_assignments(rows: list["CreativeAssignmentRow"]) -> Assignments:
+    """Project assignment rows onto the spec ``assignments`` block of a listing creative."""
+    packages: list[AssignedPackage] = []
+    for row in rows:
+        assigned_date = row.created_at
+        if assigned_date.tzinfo is None:
+            assigned_date = assigned_date.replace(tzinfo=UTC)
+        packages.append(AssignedPackage(package_id=row.package_id, assigned_date=assigned_date))
+    return Assignments(assignment_count=len(rows), assigned_packages=packages)
 
 
 @traced
@@ -43,6 +81,7 @@ def _list_creatives_impl(
     include_sub_assets: bool = False,
     page: int = 1,
     limit: int = 50,
+    cursor: str | None = None,
     sort_by: str = "created_date",
     sort_order: str = "desc",
     context: ContextObject | None = None,  # Application level context per adcp spec
@@ -69,6 +108,8 @@ def _list_creatives_impl(
         include_sub_assets: Include sub-assets (optional)
         page: Page number for pagination (default: 1)
         limit: Number of results per page (default: 50, max: 1000)
+        cursor: Opaque cursor from a previous response's ``pagination.cursor``;
+            takes precedence over ``page`` (optional)
         sort_by: Sort field (created_date, name, status) (default: created_date)
         sort_order: Sort order (asc, desc) (default: desc)
         context: Application level context per adcp spec
@@ -150,10 +191,15 @@ def _list_creatives_impl(
     # Build structured objects
     structured_filters = LibraryCreativeFilters(**filters_dict) if filters_dict else None
 
-    # Build pagination
-    offset = (page - 1) * effective_limit
-    # 3.6.0: PaginationRequest is cursor-based (max_results, cursor). DB query uses offset/limit internally.
-    structured_pagination = LibraryPagination(max_results=effective_limit)
+    # Build pagination. The wire is cursor-based (max_results, cursor); the DB
+    # query is offset/limit. A cursor encodes the next offset and takes
+    # precedence over the legacy ``page`` parameter.
+    if cursor:
+        offset = _decode_cursor(cursor)
+        page = offset // effective_limit + 1
+    else:
+        offset = (page - 1) * effective_limit
+    structured_pagination = LibraryPagination(max_results=effective_limit, cursor=cursor)
 
     # Build sort. The listing-specific ``Sort`` enum accepts the spec values
     # below; reject anything else explicitly so callers don't get silently
@@ -239,6 +285,13 @@ def _list_creatives_impl(
         db_creatives = result.creatives
         total_count = result.total_count
 
+        # One batched query for the page's assignments (spec: include_assignments).
+        assignments_by_creative: dict[str, list[CreativeAssignmentRow]] = {}
+        if include_assignments and db_creatives:
+            assert uow.assignments is not None
+            for row in uow.assignments.get_by_creatives([c.creative_id for c in db_creatives]):
+                assignments_by_creative.setdefault(row.creative_id, []).append(row)
+
         # Convert to schema objects
         for db_creative in db_creatives:
             # Handle content_uri - required field even for snippet creatives
@@ -294,7 +347,9 @@ def _list_creatives_impl(
                     else db_creative.updated_at
                 )
             else:
-                updated_at_dt = datetime.now(UTC)
+                # Never modified since creation. A read must not fabricate "now" —
+                # on the wire that looked like every listing bumping updated_date.
+                updated_at_dt = created_at_dt
 
             # AdCP v1 spec compliant - only spec fields
             # Get assets dict from database (all production data uses AdCP v2.4 format)
@@ -326,13 +381,21 @@ def _list_creatives_impl(
                 status=status_enum,
                 created_date=created_at_dt,
                 updated_date=updated_at_dt,
+                assignments=(
+                    _build_assignments(assignments_by_creative.get(db_creative.creative_id, []))
+                    if include_assignments
+                    else None
+                ),
                 # Internal field (our extension)
                 principal_id=db_creative.principal_id,
             )
             creatives.append(creative)
 
-    # Calculate pagination info (page and limit have defaults from factory function)
-    has_more = (page * limit) < total_count
+    # Calculate pagination info. ``has_more`` and the cursor are offset-based so
+    # a buyer following cursors reaches every row exactly once.
+    next_offset = offset + len(creatives)
+    has_more = next_offset < total_count
+    next_cursor = _encode_cursor(next_offset) if has_more else None
     total_pages = (total_count + limit - 1) // limit if limit > 0 else 0
 
     # Build filters_applied list from structured filters (typed CreativeFilters model)
@@ -402,6 +465,7 @@ def _list_creatives_impl(
         pagination=SchemaPagination(
             has_more=has_more,
             total_count=total_count,
+            cursor=next_cursor,
         ),
         creatives=creatives,
         format_summary=None,

@@ -803,7 +803,9 @@ async def _delegate_sync_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
     # the assignment loop never raises ``AdCPNotFoundError``.
     raw_mode = body.get("validation_mode")
     validation_mode_str = getattr(raw_mode, "value", raw_mode) or "strict"
-    identity = enrich_identity_with_account(identity, body.get("account"))
+    enriched_identity = enrich_identity_with_account(identity, body.get("account"))
+    if enriched_identity is not None:
+        identity = enriched_identity
     response = await asyncio.to_thread(
         _sync_creatives_impl,
         creatives=body.get("creatives") or [],
@@ -816,7 +818,8 @@ async def _delegate_sync_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
         context=body.get("context"),
         identity=identity,
     )
-    _emit_creative_created_for_new_creatives(identity.tenant_id, response, dry_run=bool(body.get("dry_run", False)))
+    if identity.tenant_id is not None:
+        _emit_creative_created_for_new_creatives(identity.tenant_id, response, dry_run=bool(body.get("dry_run", False)))
     return canonicalize_wire_response("sync_creatives", _to_wire(response), tenant_id=identity.tenant_id)
 
 
@@ -916,6 +919,12 @@ async def _delegate_provide_performance_feedback(req: Any, ctx: RequestContext[A
     }
 
 
+def _wire_value(container: Any, key: str) -> Any:
+    """Read ``key`` from a dumped sub-object (dict) or a still-typed model; unwrap enums."""
+    value = container.get(key) if isinstance(container, dict) else getattr(container, key, None)
+    return getattr(value, "value", value)
+
+
 @translate_adcp_errors
 async def _delegate_list_creatives(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
     """Forward to ``src/core/tools/creatives/listing.py:_list_creatives_impl``.
@@ -923,9 +932,15 @@ async def _delegate_list_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
     The impl decomposes into individual kwargs (no single request
     model). Default each from the wire shape; callers that send a
     Pydantic model get round-tripped through model_dump.
+
+    The canonical wire carries ``pagination`` {max_results, cursor} and
+    ``sort`` {field, direction}; map them onto the impl's flat kwargs. The
+    legacy flat params (page/limit/sort_by/sort_order) still win when sent.
     """
     identity = _build_identity(ctx)
     body = _legacy_request_body("list_creatives", req, exclude_unset=True) if req is not None else {}
+    pagination = body.get("pagination") or {}
+    sort = body.get("sort") or {}
     response = await asyncio.to_thread(
         _list_creatives_impl,
         media_buy_id=body.get("media_buy_id"),
@@ -942,9 +957,10 @@ async def _delegate_list_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
         include_assignments=bool(body.get("include_assignments", False)),
         include_sub_assets=bool(body.get("include_sub_assets", False)),
         page=int(body.get("page") or 1),
-        limit=int(body.get("limit") or 50),
-        sort_by=body.get("sort_by") or "created_date",
-        sort_order=body.get("sort_order") or "desc",
+        limit=int(body.get("limit") or _wire_value(pagination, "max_results") or 50),
+        cursor=_wire_value(pagination, "cursor"),
+        sort_by=body.get("sort_by") or _wire_value(sort, "field") or "created_date",
+        sort_order=body.get("sort_order") or _wire_value(sort, "direction") or "desc",
         context=body.get("context"),
         identity=identity,
     )

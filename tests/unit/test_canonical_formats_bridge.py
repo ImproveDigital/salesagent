@@ -173,6 +173,35 @@ class TestInboundTranslation:
         assert body["packages"][0]["format_ids"] == [_ref("display_300x250")]
         assert "format_option_refs" not in body["packages"][0]
 
+    def test_create_media_buy_inline_package_creatives_get_format_id(self):
+        option_id = bridge.declaration_for_legacy_ref(_ref("display_300x250"), product_id="p1").format_option_id
+        body = bridge.legacy_request_payload(
+            "create_media_buy",
+            {
+                "packages": [
+                    {
+                        "buyer_ref": "b",
+                        "product_id": "p1",
+                        "format_option_refs": [{"scope": "product", "format_option_id": option_id}],
+                        "creatives": [
+                            {
+                                "creative_id": "c1",
+                                "name": "Banner",
+                                "format_kind": "image",
+                                "format_option_ref": {"scope": "product", "format_option_id": option_id},
+                                "assets": {},
+                            },
+                            {"creative_id": "c2", "name": "Legacy", "format_id": _ref("display_300x250"), "assets": {}},
+                        ],
+                    }
+                ]
+            },
+        )
+        creatives = body["packages"][0]["creatives"]
+        assert creatives[0]["format_id"] == _ref("display_300x250")
+        assert "format_kind" not in creatives[0] and "format_option_ref" not in creatives[0]
+        assert creatives[1]["format_id"] == _ref("display_300x250")
+
     def test_list_creatives_filters_from_sdk_normalised_legacy_request(self):
         params = normalize_legacy_creative_request({"filters": {"format_ids": [_ref("display_300x250")]}})
         body = bridge.legacy_request_payload("list_creatives", params)
@@ -427,3 +456,61 @@ class TestCapabilityDeclaration:
         assert canonical_creatives_capability({"media_buy": media_buy}) is True
         dialect = resolve_creative_dialect("3.1", capabilities={"media_buy": media_buy}, request={"brief": "x"})
         assert dialect.value == "canonical"
+
+
+class TestAdapterSchemeFormats:
+    """Ad-server-owned formats use a non-HTTP ``agent_url`` (creatives/_validation.py).
+
+    adcp 7 only projects legacy tuples whose owner is a public HTTPS host, so
+    the bridge spells such owners synthetically for the SDK and maps back.
+    """
+
+    ADAPTER_REF = {"agent_url": "adapter-test://default", "id": "legacy_adapter_format"}
+
+    def test_owner_encoding_round_trips(self):
+        encoded = bridge._encode_adapter_owner(self.ADAPTER_REF["agent_url"])
+        assert encoded.startswith("https://")
+        assert bridge._decode_adapter_owner(encoded) == "adapter-test://default"
+        assert bridge._decode_adapter_owner("https://creative.adcontextprotocol.org/") is None
+
+    def test_prepare_legacy_request_respells_adapter_owner_and_hints_legacy(self):
+        params = {"creatives": [{"creative_id": "c1", "format_id": dict(self.ADAPTER_REF), "assets": {}}]}
+        out = bridge.prepare_legacy_request("sync_creatives", params)
+        assert out["adcp_version"] == "3.0"
+        agent_url = out["creatives"][0]["format_id"]["agent_url"]
+        assert agent_url.startswith("https://") and bridge._decode_adapter_owner(agent_url) == "adapter-test://default"
+        # the buyer's dict is not mutated
+        assert params["creatives"][0]["format_id"] == self.ADAPTER_REF
+
+    def test_converter_maps_synthetic_owner_back_to_original_tuple(self):
+        synthetic = bridge.legacy_ref(
+            {**self.ADAPTER_REF, "agent_url": bridge._encode_adapter_owner("adapter-test://default")}
+        )
+        body = bridge.legacy_format_converter(LegacyFormatConversionContext(synthetic, "", "creatives[0].format_id"))
+        assert body is not None
+        assert body["format_kind"] == "custom" and body["format_shape"] == "legacy_adapter_format"
+        resolved = bridge.resolve_option_id(body["format_option_id"])
+        assert resolved is not None
+        assert (str(resolved.agent_url), resolved.id) == ("adapter-test://default", "legacy_adapter_format")
+
+    def test_declaration_for_adapter_ref_is_custom_and_resolves_back(self):
+        declaration = bridge.declaration_for_legacy_ref(self.ADAPTER_REF)
+        assert declaration is not None
+        assert declaration.format_kind.value == "custom" and declaration.format_shape == "legacy_adapter_format"
+        resolved = bridge.resolve_option_id(declaration.format_option_id)
+        assert resolved is not None and str(resolved.agent_url) == "adapter-test://default"
+
+    def test_sync_creatives_round_trip_restores_adapter_format_id(self):
+        option_id = bridge.declaration_for_legacy_ref(self.ADAPTER_REF).format_option_id
+        creative = {
+            "creative_id": "c1",
+            "format_kind": "custom",
+            "format_option_ref": {
+                "scope": "publisher",
+                "publisher_domain": "seller.example",
+                "format_option_id": option_id,
+            },
+        }
+        out = bridge.legacy_request_payload("sync_creatives", {"creatives": [creative]})["creatives"][0]
+        assert out["format_id"]["agent_url"] == "adapter-test://default"
+        assert out["format_id"]["id"] == "legacy_adapter_format"

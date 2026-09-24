@@ -61,8 +61,7 @@ class TestWorkflowMappingPersisted:
         result = await _create_media_buy_impl(req=req, identity=identity)
 
         assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Expected success to verify workflow mapping. "
-            f"Errors: {getattr(result.response, 'errors', None)}"
+            f"Expected success to verify workflow mapping. Errors: {getattr(result.response, 'errors', None)}"
         )
         media_buy_id = result.response.media_buy_id
 
@@ -104,9 +103,7 @@ class TestRawRequestPersisted:
     back from the DB and verifies the critical fields are present and correct.
     """
 
-    async def test_raw_request_stored_with_package_and_brand(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_raw_request_stored_with_package_and_brand(self, sample_tenant, sample_principal, sample_products):
         """TC-DB-005: MediaBuy.raw_request contains brand, packages, and idempotency_key."""
         from src.core.database.models import MediaBuy as DBMediaBuy
         from src.core.tools.media_buy_create import _create_media_buy_impl
@@ -118,28 +115,19 @@ class TestRawRequestPersisted:
         result = await _create_media_buy_impl(req=req, identity=identity)
 
         assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Expected success to verify raw_request. "
-            f"Errors: {getattr(result.response, 'errors', None)}"
+            f"Expected success to verify raw_request. Errors: {getattr(result.response, 'errors', None)}"
         )
         media_buy_id = result.response.media_buy_id
 
         with get_db_session() as session:
-            row = session.scalars(
-                select(DBMediaBuy).where(DBMediaBuy.media_buy_id == media_buy_id)
-            ).first()
+            row = session.scalars(select(DBMediaBuy).where(DBMediaBuy.media_buy_id == media_buy_id)).first()
 
         assert row is not None, f"MediaBuy row not found for {media_buy_id!r}"
         raw = row.raw_request
-        assert raw is not None, (
-            "raw_request must be populated — it is required for manual approval reconstruction."
-        )
+        assert raw is not None, "raw_request must be populated — it is required for manual approval reconstruction."
         assert isinstance(raw, dict), "raw_request must be a dict (JSON-parsed)."
-        assert "brand" in raw, (
-            "raw_request must contain 'brand' — used to reconstruct advertiser context on approval."
-        )
-        assert "packages" in raw, (
-            "raw_request must contain 'packages' — used to reconstruct line items on approval."
-        )
+        assert "brand" in raw, "raw_request must contain 'brand' — used to reconstruct advertiser context on approval."
+        assert "packages" in raw, "raw_request must contain 'packages' — used to reconstruct line items on approval."
         assert "idempotency_key" in raw, (
             "raw_request must contain 'idempotency_key' — needed for idempotency replay logic."
         )

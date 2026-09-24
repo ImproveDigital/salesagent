@@ -14,6 +14,8 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 import psycopg2
 import pytest
 import requests
+from adcp.canonical_formats import migrated_format_option_id
+from adcp.types.legacy import LegacyFormatId
 from fastmcp.client import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from psycopg2.extras import Json
@@ -21,6 +23,21 @@ from psycopg2.extras import Json
 from tests.e2e.adcp_request_builder import parse_tool_result
 
 TENANT_SUBDOMAIN = "ci-test"
+REFERENCE_CREATIVE_AGENT = "https://creative.adcontextprotocol.org"
+
+
+def _canonical_option_ids(format_id: str) -> set[str]:
+    """Canonical ``format_option_id`` values a legacy reference-agent format maps to.
+
+    adcp 7 projects a legacy ``{agent_url, id}`` tuple to the deterministic
+    ``migrated_<hash>`` option id. The hash covers the raw ``agent_url``
+    spelling, so both the slash-less form the admin API stores and the
+    trailing-slash form the reference catalog uses are legitimate identities.
+    """
+    return {
+        migrated_format_option_id(LegacyFormatId(agent_url=agent_url, id=format_id))
+        for agent_url in (REFERENCE_CREATIVE_AGENT, REFERENCE_CREATIVE_AGENT + "/")
+    }
 
 
 def _db_params(live_server: dict[str, object]) -> dict:
@@ -187,7 +204,7 @@ def _inventory_profile_payload(profile_id: str) -> dict:
             "placements": ["e2e_top"],
             "include_descendants": True,
         },
-        "format_ids": [{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
+        "format_ids": [{"agent_url": REFERENCE_CREATIVE_AGENT, "id": "display_300x250"}],
         "publisher_properties": [
             {
                 "publisher_domain": "publisher.example.com",
@@ -295,7 +312,12 @@ async def test_admin_authored_inventory_signal_and_product_reach_buyer_discovery
                 assert product_id in discovered_products
                 discovered_product = discovered_products[product_id]
                 assert discovered_product["pricing_options"][0]["pricing_option_id"] == "cpm_usd_auction"
-                assert discovered_product["format_ids"][0]["id"] == "display_300x250"
+                # adcp 7 (AdCP 3.1) buyers see the authored display_300x250 as its
+                # canonical declaration (``format_options``), not a ``format_ids`` tuple.
+                [format_option] = discovered_product["format_options"]
+                assert format_option["format_kind"] == "image"
+                assert format_option["params"] == {"width": 300, "height": 250}
+                assert format_option["format_option_id"] in _canonical_option_ids("display_300x250")
                 assert discovered_product["publisher_properties"][0]["property_tags"] == ["sports"]
     finally:
         _cleanup_composition_rows(
