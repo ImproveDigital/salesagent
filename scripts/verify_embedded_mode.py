@@ -98,6 +98,7 @@ BASE = os.environ.get("BASE_URL", "http://localhost:8000")
 TENANT_MGMT_PREFIX = "/admin/api/v1/tenant-management"
 API_KEY = os.environ.get("MGMT_API_KEY", "sk-verify-sprint-1-8")
 HEADERS = {"X-Tenant-Management-API-Key": API_KEY, "Content-Type": "application/json"}
+_PLATFORM_AGENT_HOST = os.environ.get("EMBEDDED_PLATFORM_AGENT_HOSTS", "interchange.io").split(",")[0].strip()
 
 PASS = 0
 FAIL = 0
@@ -159,7 +160,9 @@ def _provision(label: str, *, default_advertiser: str | None = None, with_princi
         "external_org_id": f"org_verify_{uuid.uuid4().hex[:6]}",
         "external_source": "verify_script",
         "contact_email": "verify@example.com",
-        "public_agent_url": "https://agent.example.com/verify",
+        # Embedded tenants must advertise a platform host (EMBEDDED_PLATFORM_AGENT_HOSTS,
+        # default interchange.io) — see validate_public_agent_url_hostname.
+        "public_agent_url": f"https://{_PLATFORM_AGENT_HOST}/verify",
         "adapter": {"type": "mock"},
         "default_currency": "USD",
         "billing_plan": "standard",
@@ -183,8 +186,14 @@ def _provision(label: str, *, default_advertiser: str | None = None, with_princi
 
 
 def _docker_exec_python(code: str) -> str:
+    container = os.environ.get("ADCP_SERVER_CONTAINER")
+    command = (
+        ["docker", "exec", "-i", container, "python", "-"]
+        if container
+        else ["docker", "compose", "exec", "-T", "adcp-server", "python", "-"]
+    )
     result = subprocess.run(
-        ["docker", "compose", "exec", "-T", "adcp-server", "python", "-"],
+        command,
         input=code,
         capture_output=True,
         text=True,
@@ -595,6 +604,9 @@ def _verify_get_products(token: str) -> str | None:
     return products[0].get("product_id")
 
 
+_DATE_RANGE_BY_KEY: dict[str, tuple[str, str]] = {}
+
+
 def _verify_create_media_buy(
     token: str,
     tenant_id: str,
@@ -604,7 +616,9 @@ def _verify_create_media_buy(
     webhook_url: str | None = None,
 ) -> tuple[str | None, dict | None]:
     pricing_option_id = "cpm_usd_fixed"
-    start_time, end_time = _date_range()
+    # Replays must send a byte-identical payload; a fresh timestamp would be an
+    # idempotency CONFLICT (correct server behaviour, wrong test).
+    start_time, end_time = _DATE_RANGE_BY_KEY.setdefault(idempotency_key, _date_range())
     request: dict[str, Any] = {
         "brand": {"domain": "verify.example"},
         "account": {"account_id": f"{tenant_id}:default"},
@@ -680,6 +694,13 @@ def _update_media_buy_request(tenant_id: str, media_buy_id: str, **patch: Any) -
     }
 
 
+def _lifecycle_status(result: dict | None) -> str | None:
+    """AdCP 3.x responses carry the task state in ``status`` and the media buy
+    lifecycle in ``media_buy_status``; older servers only had ``status``."""
+    payload = result or {}
+    return payload.get("media_buy_status") or payload.get("status")
+
+
 def _verify_update_pause(token: str, tenant_id: str, media_buy_id: str) -> bool:
     """Flow 3: update_media_buy(paused=True). Asserts on the response payload
     (mock platform is in-memory; DB lookup wouldn't see the state)."""
@@ -688,7 +709,7 @@ def _verify_update_pause(token: str, tenant_id: str, media_buy_id: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         _say(False, "3. update_media_buy(paused=True)", f"{type(exc).__name__}: {exc}")
         return False
-    status = (result or {}).get("status")
+    status = _lifecycle_status(result)
     ok = status in {"paused", "inactive"}
     _say(ok, "3. update_media_buy(paused=True)", f"status={status!r}")
     return ok
@@ -701,8 +722,9 @@ def _verify_update_resume(token: str, tenant_id: str, media_buy_id: str) -> bool
     except Exception as exc:  # noqa: BLE001
         _say(False, "4. update_media_buy(paused=False)", f"{type(exc).__name__}: {exc}")
         return False
-    status = (result or {}).get("status")
-    ok = status in {"active", "approved", "live"}
+    status = _lifecycle_status(result)
+    # Resuming returns the buy to its pre-pause lifecycle state (no creatives yet → pending_creatives).
+    ok = status is not None and status not in {"paused", "inactive", "canceled", "cancelled"}
     _say(ok, "4. update_media_buy(paused=False)", f"status={status!r}")
     return ok
 
@@ -714,7 +736,7 @@ def _verify_cancel(token: str, tenant_id: str, media_buy_id: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         _say(False, "5. cancel via update_media_buy(canceled=True)", f"{type(exc).__name__}: {exc}")
         return False
-    status = (result or {}).get("status")
+    status = _lifecycle_status(result)
     ok = status in {"cancelled", "canceled"}
     _say(ok, "5. cancel via update_media_buy(canceled=True)", f"status={status!r}")
     return ok
@@ -723,10 +745,37 @@ def _verify_cancel(token: str, tenant_id: str, media_buy_id: str) -> bool:
 def _verify_sync_creatives(token: str, tenant_id: str, _media_buy_id: str) -> bool:
     """Flow 6: sync_creatives → list_creatives round-trip."""
     creative_id = f"verify_creative_{uuid.uuid4().hex[:8]}"
+    # adcp 7 buyers reference a product's canonical format option (AdCP 3.1);
+    # the legacy ``format_id`` tuple is rejected by the canonical request model.
+    product = option = None
+    for mode_args in ({"buying_mode": "wholesale"}, {"buying_mode": "brief", "brief": "display banners"}):
+        try:
+            catalog = _mcp(
+                token,
+                "get_products",
+                {
+                    **mode_args,
+                    "brand": {"domain": "verify.example"},
+                    "account": {"account_id": f"{tenant_id}:default"},
+                },
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        product = next((pr for pr in (catalog.get("products") or []) if pr.get("format_options")), None)
+        if product is not None:
+            option = product["format_options"][0]
+            break
+    if option is None or product is None:
+        _say(False, "6a. sync_creatives: discover a product format option", "no product exposes format_options")
+        return False
     creative = {
         "creative_id": creative_id,
-        # AdCP 4.4 expects FormatReference, not bare string
-        "format_id": {"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"},
+        "format_kind": option["format_kind"],
+        "format_option_ref": {
+            "scope": "product",
+            "product_id": product["product_id"],
+            "format_option_id": option["format_option_id"],
+        },
         "name": "Verify Creative",
         "content_uri": "https://example.com/verify.jpg",
         "assets": {
@@ -886,6 +935,7 @@ def _run_sprint_1_8_subset() -> None:
         # Import lazily so missing PYTHONPATH/relative-path doesn't blow up
         # the Sprint 5 portion.
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        os.environ["BASE_URL"] = BASE  # the legacy harness reads its target at import time
         import verify_sprint_1_8 as legacy  # type: ignore[import-not-found]
     except Exception as exc:  # noqa: BLE001
         _say(False, "Sprint 1.8 legacy harness import", f"{type(exc).__name__}: {exc}")

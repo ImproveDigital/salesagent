@@ -458,6 +458,36 @@ class TestCapabilityDeclaration:
         assert dialect.value == "canonical"
 
 
+class TestPackageCreativeRequirements:
+    """``format_ids_to_provide`` is legacy identity and is never emitted canonically."""
+
+    def test_to_provide_is_dropped_from_canonical_packages(self):
+        wire = {
+            "media_buy_id": "mb1",
+            "packages": [
+                {"package_id": "p1", "product_id": "prod", "format_ids_to_provide": [_ref("display_300x250")]}
+            ],
+        }
+        pkg = bridge.canonicalize_wire_response("create_media_buy", wire)["packages"][0]
+        assert "format_ids_to_provide" not in pkg and "format_ids" not in pkg
+        assert "format_option_refs" not in pkg  # nothing to reference: the package declared no formats
+
+    def test_to_provide_dropped_when_option_refs_present(self):
+        wire = {
+            "packages": [
+                {
+                    "package_id": "p1",
+                    "format_option_refs": [{"scope": "product", "format_option_id": "x"}],
+                    "format_ids_to_provide": [_ref("display_300x250")],
+                }
+            ]
+        }
+        pkg = bridge.canonicalize_wire_response("get_media_buys", {"media_buys": [wire]})["media_buys"][0]["packages"][
+            0
+        ]
+        assert "format_ids_to_provide" not in pkg and pkg["format_option_refs"][0]["format_option_id"] == "x"
+
+
 class TestAdapterSchemeFormats:
     """Ad-server-owned formats use a non-HTTP ``agent_url`` (creatives/_validation.py).
 

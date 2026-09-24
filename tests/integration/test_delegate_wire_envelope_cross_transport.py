@@ -181,8 +181,8 @@ def _extract_a2a_adcp_error(body: dict[str, Any]) -> dict[str, Any]:
 
 def _extract_mcp_adcp_error(result: Any) -> dict[str, Any]:
     """Extract the MCP ``structuredContent.adcp_error`` envelope."""
-    assert result.isError is True, f"Expected isError=True for MCP error result; got: {result!r}"
-    structured = result.structuredContent or {}
+    assert result.is_error is True, f"Expected isError=True for MCP error result; got: {result!r}"
+    structured = result.structured_content or {}
     adcp_error = structured.get("adcp_error")
     assert adcp_error is not None, f"Expected structuredContent.adcp_error envelope, got: {structured!r}"
     return adcp_error
@@ -323,8 +323,8 @@ def _assert_create_payload_preserves_package_fields(
 
 def _assert_mcp_create_success(result: Any) -> None:
     """Assert the first MCP create call reached the real sync success shape."""
-    assert result.isError is False, f"Initial create_media_buy should succeed; got: {result!r}"
-    structured = result.structuredContent or {}
+    assert result.is_error is False, f"Initial create_media_buy should succeed; got: {result!r}"
+    structured = result.structured_content or {}
     assert structured.get("media_buy_id"), (
         f"Expected a real create_media_buy success before conflict, got: {structured!r}"
     )
@@ -463,9 +463,9 @@ def test_create_media_buy_unknown_field_rejected_mcp(authenticated_principal) ->
 
     result = _call_mcp_raw("create_media_buy", payload, authenticated_principal)
 
-    assert result.isError is True, f"Expected unknown create_media_buy field to fail; got: {result!r}"
+    assert result.is_error is True, f"Expected unknown create_media_buy field to fail; got: {result!r}"
     assert "nonsense_field" in repr(result)
-    assert "media_buy_id" not in (result.structuredContent or {})
+    assert "media_buy_id" not in (result.structured_content or {})
 
 
 @pytest.mark.requires_db
@@ -513,7 +513,7 @@ def test_create_media_buy_replay_wire_payload_mcp(authenticated_principal) -> No
 
     first = _call_mcp_raw("create_media_buy", payload, authenticated_principal)
     _assert_mcp_create_success(first)
-    first_structured = first.structuredContent or {}
+    first_structured = first.structured_content or {}
     _assert_create_payload_preserves_package_fields(
         first_structured,
         authenticated_principal,
@@ -522,8 +522,8 @@ def test_create_media_buy_replay_wire_payload_mcp(authenticated_principal) -> No
 
     replay = _call_mcp_raw("create_media_buy", payload, authenticated_principal)
 
-    assert replay.isError is False, f"Expected successful replay for identical payload; got: {replay!r}"
-    replay_structured = replay.structuredContent or {}
+    assert replay.is_error is False, f"Expected successful replay for identical payload; got: {replay!r}"
+    replay_structured = replay.structured_content or {}
     assert replay_structured.get("media_buy_id") == first_structured.get("media_buy_id"), (
         f"Expected replay to return same media_buy_id; got first={first_structured!r}, replay={replay_structured!r}"
     )
@@ -556,7 +556,7 @@ def test_create_media_buy_integrity_race_replay_wire_payload_mcp(authenticated_p
     )
     first = _call_mcp_raw("create_media_buy", payload, authenticated_principal)
     _assert_mcp_create_success(first)
-    first_structured = first.structuredContent or {}
+    first_structured = first.structured_content or {}
     _assert_create_payload_preserves_package_fields(
         first_structured,
         authenticated_principal,
@@ -584,8 +584,8 @@ def test_create_media_buy_integrity_race_replay_wire_payload_mcp(authenticated_p
     replay = _call_mcp_raw("create_media_buy", payload, authenticated_principal)
 
     assert hid_existing_row, "Test did not force the early idempotency lookup miss"
-    assert replay.isError is False, f"Expected successful race recovery replay; got: {replay!r}"
-    replay_structured = replay.structuredContent or {}
+    assert replay.is_error is False, f"Expected successful race recovery replay; got: {replay!r}"
+    replay_structured = replay.structured_content or {}
     assert replay_structured.get("media_buy_id") == first_structured.get("media_buy_id"), (
         f"Expected race replay to return same media_buy_id; got "
         f"first={first_structured!r}, replay={replay_structured!r}"

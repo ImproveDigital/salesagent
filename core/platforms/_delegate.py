@@ -904,19 +904,11 @@ async def _delegate_provide_performance_feedback(req: Any, ctx: RequestContext[A
     contract test pass. When a real performance-feedback pipeline lands
     upstream, this delegate becomes a forward to the new ``_impl``.
     """
-    # Coerce to dict for inspection. The library response type accepts
-    # status + ext, so we acknowledge the receipt without persisting.
-    if hasattr(req, "model_dump"):
-        payload = req.model_dump(exclude_none=True)
-    elif isinstance(req, dict):
-        payload = dict(req)
-    else:
-        payload = {}
-    return {
-        "status": "acknowledged",
-        "message": "performance feedback receipt is not yet wired in this salesagent",
-        "echo": payload,
-    }
+    # ``provide-performance-feedback-response.json`` (3.1) is a task-status
+    # envelope (``status`` in the AdCP task-state enum) plus ``oneOf``
+    # ``{success}`` / ``{errors}``; anything else fails the SDK's response
+    # validation. Acknowledge receipt without persisting.
+    return {"status": "completed", "success": True}
 
 
 def _wire_value(container: Any, key: str) -> Any:

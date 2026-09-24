@@ -747,6 +747,13 @@ def _canonicalize_package(package: Any) -> Any:
         return package
     body = dict(package)
     product_id = body.get("product_id") if isinstance(body.get("product_id"), str) else None
+    # ``format_ids_to_provide`` (outstanding creative requirements) is legacy
+    # identity: the canonical boundary rejects every ``format_ids*`` key, and the
+    # SDK's legacy downgrade only serves references whose declarations were
+    # discovered through get_products, so it cannot be re-expressed as refs
+    # here. Canonical packages carry ``format_option_refs`` for the formats
+    # they use; requirements are implied by those options.
+    body.pop("format_ids_to_provide", None)
     format_ids = body.get("format_ids")
     if isinstance(format_ids, list) and not body.get("format_option_refs"):
         option_refs: list[dict[str, Any]] = []
@@ -759,8 +766,6 @@ def _canonicalize_package(package: Any) -> Any:
         if option_refs or not format_ids:
             body["format_option_refs"] = option_refs
             body.pop("format_ids", None)
-            # Creative requirements are implied by the referenced options.
-            body.pop("format_ids_to_provide", None)
     return body
 
 
