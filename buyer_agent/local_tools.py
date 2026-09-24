@@ -32,10 +32,9 @@ async def _ask_user(arguments: dict[str, Any]) -> dict[str, str]:
     the harness may be doing while the human types.
     """
     question = str(arguments.get("question", "")).strip()
-    print(f"\n[agent asks] {question}")
-    answer = await asyncio.to_thread(input, "[you] > ")
+    print(f"\n[agent] {question}")
+    answer = await asyncio.to_thread(input, "[user] > ")
     answer = answer.strip()
-    print(f"[you said] {answer}")
     return {"answer": answer}
 
 

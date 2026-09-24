@@ -19,6 +19,9 @@ import asyncio
 import itertools
 import json
 import os
+import shutil
+import sys
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,6 +59,41 @@ MAX_TOTAL_TURNS = 60
 STALL_REPEATS = 3  # same tool + same arguments this many times in a row = stuck
 
 
+@asynccontextmanager
+async def thinking(label: str = "thinking"):
+    """Show an animated ``thinking...`` line while waiting, erase it afterwards.
+
+    Only animates on a real terminal. When output is piped to a file there is
+    no cursor to move, so nothing is printed and logs stay clean.
+    """
+    if not sys.stdout.isatty():
+        yield
+        return
+
+    async def animate() -> None:
+        dots = 0
+        while True:
+            sys.stdout.write(f"\r[agent] {label}{'.' * dots}{' ' * (3 - dots)}")
+            sys.stdout.flush()
+            dots = (dots + 1) % 4
+            await asyncio.sleep(0.4)
+
+    task = asyncio.create_task(animate())
+    try:
+        yield
+    finally:
+        task.cancel()
+        sys.stdout.write("\r\033[K")  # back to column 0, clear to end of line
+        sys.stdout.flush()
+
+
+def rule(label: str = "") -> None:
+    """Horizontal line between turns, with an optional label."""
+    width = shutil.get_terminal_size((80, 20)).columns
+    text = f" {label} " if label else ""
+    print(f"\n{text.center(width, '─')}")
+
+
 def connect() -> Client:
     """Build an MCP client for the sales agent from environment variables."""
     url = os.environ["SALES_AGENT_MCP_URL"]
@@ -71,9 +109,9 @@ async def confirm(entry: ToolEntry, arguments: dict[str, Any]) -> bool:
     told. The prompt may ask the model to confirm via ask_user as well, but
     the prompt is advice; this is the rule.
     """
-    print(f"\n[confirm] {entry.name} changes state on the sales agent. Arguments:")
+    print(f"\n[harness] {entry.name} changes state on the sales agent. Arguments:")
     print(json.dumps(arguments, indent=2))
-    reply = await asyncio.to_thread(input, "[confirm] run it? [y/N] > ")
+    reply = await asyncio.to_thread(input, "[user] run it? [y/N] > ")
     return reply.strip().lower() in {"y", "yes"}
 
 
@@ -115,10 +153,10 @@ def involves_human(registry: dict[str, ToolEntry], name: str) -> bool:
 
 
 async def grant_more_turns(streak: int, recent: list[str]) -> bool:
-    print(f"\n[budget] {streak} model turns in a row without involving you. Recent calls:")
+    print(f"\n[harness] {streak} model turns in a row without involving you. Recent calls:")
     for line in recent[-5:]:
         print(f"  {line}")
-    reply = await asyncio.to_thread(input, f"[budget] allow {MAX_AUTONOMOUS_TURNS} more? [y/N] > ")
+    reply = await asyncio.to_thread(input, f"[user] allow {MAX_AUTONOMOUS_TURNS} more? [y/N] > ")
     return reply.strip().lower() in {"y", "yes"}
 
 
@@ -156,15 +194,17 @@ async def run_agent(
 
         if show_history:
             print_history(history)
-        response = await llm.step(client, history, gemini_tools, system)
+        async with thinking():
+            response = await llm.step(client, history, gemini_tools, system)
         model_turn = response.candidates[0].content
         history.append(model_turn)
 
         calls = list(response.function_calls or [])
         if not calls:
+            rule("done")
             return response.text or "(model returned no text)"
 
-        print(f"\n--- turn {turn}: {len(calls)} tool call(s) ---")
+        rule(f"turn {turn}")
         result_parts: list[types.Part] = []
         human_this_turn = False
         for call in calls:
@@ -190,7 +230,7 @@ async def run_agent(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the buyer agent against the sales agent.")
-    parser.add_argument("goal", help="What the buyer wants, in plain language.")
+    parser.add_argument("goal", nargs="?", help="What the buyer wants. Omit to be asked interactively.")
     parser.add_argument(
         "--tools",
         help="Comma-separated sales agent tools to expose. Default: all. Local tools are always included.",
@@ -209,9 +249,17 @@ async def main() -> None:
         print(f"Tools exposed: {len(registry)} ({', '.join(sorted(registry))})")
         print(f"Gated (need confirmation): {', '.join(gated) or 'none'}")
 
-        print(f"\nGoal: {args.goal}")
-        answer = await run_agent(registry, args.goal, show_history=args.show_history)
-        print(f"\n=== agent finished ===\n{answer}")
+        goal = args.goal
+        if not goal:
+            rule()
+            print("[harness] What should the buyer do?")
+            goal = (await asyncio.to_thread(input, "[user] > ")).strip()
+        if not goal:
+            print("[harness] No goal given, exiting.")
+            return
+
+        answer = await run_agent(registry, goal, show_history=args.show_history)
+        print(f"[agent] {answer}")
 
 
 if __name__ == "__main__":
