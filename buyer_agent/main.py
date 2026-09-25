@@ -308,7 +308,7 @@ async def _loop(  # noqa: PLR0913
             rule("done")
             tracker.print_call_line()
             render.agent_text(response.text or "(model returned no text)")
-            tracker.print_goal_summary()
+            # tracker.print_goal_summary()  # per-goal table, disabled for now
             follow_up = await ask_follow_up()
             if not follow_up:
                 return "(session ended by the operator)"
