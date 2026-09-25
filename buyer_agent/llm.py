@@ -76,9 +76,11 @@ async def step(
     tools: list[types.Tool],
     system: str,
 ) -> types.GenerateContentResponse:
+    # list is invariant, so list[Content] is not a list[ContentUnion]; rebuild it.
+    contents: list[types.ContentUnion] = list(history)
     return await client.aio.models.generate_content(
         model=model_name(),
-        contents=history,
+        contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=system,
             tools=tools,

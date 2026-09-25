@@ -30,9 +30,10 @@ from dotenv import load_dotenv
 from fastmcp.client import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
+from google import genai
 from google.genai import errors, types
 
-from buyer_agent import llm
+from buyer_agent import llm, render, usage
 from buyer_agent.local_tools import LOCAL_TOOLS
 from buyer_agent.registry import ToolEntry, build_registry
 
@@ -200,6 +201,20 @@ def involves_human(registry: dict[str, ToolEntry], name: str) -> bool:
     return name == "ask_user" or bool(entry and entry.requires_confirmation)
 
 
+EXIT_WORDS = {"no", "n", "exit", "quit", "q", "done", "bye"}
+
+
+async def ask_follow_up() -> str:
+    """After the model's final answer, ask the operator for a follow-up.
+
+    The conversation history is kept, so the next goal can refer to anything
+    said so far. An empty line or an exit word ends the session.
+    """
+    print("\n[harness] Anything else? (Enter or 'exit' to finish)")
+    reply = (await asyncio.to_thread(input, "[user] > ")).strip()
+    return "" if reply.lower() in EXIT_WORDS else reply
+
+
 async def grant_more_turns(streak: int, recent: list[str]) -> bool:
     print(f"\n[harness] {streak} model turns in a row without involving you. Recent calls:")
     for line in recent[-5:]:
@@ -215,8 +230,9 @@ async def run_agent(
 ) -> str:
     """The agent loop: model proposes, harness executes, result goes back. Repeat.
 
-    Ends when the model replies with text, when the operator declines more
-    autonomous turns, when the same call repeats STALL_REPEATS times in a row,
+    When the model replies with text the operator is asked for a follow-up,
+    which continues the same history. Ends when the operator has nothing more,
+    when they decline more autonomous turns, when the same call repeats STALL_REPEATS times in a row,
     or at the absolute ceiling. All of these live here, not in the prompt.
 
     Tool schemas go to Gemini exactly as the sales agent serves them. If Gemini
@@ -227,6 +243,22 @@ async def run_agent(
     history: list[types.Content] = [llm.user_turn(goal)]
     system = system_prompt()
 
+    tracker = usage.Tracker()
+    try:
+        return await _loop(client, registry, gemini_tools, history, system, tracker, show_history)
+    finally:
+        tracker.print_session_line(llm.model_name())
+
+
+async def _loop(  # noqa: PLR0913
+    client: genai.Client,
+    registry: dict[str, ToolEntry],
+    gemini_tools: list[types.Tool],
+    history: list[types.Content],
+    system: str,
+    tracker: usage.Tracker,
+    show_history: bool,
+) -> str:
     autonomous_streak = 0
     recent_calls: list[str] = []
     last_signature: str | None = None
@@ -256,6 +288,7 @@ async def run_agent(
                 tool_schema_bytes=sum(len(json.dumps(e.input_schema)) for e in registry.values()),
             )
             return f"(stopped: model call failed with {type(exc).__name__} {getattr(exc, 'code', '')})"
+        tracker.record(response.usage_metadata)
         if not response.candidates:
             report_error(
                 "model returned no candidates",
@@ -265,17 +298,32 @@ async def run_agent(
             )
             return "(stopped: model returned no candidates)"
         model_turn = response.candidates[0].content
+        if model_turn is None:
+            report_error("model returned no content", RuntimeError("empty candidate"), turn=turn)
+            return "(stopped: model returned no content)"
         history.append(model_turn)
 
         calls = list(response.function_calls or [])
         if not calls:
             rule("done")
-            return response.text or "(model returned no text)"
+            tracker.print_call_line()
+            render.agent_text(response.text or "(model returned no text)")
+            tracker.print_goal_summary()
+            follow_up = await ask_follow_up()
+            if not follow_up:
+                return "(session ended by the operator)"
+            history.append(llm.user_turn(follow_up))
+            tracker.new_goal()
+            autonomous_streak = 0
+            continue
 
         rule(f"turn {turn}")
+        tracker.print_call_line()
         result_parts: list[types.Part] = []
         human_this_turn = False
         for call in calls:
+            if not call.name:
+                return "(stopped: model issued a function call without a name)"
             arguments = dict(call.args or {})
             signature = f"{call.name} {json.dumps(arguments, sort_keys=True)}"
             repeats = repeats + 1 if signature == last_signature else 1
@@ -326,8 +374,8 @@ async def main() -> None:
             print("[harness] No goal given, exiting.")
             return
 
-        answer = await run_agent(registry, goal, show_history=args.show_history)
-        print(f"[agent] {answer}")
+        outcome = await run_agent(registry, goal, show_history=args.show_history)
+        print(f"[harness] {outcome}")
 
 
 if __name__ == "__main__":

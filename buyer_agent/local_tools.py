@@ -15,6 +15,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from buyer_agent import render
+
 
 @dataclass(frozen=True)
 class LocalTool:
@@ -32,7 +34,7 @@ async def _ask_user(arguments: dict[str, Any]) -> dict[str, str]:
     the harness may be doing while the human types.
     """
     question = str(arguments.get("question", "")).strip()
-    print(f"\n[agent] {question}")
+    render.agent_text(question)
     answer = await asyncio.to_thread(input, "[user] > ")
     answer = answer.strip()
     return {"answer": answer}
