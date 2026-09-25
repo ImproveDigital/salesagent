@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import sys
+import traceback
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -29,7 +30,7 @@ from dotenv import load_dotenv
 from fastmcp.client import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
-from google.genai import types
+from google.genai import errors, types
 
 from buyer_agent import llm
 from buyer_agent.local_tools import LOCAL_TOOLS
@@ -39,6 +40,14 @@ load_dotenv()
 
 SYSTEM_PROMPT_TEMPLATE = """You are a media buyer working with an advertising sales agent through tools.
 Today's date is {today} (UTC). Use it to resolve relative dates such as "tomorrow".
+
+Scope. You only handle advertising media buying through this sales agent: discovering
+accounts and products, creative formats, creating and updating media buys, creatives,
+delivery and reporting, and questions about what the sales agent offers or about this
+conversation. If the user asks for anything outside that scope, decline in one sentence,
+state what you can help with, and do not answer the out-of-scope request. Do not call
+tools to answer an out-of-scope request.
+
 Work towards the user's goal by calling tools. Never invent IDs, domains, budgets or dates:
 if a value is missing, discover it with a read-only tool or ask the user with ask_user.
 Before calling a tool that creates or changes something, summarise what you are about to do
@@ -115,6 +124,38 @@ async def confirm(entry: ToolEntry, arguments: dict[str, Any]) -> bool:
     return reply.strip().lower() in {"y", "yes"}
 
 
+def report_error(where: str, exc: BaseException, **context: Any) -> None:
+    """Print everything known about a failure, untruncated, in one marked block.
+
+    Used for tool failures (which the run survives) and model failures (which
+    end it). ``context`` carries whatever identifies the failing step: tool
+    name and arguments, turn number, request payload size.
+    """
+    print(f"\n[error] {where}")
+    print(f"  type:    {type(exc).__module__}.{type(exc).__name__}")
+    print(f"  message: {exc}")
+    for key, value in context.items():
+        text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
+        print(
+            f"  {key}:"
+            + ("\n" + "\n".join("    " + line for line in text.splitlines()) if "\n" in text else f" {text}")
+        )
+    # Gemini errors carry an HTTP status and a JSON body worth seeing in full.
+    for attr in ("code", "status", "details", "response_json"):
+        value = getattr(exc, attr, None)
+        if value not in (None, "", {}):
+            print(
+                f"  {attr}: {json.dumps(value, indent=2, default=str) if not isinstance(value, str | int) else value}"
+            )
+    if exc.__cause__ is not None:
+        print(f"  caused by: {type(exc.__cause__).__name__}: {exc.__cause__}")
+    if not isinstance(exc, ToolError | errors.APIError):
+        # Unexpected exception types: the traceback is the only real clue.
+        print("  traceback:")
+        for line in traceback.format_exception(exc):
+            print("    " + line.rstrip())
+
+
 async def execute(registry: dict[str, ToolEntry], name: str, arguments: dict[str, Any]) -> Any:
     """Look the tool up, pass it through the gate if flagged, run it.
 
@@ -129,7 +170,14 @@ async def execute(registry: dict[str, ToolEntry], name: str, arguments: dict[str
     try:
         return await entry.run(arguments)
     except ToolError as exc:
+        # The sales agent rejected or failed the call. Expected during testing.
+        report_error(f"tool '{name}' failed on the sales agent", exc, tool=name, arguments=arguments)
         return {"error": str(exc)}
+    except Exception as exc:
+        # Anything else: transport, a bug in a local tool, a bad result shape.
+        # Still returned to the model as data, but with the full traceback shown.
+        report_error(f"tool '{name}' raised unexpectedly in the harness", exc, tool=name, arguments=arguments)
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def print_history(history: list[types.Content]) -> None:
@@ -194,8 +242,28 @@ async def run_agent(
 
         if show_history:
             print_history(history)
-        async with thinking():
-            response = await llm.step(client, history, gemini_tools, system)
+        try:
+            async with thinking():
+                response = await llm.step(client, history, gemini_tools, system)
+        except errors.APIError as exc:
+            report_error(
+                "model call failed",
+                exc,
+                turn=turn,
+                model=llm.model_name(),
+                history_turns=len(history),
+                tools=[e.name for e in registry.values()],
+                tool_schema_bytes=sum(len(json.dumps(e.input_schema)) for e in registry.values()),
+            )
+            return f"(stopped: model call failed with {type(exc).__name__} {getattr(exc, 'code', '')})"
+        if not response.candidates:
+            report_error(
+                "model returned no candidates",
+                RuntimeError("empty response"),
+                turn=turn,
+                prompt_feedback=getattr(response, "prompt_feedback", None),
+            )
+            return "(stopped: model returned no candidates)"
         model_turn = response.candidates[0].content
         history.append(model_turn)
 
