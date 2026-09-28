@@ -5,12 +5,20 @@ implementation pattern from CLAUDE.md.
 """
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from adcp.types import ContextObject
 from pydantic import ValidationError
 
-from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError, AdCPValidationError
+from src.core.exceptions import (
+    AdCPAdapterError,
+    AdCPAuthenticationError,
+    AdCPInvalidStateError,
+    AdCPNotFoundError,
+    AdCPPackageNotFoundError,
+    AdCPValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +28,7 @@ from src.core.database.repositories import MediaBuyUoW
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import PackagePerformance, UpdatePerformanceIndexRequest, UpdatePerformanceIndexResponse
+from src.core.tools._gam_projection import not_materialized_message, unmaterialized_projected_ids
 from src.core.tools.media_buy_update import _verify_principal
 from src.core.tracing import traced
 from src.core.validation_helpers import format_validation_error
@@ -124,3 +133,99 @@ def _update_performance_index_impl(
         detail=f"Performance index updated for {len(req.performance_data)} products",
         context=req.context,
     )
+
+
+def _parse_period_bound(value: Any, name: str) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as e:
+        raise AdCPValidationError(f"measurement_period.{name} must be an ISO 8601 date-time") from e
+
+
+@traced
+def _provide_performance_feedback_impl(
+    media_buy_id: str,
+    performance_index: float,
+    measurement_period: dict[str, Any],
+    package_id: str | None = None,
+    creative_id: str | None = None,
+    metric_type: str | None = None,
+    feedback_source: str | None = None,
+    identity: ResolvedIdentity | None = None,
+) -> bool:
+    """Record buyer performance feedback for a media buy (AdCP provide_performance_feedback).
+
+    Verifies the caller owns the media buy (and the package, when given),
+    forwards the index to the adapter and writes an audit-log entry.
+
+    Raises:
+        AdCPAuthenticationError: Missing identity, principal or tenant.
+        AdCPMediaBuyNotFoundError / AdCPAuthorizationError: Buy unknown or not owned.
+        AdCPInvalidStateError: Imported GAM order not yet claimed via update_media_buy.
+        AdCPPackageNotFoundError: ``package_id`` is not part of the media buy.
+        AdCPValidationError: Invalid performance_index or measurement_period.
+        AdCPAdapterError: The adapter rejected the update.
+    """
+    if identity is None or not identity.principal_id:
+        raise AdCPAuthenticationError("Authentication required for provide_performance_feedback")
+    tenant = identity.tenant
+    if not tenant:
+        raise AdCPAuthenticationError("No tenant context available")
+
+    if performance_index < 0:
+        raise AdCPValidationError("performance_index must be >= 0")
+    start = _parse_period_bound(measurement_period.get("start"), "start")
+    end = _parse_period_bound(measurement_period.get("end"), "end")
+    if start > end:
+        raise AdCPValidationError("measurement_period.start must be on or before measurement_period.end")
+
+    with MediaBuyUoW(tenant["tenant_id"]) as uow:
+        assert uow.media_buys is not None
+        assert uow.session is not None
+        if media_buy_id in unmaterialized_projected_ids(
+            uow.session, tenant["tenant_id"], identity.principal_id, [media_buy_id]
+        ):
+            raise AdCPInvalidStateError(not_materialized_message(media_buy_id))
+        _verify_principal(media_buy_id, identity, uow.media_buys)
+        buy_package_ids = [pkg.package_id for pkg in uow.media_buys.get_packages(media_buy_id)]
+
+    if package_id is not None:
+        if package_id not in buy_package_ids:
+            raise AdCPPackageNotFoundError(f"Package '{package_id}' not found in media buy '{media_buy_id}'.")
+        target_package_ids = [package_id]
+    else:
+        target_package_ids = buy_package_ids
+
+    principal = get_principal_object(identity.principal_id, tenant_id=identity.tenant_id)
+    if not principal:
+        raise AdCPNotFoundError(f"Principal {identity.principal_id} not found")
+
+    adapter = get_adapter(principal, dry_run=False, tenant=tenant)
+    package_performance = [
+        PackagePerformance(package_id=pid, performance_index=performance_index) for pid in target_package_ids
+    ]
+    success = adapter.update_media_buy_performance_index(media_buy_id, package_performance)
+
+    get_audit_logger("AdCP", tenant["tenant_id"]).log_operation(
+        operation="provide_performance_feedback",
+        principal_name=identity.principal_id,
+        principal_id=identity.principal_id,
+        adapter_id="mcp_server",
+        success=success,
+        details={
+            "media_buy_id": media_buy_id,
+            "package_id": package_id,
+            "creative_id": creative_id,
+            "performance_index": performance_index,
+            "metric_type": metric_type,
+            "feedback_source": feedback_source,
+            "measurement_period": {"start": start.isoformat(), "end": end.isoformat()},
+            "package_ids": target_package_ids,
+        },
+    )
+
+    if not success:
+        raise AdCPAdapterError(f"Adapter rejected performance feedback for media buy '{media_buy_id}'.")
+    return True

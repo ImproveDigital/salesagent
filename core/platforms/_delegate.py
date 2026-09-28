@@ -56,6 +56,7 @@ from src.core.tools.media_buy_create import _create_media_buy_impl
 from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 from src.core.tools.media_buy_list import _get_media_buys_impl
 from src.core.tools.media_buy_update import _update_media_buy_impl
+from src.core.tools.performance import _provide_performance_feedback_impl
 from src.core.tools.products import _get_products_impl
 from src.core.tools.signals import _get_signals_impl
 from src.core.transport_helpers import enrich_identity_with_account
@@ -896,18 +897,26 @@ async def _delegate_list_creative_formats(req: Any, ctx: RequestContext[Any]) ->
 
 @translate_adcp_errors
 async def _delegate_provide_performance_feedback(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
-    """Stub — salesagent doesn't yet have a performance-feedback impl.
+    """Forward to ``src/core/tools/performance.py:_provide_performance_feedback_impl``.
 
-    Required by the v6.0-rc.1 SalesPlatform Protocol; the soft-warn at boot
-    fires when the platform omits it. Returns an acknowledgement matching
-    the protocol's response shape so the framework's validator + buyer
-    contract test pass. When a real performance-feedback pipeline lands
-    upstream, this delegate becomes a forward to the new ``_impl``.
+    ``provide-performance-feedback-response.json`` (3.1) is a task-status
+    envelope (``status`` in the AdCP task-state enum) plus ``oneOf``
+    ``{success}`` / ``{errors}``; rejections raise and are projected onto the
+    ``adcp_error`` envelope by ``translate_adcp_errors``.
     """
-    # ``provide-performance-feedback-response.json`` (3.1) is a task-status
-    # envelope (``status`` in the AdCP task-state enum) plus ``oneOf``
-    # ``{success}`` / ``{errors}``; anything else fails the SDK's response
-    # validation. Acknowledge receipt without persisting.
+    identity = _build_identity(ctx)
+    body = _request_payload(req)
+    await asyncio.to_thread(
+        _provide_performance_feedback_impl,
+        media_buy_id=body["media_buy_id"],
+        performance_index=float(body["performance_index"]),
+        measurement_period=body.get("measurement_period") or {},
+        package_id=body.get("package_id"),
+        creative_id=body.get("creative_id"),
+        metric_type=_wire_value(body, "metric_type"),
+        feedback_source=_wire_value(body, "feedback_source"),
+        identity=identity,
+    )
     return {"status": "completed", "success": True}
 
 
