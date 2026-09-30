@@ -24,7 +24,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 
 from tests.e2e.adcp_request_builder import (
     build_adcp_media_buy_request,
-    build_creative,
+    build_canonical_creative,
     build_sync_creatives_request,
     build_update_media_buy_request,
     get_test_date_range,
@@ -151,8 +151,11 @@ class TestAdCPReferenceImplementation:
             product = products_data["products"][0]
             product_id = product["product_id"]
             print(f"   ✓ Found product: {product['name']} ({product_id})")
-            # Product uses 'format_ids' field
-            print(f"   ✓ Formats: {product['format_ids']}")
+            # adcp 7 (AdCP 3.1): products advertise canonical ``format_options``
+            # (format_option_id + format_kind + params) instead of ``format_ids``.
+            format_options = product["format_options"]
+            assert len(format_options) > 0, f"Product {product_id} must advertise at least one format option"
+            print(f"   ✓ Formats: {format_options}")
 
             # Get creative formats (no req wrapper - takes optional params directly)
             formats_result = await client.call_tool("list_creative_formats", {})
@@ -211,23 +214,26 @@ class TestAdCPReferenceImplementation:
             # ================================================================
             print("\n🎨 PHASE 3: Sync Creatives")
 
-            # Build creatives using helper
+            # Build canonical creatives targeting the product's advertised format
+            # options (AdCP 3.1 identity: format_kind + format_option_ref).
             creative_id_1 = f"creative_{uuid.uuid4().hex[:8]}"
             creative_id_2 = f"creative_{uuid.uuid4().hex[:8]}"
+            option_1 = format_options[0]
+            option_2 = format_options[1] if len(format_options) > 1 else format_options[0]
 
-            creative_1 = build_creative(
+            creative_1 = build_canonical_creative(
                 creative_id=creative_id_1,
-                format_id="display_300x250",
-                name="Nike Air Jordan - Display 300x250",
-                asset_url="https://example.com/nike-jordan-300x250.jpg",
+                format_option=option_1,
+                name=f"Nike Air Jordan - {option_1['format_kind']} {option_1['format_option_id']}",
+                asset_url="https://example.com/nike-jordan-1.jpg",
                 click_through_url="https://nike.com/air-jordan-2025",
             )
 
-            creative_2 = build_creative(
+            creative_2 = build_canonical_creative(
                 creative_id=creative_id_2,
-                format_id="display_728x90",
-                name="Nike Air Jordan - Display 728x90",
-                asset_url="https://example.com/nike-jordan-728x90.jpg",
+                format_option=option_2,
+                name=f"Nike Air Jordan - {option_2['format_kind']} {option_2['format_option_id']}",
+                asset_url="https://example.com/nike-jordan-2.jpg",
                 click_through_url="https://nike.com/air-jordan-2025",
             )
 

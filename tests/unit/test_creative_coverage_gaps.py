@@ -634,7 +634,7 @@ class TestValidationEdgeCases:
 
     def test_tags_passthrough(self, mock_format_spec):
         """Line 72: creative with non-empty tags."""
-        from adcp.types.generated_poc.core.creative_asset import CreativeAsset
+        from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
 
         from src.core.tools.creatives._validation import _validate_creative_input
 

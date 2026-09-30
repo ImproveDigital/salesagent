@@ -7,7 +7,7 @@ assignments, and admin approval workflows.
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from adcp.types import (
     AiTool,
@@ -17,20 +17,6 @@ from adcp.types import (
     SchemaVariant,
 )
 from adcp.types import CreativeApproval as LibraryCreativeApproval
-from adcp.types import CreativeAsset as LibraryCreativeAsset
-from adcp.types import FormatId as LibraryFormatId
-from adcp.types import (
-    ListCreativeFormatsRequest as LibraryListCreativeFormatsRequest,
-)
-from adcp.types import (
-    ListCreativeFormatsResponse as LibraryListCreativeFormatsResponse,
-)
-from adcp.types import (
-    ListCreativesRequest as LibraryListCreativesRequest,
-)
-from adcp.types import (
-    ListCreativesResponse as LibraryListCreativesResponse,
-)
 from adcp.types import PaginationResponse as LibraryResponsePagination
 from adcp.types import (
     QuerySummary as LibraryQuerySummary,
@@ -38,9 +24,14 @@ from adcp.types import (
 from adcp.types import (
     SyncCreativeResult as LibrarySyncCreativeResult,
 )
-from adcp.types import (
-    SyncCreativesRequest as LibrarySyncCreativesRequest,
-)
+
+# adcp 7.x: canonical creative identity is the primary contract; salesagent
+# still serves the AdCP 3.x named-format (``format_id``) wire shape, so extend
+# the SDK's explicit ``Legacy*`` models (see src/core/schemas/_base.py).
+# ``CreativeAsset`` is a RootModel union in adcp 7 (``CreativeAsset1`` legacy
+# ``format_id`` path | ``CreativeAsset2`` canonical ``format_kind`` path); extend
+# the named-format variant directly so field overrides keep working.
+from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as LibraryCreativeAsset
 
 # Pin to the listing-side ``Creative`` (list_creatives_response). The
 # top-level ``adcp.types.Creative`` resolves to the delivery-side type
@@ -48,12 +39,21 @@ from adcp.types import (
 # ``creative_id, media_buy_id, format_id, totals, variant_count, variants``
 # and rejects ``tags`` / ``status`` / ``assets`` etc. Our Creative is
 # explicitly a listing-side schema, so we extend the listing variant.
+# adcp 7.x splits the listing row into ``Creatives`` (legacy ``format_id``
+# path) and ``Creatives1`` (canonical ``format_kind`` path); we serve the
+# named-format path.
 from adcp.types.generated_poc.creative.list_creatives_response import (
-    Creative as LibraryCreative,
+    Creatives as LibraryCreative,
 )
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
+from adcp.types.legacy import LegacyFormatId as LibraryFormatId
+from adcp.types.legacy import LegacyListCreativeFormatsRequest as LibraryListCreativeFormatsRequest
+from adcp.types.legacy import LegacyListCreativeFormatsResponse as LibraryListCreativeFormatsResponse
+from adcp.types.legacy import LegacyListCreativesRequest as LibraryListCreativesRequest
+from adcp.types.legacy import LegacyListCreativesResponse as LibraryListCreativesResponse
+from adcp.types.legacy import LegacySyncCreativesRequest as LibrarySyncCreativesRequest
 from pydantic import (
     ConfigDict,
     Field,
@@ -279,8 +279,8 @@ class Creative(LibraryCreative):
     # Helper properties for format_id (still present in 3.6.0)
     @property
     def format(self) -> LibraryFormatId | None:
-        """Alias for format_id."""
-        return self.format_id
+        """Alias for format_id (upgraded to ``FormatId`` by ``validate_format_id``)."""
+        return cast(LibraryFormatId | None, self.format_id)
 
     @property
     def format_id_str(self) -> str | None:

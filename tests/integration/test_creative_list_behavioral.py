@@ -413,7 +413,7 @@ class TestListStructuredFilters:
 
     def test_structured_filters_merge_with_flat(self, integration_db):
         """Spec: list_creatives structured filters merge with flat params in request."""
-        from adcp import CreativeFilters
+        from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 
         with CreativeListEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")

@@ -7,7 +7,7 @@ beads: salesagent-x79
 """
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from adcp.types import Error, Setup
 from adcp.types import ListAccountsRequest as LibraryListAccountsRequest
@@ -149,6 +149,11 @@ class SyncAccountsResponse(NestedModelSerializerMixin, LibrarySyncAccountsSucces
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    # AdCP 3.1 requires the protocol envelope ``status`` on every synchronous
+    # response; adcp 7's dispatcher stamps ``completed`` on the wire. Declare it
+    # (as ``CreateMediaBuySuccess`` does) so the strict local model round-trips.
+    status: Literal["completed"] = "completed"
 
     # SyncResponseAccount is an independent local row model (extends AdCPBaseModel,
     # NOT a subclass of the parent's element type). adcp 6.3 retyped the parent's

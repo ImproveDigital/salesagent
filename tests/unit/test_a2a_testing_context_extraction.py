@@ -12,6 +12,7 @@ Beads: salesagent-2yt6
 from unittest.mock import patch
 
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.resolved_identity import ResolvedIdentity
 from tests.a2a_helpers import make_a2a_context
 

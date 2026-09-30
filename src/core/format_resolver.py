@@ -10,7 +10,7 @@ creative agent-based format discovery per AdCP v2.4.
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from adcp.utils.format_assets import get_format_assets
 
@@ -59,7 +59,7 @@ def _format_is_responsive(fmt: Format) -> bool:
 
 def _format_asset_types(fmt: Format) -> set[str]:
     asset_types: set[str] = set()
-    for asset_req in get_format_assets(fmt):
+    for asset_req in get_format_assets(cast(Any, fmt)):
         asset_type = getattr(asset_req, "asset_type", None)
         if asset_type:
             asset_types.add(_string_value(asset_type))

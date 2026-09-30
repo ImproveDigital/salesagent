@@ -72,29 +72,19 @@ class TestSchemaMatchesLibrary:
         Non-spec fields should be explicitly documented and eventually removed.
         """
         from adcp import (
-            CreateMediaBuyRequest as LibCreateMediaBuyRequest,
-        )
-        from adcp import (
             GetMediaBuyDeliveryRequest as LibGetMediaBuyDeliveryRequest,
         )
         from adcp import (
             GetSignalsRequest as LibGetSignalsRequest,
         )
+        from adcp.types.legacy import LegacyCreateMediaBuyRequest as LibCreateMediaBuyRequest
+        from adcp.types.legacy import LegacyGetProductsRequest as LibGetProductsRequest
 
         # NOTE: ListAuthorizedPropertiesRequest was removed from adcp 3.2.0
         # We define it locally in src/core/schemas.py
-        from adcp import (
-            ListCreativeFormatsRequest as LibListCreativeFormatsRequest,
-        )
-        from adcp import (
-            ListCreativesRequest as LibListCreativesRequest,
-        )
-        from adcp import (
-            SyncCreativesRequest as LibSyncCreativesRequest,
-        )
-        from adcp.types import (
-            GetProductsWholesaleRequest as LibGetProductsRequest,
-        )
+        from adcp.types.legacy import LegacyListCreativeFormatsRequest as LibListCreativeFormatsRequest
+        from adcp.types.legacy import LegacyListCreativesRequest as LibListCreativesRequest
+        from adcp.types.legacy import LegacySyncCreativesRequest as LibSyncCreativesRequest
 
         from src.core.schemas import (
             CreateMediaBuyRequest as LocalCreateMediaBuyRequest,
@@ -176,7 +166,7 @@ class TestSchemaMatchesLibrary:
         This test catches accidental regressions where we make fields required.
         In adcp 3.6.0, brand_manifest is replaced by brand (BrandReference with domain).
         """
-        from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
+        from adcp.types.legacy import LegacyGetProductsRequest as LibraryGetProductsRequest
 
         # Verify library allows empty request (buying_mode is required for wholesale variant)
         lib_req = LibraryGetProductsRequest(buying_mode="wholesale")
@@ -192,7 +182,7 @@ class TestSchemaMatchesLibrary:
 
     def test_get_products_request_brand_accepts_domain(self):
         """Verify brand (BrandReference) accepts domain field per adcp 3.6.0."""
-        from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
+        from adcp.types.legacy import LegacyGetProductsRequest as LibraryGetProductsRequest
 
         # Library accepts brand with domain (buying_mode required for wholesale variant)
         lib_req = LibraryGetProductsRequest(brand={"domain": "acme.com"}, buying_mode="wholesale")
@@ -208,7 +198,7 @@ class TestSchemaMatchesLibrary:
 
         In adcp 3.6.0, brand (BrandReference) is required for CreateMediaBuyRequest.
         """
-        from adcp import CreateMediaBuyRequest as LibraryCreateMediaBuyRequest
+        from adcp.types.legacy import LegacyCreateMediaBuyRequest as LibraryCreateMediaBuyRequest
         from pydantic import ValidationError
 
         # Library should require brand for CreateMediaBuyRequest
@@ -217,7 +207,7 @@ class TestSchemaMatchesLibrary:
 
     def test_schema_validation_matches_library(self):
         """Compare our schema validation against library for common cases."""
-        from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
+        from adcp.types.legacy import LegacyGetProductsRequest as LibraryGetProductsRequest
 
         # Test cases that should work in both (adcp 3.6.0: brand replaces brand_manifest)
         # buying_mode is required for the wholesale variant in adcp 3.9
@@ -1606,11 +1596,10 @@ class TestAdCPContract:
 
         Now extends library ListCreativesRequest directly - all fields are spec-compliant.
         """
-        from adcp.types import CreativeFilters as LibraryCreativeFilters
-
         # adcp 3.6.0: Request pagination uses PaginationRequest (cursor + max_results)
         from adcp.types.generated_poc.core.pagination_request import PaginationRequest
         from adcp.types.generated_poc.creative.list_creatives_request import Sort as LibrarySort
+        from adcp.types.legacy import LegacyCreativeFilters as LibraryCreativeFilters
 
         from src.core.schemas import ListCreativesRequest
 

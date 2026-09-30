@@ -1821,9 +1821,7 @@ class TestUC003UpdateCreativeIds:
         from adcp.types.generated_poc.creative.get_creative_delivery_response import (
             Creative as LibraryDeliveryCreative,
         )
-        from adcp.types.generated_poc.creative.list_creatives_response import (
-            Creative as LibraryListCreative,
-        )
+        from adcp.types.generated_poc.creative.list_creatives_response import Creatives as LibraryListCreative
 
         from src.core.schemas import Creative
 

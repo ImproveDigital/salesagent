@@ -261,6 +261,7 @@ class TestFastAPIExceptionHandlers:
     def test_validation_error_returns_400(self):
         """AdCPValidationError raised in a route must return 400."""
         from src.app import app
+
         from src.core.exceptions import AdCPValidationError
 
         # Add a temporary test route that raises
@@ -278,6 +279,7 @@ class TestFastAPIExceptionHandlers:
     def test_authentication_error_returns_401(self):
         """AdCPAuthenticationError raised in a route must return 401."""
         from src.app import app
+
         from src.core.exceptions import AdCPAuthenticationError
 
         @app.get("/test-exc/auth")
@@ -293,6 +295,7 @@ class TestFastAPIExceptionHandlers:
     def test_not_found_error_returns_404(self):
         """AdCPNotFoundError raised in a route must return 404."""
         from src.app import app
+
         from src.core.exceptions import AdCPNotFoundError
 
         @app.get("/test-exc/notfound")
@@ -308,6 +311,7 @@ class TestFastAPIExceptionHandlers:
     def test_adapter_error_returns_502(self):
         """AdCPAdapterError raised in a route must return 502."""
         from src.app import app
+
         from src.core.exceptions import AdCPAdapterError
 
         @app.get("/test-exc/adapter")
@@ -323,6 +327,7 @@ class TestFastAPIExceptionHandlers:
     def test_conflict_error_returns_409(self):
         """AdCPConflictError raised in a route must return 409."""
         from src.app import app
+
         from src.core.exceptions import AdCPConflictError
 
         @app.get("/test-exc/conflict")
@@ -338,6 +343,7 @@ class TestFastAPIExceptionHandlers:
     def test_gone_error_returns_410(self):
         """AdCPGoneError raised in a route must return 410."""
         from src.app import app
+
         from src.core.exceptions import AdCPGoneError
 
         @app.get("/test-exc/gone")
@@ -353,6 +359,7 @@ class TestFastAPIExceptionHandlers:
     def test_budget_exhausted_error_returns_422(self):
         """AdCPBudgetExhaustedError raised in a route must return 422."""
         from src.app import app
+
         from src.core.exceptions import AdCPBudgetExhaustedError
 
         @app.get("/test-exc/budget")
@@ -368,6 +375,7 @@ class TestFastAPIExceptionHandlers:
     def test_service_unavailable_error_returns_503(self):
         """AdCPServiceUnavailableError raised in a route must return 503."""
         from src.app import app
+
         from src.core.exceptions import AdCPServiceUnavailableError
 
         @app.get("/test-exc/unavailable")
@@ -383,6 +391,7 @@ class TestFastAPIExceptionHandlers:
     def test_error_response_has_standard_envelope(self):
         """Error responses must have {error_code, message, details} envelope."""
         from src.app import app
+
         from src.core.exceptions import AdCPValidationError
 
         @app.get("/test-exc/envelope")

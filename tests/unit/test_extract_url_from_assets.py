@@ -6,9 +6,7 @@ Verifies URL extraction priority: top-level url > named asset keys
 Beads: salesagent-dmn
 """
 
-from adcp.types import FormatId
-
-from src.core.schemas import CreativeAsset
+from src.core.schemas import CreativeAsset, FormatId
 from src.core.tools.creatives import _extract_url_from_assets
 
 _FMT = FormatId(id="banner", agent_url="http://agent.test")

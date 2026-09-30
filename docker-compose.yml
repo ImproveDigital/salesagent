@@ -108,6 +108,9 @@ services:
       # Per-tenant Setup Mode enables test credentials for new tenants
       # Override .env ports to match nginx-development.conf expectations
       ADCP_SALES_PORT: "8080"
+      # ENV ADCP_PORT=8000 in the image beats run_server.py's setdefault(), so
+      # core/main.py must be told explicitly to bind the port nginx proxies to.
+      ADCP_PORT: "8080"
       # Enable test login mode for development
       ADCP_AUTH_TEST_MODE: "true"
       # Allow mock-adapter setup to satisfy the "Ad Server Configured" gate.

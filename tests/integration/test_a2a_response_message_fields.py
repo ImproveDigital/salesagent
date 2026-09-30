@@ -18,8 +18,8 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.resolved_identity import ResolvedIdentity
 from tests.helpers.a2a_response_validator import assert_valid_skill_response
 from tests.helpers.external_service import is_external_service_exception

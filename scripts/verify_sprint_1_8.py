@@ -35,6 +35,8 @@ TENANT_MGMT_PREFIX = "/admin/api/v1/tenant-management"
 API_KEY = os.environ.get("MGMT_API_KEY", "sk-verify-sprint-1-8")
 
 HEADERS = {"X-Tenant-Management-API-Key": API_KEY, "Content-Type": "application/json"}
+# Embedded tenants must advertise a platform host (EMBEDDED_PLATFORM_AGENT_HOSTS).
+_PLATFORM_AGENT_HOST = os.environ.get("EMBEDDED_PLATFORM_AGENT_HOSTS", "interchange.io").split(",")[0].strip()
 
 PASS = 0
 FAIL = 0
@@ -79,7 +81,7 @@ def _provision(label: str, *, default_advertiser: str | None = None) -> str | No
         "external_org_id": f"org_verify_{uuid.uuid4().hex[:6]}",
         "external_source": "verify_script",
         "contact_email": "verify@example.com",
-        "public_agent_url": "https://agent.example.com/verify",
+        "public_agent_url": f"https://{_PLATFORM_AGENT_HOST}/verify",
         "adapter": {"type": "mock"},
         "default_currency": "USD",
         "billing_plan": "standard",

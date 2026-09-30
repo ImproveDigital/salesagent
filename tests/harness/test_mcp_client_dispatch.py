@@ -27,7 +27,6 @@ class TestMcpClientDispatch:
     def test_client_mcp_succeeds_through_pipeline(self):
         """Call get_adcp_capabilities via Client(mcp) — exercises full middleware chain."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         identity = _make_identity()
@@ -52,7 +51,6 @@ class TestMcpClientDispatch:
         fields the seller agent doesn't support.
         """
         from fastmcp import Client
-
         from src.core.main import mcp
 
         identity = _make_identity()
@@ -79,7 +77,6 @@ class TestMcpClientDispatch:
         before TypeAdapter validates.
         """
         from fastmcp import Client
-
         from src.core.main import mcp
 
         identity = _make_identity()

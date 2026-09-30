@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from adcp.canonical_formats.fixtures import load_v1_reference_catalog
-from adcp.types import FormatId as LibraryFormatId
+from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 
 from src.core.canonical_formats import (
     CANONICAL_FORMAT_IDS,

@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 from adcp.types import CreativeAction
-from adcp.types import FormatId as AdcpFormatId
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
+from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
 
+from src.core.schemas import FormatId as AdcpFormatId
 from tests.harness import CreativeListEnv, CreativeSyncEnv
 
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
@@ -242,9 +242,7 @@ class TestCreativeExtendsListingBase:
 
         Covers: UC-006-CREATIVE-SCHEMA-COMPLIANCE-01
         """
-        from adcp.types.generated_poc.creative.list_creatives_response import (
-            Creative as ListingCreative,
-        )
+        from adcp.types.generated_poc.creative.list_creatives_response import Creatives as ListingCreative
 
         with CreativeSyncEnv() as env:
             env.setup_default_data()

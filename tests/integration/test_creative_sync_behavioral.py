@@ -13,10 +13,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from adcp.types import CreativeAction
-from adcp.types import FormatId as AdcpFormatId
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
+from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError, AdCPValidationError
+from src.core.schemas import FormatId as AdcpFormatId
 from tests.factories import MediaBuyFactory, MediaPackageFactory, PrincipalFactory, ProductFactory, TenantFactory
 from tests.harness import CreativeSyncEnv, make_identity
 
