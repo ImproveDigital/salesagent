@@ -1,0 +1,20 @@
+# The goal leaves out budget, currency and dates on purpose. The buyer must ask,
+# and the simulated user answers from the facts. Checks the asking path end to end.
+# Creates a real media buy on the target: run against local only.
+name: create-media-buy-with-questions
+goal: Create a display media buy for testbrand.com.
+facts:
+  total budget: 5000 USD
+  start date: 14 days from today
+  flight length: 30 days
+  product preference: none, the first suitable display product is fine
+persona: A junior buyer who answers only what is asked, in a few words.
+expect:
+  outcome: completed
+  calls:
+    - tool: ask_user
+      min: 1
+    - tool: create_media_buy
+      min: 1
+      max: 1
+  tool_errors: none

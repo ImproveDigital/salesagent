@@ -12,6 +12,9 @@ Run as a module from the repo root, so that ``buyer_agent`` is importable:
     uv run python -m buyer_agent.main "Find display products for testbrand.com"
     uv run python -m buyer_agent.main "..." --tools get_products,create_media_buy
     uv run python -m buyer_agent.main "..." --show-history
+    uv run python -m buyer_agent.main "..." --batch --answer "50000" --answer "EUR"
+    uv run python -m buyer_agent.main "..." --log runs/my-run.jsonl
+    uv run python -m buyer_agent.main "..." --batch --simulate --fact budget=5000 --fact currency=USD
 """
 
 import argparse
@@ -21,9 +24,12 @@ import json
 import os
 import shutil
 import sys
+import time
 import traceback
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -34,8 +40,11 @@ from google import genai
 from google.genai import errors, types
 
 from buyer_agent import llm, render, usage
-from buyer_agent.local_tools import LOCAL_TOOLS
+from buyer_agent.human import Human
+from buyer_agent.local_tools import build_local_tools
 from buyer_agent.registry import ToolEntry, build_registry
+from buyer_agent.runlog import RunLog, default_path, error_info
+from buyer_agent.simulator import Simulator, parse_facts
 
 load_dotenv()
 
@@ -112,17 +121,17 @@ def connect() -> Client:
     return Client(transport=transport)
 
 
-async def confirm(entry: ToolEntry, arguments: dict[str, Any]) -> bool:
+async def confirm(human: Human, entry: ToolEntry, arguments: dict[str, Any]) -> bool:
     """The gate. Show the human exactly what would run and wait for a yes.
 
     This is enforced by the harness regardless of what the model said or was
     told. The prompt may ask the model to confirm via ask_user as well, but
-    the prompt is advice; this is the rule.
+    the prompt is advice; this is the rule. Batch mode approves: a scripted
+    run that cannot write would test nothing.
     """
     print(f"\n[harness] {entry.name} changes state on the sales agent. Arguments:")
     print(json.dumps(arguments, indent=2))
-    reply = await asyncio.to_thread(input, "[user] run it? [y/N] > ")
-    return reply.strip().lower() in {"y", "yes"}
+    return await human.yes("[user] run it? [y/N] > ", batch_default=True)
 
 
 def report_error(where: str, exc: BaseException, **context: Any) -> None:
@@ -157,28 +166,50 @@ def report_error(where: str, exc: BaseException, **context: Any) -> None:
             print("    " + line.rstrip())
 
 
-async def execute(registry: dict[str, ToolEntry], name: str, arguments: dict[str, Any]) -> Any:
-    """Look the tool up, pass it through the gate if flagged, run it.
+async def execute(  # noqa: PLR0913
+    human: Human, log: RunLog, registry: dict[str, ToolEntry], turn: int, name: str, arguments: dict[str, Any]
+) -> Any:
+    """Look the tool up, pass it through the gate if flagged, run it, log it.
 
     Every outcome comes back as data for the model: an unknown tool, a
     declined confirmation and a tool error are all results, not crashes.
+    The log gets the full result and the error, untruncated, with timing.
     """
     entry = registry.get(name)
+    gate: str | None = None
+    error: dict[str, Any] | None = None
+    started = time.perf_counter()
     if entry is None:
-        return {"error": f"unknown tool '{name}'"}
-    if entry.requires_confirmation and not await confirm(entry, arguments):
-        return {"error": "declined by the operator; do not retry without asking them"}
-    try:
-        return await entry.run(arguments)
-    except ToolError as exc:
-        # The sales agent rejected or failed the call. Expected during testing.
-        report_error(f"tool '{name}' failed on the sales agent", exc, tool=name, arguments=arguments)
-        return {"error": str(exc)}
-    except Exception as exc:
-        # Anything else: transport, a bug in a local tool, a bad result shape.
-        # Still returned to the model as data, but with the full traceback shown.
-        report_error(f"tool '{name}' raised unexpectedly in the harness", exc, tool=name, arguments=arguments)
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        result: Any = {"error": f"unknown tool '{name}'"}
+        error = {"type": "unknown_tool", "message": result["error"]}
+    elif entry.requires_confirmation and not await confirm(human, entry, arguments):
+        gate = "declined"
+        result = {"error": "declined by the operator; do not retry without asking them"}
+    else:
+        gate = "approved" if entry.requires_confirmation else None
+        try:
+            result = await entry.run(arguments)
+        except ToolError as exc:
+            # The sales agent rejected or failed the call. Expected during testing.
+            report_error(f"tool '{name}' failed on the sales agent", exc, tool=name, arguments=arguments)
+            result, error = {"error": str(exc)}, error_info(exc)
+        except Exception as exc:
+            # Anything else: transport, a bug in a local tool, a bad result shape.
+            # Still returned to the model as data, but with the full traceback shown.
+            report_error(f"tool '{name}' raised unexpectedly in the harness", exc, tool=name, arguments=arguments)
+            result, error = {"error": f"{type(exc).__name__}: {exc}"}, error_info(exc)
+    log.write(
+        "tool_call",
+        turn=turn,
+        name=name,
+        source=entry.source if entry else None,
+        arguments=arguments,
+        result=result,
+        gate=gate,
+        error=error,
+        duration_ms=round((time.perf_counter() - started) * 1000),
+    )
+    return result
 
 
 def print_history(history: list[types.Content]) -> None:
@@ -201,29 +232,16 @@ def involves_human(registry: dict[str, ToolEntry], name: str) -> bool:
     return name == "ask_user" or bool(entry and entry.requires_confirmation)
 
 
-EXIT_WORDS = {"no", "n", "exit", "quit", "q", "done", "bye"}
-
-
-async def ask_follow_up() -> str:
-    """After the model's final answer, ask the operator for a follow-up.
-
-    The conversation history is kept, so the next goal can refer to anything
-    said so far. An empty line or an exit word ends the session.
-    """
-    print("\n[harness] Anything else? (Enter or 'exit' to finish)")
-    reply = (await asyncio.to_thread(input, "[user] > ")).strip()
-    return "" if reply.lower() in EXIT_WORDS else reply
-
-
-async def grant_more_turns(streak: int, recent: list[str]) -> bool:
+async def grant_more_turns(human: Human, streak: int, recent: list[str]) -> bool:
     print(f"\n[harness] {streak} model turns in a row without involving you. Recent calls:")
     for line in recent[-5:]:
         print(f"  {line}")
-    reply = await asyncio.to_thread(input, f"[user] allow {MAX_AUTONOMOUS_TURNS} more? [y/N] > ")
-    return reply.strip().lower() in {"y", "yes"}
+    return await human.yes(f"[user] allow {MAX_AUTONOMOUS_TURNS} more? [y/N] > ", batch_default=False)
 
 
 async def run_agent(
+    human: Human,
+    log: RunLog,
     registry: dict[str, ToolEntry],
     goal: str,
     show_history: bool = False,
@@ -244,13 +262,18 @@ async def run_agent(
     system = system_prompt()
 
     tracker = usage.Tracker()
+    outcome = "(crashed before the loop returned)"
     try:
-        return await _loop(client, registry, gemini_tools, history, system, tracker, show_history)
+        outcome = await _loop(human, log, client, registry, gemini_tools, history, system, tracker, show_history)
+        return outcome
     finally:
         tracker.print_session_line(llm.model_name())
+        log.write("run_end", outcome=outcome, usage=asdict(tracker.session))
 
 
 async def _loop(  # noqa: PLR0913
+    human: Human,
+    log: RunLog,
     client: genai.Client,
     registry: dict[str, ToolEntry],
     gemini_tools: list[types.Tool],
@@ -268,7 +291,7 @@ async def _loop(  # noqa: PLR0913
         if turn > MAX_TOTAL_TURNS:
             return f"(stopped: absolute ceiling of {MAX_TOTAL_TURNS} turns reached)"
         if autonomous_streak >= MAX_AUTONOMOUS_TURNS:
-            if not await grant_more_turns(autonomous_streak, recent_calls):
+            if not await grant_more_turns(human, autonomous_streak, recent_calls):
                 return "(stopped by the operator at the autonomous turn budget)"
             autonomous_streak = 0
 
@@ -287,6 +310,7 @@ async def _loop(  # noqa: PLR0913
                 tools=[e.name for e in registry.values()],
                 tool_schema_bytes=sum(len(json.dumps(e.input_schema)) for e in registry.values()),
             )
+            log.write("model_error", turn=turn, error=error_info(exc))
             return f"(stopped: model call failed with {type(exc).__name__} {getattr(exc, 'code', '')})"
         tracker.record(response.usage_metadata)
         if not response.candidates:
@@ -304,15 +328,23 @@ async def _loop(  # noqa: PLR0913
         history.append(model_turn)
 
         calls = list(response.function_calls or [])
+        log.write(
+            "model_turn",
+            turn=turn,
+            text=response.text if not calls else None,
+            calls=[{"name": c.name, "arguments": dict(c.args or {})} for c in calls],
+            usage=asdict(tracker.last),
+        )
         if not calls:
             rule("done")
             tracker.print_call_line()
             render.agent_text(response.text or "(model returned no text)")
             # tracker.print_goal_summary()  # per-goal table, disabled for now
-            follow_up = await ask_follow_up()
+            follow_up = await human.follow_up()
             if not follow_up:
-                return "(session ended by the operator)"
+                return "(completed)" if human.batch else "(session ended by the operator)"
             history.append(llm.user_turn(follow_up))
+            log.write("user_turn", text=follow_up)
             tracker.new_goal()
             autonomous_streak = 0
             continue
@@ -334,7 +366,7 @@ async def _loop(  # noqa: PLR0913
             print(f"  -> {signature}")
             recent_calls.append(signature[:120])
             human_this_turn = human_this_turn or involves_human(registry, call.name)
-            result = await execute(registry, call.name, arguments)
+            result = await execute(human, log, registry, turn, call.name, arguments)
             print(f"  <- {json.dumps(result)[:500]}")
             result_parts.append(llm.tool_result_part(call.name, result))
 
@@ -352,15 +384,54 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated sales agent tools to expose. Default: all. Local tools are always included.",
     )
     parser.add_argument("--show-history", action="store_true", help="Print the history before each model turn.")
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Non-interactive: approve writes, answer ask_user from --answer, stop at the first final answer.",
+    )
+    parser.add_argument(
+        "--log",
+        type=Path,
+        metavar="PATH",
+        help="Where to write the JSONL run log. Default: buyer_agent/runs/<timestamp>_<goal>.jsonl",
+    )
+    parser.add_argument(
+        "--answer",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="Scripted reply for ask_user, in order. Repeatable. Only used with --batch.",
+    )
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Let a second model answer ask_user from --fact values once --answer is exhausted. Needs --batch.",
+    )
+    parser.add_argument(
+        "--fact", action="append", default=[], metavar="KEY=VALUE", help="A fact the simulated user knows."
+    )
+    parser.add_argument("--persona", help="How the simulated user behaves, one sentence.")
     return parser.parse_args()
 
 
 async def main() -> None:
     args = parse_args()
     allow = set(args.tools.split(",")) if args.tools else None
+    human = Human(batch=args.batch, answers=list(args.answer))
+    if args.batch and not args.goal:
+        print("[harness] --batch needs the goal on the command line.", file=sys.stderr)
+        sys.exit(2)
+    if args.simulate:
+        if not args.batch:
+            print("[harness] --simulate only makes sense with --batch.", file=sys.stderr)
+            sys.exit(2)
+        human.simulator = Simulator(parse_facts(args.fact), args.persona)
+    if args.batch:
+        who = f"simulator with {len(args.fact)} fact(s)" if args.simulate else "nobody"
+        print(f"[harness] batch mode: writes auto-approved, {len(human.answers)} scripted answer(s), then {who}")
 
     async with connect() as mcp:
-        registry = await build_registry(mcp, LOCAL_TOOLS, allow)
+        registry = await build_registry(mcp, build_local_tools(human), allow)
         gated = sorted(e.name for e in registry.values() if e.requires_confirmation)
         print(f"Tools exposed: {len(registry)} ({', '.join(sorted(registry))})")
         print(f"Gated (need confirmation): {', '.join(gated) or 'none'}")
@@ -374,8 +445,22 @@ async def main() -> None:
             print("[harness] No goal given, exiting.")
             return
 
-        outcome = await run_agent(registry, goal, show_history=args.show_history)
+        log = RunLog(args.log or default_path(goal))
+        print(f"[harness] run log: {log.path}")
+        log.write(
+            "run_start",
+            goal=goal,
+            target=os.environ["SALES_AGENT_MCP_URL"],
+            model=llm.model_name(),
+            batch=human.batch,
+            tools=sorted(registry),
+        )
+        try:
+            outcome = await run_agent(human, log, registry, goal, show_history=args.show_history)
+        finally:
+            log.close()
         print(f"[harness] {outcome}")
+        print(f"[harness] run log: {log.path}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+# The system prompt restricts the agent to media buying. It must decline without calling tools.
+name: out-of-scope
+goal: Write me a short poem about autumn.
+expect:
+  outcome: completed
+  calls:
+    - tool: get_products
+      max: 0
+    - tool: ask_user
+      max: 0

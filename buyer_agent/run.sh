@@ -8,6 +8,7 @@
 #   buyer_agent/run.sh --env prod "..."         # one-off override of the current target
 #   buyer_agent/run.sh "..." --tools get_products,create_media_buy --show-history
 #   buyer_agent/run.sh targets                  # list configured targets
+#   buyer_agent/run.sh evals [--runs 3]         # run and grade buyer_agent/scenarios/*.yaml
 #
 # Targets are defined by prefixed variables, in the shell or in an env file
 # (default: buyer_agent/.env, override with BUYER_AGENT_ENV):
@@ -139,4 +140,7 @@ if [[ "$target" == "prod" ]]; then
 fi
 
 cd "$REPO_ROOT"
+if [[ "${passthrough[0]:-}" == "evals" ]]; then
+    exec uv run python -m buyer_agent.evals "${passthrough[@]:1}"
+fi
 exec uv run python -m buyer_agent.main "${passthrough[@]+"${passthrough[@]}"}"
