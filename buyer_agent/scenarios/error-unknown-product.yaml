@@ -1,0 +1,18 @@
+# The sales agent must reject a product id that does not exist with a structured
+# INVALID_REQUEST, not a 500 or a transport error. The goal pins the id and forbids
+# substitution, otherwise the buyer would just look a real product up.
+name: error-unknown-product
+goal: >
+  Create a display media buy for testbrand.com using product_id "prod_does_not_exist"
+  exactly as written, total budget 100 EUR, starting in 7 days and running 10 days.
+  Do not look up or substitute another product. If the sales agent rejects the request,
+  stop and report the error message to me verbatim.
+expect:
+  outcome: completed
+  calls:
+    - tool: create_media_buy
+      min: 1
+      max: 2
+  tool_errors:
+    - tool: create_media_buy
+      message_contains: product

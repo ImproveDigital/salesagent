@@ -161,3 +161,5 @@ test-results/
 docs/TRANSFORMATION_PRESENTATION.md
 buyer_agent/.context
 buyer_agent/runs/
+buyer_agent/.coverage-stack.env
+adcp-schemas/*

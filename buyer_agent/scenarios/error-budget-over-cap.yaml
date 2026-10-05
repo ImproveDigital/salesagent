@@ -1,0 +1,18 @@
+# The tenant caps daily spend per package (10 EUR on the local tenant as of 2026-10-01).
+# A one-day flight with a large budget must be rejected with the cap message.
+# Adjust the budget if the tenant's cap changes.
+name: error-budget-over-cap
+goal: >
+  Create a display media buy for testbrand.com with total budget 5000 EUR, starting in
+  7 days and running for exactly 1 day. Pick the first suitable display product. Send the
+  request as given; if it is rejected, report the error verbatim instead of retrying with
+  a smaller budget.
+expect:
+  outcome: completed
+  calls:
+    - tool: create_media_buy
+      min: 1
+      max: 2
+  tool_errors:
+    - tool: create_media_buy
+      message_contains: exceeds maximum daily spend

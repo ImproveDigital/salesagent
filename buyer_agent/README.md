@@ -112,3 +112,47 @@ buyer_agent/run.sh "Create a display media buy for testbrand.com" --batch --simu
 ```
 
 In a scenario file, a `facts:` mapping turns the simulator on; `persona:` is optional. Scripted `answers:` are used first, then the simulator. Set `SIMULATOR_MODEL` to use a cheaper model than the buyer's. Each simulated answer is printed as `[user] ... (simulated)` and recorded in the log as the `ask_user` result.
+
+## Error scenarios
+
+The `error-*.yaml` scenarios send deliberately bad requests and require a structured rejection from the sales agent: unknown product id, end before start, budget over the tenant's daily cap, unsupported currency. Each goal tells the buyer to send the value as given and report the rejection, because the system prompt otherwise makes it avoid the problem. The `tool_errors` list form means the named error must occur and any other error fails the run.
+
+Two outcomes are findings, not noise: "expected an error, none seen" means the buyer repaired the request instead of sending it, and a run that stops before `create_media_buy` usually means Gemini refused the call on the tool schema. Expected messages come from the sales agent source and the local tenant's limits, so they may need adjusting when either changes.
+
+## Replay (load and concurrency, no model)
+
+Every run log already records the exact tool calls the buyer sent. `replay` sends them again from N independent MCP connections, each repeating the sequence R times, and times every call. Gemini is not involved, so the numbers measure the sales agent alone.
+
+```bash
+buyer_agent/run.sh replay buyer_agent/runs/evals/<ts>/create-media-buy_1.jsonl --dry-run   # list the calls
+buyer_agent/run.sh replay buyer_agent/runs/evals/<ts>/create-media-buy_1.jsonl --clients 10 --rounds 3
+buyer_agent/run.sh replay buyer_agent/runs/*.jsonl --read-only --clients 20                 # discovery tools only
+```
+
+Output is a per-tool table with call count, errors, p50, p95 and max latency, plus every call as JSONL and a `summary.json` under `buyer_agent/runs/replay/<timestamp>/`. Exit code is 1 if any call failed.
+
+Writes are replayed unless `--read-only`. That is how `create_media_buy` gets load tested, but it creates real objects on the target and identical repeats may be rejected as duplicates. Both are findings; keep the target on `local`.
+
+## Coverage
+
+Two views. The first needs nothing running.
+
+**Tool coverage** reads every run log and shows, per sales agent tool, how many calls, errors and distinct argument keys the runs have exercised, then lists the tools never called. That list is the gap list for new scenarios.
+
+```bash
+uv run python -m buyer_agent.toolcov                       # all logs under buyer_agent/runs/
+uv run python -m buyer_agent.toolcov buyer_agent/runs/evals/<ts>
+```
+
+**Code coverage** runs the sales agent natively under coverage.py while scenarios hit it. The Docker image has no dev dependencies and its Postgres is not exposed, so the helper starts a throwaway Postgres (agent-db skill), migrates, seeds the demo tenant, and starts the server on port 18080 (override with `COV_PORT`). The seeded principal's token becomes a `cov` target.
+
+```bash
+buyer_agent/coverage.sh up
+source buyer_agent/.coverage-stack.env
+buyer_agent/run.sh --env cov evals --runs 2
+buyer_agent/run.sh --env cov replay buyer_agent/runs/evals/<ts>/find-display-products_1.jsonl --clients 5
+buyer_agent/coverage.sh report        # stops the server, prints the report, writes html and json
+buyer_agent/coverage.sh down          # removes the Postgres container
+```
+
+Report and HTML land in `buyer_agent/runs/coverage/`. Measured code is `src/` per `[tool.coverage.run]` in pyproject.toml. The seeded tenant differs from your usual local tenant, so scenario expectations tied to tenant data, such as the daily budget cap, may need their own values there.

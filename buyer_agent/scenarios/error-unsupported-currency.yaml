@@ -1,0 +1,17 @@
+# A currency the tenant has no limit for must be rejected. The buyer is told to send
+# it as given. If Gemini refuses the call because the tool schema restricts currency,
+# the run stops before create_media_buy and that is a finding about the schema.
+name: error-unsupported-currency
+goal: >
+  Create a display media buy for testbrand.com with total budget 100 in currency "XYZ",
+  starting in 7 days and running 10 days. Use the currency code XYZ exactly as given.
+  Pick the first suitable display product. If the request is rejected, report the error verbatim.
+expect:
+  outcome: completed
+  calls:
+    - tool: create_media_buy
+      min: 1
+      max: 2
+  tool_errors:
+    - tool: create_media_buy
+      message_contains: currency

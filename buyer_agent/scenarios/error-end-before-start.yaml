@@ -1,0 +1,18 @@
+# An end date earlier than the start date must be rejected by the sales agent.
+# If the buyer silently swaps the dates instead of sending them, that is a buyer
+# finding and shows up here as "expected an error, none seen".
+name: error-end-before-start
+goal: >
+  Create a display media buy for testbrand.com with total budget 100 EUR, start date
+  2026-12-01 and end date 2026-11-01. Use these dates exactly as given even though
+  the end is before the start; I want to see how the sales agent responds. Pick the
+  first suitable display product. If the request is rejected, report the error verbatim.
+expect:
+  outcome: completed
+  calls:
+    - tool: create_media_buy
+      min: 1
+      max: 2
+  tool_errors:
+    - tool: create_media_buy
+      message_contains: must be after start

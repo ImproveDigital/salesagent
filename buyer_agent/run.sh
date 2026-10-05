@@ -9,6 +9,7 @@
 #   buyer_agent/run.sh "..." --tools get_products,create_media_buy --show-history
 #   buyer_agent/run.sh targets                  # list configured targets
 #   buyer_agent/run.sh evals [--runs 3]         # run and grade buyer_agent/scenarios/*.yaml
+#   buyer_agent/run.sh replay <log.jsonl> --clients 10   # replay recorded calls in parallel, no model
 #
 # Targets are defined by prefixed variables, in the shell or in an env file
 # (default: buyer_agent/.env, override with BUYER_AGENT_ENV):
@@ -142,5 +143,8 @@ fi
 cd "$REPO_ROOT"
 if [[ "${passthrough[0]:-}" == "evals" ]]; then
     exec uv run python -m buyer_agent.evals "${passthrough[@]:1}"
+fi
+if [[ "${passthrough[0]:-}" == "replay" ]]; then
+    exec uv run python -m buyer_agent.replay "${passthrough[@]:1}"
 fi
 exec uv run python -m buyer_agent.main "${passthrough[@]+"${passthrough[@]}"}"
