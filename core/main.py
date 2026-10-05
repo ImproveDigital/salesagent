@@ -611,7 +611,12 @@ def build_router() -> LazyPlatformRouter:
 
     capabilities = DecisioningCapabilities(
         specialisms=["sales-non-guaranteed", "signal-owned"],
-        webhook_signing_managed_externally=True,
+        # adcp 8 validates ``webhook_signing_managed_externally=True`` against
+        # ``webhook_signing.supported=True`` (+ a delivery retry horizon) on
+        # every request-scoped capability projection. The base advertises
+        # signing as unsupported; ``_capabilities_envelope`` flips both the
+        # capability block and this flag for tenants with a usable credential.
+        webhook_signing_managed_externally=False,
         adcp=Adcp(
             major_versions=sorted(SUPPORTED_MAJOR_VERSIONS),
             supported_versions=list(SUPPORTED_ADCP_VERSIONS),
@@ -1134,6 +1139,11 @@ def build_app():
     handler, _executor, _registry = create_adcp_server_from_platform(
         router,
         auto_emit_completion_webhooks=auto_emit,
+        # Salesagent publishes task webhooks through its own service path
+        # (externally managed). adcp 8 requires the SDK emitter to be off so
+        # it cannot race the adopter-owned delivery; no SDK WebhookSender is
+        # wired, so this changes nothing about what is actually sent.
+        auto_emit_task_webhooks=False,
     )
 
     app = _build_mcp_and_a2a_app(

@@ -56,8 +56,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types import Error
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
 from adcp.types.generated_poc.enums.creative_action import CreativeAction
+from adcp.types.legacy import LegacyCreativeAsset as CreativeAsset
 
 from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError, AdCPValidationError
 from src.core.schemas import (
@@ -945,20 +945,26 @@ class TestCreativeValidation:
             _validate_creative_input(creative, mock_registry, "p1")
 
     def test_missing_format_id_rejected_at_schema_level(self):
-        """Creative with format_id=None is rejected at Pydantic schema level.
+        """Creative with format_id=None is rejected before it reaches the registry.
 
-        Spec: CONFIRMED -- creative-asset.json lists format_id in required array.
-        https://github.com/adcontextprotocol/adcp/blob/8f26baf3549c00d2638341fed1d80abacb5d894a/dist/schemas/3.0.0-beta.3/core/creative-asset.json
+        Spec: AdCP 3.2 (adcp 8) made ``format_id`` optional on creative-asset.json
+        (canonical creatives carry ``format_kind`` instead), so the schema accepts
+        ``None``; salesagent's sync validation rejects a creative with no
+        resolvable format ("Creative format is required").
         """
-        from pydantic import ValidationError as PydanticValidationError
+        from src.core.schemas.creative import CreativeAsset as SalesAgentCreativeAsset
+        from src.core.tools.creatives._validation import _validate_creative_input
 
-        with pytest.raises(PydanticValidationError, match="format_id"):
-            CreativeAsset(
-                creative_id="c_test_1",
-                name="No Format",
-                format_id=None,
-                assets={"banner": {"url": "https://example.com/banner.png"}},
-            )
+        creative = SalesAgentCreativeAsset(
+            creative_id="c_test_1",
+            name="No Format",
+            format_id=None,
+            assets={"banner": {"url": "https://example.com/banner.png"}},
+        )
+        assert creative.format_id is None
+
+        with pytest.raises(ValueError, match="format"):
+            _validate_creative_input(creative, registry=None, principal_id="principal_1")
 
     def test_adapter_format_skips_external_validation(self):
         """Non-HTTP agent_url (adapter format) skips creative agent check.

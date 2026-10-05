@@ -12,8 +12,8 @@ from typing import Any
 
 # Import types from adcp library - use public API when available
 from adcp import Property
-from adcp.types.generated_poc.brand import Brand
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
+from adcp.types import BrandIdentity as Brand
+from adcp.types.legacy import LegacyCreativeAsset as CreativeAsset
 from adcp.types.legacy import LegacyFormat as Format
 from adcp.types.legacy import LegacyProduct as Product
 

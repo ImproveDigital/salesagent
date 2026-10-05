@@ -13,12 +13,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types.generated_poc.core.format import Assets, Dimensions, Renders
-from adcp.types.generated_poc.core.format import Assets10 as Assets5
+from adcp.types.generated_poc.core.format import Assets9 as Assets5
 
 # adcp 7: Assets classes are type-discriminated by asset_type + item_type.
-# Assets = individual image, Assets10 (aliased Assets5 here) = individual video
-# Assets24 = repeatable_group (has nested assets, no asset_type)
-# Nested group assets (Assets25 union): Assets26 (image), Assets27 (video), Assets29 (text), etc.
+# adcp 8 (AdCP 3.2.1) numbering: Assets = individual image, Assets9 (aliased
+# Assets5 here) = individual video, Assets13 = html, Assets29 = repeatable_group
+# (no asset_type; its nested items use the group-scoped arms Assets31 = image,
+# Assets34 = text). The generated arm numbers shift with every schema release —
+# re-check on each SDK upgrade.
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest
 from tests.factories import PrincipalFactory
 
@@ -192,22 +194,22 @@ class TestAssetTypesFilterChecksGroupAssets:
 
     def test_asset_types_filter_finds_type_in_group_assets(self):
         """Format with group assets containing requested type should be included."""
-        # adcp 7: repeatable_group uses Assets24, nested items use the Assets25 union
-        # (Assets26 = image, Assets29 = text)
-        from adcp.types.generated_poc.core.format import Assets24, Assets26, Assets29
+        # adcp 8: repeatable_group is Assets29; its nested items use the
+        # group-scoped arms (Assets31 = image, Assets34 = text)
+        from adcp.types.generated_poc.core.format import Assets29, Assets31, Assets34
 
-        group_asset = Assets24(
+        group_asset = Assets29(
             item_type="repeatable_group",
             asset_group_id="product_group",
             required=True,
             min_count=1,
             max_count=5,
             assets=[
-                Assets26(
+                Assets31(
                     asset_id="product_image",
                     required=True,
                 ),
-                Assets29(
+                Assets34(
                     asset_id="product_title",
                     required=True,
                 ),
@@ -230,17 +232,17 @@ class TestAssetTypesFilterChecksGroupAssets:
 
     def test_asset_types_filter_excludes_group_without_match(self):
         """Format with group assets NOT containing requested type should be excluded."""
-        # adcp 7: repeatable_group uses Assets24, nested text items use Assets29
-        from adcp.types.generated_poc.core.format import Assets24, Assets29
+        # adcp 8: repeatable_group is Assets29, nested text items are Assets34
+        from adcp.types.generated_poc.core.format import Assets29, Assets34
 
-        group_asset = Assets24(
+        group_asset = Assets29(
             item_type="repeatable_group",
             asset_group_id="text_group",
             required=True,
             min_count=1,
             max_count=3,
             assets=[
-                Assets29(
+                Assets34(
                     asset_id="headline",
                     required=True,
                 ),
@@ -262,22 +264,22 @@ class TestAssetTypesFilterChecksGroupAssets:
 
     def test_asset_types_filter_mixed_individual_and_group(self):
         """Format with both individual and group assets: filter checks both."""
-        # adcp 7: Assets5 (= Assets10) = individual video, Assets24 = repeatable_group
-        # Assets24 nested assets use the Assets25 union (image = Assets26)
-        from adcp.types.generated_poc.core.format import Assets24, Assets26
+        # adcp 8: Assets5 (= Assets9) = individual video, Assets29 = repeatable_group
+        # whose nested assets use the group-scoped arms (image = Assets31)
+        from adcp.types.generated_poc.core.format import Assets29, Assets31
 
         individual_asset = Assets5(
             asset_id="hero_video",
             required=True,
         )
-        group_asset = Assets24(
+        group_asset = Assets29(
             item_type="repeatable_group",
             asset_group_id="product_group",
             required=False,
             min_count=0,
             max_count=5,
             assets=[
-                Assets26(
+                Assets31(
                     asset_id="product_image",
                     required=True,
                 ),
@@ -440,8 +442,8 @@ class TestAssetTypesFilterExclusion:
 
     def test_format_with_non_matching_assets_excluded(self):
         """Format with assets that do not match any requested type is excluded."""
-        # adcp 3.6.0: use typed asset classes - Assets (image), Assets9 (html)
-        from adcp.types.generated_poc.core.format import Assets14 as Assets9
+        # typed asset classes - Assets (image), Assets13 (html; aliased Assets9 here)
+        from adcp.types.generated_poc.core.format import Assets13 as Assets9
 
         formats = [
             _make_format(

@@ -8,8 +8,6 @@ Customer: Damascus-v1 test agent
 Error: AttributeError when accessing response.message on CreateMediaBuyResponse
 """
 
-import pytest
-
 from src.core.schemas import (
     CreateMediaBuySuccess,
     GetProductsResponse,
@@ -33,10 +31,11 @@ def test_create_media_buy_response_message_access():
         packages=[],
     )
 
-    # TEST 1: The OLD BROKEN pattern (what was causing the error)
-    with pytest.raises(AttributeError, match="has no attribute 'message'"):
-        # This is what line 1382 was doing - should raise AttributeError
-        _ = response.message or "Default message"
+    # TEST 1: The OLD BROKEN pattern. adcp 8 (AdCP 3.2) declares ``message``
+    # as an optional envelope field on the response schema, so the attribute
+    # access no longer raises — but it is unset on a synchronous success, so
+    # relying on it would still have produced an empty buyer message.
+    assert response.message is None
 
     # TEST 2: The NEW SAFE pattern (our fix)
     # This is our fix - uses __str__ method
