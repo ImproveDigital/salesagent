@@ -80,10 +80,40 @@ async def _start_lifespan(app: Any) -> tuple[asyncio.Task, asyncio.Queue, asynci
     return task, receive_q, send_q
 
 
+async def _close_pools_on_this_loop() -> None:
+    """Close psycopg pools whose worker tasks were bound to this loop.
+
+    The idempotency ``PgBackend`` opens its pools lazily on the first async
+    call, i.e. on this loop (see ``core.idempotency._LazyBootstrapPgBackend``).
+    ``AsyncConnectionPool.close()`` must run on the owning loop; doing it
+    here, while the loop is still alive, is the only place that works.
+    Without it the loop stops with the pool workers pending and asyncio
+    prints ``Task was destroyed but it is pending!`` at interpreter exit.
+    """
+    try:
+        from core import idempotency
+    except Exception:  # pragma: no cover - core is always importable in-process
+        return
+    for name in ("_POOL", "_LOCK_POOL"):
+        pool = getattr(idempotency, name, None)
+        if pool is None:
+            continue
+        try:
+            await asyncio.wait_for(pool.close(), timeout=5)
+        except Exception:
+            pass
+
+
 def _shutdown() -> None:
-    """Best-effort lifespan shutdown + loop stop at process exit."""
+    """Orderly lifespan shutdown, pool close, task cancel and loop stop.
+
+    Idempotent. Runs from :func:`pytest_sessionfinish` (root ``conftest``) so
+    the teardown logs land in pytest's live capture; the ``atexit`` hook is
+    only the fallback for non-pytest callers.
+    """
     global _LIFESPAN_TASK, _LIFESPAN_RECEIVE, _LIFESPAN_SEND, _LOOP, _THREAD
-    if _LOOP is None or not _LOOP.is_running():
+    loop = _LOOP
+    if loop is None or not loop.is_running():
         return
 
     async def _stop() -> None:
@@ -100,14 +130,30 @@ def _shutdown() -> None:
                 await _LIFESPAN_TASK
             except (asyncio.CancelledError, Exception):
                 pass
+        await _close_pools_on_this_loop()
+        # Anything still scheduled on this loop (pool workers that outlived
+        # close(), session-manager helpers) is cancelled while the loop can
+        # still run their cleanup, instead of being destroyed pending.
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     try:
-        asyncio.run_coroutine_threadsafe(_stop(), _LOOP).result(timeout=10)
+        asyncio.run_coroutine_threadsafe(_stop(), loop).result(timeout=15)
     except Exception:
         pass
-    _LOOP.call_soon_threadsafe(_LOOP.stop)
+    loop.call_soon_threadsafe(loop.stop)
     if _THREAD is not None:
         _THREAD.join(timeout=5)
+    _LOOP = None
+    _LIFESPAN_TASK = _LIFESPAN_RECEIVE = _LIFESPAN_SEND = None
+
+
+def shutdown_app_loop() -> None:
+    """Public entry point for the pytest session-finish hook."""
+    _shutdown()
 
 
 def _ensure_started() -> tuple[Any, asyncio.AbstractEventLoop]:

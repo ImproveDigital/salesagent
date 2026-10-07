@@ -44,6 +44,7 @@ The Prebid Sales Agent is the Prebid.org reference implementation of an AdCP-com
 - **[Architecture](development/architecture.md)** - System design
 - **[Contributing](development/contributing.md)** - Development workflows
 - **[Troubleshooting](development/troubleshooting.md)** - Common issues
+- **[Manual-approval E2E testing](development/manual-approval-e2e.md)** - Human-approval lifecycle test and dev driver
 
 ## Documentation Structure
 

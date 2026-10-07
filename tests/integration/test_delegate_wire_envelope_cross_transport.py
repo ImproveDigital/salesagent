@@ -344,6 +344,16 @@ def authenticated_principal(integration_db):
     and ``Authorization: Bearer`` (A2A). Both transports share the same
     BearerTokenAuth handler — one Principal serves both.
     """
+    yield from provision_wire_principal()
+
+
+def provision_wire_principal(**tenant_overrides: Any):
+    """Generator behind :func:`authenticated_principal`.
+
+    Other modules build variants (e.g. a manual-approval tenant) by passing
+    ``TenantFactory`` overrides, so the tenant/principal/product/account
+    wiring stays in one place.
+    """
     from sqlalchemy.orm import Session as SASession
 
     from src.core.database.database_session import get_engine
@@ -372,13 +382,15 @@ def authenticated_principal(integration_db):
     access_token = f"wire_token_{suffix}"
 
     try:
-        tenant = TenantFactory(
-            tenant_id=tenant_id,
-            subdomain=subdomain,
-            auth_setup_mode=False,
-            human_review_required=False,
-            approval_mode="auto-approve",
-        )
+        tenant_kwargs: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "subdomain": subdomain,
+            "auth_setup_mode": False,
+            "human_review_required": False,
+            "approval_mode": "auto-approve",
+        }
+        tenant_kwargs.update(tenant_overrides)
+        tenant = TenantFactory(**tenant_kwargs)
         TenantAuthConfigFactory(tenant=tenant, oidc_enabled=True)
         seed_verified_publisher_authorization(
             tenant,

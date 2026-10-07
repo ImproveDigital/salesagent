@@ -25,6 +25,20 @@ import pytest
 # time out). The SDK's own clocks are not under test, so skip its modules.
 freezegun.configure(extend_ignore_list=["adcp"])
 
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001 - pytest hook signature
+    """Tear down the shared in-process ASGI app while pytest still owns stdio.
+
+    The harness loop (``tests/harness/_asgi_app.py``) otherwise stops at
+    ``atexit``, after pytest closed its capture streams: psycopg pool workers
+    get destroyed pending and the MCP session manager logs into a closed
+    file ("Logging error" / "Task was destroyed but it is pending!").
+    """
+    from tests.harness._asgi_app import shutdown_app_loop
+
+    shutdown_app_loop()
+
+
 # ---------------------------------------------------------------------------
 # Entity marker taxonomy — auto-applied to tests by filename / path patterns
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ See [Getting Started](GETTING_STARTED.md) for prerequisites, manual setup, testi
 - **[Patterns Reference](patterns-reference.md)** - Canonical examples for every key pattern (start here for new contributors)
 - **[Contributing](contributing.md)** - Development workflows, testing, code style
 - **[Structural Guards](structural-guards.md)** - Automated architecture enforcement tests
+- **[Manual-approval end-to-end testing](manual-approval-e2e.md)** - Buyer-to-operator lifecycle test and the dev driver for any ad server / product scenario
 - **[Troubleshooting](troubleshooting.md)** - Common development issues
 
 ## Key Resources

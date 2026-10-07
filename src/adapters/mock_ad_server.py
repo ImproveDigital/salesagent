@@ -50,6 +50,19 @@ class MockProductConfig(BaseProductConfig):
     scenario: str = Field(default="normal")
 
 
+def _asset_creative_id(asset: dict[str, Any]) -> str:
+    """Return the creative identifier of an adapter asset dict.
+
+    Callers are inconsistent about the key: the auto-approve path and the GAM
+    / SpringServe / FreeWheel adapters use ``creative_id``, while older mock
+    callers passed ``id`` (``build_adapter_asset_from_stored_creative`` emits
+    both). The manual-approval executor emits only ``creative_id``, which used
+    to raise ``KeyError: 'id'`` here and fail every approved media buy that
+    carried creatives.
+    """
+    return str(asset.get("creative_id") or asset.get("id") or "")
+
+
 class MockAdServer(AdServerAdapter):
     """
     A mock ad server that simulates the lifecycle of a media buy.
@@ -899,7 +912,7 @@ class MockAdServer(AdServerAdapter):
             self.log("   Manual completion required - use complete_task tool")
 
         # Return pending status for all assets
-        return [AssetStatus(creative_id=asset["id"], status="pending") for asset in assets]
+        return [AssetStatus(creative_id=_asset_creative_id(asset), status="pending") for asset in assets]
 
     def associate_creatives(self, line_item_ids: list[str], platform_creative_ids: list[str]) -> list[dict[str, Any]]:
         """Associate already-uploaded creatives with line items (mock simulation)."""
@@ -1021,7 +1034,7 @@ class MockAdServer(AdServerAdapter):
                 if scenario.should_reject:
                     reason = scenario.rejection_reason or "Test rejection"
                     self.log(f"   ❌ Rejecting creative '{creative_name}' - {reason}")
-                    results.append(AssetStatus(creative_id=asset["id"], status="rejected"))
+                    results.append(AssetStatus(creative_id=_asset_creative_id(asset), status="rejected"))
                     continue
 
                 # Handle creative-specific actions
@@ -1032,15 +1045,15 @@ class MockAdServer(AdServerAdapter):
 
                     if action_type == "ask_for_field":
                         self.log(f"   ❓ Asking for field in creative '{creative_name}' - {reason}")
-                        results.append(AssetStatus(creative_id=asset["id"], status="pending"))
+                        results.append(AssetStatus(creative_id=_asset_creative_id(asset), status="pending"))
                         continue
                     elif action_type == "approve":
                         self.log(f"   ✅ Approving creative '{creative_name}'")
-                        results.append(AssetStatus(creative_id=asset["id"], status="approved"))
+                        results.append(AssetStatus(creative_id=_asset_creative_id(asset), status="approved"))
                         continue
 
             # Default behavior - auto-approve
-            results.append(AssetStatus(creative_id=asset["id"], status="approved"))
+            results.append(AssetStatus(creative_id=_asset_creative_id(asset), status="approved"))
 
         return results
 
