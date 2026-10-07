@@ -32,6 +32,21 @@ Jira: [FMS-2029](https://azerion-advertising.atlassian.net/browse/FMS-2029).
    signal of approval: the wire `get_media_buys.status` stays `pending_start`
    both before and after approval because the flight has not started yet.
 
+## MCP capability sweep (local, automated)
+
+`tests/integration/test_mcp_capability_sweep.py` calls every tool the server
+advertises over MCP with the real `fastmcp` client: `tools/list` (each tool
+must carry an `outputSchema`), then one minimal valid call per tool in
+dependency order (products → creatives → media buy → update, delivery,
+feedback), validating each structured result against the advertised
+`outputSchema` with `jsonschema`. A tool with no payload defined is still
+called with `{}` and reported as `NO-PAYLOAD`, so new tools cannot escape
+coverage. Run with `-s` to see the per-tool table:
+
+```bash
+scripts/run-test.sh tests/integration/test_mcp_capability_sweep.py -x -s
+```
+
 ## Running the integration test (local, automated)
 
 Needs Docker for the throwaway Postgres; nothing else.
