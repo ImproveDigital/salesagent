@@ -30,11 +30,12 @@ class TestResponseSchemas:
         """Verify CreateMediaBuyResponse has only domain fields (no protocol fields)."""
         response = CreateMediaBuySuccess(media_buy_id="buy_123", packages=[])
 
-        # Verify protocol fields are not in the schema (moved to ProtocolEnvelope)
-        assert not hasattr(response, "context_id")
+        # AdCP 3.2 (adcp 8) declares the task envelope fields on the response
+        # schema itself; a synchronous success leaves them unset.
+        assert response.context_id is None
         # status is now a domain field on CreateMediaBuySuccess (added in adcp 3.12)
-        assert not hasattr(response, "task_id")
-        assert not hasattr(response, "message")
+        assert response.task_id is None
+        assert response.message is None
 
         # Verify domain fields are present
         assert response.media_buy_id == "buy_123"
@@ -90,8 +91,8 @@ class TestResponseSchemas:
         assert len(response.errors) == 1
         assert response.errors[0].code == "validation_error"
 
-        # Verify no protocol fields
-        assert not hasattr(response, "status")
+        # AdCP 3.2 (adcp 8): the envelope ``status`` lives on the error schema too
+        assert response.status == "completed"
 
 
 class TestAsyncPatterns:
@@ -173,9 +174,9 @@ class TestProtocolCompliance:
         # Domain fields present
         assert response.media_buy_id == "pending_123"
 
-        # Protocol fields NOT present (moved to ProtocolEnvelope)
-        # status is now a domain field on CreateMediaBuySuccess (added in adcp 3.12)
-        assert not hasattr(response, "task_id")
+        # AdCP 3.2 (adcp 8): envelope fields exist on the schema but stay unset
+        # for a synchronous success (status is a domain field since adcp 3.12)
+        assert response.task_id is None
 
         # Error case
         from src.core.schemas import CreateMediaBuyError

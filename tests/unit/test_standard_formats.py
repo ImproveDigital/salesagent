@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-from adcp import Format
+from adcp.types.legacy import LegacyFormat as Format
 
 from src.core.canonical_formats import CANONICAL_FORMAT_IDS
 from src.core.standard_formats import (
@@ -84,7 +84,7 @@ class TestStandardFormatCatalog:
 
     def test_full_catalog_serializes_to_list_creative_formats_response(self):
         """The bundled catalog must be valid as a list_creative_formats payload."""
-        from adcp.types import ListCreativeFormatsResponse
+        from adcp.types.legacy import LegacyListCreativeFormatsResponse as ListCreativeFormatsResponse
 
         payload = {"formats": [fmt.model_dump(mode="json", exclude_none=True) for fmt in get_standard_formats()]}
 

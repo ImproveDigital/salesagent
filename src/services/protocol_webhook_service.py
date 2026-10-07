@@ -24,7 +24,9 @@ from uuid import uuid4
 import requests
 from a2a.types import Task, TaskStatusUpdateEvent
 from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload, extract_webhook_result_data
-from adcp.types import CreateMediaBuySuccessResponse, GeneratedTaskStatus, McpWebhookPayload, Package
+from adcp.types import GeneratedTaskStatus, McpWebhookPayload
+from adcp.types.legacy import LegacyCreateMediaBuyResponse1 as CreateMediaBuySuccessResponse
+from adcp.types.legacy import LegacyPackage as Package
 from adcp.webhooks import generate_webhook_idempotency_key, sign_legacy_webhook
 from google.protobuf.json_format import MessageToDict
 
@@ -577,11 +579,13 @@ def build_request_scoped_config(
     authentication = push_config.get("authentication") or {}
     schemes = authentication.get("schemes") or []
     auth_type = schemes[0] if isinstance(schemes, list) and schemes else None
+    operation_id = push_config.get("operation_id")
     return PushNotificationConfig(
         id=push_config.get("id") or f"pnc_{uuid4().hex[:16]}",
         tenant_id=tenant_id,
         principal_id=principal_id,
         url=str(url),
+        operation_id=str(operation_id) if operation_id is not None else None,
         authentication_type=auth_type,
         authentication_token=authentication.get("credentials"),
         purpose="async_task",
@@ -619,8 +623,22 @@ def send_create_media_buy_decision(
     if protocol == "a2a":
         payload = create_a2a_webhook_payload(task_id=step_id, status=task_status, result=result, context_id=context_id)
     else:
+        # AdCP 3.2 (adcp 8): MCP task webhooks must echo the buyer-supplied
+        # ``push_notification_config.operation_id`` verbatim; sellers never
+        # recover it from the callback URL. Registrations without one get no
+        # push — the buyer polls the task instead.
+        if not config.operation_id:
+            logger.warning(
+                "Skipping MCP webhook for media buy %s: push_notification_config carries no operation_id",
+                media_buy_id,
+            )
+            return False
         payload = create_mcp_webhook_payload(
-            task_id=step_id, status=task_status, task_type="create_media_buy", result=result
+            task_id=step_id,
+            status=task_status,
+            task_type="create_media_buy",
+            result=result,
+            operation_id=config.operation_id,
         )
     metadata = {"task_type": "create_media_buy", "tenant_id": config.tenant_id, "principal_id": config.principal_id}
     try:

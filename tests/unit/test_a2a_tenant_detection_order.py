@@ -76,6 +76,7 @@ class TestA2ATenantDetectionMatchesCanonical:
         inline tenant detection, resolve_identity() would NOT be called.
         """
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
         from src.core.resolved_identity import ResolvedIdentity
         from tests.a2a_helpers import make_a2a_context
 

@@ -2098,7 +2098,7 @@ class TestDeliveryProtocol:
         with both content (string) and structured_content (response object).
         Covers: UC-004-MAIN-13
         """
-        from fastmcp.tools.tool import ToolResult
+        from fastmcp.tools import ToolResult
 
         buy = _make_mock_media_buy(media_buy_id="mb_tool")
         mock_adapter = MagicMock()

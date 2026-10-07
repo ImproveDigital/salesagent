@@ -7,7 +7,7 @@ assignments, and admin approval workflows.
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from adcp.types import (
     AiTool,
@@ -17,29 +17,12 @@ from adcp.types import (
     SchemaVariant,
 )
 from adcp.types import CreativeApproval as LibraryCreativeApproval
-from adcp.types import CreativeAsset as LibraryCreativeAsset
-from adcp.types import FormatId as LibraryFormatId
-from adcp.types import (
-    ListCreativeFormatsRequest as LibraryListCreativeFormatsRequest,
-)
-from adcp.types import (
-    ListCreativeFormatsResponse as LibraryListCreativeFormatsResponse,
-)
-from adcp.types import (
-    ListCreativesRequest as LibraryListCreativesRequest,
-)
-from adcp.types import (
-    ListCreativesResponse as LibraryListCreativesResponse,
-)
 from adcp.types import PaginationResponse as LibraryResponsePagination
 from adcp.types import (
     QuerySummary as LibraryQuerySummary,
 )
 from adcp.types import (
     SyncCreativeResult as LibrarySyncCreativeResult,
-)
-from adcp.types import (
-    SyncCreativesRequest as LibrarySyncCreativesRequest,
 )
 
 # Pin to the listing-side ``Creative`` (list_creatives_response). The
@@ -48,12 +31,30 @@ from adcp.types import (
 # ``creative_id, media_buy_id, format_id, totals, variant_count, variants``
 # and rejects ``tags`` / ``status`` / ``assets`` etc. Our Creative is
 # explicitly a listing-side schema, so we extend the listing variant.
+# adcp 7.x splits the listing row into ``Creatives`` (legacy ``format_id``
+# path) and ``Creatives1`` (canonical ``format_kind`` path); we serve the
+# named-format path.
 from adcp.types.generated_poc.creative.list_creatives_response import (
-    Creative as LibraryCreative,
+    Creatives as LibraryCreative,
 )
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
+
+# adcp 7.x+: canonical creative identity is the primary contract; salesagent
+# still serves the AdCP 3.x named-format (``format_id``) wire shape, so extend
+# the SDK's explicit ``Legacy*`` models (see src/core/schemas/_base.py).
+# ``adcp.types.CreativeAsset`` is the canonical boundary model (rejects
+# ``format_id``); ``LegacyCreativeAsset`` is the named-format variant. adcp 8
+# dropped the generated ``CreativeAsset1``/``CreativeAsset2`` split, so the
+# stable ``adcp.types.legacy`` path is the only supported import.
+from adcp.types.legacy import LegacyCreativeAsset as LibraryCreativeAsset
+from adcp.types.legacy import LegacyFormatId as LibraryFormatId
+from adcp.types.legacy import LegacyListCreativeFormatsRequest as LibraryListCreativeFormatsRequest
+from adcp.types.legacy import LegacyListCreativeFormatsResponse as LibraryListCreativeFormatsResponse
+from adcp.types.legacy import LegacyListCreativesRequest as LibraryListCreativesRequest
+from adcp.types.legacy import LegacyListCreativesResponse as LibraryListCreativesResponse
+from adcp.types.legacy import LegacySyncCreativesRequest as LibrarySyncCreativesRequest
 from pydantic import (
     ConfigDict,
     Field,
@@ -210,6 +211,11 @@ class CreativeAsset(LibraryCreativeAsset):
     forward-compat fields that should pass through silently.
     """
 
+    # adcp 8 (AdCP 3.2) makes the inherited ``format_id`` optional (and marks it
+    # deprecated on the SDK model). The schema inherits that contract; a sync
+    # creative without a resolvable format is rejected by
+    # ``_validate_creative_input`` ("Creative format is required").
+
     @model_validator(mode="before")
     @classmethod
     def upgrade_format_id(cls, values: Any) -> Any:
@@ -279,8 +285,8 @@ class Creative(LibraryCreative):
     # Helper properties for format_id (still present in 3.6.0)
     @property
     def format(self) -> LibraryFormatId | None:
-        """Alias for format_id."""
-        return self.format_id
+        """Alias for format_id (upgraded to ``FormatId`` by ``validate_format_id``)."""
+        return cast(LibraryFormatId | None, self.format_id)
 
     @property
     def format_id_str(self) -> str | None:

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from adcp.types.generated_poc.brand import Brand
+from adcp.types import BrandIdentity as Brand
 from pydantic import BaseModel, Field
 
 from src.services.ai import AIServiceFactory, TenantAIConfig

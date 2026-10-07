@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 from adcp.exceptions import ADCPConnectionError, ADCPError, ADCPTimeoutError
 
 from src.admin.blueprints.products import _validate_format_entries
-from src.core.schemas import Format
+from src.core.schemas import Format, FormatId
 
 
 class TestProductFormatValidation:
@@ -340,10 +340,10 @@ class TestNamespaceAwareProductFormatValidation:
         self, format_id: str, agent_url: str = "https://creative.adcontextprotocol.org"
     ) -> MagicMock:
         mock_format = MagicMock(spec=Format)
-        mock_format_id = MagicMock()
-        mock_format_id.id = format_id
-        mock_format_id.agent_url = agent_url
-        mock_format.format_id = mock_format_id
+        # adcp 7 LegacyFormatId uses StrictInt for width/height/duration_ms, so a bare
+        # MagicMock (whose attributes are MagicMocks) no longer validates as a FormatId.
+        # Use the typed FormatId the creative-agent registry actually returns.
+        mock_format.format_id = FormatId(agent_url=agent_url, id=format_id)
         return mock_format
 
     def test_rejects_same_format_id_from_different_agent(self):

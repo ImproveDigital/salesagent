@@ -620,7 +620,7 @@ class TestGetMediaBuysImpl:
         media_buy_seller/inventory_list_targeting/get_after_create scenario to
         surface ``Platform method 'get_media_buys' raised AdCPValidationError``.
         """
-        from adcp.types import AccountReference
+        from adcp.types.generated_poc.core.account_ref import AccountReference
 
         mock_principal_obj.return_value = MagicMock(principal_id="principal_1")
         mock_fetch_buys.return_value = []
@@ -634,7 +634,7 @@ class TestGetMediaBuysImpl:
                     "operator": "pinnacle-agency.example",
                     "sandbox": True,
                 }
-            ),
+            ).root,
         )
         # Must not raise.
         response = _get_media_buys_impl(req, identity=make_identity())

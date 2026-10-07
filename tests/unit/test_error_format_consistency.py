@@ -16,8 +16,8 @@ import pytest
 from a2a.utils.errors import ServerError
 from fastmcp.exceptions import ToolError
 from pydantic import ValidationError
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.exceptions import AdCPAuthenticationError, AdCPError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
 

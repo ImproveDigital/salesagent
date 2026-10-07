@@ -35,7 +35,6 @@ from src.core.schemas import CreateMediaBuyRequest
 from src.core.testing_hooks import AdCPTestContext
 from tests.factories.spec_required_kwargs import required_request_kwargs
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -140,9 +139,7 @@ class TestEnvVarBypassSetupCheck:
             except Exception:
                 pass
 
-        mock_setup.assert_not_called(), (
-            "validate_setup_complete must not be called when ADCP_SKIP_SETUP_CHECK=true."
-        )
+        mock_setup.assert_not_called(), ("validate_setup_complete must not be called when ADCP_SKIP_SETUP_CHECK=true.")
 
     @pytest.mark.asyncio
     async def test_without_env_var_setup_check_is_called(self):
@@ -153,9 +150,9 @@ class TestEnvVarBypassSetupCheck:
         because setup validation was removed entirely. If setup is never called
         regardless of the env var, both tests would wrongly pass.
         """
-        from src.services.setup_checklist_service import SetupIncompleteError
-        from src.core.tools.media_buy_create import _create_media_buy_impl
         from src.core.exceptions import AdCPValidationError
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.services.setup_checklist_service import SetupIncompleteError
 
         identity = _production_identity(dry_run=False, test_session_id=None)
         req = _minimal_request()
@@ -164,9 +161,12 @@ class TestEnvVarBypassSetupCheck:
         with (
             patch.dict(os.environ, {}, clear=False),  # ensure env var is absent
             patch.dict(os.environ, {"ADCP_SKIP_SETUP_CHECK": ""}),  # empty string = falsy
-            patch(_PATCH_SETUP, side_effect=SetupIncompleteError(
-                "Incomplete", missing_tasks=[{"name": "Products", "description": "Add products"}]
-            )),
+            patch(
+                _PATCH_SETUP,
+                side_effect=SetupIncompleteError(
+                    "Incomplete", missing_tasks=[{"name": "Products", "description": "Add products"}]
+                ),
+            ),
             patch(_PATCH_PRINCIPAL, return_value=mock_principal),
         ):
             with pytest.raises(AdCPValidationError, match="Setup incomplete"):
@@ -210,9 +210,7 @@ class TestDryRunBypassSetupCheck:
             except Exception:
                 pass  # dry_run may short-circuit differently; we only care setup was skipped
 
-        mock_setup.assert_not_called(), (
-            "validate_setup_complete must not be called when dry_run=True."
-        )
+        mock_setup.assert_not_called(), ("validate_setup_complete must not be called when dry_run=True.")
 
 
 # ===========================================================================
@@ -253,6 +251,4 @@ class TestSessionIdBypassSetupCheck:
             except Exception:
                 pass  # fails at product lookup later — only care that setup was skipped
 
-        mock_setup.assert_not_called(), (
-            "validate_setup_complete must not be called when test_session_id is set."
-        )
+        mock_setup.assert_not_called(), ("validate_setup_complete must not be called when test_session_id is set.")

@@ -7,7 +7,7 @@ implementation pattern from CLAUDE.md.
 import logging
 import time
 
-from adcp.types import Format as AdcpFormat
+from adcp.types.legacy import LegacyFormat as AdcpFormat
 from adcp.utils.format_assets import get_format_assets
 
 from src.core.exceptions import AdCPAuthenticationError

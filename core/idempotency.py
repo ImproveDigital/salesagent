@@ -131,6 +131,7 @@ def translate_idempotency_conflict[F: Callable[..., Awaitable[Any]]](handler: F)
 _LOCK = threading.Lock()
 _STORE: IdempotencyStore | None = None
 _POOL = None  # AsyncConnectionPool, kept around so the GC doesn't close it
+_LOCK_POOL = None  # second AsyncConnectionPool: PgBackend's advisory-lock connections
 
 
 def _build_pool():
@@ -203,8 +204,11 @@ def get_idempotency_store() -> IdempotencyStore:
         # Defer pool.open() + create_schema() to the first async call via
         # _LazyBootstrapPgBackend, which runs them on whatever loop is live
         # at that moment.
+        # adcp 7.x requires a second, distinct pool for the advisory-lock
+        # connection so a saturated data pool can't deadlock the handler.
         _POOL = _build_pool()
-        backend = _LazyBootstrapPgBackend(pool=_POOL)
+        _LOCK_POOL = _build_pool()
+        backend = _LazyBootstrapPgBackend(pool=_POOL, lock_pool=_LOCK_POOL)
 
         logger.info("Idempotency: PgBackend constructed (pool will open on first async use)")
         _STORE = IdempotencyStore(backend=backend, ttl_seconds=86400)
@@ -241,6 +245,7 @@ class _LazyBootstrapPgBackend(PgBackend):
             if self._bootstrapped:
                 return
             await self._pool.open()
+            await self._lock_pool.open()
             await self.create_schema()
             self._bootstrapped = True
             logger.info("Idempotency: PgBackend pool opened, adcp_idempotency table ensured")
@@ -264,7 +269,7 @@ def reset_for_tests() -> None:
     Tests that flip ``CORE_IDEMPOTENCY_BACKEND`` between cases need this
     to force re-init. Production code never calls it.
     """
-    global _STORE, _POOL
+    global _STORE, _POOL, _LOCK_POOL
     with _LOCK:
         _STORE = None
         # We deliberately don't close the pool here — its workers are bound
@@ -273,3 +278,4 @@ def reset_for_tests() -> None:
         # exits at session end and the OS reclaims the connections. This is
         # test-only; production never resets the singleton.
         _POOL = None
+        _LOCK_POOL = None

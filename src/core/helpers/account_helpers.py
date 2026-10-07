@@ -28,7 +28,7 @@ from src.core.resolved_identity import ResolvedIdentity
 
 
 def resolve_account(
-    account_ref: AccountReference,
+    account_ref: AccountReference | AccountReference1 | AccountReference2,
     identity: ResolvedIdentity,
     repo: AccountRepository,
 ) -> str:
@@ -37,6 +37,11 @@ def resolve_account(
     Handles both variants of the AdCP AccountReference union:
     - AccountReference1: lookup by explicit account_id, verify agent access
     - AccountReference2: lookup by natural key (brand + operator + sandbox)
+
+    adcp 8 types request ``account`` fields as the bare
+    ``AccountReference1 | AccountReference2`` union (no RootModel wrapper),
+    while the generated ``AccountReference`` RootModel still exists for
+    validating raw dicts — accept either shape.
 
     Args:
         account_ref: AccountReference from the request payload.
@@ -54,7 +59,7 @@ def resolve_account(
         AdCPAccountSuspendedError: Account is suspended.
         AdCPAccountPaymentRequiredError: Account has outstanding payment.
     """
-    inner = account_ref.root
+    inner = getattr(account_ref, "root", account_ref)
 
     if isinstance(inner, AccountReference1):
         return _resolve_by_id(inner.account_id, identity, repo)

@@ -337,7 +337,6 @@ class TestA2ABoundaryAdCPErrorTranslation:
     async def test_adcp_validation_becomes_invalid_params(self):
         """AdCPValidationError → ServerError(InvalidParamsError) with correctable recovery."""
         from a2a.utils.errors import ServerError
-
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
         handler = AdCPRequestHandler()
@@ -360,7 +359,6 @@ class TestA2ABoundaryAdCPErrorTranslation:
     async def test_adcp_auth_becomes_invalid_request(self):
         """AdCPAuthenticationError → ServerError(InvalidRequestError) with terminal recovery."""
         from a2a.utils.errors import ServerError
-
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
         handler = AdCPRequestHandler()
@@ -381,7 +379,6 @@ class TestA2ABoundaryAdCPErrorTranslation:
     async def test_adcp_adapter_becomes_internal_error(self):
         """AdCPAdapterError → ServerError(InternalError) with transient recovery."""
         from a2a.utils.errors import ServerError
-
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
         handler = AdCPRequestHandler()
@@ -403,7 +400,6 @@ class TestA2ABoundaryAdCPErrorTranslation:
         """Existing ServerError behavior preserved — re-raised unchanged."""
         from a2a.types import MethodNotFoundError
         from a2a.utils.errors import ServerError
-
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
         handler = AdCPRequestHandler()
@@ -429,9 +425,8 @@ class TestRESTBoundaryAdCPErrorTranslation:
 
     def test_adcp_validation_from_impl_returns_400(self):
         """AdCPValidationError raised in _impl → REST returns 400 with correctable recovery."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         with patch(
             "src.core.tools.capabilities.get_adcp_capabilities_raw",
@@ -447,9 +442,8 @@ class TestRESTBoundaryAdCPErrorTranslation:
 
     def test_adcp_auth_from_impl_returns_401(self):
         """AdCPAuthenticationError raised in _impl → REST returns 401 with terminal recovery."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         with patch(
             "src.core.tools.capabilities.get_adcp_capabilities_raw",
@@ -464,9 +458,8 @@ class TestRESTBoundaryAdCPErrorTranslation:
 
     def test_adcp_not_found_from_impl_returns_404(self):
         """AdCPNotFoundError raised in _impl → REST returns 404 with terminal recovery."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         with patch(
             "src.core.tools.capabilities.get_adcp_capabilities_raw",
@@ -481,9 +474,8 @@ class TestRESTBoundaryAdCPErrorTranslation:
 
     def test_adcp_adapter_from_impl_returns_502(self):
         """AdCPAdapterError raised in _impl → REST returns 502 with transient recovery."""
-        from starlette.testclient import TestClient
-
         from src.app import app
+        from starlette.testclient import TestClient
 
         with patch(
             "src.core.tools.capabilities.get_adcp_capabilities_raw",
@@ -498,9 +490,9 @@ class TestRESTBoundaryAdCPErrorTranslation:
 
     def test_adcp_conflict_from_impl_returns_409(self):
         """AdCPConflictError raised in _impl → REST returns 409 with correctable recovery."""
+        from src.app import app
         from starlette.testclient import TestClient
 
-        from src.app import app
         from src.core.exceptions import AdCPConflictError
 
         with patch(
@@ -516,9 +508,9 @@ class TestRESTBoundaryAdCPErrorTranslation:
 
     def test_adcp_service_unavailable_from_impl_returns_503(self):
         """AdCPServiceUnavailableError raised in _impl → REST returns 503 with transient recovery."""
+        from src.app import app
         from starlette.testclient import TestClient
 
-        from src.app import app
         from src.core.exceptions import AdCPServiceUnavailableError
 
         with patch(
@@ -652,8 +644,8 @@ class TestCustomRecoveryOverrideA2ABoundary:
     async def test_custom_recovery_propagates_through_a2a_boundary(self):
         """AdCPNotFoundError(recovery='transient') -> ServerError.data has 'transient'."""
         from a2a.utils.errors import ServerError
-
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
         from src.core.exceptions import AdCPNotFoundError
 
         handler = AdCPRequestHandler()
@@ -674,9 +666,9 @@ class TestCustomRecoveryOverrideRESTBoundary:
 
     def test_custom_recovery_propagates_through_rest_boundary(self):
         """AdCPAdapterError(recovery='terminal') -> REST JSON body has 'terminal'."""
+        from src.app import app
         from starlette.testclient import TestClient
 
-        from src.app import app
         from src.core.exceptions import AdCPAdapterError
 
         with patch(
@@ -760,8 +752,8 @@ class TestRecoveryRoundtrip:
     async def test_a2a_roundtrip_all_subclasses(self):
         """All 11 AdCPError subclasses: raise -> _handle_explicit_skill -> ServerError.data.recovery."""
         from a2a.utils.errors import ServerError
-
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
         from src.core.exceptions import (
             AdCPAdapterError,
             AdCPAuthenticationError,
@@ -818,9 +810,9 @@ class TestRecoveryRoundtrip:
 
     def test_rest_roundtrip_all_subclasses(self):
         """All 11 AdCPError subclasses: raise -> REST handler -> JSON body -> verify recovery."""
+        from src.app import app
         from starlette.testclient import TestClient
 
-        from src.app import app
         from src.core.exceptions import (
             AdCPAdapterError,
             AdCPAuthenticationError,

@@ -6,13 +6,13 @@ Issue #782: Support creative format templates with dynamic width/height/duration
 from pathlib import Path
 
 import pytest
-from adcp.types import Dimensions, FormatId, Renders
+from adcp.types import Dimensions, Renders
 
 from src.core.helpers import _extract_format_info, _extract_format_namespace
 from src.core.helpers.creative_helpers import (
     _convert_creative_to_adapter_asset,
 )
-from src.core.schemas import Creative, Format
+from src.core.schemas import Creative, Format, FormatId
 from src.core.schemas import FormatId as SchemasFormatId
 
 
@@ -80,7 +80,7 @@ class TestExtractFormatInfo:
         )
         result = _extract_format_info(format_obj)
 
-        assert result["agent_url"] == "https://creative.example.com/"  # AnyUrl normalizes
+        assert result["agent_url"] == "https://creative.example.com"  # adcp 7 preserves wire spelling
         assert result["format_id"] == "display_static"
         assert result["parameters"] == {"width": 728, "height": 90}
 
@@ -160,7 +160,7 @@ class TestFormatIdReconstruction:
             id="display_static",
         )
 
-        assert str(format_obj.agent_url) == "https://creative.example.com/"
+        assert str(format_obj.agent_url) == "https://creative.example.com"
         assert format_obj.id == "display_static"
         assert format_obj.width is None
         assert format_obj.height is None
@@ -183,7 +183,7 @@ class TestFormatIdReconstruction:
 
         format_obj = FormatId(**format_kwargs)
 
-        assert str(format_obj.agent_url) == "https://creative.example.com/"
+        assert str(format_obj.agent_url) == "https://creative.example.com"
         assert format_obj.id == "display_static"
         assert format_obj.width == 300
         assert format_obj.height == 250
@@ -218,7 +218,7 @@ class TestFormatParametersRoundTrip:
         format_info = _extract_format_info(original)
 
         # Verify storage format
-        assert format_info["agent_url"] == "https://creative.example.com/"
+        assert format_info["agent_url"] == "https://creative.example.com"
         assert format_info["format_id"] == "display_static"
         assert format_info["parameters"] == {"width": 300, "height": 250}
 

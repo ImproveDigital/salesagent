@@ -36,7 +36,7 @@ def test_filters_as_dict_does_not_raise_attribute_error():
 
 def test_filters_as_pydantic_model_still_works():
     """``filters`` arriving as a CreativeFilters model continues to work."""
-    from adcp import CreativeFilters
+    from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 
     with pytest.raises(AdCPAuthenticationError):
         _list_creatives_impl(

@@ -188,6 +188,33 @@ def is_projected_media_buy_id(media_buy_id: str) -> bool:
     return media_buy_id.startswith("gam_") and not media_buy_id.startswith("gam_li_")
 
 
+def unmaterialized_projected_ids(
+    session: Session,
+    tenant_id: str,
+    principal_id: str,
+    media_buy_ids: Iterable[str],
+) -> set[str]:
+    """Return the ids in ``media_buy_ids`` that are visible projected GAM orders with no MediaBuy row.
+
+    ``get_media_buys`` lists these orders, but tools that need a real row
+    (delivery, performance feedback) cannot serve them until the buyer
+    claims the order via ``update_media_buy``. Callers use this to return a
+    specific error instead of a misleading "not found".
+    """
+    projected = [mid for mid in media_buy_ids if is_projected_media_buy_id(mid)]
+    if not projected:
+        return set()
+    orders, _ = project_orders_for_principal(session, tenant_id, principal_id, projected)
+    return {projected_media_buy_id(o.order_id) for o in orders}
+
+
+def not_materialized_message(media_buy_id: str) -> str:
+    return (
+        f"Media buy {media_buy_id} is an imported GAM order that has not been claimed yet; "
+        "call update_media_buy on it first to enable delivery reporting and performance feedback"
+    )
+
+
 def build_buy_ext(raw_request: dict | None) -> dict | None:
     """Build the ``ext.gam`` payload for a projected/imported MediaBuy response.
 

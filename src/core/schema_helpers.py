@@ -12,8 +12,10 @@ Philosophy:
 
 from typing import Any, Literal
 
-from adcp import GetProductsResponse, Product
-from adcp.types import BrandReference, ContextObject, ProductFilters, PropertyListReference, ReportingWebhook
+from adcp.types import BrandReference, ContextObject, PropertyListReference, ReportingWebhook
+from adcp.types.legacy import LegacyGetProductsResponse as GetProductsResponse
+from adcp.types.legacy import LegacyProduct as Product
+from adcp.types.legacy import LegacyProductFilters as ProductFilters
 
 from src.core.schemas.product import GetProductsRequest
 

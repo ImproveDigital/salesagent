@@ -61,5 +61,20 @@ class CreativeListEnv(IntegrationEnv):
         return _list_creatives_impl(**kwargs)
 
     def call_mcp(self, **kwargs: Any) -> ListCreativesResponse:
-        """Call list_creatives via Client(mcp) — full pipeline dispatch."""
-        return self._run_mcp_client("list_creatives", ListCreativesResponse, **kwargs)
+        """Call list_creatives via Client(mcp) — full pipeline dispatch.
+
+        Unversioned MCP buyers receive AdCP 3.1 canonical creative identity
+        (``format_kind`` + ``format_option_ref``); project it back to the
+        impl's legacy ``format_id`` shape so transport-parity assertions can
+        compare against ``call_impl``.
+        """
+        from core.platforms._canonical_formats import legacy_creative_payload
+
+        wire = self._run_mcp_client("list_creatives", dict, **kwargs)
+        creatives = wire.get("creatives")
+        if isinstance(creatives, list):
+            wire["creatives"] = [
+                legacy_creative_payload(c, field=f"creatives[{i}]", tenant_id=self._tenant_id)
+                for i, c in enumerate(creatives)
+            ]
+        return ListCreativesResponse(**wire)

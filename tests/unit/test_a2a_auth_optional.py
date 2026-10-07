@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from a2a.utils.errors import ServerError
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.resolved_identity import ResolvedIdentity
 
 

@@ -53,9 +53,7 @@ class TestMultiPackageBuy:
     would go undetected.
     """
 
-    async def test_two_packages_creates_two_media_package_rows(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_two_packages_creates_two_media_package_rows(self, sample_tenant, sample_principal, sample_products):
         """PATH-001: 2 packages in request → 2 MediaPackage rows in DB, both linked to same media_buy_id."""
         from src.core.database.models import MediaPackage as DBMediaPackage
         from src.core.schemas import CreateMediaBuyRequest
@@ -86,15 +84,12 @@ class TestMultiPackageBuy:
         result = await _create_media_buy_impl(req=req, identity=identity)
 
         assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Expected success for multi-package buy. "
-            f"Errors: {getattr(result.response, 'errors', None)}"
+            f"Expected success for multi-package buy. Errors: {getattr(result.response, 'errors', None)}"
         )
         media_buy_id = result.response.media_buy_id
 
         with get_db_session() as session:
-            packages = session.scalars(
-                select(DBMediaPackage).where(DBMediaPackage.media_buy_id == media_buy_id)
-            ).all()
+            packages = session.scalars(select(DBMediaPackage).where(DBMediaPackage.media_buy_id == media_buy_id)).all()
 
         assert len(packages) == 2, (
             f"Expected 2 MediaPackage rows for a 2-package buy, got {len(packages)}. "
@@ -103,9 +98,7 @@ class TestMultiPackageBuy:
         package_ids = {p.package_id for p in packages}
         assert len(package_ids) == 2, "Each package must have a distinct package_id."
         for pkg in packages:
-            assert pkg.media_buy_id == media_buy_id, (
-                "Both MediaPackage rows must reference the same media_buy_id."
-            )
+            assert pkg.media_buy_id == media_buy_id, "Both MediaPackage rows must reference the same media_buy_id."
 
 
 # ===========================================================================
@@ -124,9 +117,7 @@ class TestPoNumberPreserved:
     not carry the reference.
     """
 
-    async def test_po_number_stored_in_raw_request(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_po_number_stored_in_raw_request(self, sample_tenant, sample_principal, sample_products):
         """PATH-002: po_number='PO-2026-TEST' in request → found in MediaBuy.raw_request."""
         from src.core.database.models import MediaBuy as DBMediaBuy
         from src.core.schemas import CreateMediaBuyRequest
@@ -142,16 +133,12 @@ class TestPoNumberPreserved:
             start_time=_future(1),
             end_time=_future(8),
             po_number=po,
-            packages=[
-                {"product_id": "guaranteed_display", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}
-            ],
+            packages=[{"product_id": "guaranteed_display", "budget": 5000.0, "pricing_option_id": "cpm_usd_fixed"}],
         )
 
         result = await _create_media_buy_impl(req=req, identity=identity)
 
-        assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Errors: {getattr(result.response, 'errors', None)}"
-        )
+        assert isinstance(result.response, CreateMediaBuySuccess), f"Errors: {getattr(result.response, 'errors', None)}"
 
         with get_db_session() as session:
             row = session.scalars(
@@ -212,15 +199,11 @@ class TestTargetingOverlayPreserved:
 
         result = await _create_media_buy_impl(req=req, identity=identity)
 
-        assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Errors: {getattr(result.response, 'errors', None)}"
-        )
+        assert isinstance(result.response, CreateMediaBuySuccess), f"Errors: {getattr(result.response, 'errors', None)}"
 
         with get_db_session() as session:
             packages = session.scalars(
-                select(DBMediaPackage).where(
-                    DBMediaPackage.media_buy_id == result.response.media_buy_id
-                )
+                select(DBMediaPackage).where(DBMediaPackage.media_buy_id == result.response.media_buy_id)
             ).all()
 
         assert packages, "At least one MediaPackage row must exist."
@@ -315,25 +298,27 @@ class TestFutureDatedBuyWithCreativesStatus:
         # Create a pre-approved creative so the creative_ids assignment is valid
         creative_id = f"cre_path05_{uuid.uuid4().hex[:8]}"
         with get_db_session() as session:
-            session.add(DBCreative(
-                tenant_id=tenant_id,
-                creative_id=creative_id,
-                principal_id=principal_id,
-                name="Pre-approved Creative",
-                agent_url="https://creative.adcontextprotocol.org",
-                format="display_300x250",
-                status="approved",
-                data={
-                    "assets": {
-                        "banner_image": {
-                            "asset_type": "image",
-                            "url": "https://example.com/banner.png",
-                            "width": 300,
-                            "height": 250,
+            session.add(
+                DBCreative(
+                    tenant_id=tenant_id,
+                    creative_id=creative_id,
+                    principal_id=principal_id,
+                    name="Pre-approved Creative",
+                    agent_url="https://creative.adcontextprotocol.org",
+                    format="display_300x250",
+                    status="approved",
+                    data={
+                        "assets": {
+                            "banner_image": {
+                                "asset_type": "image",
+                                "url": "https://example.com/banner.png",
+                                "width": 300,
+                                "height": 250,
+                            }
                         }
-                    }
-                },
-            ))
+                    },
+                )
+            )
             session.commit()
 
         tenant_dict = _get_tenant_dict(tenant_id)
@@ -342,7 +327,7 @@ class TestFutureDatedBuyWithCreativesStatus:
         req = CreateMediaBuyRequest(
             **required_request_kwargs(),
             brand={"domain": "testbrand.com"},
-            start_time=_future(days=3),   # clearly in the future
+            start_time=_future(days=3),  # clearly in the future
             end_time=_future(days=10),
             packages=[
                 {
@@ -355,9 +340,7 @@ class TestFutureDatedBuyWithCreativesStatus:
         )
 
         result = await _create_media_buy_impl(req=req, identity=identity)
-        assert isinstance(result.response, CreateMediaBuySuccess), (
-            f"Errors: {getattr(result.response, 'errors', None)}"
-        )
+        assert isinstance(result.response, CreateMediaBuySuccess), f"Errors: {getattr(result.response, 'errors', None)}"
 
         with get_db_session() as session:
             row = session.scalars(
@@ -385,11 +368,8 @@ class TestCrossTenantIsolation:
     invariant in the system — a unit test with mocked DB cannot prove real SQL scoping.
     """
 
-    async def test_tenant_a_buy_not_visible_to_tenant_b(
-        self, sample_tenant, sample_principal, sample_products
-    ):
+    async def test_tenant_a_buy_not_visible_to_tenant_b(self, sample_tenant, sample_principal, sample_products):
         """PATH-006: MediaBuy created under tenant A is not returned by tenant B's repository."""
-        from src.core.database.models import Principal as DBPrincipal
         from src.core.database.models import Tenant as DBTenant
         from src.core.database.repositories import MediaBuyRepository
         from src.core.tools.media_buy_create import _create_media_buy_impl
@@ -407,13 +387,18 @@ class TestCrossTenantIsolation:
         tenant_b_id = f"tenant_b_{uuid.uuid4().hex[:8]}"
         now = datetime.now(UTC)
         with get_db_session() as session:
-            session.add(DBTenant(
-                tenant_id=tenant_b_id, name="Tenant B",
-                subdomain=f"tenant-b-{uuid.uuid4().hex[:6]}",
-                is_active=True, ad_server="mock",
-                human_review_required=False,
-                created_at=now, updated_at=now,
-            ))
+            session.add(
+                DBTenant(
+                    tenant_id=tenant_b_id,
+                    name="Tenant B",
+                    subdomain=f"tenant-b-{uuid.uuid4().hex[:6]}",
+                    is_active=True,
+                    ad_server="mock",
+                    human_review_required=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
             session.commit()
 
         # Tenant B's repository must NOT see tenant A's buy

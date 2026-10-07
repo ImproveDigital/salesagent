@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import InstrumentedAttribute, Session, attributes
+from sqlalchemy.orm import Session, attributes
+from sqlalchemy.sql.elements import SQLCoreOperations
 
 from src.core.database.models import (
     Creative,
@@ -148,19 +149,23 @@ class CreativeRepository:
         total_count_result = self._session.scalar(select(func.count()).select_from(stmt.subquery()))
         total_count = int(total_count_result) if total_count_result is not None else 0
 
-        # Apply sorting
-        sort_column: InstrumentedAttribute
+        # Apply sorting. ``updated_date`` falls back to ``created_at`` for rows
+        # never modified since creation (mirrors the listing response).
+        sort_column: SQLCoreOperations[Any]
         if sort_by == "name":
             sort_column = Creative.name
         elif sort_by == "status":
             sort_column = Creative.status
+        elif sort_by == "updated_date":
+            sort_column = func.coalesce(Creative.updated_at, Creative.created_at)
         else:
             sort_column = Creative.created_at
 
+        # ``creative_id`` breaks ties so cursor pagination never repeats or skips a row.
         if sort_order == "asc":
-            stmt = stmt.order_by(sort_column.asc())
+            stmt = stmt.order_by(sort_column.asc(), Creative.creative_id.asc())
         else:
-            stmt = stmt.order_by(sort_column.desc())
+            stmt = stmt.order_by(sort_column.desc(), Creative.creative_id.desc())
 
         # Apply pagination
         db_creatives = list(self._session.scalars(stmt.offset(offset).limit(limit)).all())
@@ -374,6 +379,21 @@ class CreativeAssignmentRepository:
                     CreativeAssignment.tenant_id == self._tenant_id,
                     CreativeAssignment.creative_id == creative_id,
                 )
+            ).all()
+        )
+
+    def get_by_creatives(self, creative_ids: list[str]) -> list[CreativeAssignment]:
+        """Get all assignments for a batch of creatives within the tenant (single query)."""
+        if not creative_ids:
+            return []
+        return list(
+            self._session.scalars(
+                select(CreativeAssignment)
+                .where(
+                    CreativeAssignment.tenant_id == self._tenant_id,
+                    CreativeAssignment.creative_id.in_(creative_ids),
+                )
+                .order_by(CreativeAssignment.created_at, CreativeAssignment.assignment_id)
             ).all()
         )
 

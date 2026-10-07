@@ -9,7 +9,7 @@ beads: salesagent-x79
 import uuid
 from typing import Any
 
-from adcp.types import Error, Setup
+from adcp.types import Error, NotificationConfig, Setup
 from adcp.types import ListAccountsRequest as LibraryListAccountsRequest
 from adcp.types import ListAccountsResponse as LibraryListAccountsResponse
 from adcp.types import SyncAccountsRequest as LibrarySyncAccountsRequest
@@ -112,7 +112,10 @@ class SyncResponseAccount(AdCPBaseModel):
     sandbox: bool | None = None
     errors: list[Error] | None = None
     setup: Setup | None = None
-    notification_configs: list[Any] | None = None
+    # Typed with the SDK model so the sync echo serialises exactly like the
+    # ``list_accounts`` row (adcp 8 defaults ``product_payload_view`` for
+    # ``product.*`` subscriptions and its serializer keeps it on the wire).
+    notification_configs: list[NotificationConfig] | None = None
 
 
 class ListAccountsResponse(NestedModelSerializerMixin, LibraryListAccountsResponse):
@@ -149,6 +152,10 @@ class SyncAccountsResponse(NestedModelSerializerMixin, LibrarySyncAccountsSucces
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    # AdCP 3.1+ requires the protocol envelope ``status`` on every synchronous
+    # response. adcp 8's generated success variant declares it natively
+    # (``status: TaskStatus = completed``), so it is inherited here.
 
     # SyncResponseAccount is an independent local row model (extends AdCPBaseModel,
     # NOT a subclass of the parent's element type). adcp 6.3 retyped the parent's

@@ -3,10 +3,19 @@
 import logging
 from typing import Any
 
-from adcp.types import CreativeAsset
+from adcp.types.legacy import LegacyCreativeAsset as CreativeAsset
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+def _url_text(value: Any) -> str:
+    """Render a URL value as plain text.
+
+    adcp 8 types creative asset URLs as RootModel wrappers (``MacroBearingUrl``);
+    ``str()`` on those yields ``root='...'``, so unwrap ``.root`` first.
+    """
+    return str(getattr(value, "root", value))
 
 
 def _extract_url_from_assets(creative: CreativeAsset) -> str | None:
@@ -23,7 +32,7 @@ def _extract_url_from_assets(creative: CreativeAsset) -> str | None:
     """
     url = getattr(creative, "url", None) or getattr(creative, "media_url", None)
     if url or not creative.assets:
-        return url
+        return _url_text(url) if url else url
 
     assets = creative.assets
 
@@ -34,14 +43,14 @@ def _extract_url_from_assets(creative: CreativeAsset) -> str | None:
             url = asset.get("url") if isinstance(asset, dict) else getattr(asset, "url", None)
             if url:
                 logger.debug(f"[sync_creatives] Extracted URL from assets.{priority_key}.url")
-                return str(url)
+                return _url_text(url)
 
     # Priority 2: First available asset URL
     for asset_id, asset_data in assets.items():
         asset_url = asset_data.get("url") if isinstance(asset_data, dict) else getattr(asset_data, "url", None)
         if asset_url:
             logger.debug(f"[sync_creatives] Extracted URL from assets.{asset_id}.url (fallback)")
-            return str(asset_url)
+            return _url_text(asset_url)
 
     return None
 

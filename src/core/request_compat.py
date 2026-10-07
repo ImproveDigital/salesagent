@@ -91,15 +91,34 @@ def _normalize_packages(packages: list[dict[str, Any]]) -> tuple[list[dict[str, 
 
 
 def _normalize_format_ref(value: Any) -> tuple[Any, list[str]]:
-    """Normalize a single format reference object before SDK validation."""
+    """Normalize a single format reference object before SDK validation.
+
+    adcp 7 projects legacy creative identity to canonical declarations *before*
+    the handler runs and only understands the structured ``{agent_url, id}``
+    tuple, so the deprecated bare-string shape (``"display_300x250_image"``)
+    must be upgraded here rather than in the impl-local schema validators.
+    """
+    if isinstance(value, str):
+        from src.core.format_cache import upgrade_legacy_format_id
+
+        upgraded = upgrade_legacy_format_id(value).model_dump(mode="json", exclude_none=True)
+        return upgraded, ["format_id string → structured format_id"]
     if not isinstance(value, dict):
         return value, []
 
     result = dict(value)
+    translations: list[str] = []
     if "format_id" in result and "id" not in result:
         result["id"] = result.pop("format_id")
-        return result, ["format_id.format_id → format_id.id"]
-    return result, []
+        translations.append("format_id.format_id → format_id.id")
+    # A2A carries JSON numbers as floats (protobuf Struct); the SDK's legacy
+    # tuple uses strict ints for dimensions, so 300.0 must become 300.
+    for key in ("width", "height", "duration_ms"):
+        number = result.get(key)
+        if isinstance(number, float) and number.is_integer():
+            result[key] = int(number)
+            translations.append(f"format_id.{key} float → int")
+    return result, translations
 
 
 def _normalize_format_ref_list(values: list[Any]) -> tuple[list[Any], list[str]]:
@@ -179,6 +198,15 @@ def normalize_request_params(
             translations.append("promoted_offerings → catalogs")
         if tool_name == "get_products":
             del result["promoted_offerings"]
+
+    # --- Filter-level translations (get_products / list_creatives) ---
+    filters = result.get("filters")
+    if tool_name in {"get_products", "list_creatives"} and isinstance(filters, dict):
+        if isinstance(filters.get("format_ids"), list):
+            filters = dict(filters)
+            filters["format_ids"], filter_translations = _normalize_format_ref_list(filters["format_ids"])
+            translations.extend(filter_translations)
+            result["filters"] = filters
 
     # --- Package-level translations ---
     if "packages" in result and isinstance(result["packages"], list):
