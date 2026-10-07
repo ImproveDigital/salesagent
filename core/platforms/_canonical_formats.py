@@ -1,7 +1,8 @@
 """Bridge between salesagent's named creative formats and AdCP 3.1 canonical format options.
 
-adcp 7 (AdCP 3.1.15) makes *canonical* creative identity the framework's
-native contract:
+adcp 7 (AdCP 3.1.15) made *canonical* creative identity the framework's
+native contract; adcp 8 (AdCP 3.2.1) keeps the same negotiation and only
+widens the ``CanonicalFormatKind`` vocabulary:
 
 * products declare ``format_options[]`` (a ``format_kind`` such as ``image``
   or ``video_hosted`` plus ``params``) instead of ``format_ids[]``;
@@ -40,6 +41,8 @@ index caches every tuple we have projected in this process.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import threading
@@ -52,8 +55,8 @@ from adcp.canonical_formats import (
     migrated_format_option_id,
     project_legacy_format_id,
 )
+from adcp.decisioning.capabilities import Features
 from adcp.types import Format as CanonicalFormat
-from adcp.types.generated_poc.bundled.protocol.get_adcp_capabilities_response import Features
 from adcp.types.generated_poc.core.format_id import FormatReferenceStructuredObject
 from adcp.types.legacy import LegacyFormatId
 from pydantic import BaseModel
@@ -326,7 +329,27 @@ def _decode_adapter_owner(agent_url: Any) -> str | None:
 
 
 def _adapter_format_body(ref: LegacyFormatId) -> dict[str, Any]:
-    return {"format_kind": "custom", "format_shape": ref.id, "params": {}}
+    """Canonical ``custom`` body for an ad-server-owned (adapter-scheme) format.
+
+    adcp 8 requires every ``custom`` declaration to carry an immutable
+    ``format_schema`` reference (HTTPS ``uri`` + ``sha256:`` digest). Adapter
+    formats have no published schema document, so derive a deterministic
+    reference from the legacy tuple: the uri lives under the same reserved
+    ``.example`` owner namespace as the synthetic ``agent_url`` (nothing
+    resolves), and the digest changes whenever the tuple does, which is the
+    drift signal the reference exists for.
+    """
+    tuple_json = json.dumps(ref.model_dump(mode="json", exclude_none=True), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(tuple_json.encode("utf-8")).hexdigest()
+    return {
+        "format_kind": "custom",
+        "format_shape": ref.id,
+        "format_schema": {
+            "uri": f"{_encode_adapter_owner(ref.agent_url)}/format-schema/{ref.id}.json",
+            "digest": f"sha256:{digest}",
+        },
+        "params": {},
+    }
 
 
 def _rewrite_adapter_ref(ref: Mapping[str, Any]) -> dict[str, Any]:

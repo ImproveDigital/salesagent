@@ -80,8 +80,10 @@ from adcp.types import TargetingOverlay as LibraryTargetingOverlay
 from adcp.types.generated_poc.core.format_id import FormatReferenceStructuredObject
 
 # adcp 7.x removed ``GeoPostalArea`` from the typed surface (deprecated lazy alias
-# only). Bind the name to the legacy ``{system, values}`` PostalArea arm it maps to.
-from adcp.types.generated_poc.core.postal_area import PostalArea5 as GeoPostalArea
+# only). Bind the name to the ``{system, values}`` PostalArea arm it maps to
+# (``PostalArea5`` in adcp 7, ``PostalArea2`` in adcp 8 — the generated arm
+# numbering is not stable across SDK releases, so re-check on every upgrade).
+from adcp.types.generated_poc.core.postal_area import PostalArea2 as GeoPostalArea
 from adcp.types.generated_poc.signals.get_signals_response import Signal as LibrarySignal
 from pydantic import (
     AnyUrl,
@@ -1488,8 +1490,10 @@ class PackageRequest(LibraryPackageRequest):
         description="Internal: List of creative IDs to assign (alternative to full creatives objects)",
         exclude=True,
     )
-    # Override library TargetingOverlay -> our Targeting with internal fields + legacy normalizer
-    targeting_overlay: Targeting | None = None
+    # Override library TargetingOverlay -> our Targeting with internal fields + legacy normalizer.
+    # adcp 8 types the base field as ``TargetingOverlayInput | TargetingOverlay``
+    # (input vs. resolved overlay); we keep serving the single resolved shape.
+    targeting_overlay: Targeting | None = None  # type: ignore[assignment]
 
     @model_validator(mode="before")
     @classmethod

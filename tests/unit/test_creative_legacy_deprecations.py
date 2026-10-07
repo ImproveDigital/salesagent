@@ -74,6 +74,11 @@ class TestLegacyFormatKey:
         """Spec-shaped key + structured value path is silent."""
         with warnings.catch_warnings():
             warnings.simplefilter("error", DeprecationWarning)
+            # adcp 8 marks the SDK's ``format_id`` field itself as deprecated, so
+            # pydantic emits a bare ``DeprecationWarning("deprecated")`` on every
+            # read of it (the SDK's own after-validator reads it). That is the
+            # library's field-level deprecation, not our legacy-shape warning.
+            warnings.filterwarnings("ignore", message=r"^deprecated$", category=DeprecationWarning)
             Creative(
                 **_base_creative_kwargs(
                     {"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}
@@ -94,7 +99,11 @@ class TestLegacyFormatKey:
             warnings.simplefilter("always", DeprecationWarning)
             Creative(**_base_creative_kwargs("display_300x250", key="format"))
 
-        deprecation_warnings = [w for w in captured if issubclass(w.category, DeprecationWarning)]
+        # Exclude pydantic's bare "deprecated" warning for the SDK's deprecated
+        # ``format_id`` field (adcp 8) — only our legacy-shape warning is under test.
+        deprecation_warnings = [
+            w for w in captured if issubclass(w.category, DeprecationWarning) and str(w.message) != "deprecated"
+        ]
         assert deprecation_warnings, "expected a DeprecationWarning to be emitted"
         for w in deprecation_warnings:
             assert w.filename.endswith(__file__.split("/")[-1]), (

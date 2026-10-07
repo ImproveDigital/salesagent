@@ -206,11 +206,13 @@ async def _call_webhook_for_creative_status(
             derived_tenant_id = tenant_id or (getattr(context_obj, "tenant_id", None))
             derived_principal_id = getattr(context_obj, "principal_id", None)
 
+            operation_id = cfg_dict.get("operation_id")
             push_notification_config = DBPushNotificationConfig(
                 id=cfg_dict.get("id") or f"pnc_{uuid4().hex[:16]}",
                 tenant_id=derived_tenant_id,
                 principal_id=derived_principal_id,
                 url=url,
+                operation_id=str(operation_id) if operation_id is not None else None,
                 authentication_type=auth_type,
                 authentication_token=auth_token,
                 is_active=True,
@@ -258,11 +260,20 @@ async def _call_webhook_for_creative_status(
                     task_type_arg: Any = TaskType(step_tool_name) if step_tool_name else TaskType.sync_creatives
                 except ValueError:
                     task_type_arg = TaskType.sync_creatives
+                # AdCP 3.2 (adcp 8): echo the buyer-supplied operation_id verbatim;
+                # a registration without one gets no push (buyer polls instead).
+                if not push_notification_config.operation_id:
+                    logger.warning(
+                        "Skipping MCP webhook for creative %s: push_notification_config carries no operation_id",
+                        creative_id,
+                    )
+                    return False
                 payload = create_mcp_webhook_payload(
                     step_step_id,
                     GeneratedTaskStatus.completed,
                     task_type_arg,
                     result=result_dict,
+                    operation_id=push_notification_config.operation_id,
                 )
 
             metadata = {

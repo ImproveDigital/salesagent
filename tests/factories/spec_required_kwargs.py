@@ -23,7 +23,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from adcp.types import AccountReference
+from adcp.types.generated_poc.core.account_ref import AccountReference1
 
 
 def required_request_kwargs(*, account_id: str = "test-acct", **overrides: Any) -> dict[str, Any]:
@@ -41,7 +41,7 @@ def required_request_kwargs(*, account_id: str = "test-acct", **overrides: Any) 
     defaults — never produces ``got multiple values for kwarg``.
     """
     base: dict[str, Any] = {
-        "account": AccountReference(account_id=account_id),
+        "account": AccountReference1(account_id=account_id),
         "idempotency_key": f"idem-test-{uuid.uuid4().hex}",
     }
     base.update(overrides)

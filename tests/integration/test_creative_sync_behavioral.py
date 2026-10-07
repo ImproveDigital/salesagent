@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from adcp.types import CreativeAction
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as CreativeAsset
+from adcp.types.legacy import LegacyCreativeAsset as CreativeAsset
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError, AdCPValidationError
 from src.core.schemas import FormatId as AdcpFormatId

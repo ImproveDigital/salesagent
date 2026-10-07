@@ -153,6 +153,7 @@ class TestIdempotencyReplaySuccess:
                 "affected_packages": [],
                 "media_buy_status": "canceled",
                 "status": "completed",
+                "replayed": False,
                 "revision": 2,
             },
         )

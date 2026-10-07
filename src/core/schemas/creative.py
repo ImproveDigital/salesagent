@@ -25,14 +25,6 @@ from adcp.types import (
     SyncCreativeResult as LibrarySyncCreativeResult,
 )
 
-# adcp 7.x: canonical creative identity is the primary contract; salesagent
-# still serves the AdCP 3.x named-format (``format_id``) wire shape, so extend
-# the SDK's explicit ``Legacy*`` models (see src/core/schemas/_base.py).
-# ``CreativeAsset`` is a RootModel union in adcp 7 (``CreativeAsset1`` legacy
-# ``format_id`` path | ``CreativeAsset2`` canonical ``format_kind`` path); extend
-# the named-format variant directly so field overrides keep working.
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset1 as LibraryCreativeAsset
-
 # Pin to the listing-side ``Creative`` (list_creatives_response). The
 # top-level ``adcp.types.Creative`` resolves to the delivery-side type
 # (get_creative_delivery_response) since adcp 4.4 — that variant has only
@@ -48,6 +40,15 @@ from adcp.types.generated_poc.creative.list_creatives_response import (
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
+
+# adcp 7.x+: canonical creative identity is the primary contract; salesagent
+# still serves the AdCP 3.x named-format (``format_id``) wire shape, so extend
+# the SDK's explicit ``Legacy*`` models (see src/core/schemas/_base.py).
+# ``adcp.types.CreativeAsset`` is the canonical boundary model (rejects
+# ``format_id``); ``LegacyCreativeAsset`` is the named-format variant. adcp 8
+# dropped the generated ``CreativeAsset1``/``CreativeAsset2`` split, so the
+# stable ``adcp.types.legacy`` path is the only supported import.
+from adcp.types.legacy import LegacyCreativeAsset as LibraryCreativeAsset
 from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 from adcp.types.legacy import LegacyListCreativeFormatsRequest as LibraryListCreativeFormatsRequest
 from adcp.types.legacy import LegacyListCreativeFormatsResponse as LibraryListCreativeFormatsResponse
@@ -209,6 +210,11 @@ class CreativeAsset(LibraryCreativeAsset):
     Inherits ``extra="allow"`` from the library type — sync payloads commonly carry
     forward-compat fields that should pass through silently.
     """
+
+    # adcp 8 (AdCP 3.2) makes the inherited ``format_id`` optional (and marks it
+    # deprecated on the SDK model). The schema inherits that contract; a sync
+    # creative without a resolvable format is rejected by
+    # ``_validate_creative_input`` ("Creative format is required").
 
     @model_validator(mode="before")
     @classmethod

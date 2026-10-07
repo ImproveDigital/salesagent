@@ -1663,6 +1663,8 @@ class TestAdCPContract:
             "account",
             "adcp_version",
             "adcp_major_version",
+            "assignment_limit",
+            "assignment_projection",
             "context",
             "ext",
             "fields",

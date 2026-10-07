@@ -687,11 +687,13 @@ class ContextManager(DatabaseManager):
             derived_tenant_id = tenant_id or (getattr(context_obj, "tenant_id", None))
             derived_principal_id = getattr(context_obj, "principal_id", None)
 
+            operation_id = cfg_dict.get("operation_id")
             push_notification_config = PushNotificationConfig(
                 id=cfg_dict.get("id") or f"pnc_{uuid4().hex[:16]}",
                 tenant_id=derived_tenant_id,
                 principal_id=derived_principal_id,
                 url=url,
+                operation_id=str(operation_id) if operation_id is not None else None,
                 authentication_type=auth_type,
                 authentication_token=auth_token,
                 purpose="async_task",
@@ -739,23 +741,29 @@ class ContextManager(DatabaseManager):
                         context_id=step.context_id,
                         result=step.response_data or {},
                     )
-                elif task_type_enum is not None:
+                elif task_type_enum is not None and push_notification_config.operation_id:
                     # adcp 5.0+: create_mcp_webhook_payload returns McpWebhookPayload directly
                     # and requires task_type to be a closed TaskType enum value
-                    # (was a free-form ``domain`` string pre-5.0).
+                    # (was a free-form ``domain`` string pre-5.0). AdCP 3.2
+                    # (adcp 8) additionally requires the buyer-supplied
+                    # ``push_notification_config.operation_id`` to be echoed.
                     payload = create_mcp_webhook_payload(
                         step.step_id,
                         status_enum,
                         task_type_enum,
                         result=step.response_data,
+                        operation_id=push_notification_config.operation_id,
                     )
                 else:
                     # Non-enum tool_name (internal review action, custom step,
-                    # etc.) — MCP webhook spec doesn't model these. Skip the
-                    # webhook rather than fail at validation. The buyer-facing
-                    # state still updates via the DB; the webhook is best-effort.
+                    # etc.) — MCP webhook spec doesn't model these — or a
+                    # registration without an ``operation_id`` (AdCP 3.2 forbids
+                    # sellers from inventing one). Skip the webhook rather than
+                    # fail at validation. The buyer-facing state still updates
+                    # via the DB; the webhook is best-effort.
                     logger.info(
-                        "Skipping MCP webhook for step %s: tool_name=%r is not a TaskType enum member.",
+                        "Skipping MCP webhook for step %s: tool_name=%r is not a TaskType enum member "
+                        "or push_notification_config carries no operation_id.",
                         step.step_id,
                         raw_task_type,
                     )
