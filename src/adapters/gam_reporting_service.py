@@ -160,6 +160,10 @@ class GAMReportingService:
         self.client = gam_client
         self.report_service = self.client.GetService("ReportService")
 
+        # Currency every ReportService revenue column is denominated in.
+        # Only known when we looked the network up ourselves.
+        self.network_currency: str | None = None
+
         # Get network timezone from GAM if not provided
         if network_timezone:
             self.network_timezone = network_timezone
@@ -168,6 +172,7 @@ class GAMReportingService:
                 network_service = self.client.GetService("NetworkService")
                 network = network_service.getCurrentNetwork()
                 self.network_timezone = network.timeZone
+                self.network_currency = str(network.currencyCode) if network.currencyCode else None
             except Exception:
                 # Fallback to Eastern Time if we can't get network timezone
                 self.network_timezone = "America/New_York"

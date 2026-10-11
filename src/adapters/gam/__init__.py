@@ -34,6 +34,9 @@ def build_gam_config_from_adapter(adapter_config) -> dict:
         "network_code": adapter_config.gam_network_code,
         "trafficker_id": adapter_config.gam_trafficker_id,
         "manual_approval_required": adapter_config.gam_manual_approval_required,
+        # ReportService revenue is always denominated in the network currency;
+        # delivery responses label spend with this, not the buy currency.
+        "network_currency": adapter_config.gam_network_currency,
     }
 
     # Detect auth method from credential presence rather than trusting
