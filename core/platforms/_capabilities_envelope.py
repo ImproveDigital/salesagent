@@ -23,7 +23,9 @@ continues to own canonical response projection and validation.
 Salesagent emits buyer-protocol webhooks through its own service path,
 so ``DecisioningCapabilities.webhook_signing_managed_externally`` tells
 the SDK to trust this typed capability declaration instead of requiring
-an SDK-wired ``WebhookSender``.
+an SDK-wired ``WebhookSender``. adcp 8 only accepts that flag together
+with ``webhook_signing.supported=True`` and an advertised
+``delivery_retry_horizon_seconds``, so both are set per tenant here.
 """
 
 from __future__ import annotations
@@ -41,6 +43,13 @@ from src.core.embedded_runtime import publisher_owns_compose_products
 logger = logging.getLogger(__name__)
 
 _WEBHOOK_SIGNING_PROFILE = "adcp/webhook-signing/v1"
+
+# AdCP 3.2 requires a seller that advertises ``webhook_signing.supported=True``
+# to also advertise the window (86 400–604 800 s) within which it may retry a
+# delivery; receivers retain idempotency bindings for that long. Our delivery
+# path (``ProtocolWebhookService``) gives up after a few minutes, so the
+# spec minimum is honoured conservatively — we never retry beyond it.
+WEBHOOK_DELIVERY_RETRY_HORIZON_SECONDS = 86_400
 
 
 def _webhook_signing_unsupported() -> WebhookSigning:
@@ -130,6 +139,14 @@ def capabilities_for_request(
     ):
         updates["webhook_signing"] = webhook_signing
 
+    # adcp 8 rejects ``webhook_signing_managed_externally=True`` unless the
+    # projected capability block advertises ``supported=True`` (and vice
+    # versa it is the only way to skip the SDK WebhookSender check), so the
+    # flag has to follow the tenant-specific advertisement.
+    managed_externally = bool(webhook_signing.supported)
+    if base_capabilities.webhook_signing_managed_externally != managed_externally:
+        updates["webhook_signing_managed_externally"] = managed_externally
+
     if not updates:
         return None
 
@@ -171,6 +188,7 @@ def _webhook_signing_for_tenant_id(tenant_id: str | None) -> WebhookSigning:
         profile=_WEBHOOK_SIGNING_PROFILE,
         algorithms=[snapshot.alg],
         legacy_hmac_fallback=True,
+        delivery_retry_horizon_seconds=WEBHOOK_DELIVERY_RETRY_HORIZON_SECONDS,
     )
 
 

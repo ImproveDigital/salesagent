@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 import pytest
 from a2a.types import MessageSendParams, Task
 from a2a.utils.errors import InvalidParamsError, ServerError
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.resolved_identity import ResolvedIdentity
 from tests.utils.a2a_helpers import create_a2a_message_with_skill
 

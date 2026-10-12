@@ -4,13 +4,16 @@ Extracted from src/core/schemas/__init__.py to reduce file size.
 All classes are re-exported from src.core.schemas for backward compatibility.
 """
 
-from adcp.types import GetProductsResponse as LibraryGetProductsResponse
-from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
-from adcp.types import Placement as LibraryPlacement
-from adcp.types import Product as LibraryProduct
 from adcp.types import ProductCard as LibraryProductCard
 from adcp.types import ProductCardDetailed as LibraryProductCardDetailed
-from adcp.types import ProductFilters as LibraryFilters
+
+# adcp 7.x: products carry legacy ``format_ids``; extend the explicit ``Legacy*``
+# models (see src/core/schemas/_base.py for the rationale).
+from adcp.types.legacy import LegacyGetProductsRequest as LibraryGetProductsRequest
+from adcp.types.legacy import LegacyGetProductsResponse as LibraryGetProductsResponse
+from adcp.types.legacy import LegacyPlacement as LibraryPlacement
+from adcp.types.legacy import LegacyProduct as LibraryProduct
+from adcp.types.legacy import LegacyProductFilters as LibraryFilters
 from pydantic import ConfigDict, Field, model_validator
 
 from src.core.config import get_pydantic_extra_mode

@@ -203,6 +203,7 @@ class TestFunctionCallIntegration:
 
         # Note: Signals tools removed - now testing get_products instead
         from src.a2a_server.adcp_a2a_server import core_get_products_tool
+
         from src.core.schemas import GetProductsRequest
         from src.core.tool_context import ToolContext
 

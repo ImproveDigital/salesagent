@@ -187,7 +187,7 @@ class TestCreativeAgentRegistry:
         mock_result.data = Mock()
         mock_result.data.formats = mock_formats
 
-        mock_agent_client.list_creative_formats = AsyncMock(return_value=mock_result)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(return_value=mock_result)
         mock_client.agent = Mock(return_value=mock_agent_client)
 
         # Call the method
@@ -222,7 +222,7 @@ class TestCreativeAgentRegistry:
         mock_result.submitted = Mock()
         mock_result.submitted.webhook_url = "https://webhook.example.com/callback"
 
-        mock_agent_client.list_creative_formats = AsyncMock(return_value=mock_result)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(return_value=mock_result)
         mock_client.agent = Mock(return_value=mock_agent_client)
 
         # Submitted status is anomalous for list_creative_formats — must raise
@@ -249,7 +249,7 @@ class TestCreativeAgentRegistry:
         mock_result.error = (
             "Failed to parse response: Response doesn't match expected schema ListCreativeFormatsResponse"
         )
-        mock_agent_client.list_creative_formats = AsyncMock(return_value=mock_result)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(return_value=mock_result)
         mock_client.agent = Mock(return_value=mock_agent_client)
 
         fallback_format = Format(
@@ -282,7 +282,7 @@ class TestCreativeAgentRegistry:
         mock_result.error = (
             "Failed to parse response: Response doesn't match expected schema ListCreativeFormatsResponse"
         )
-        mock_agent_client.list_creative_formats = AsyncMock(return_value=mock_result)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(return_value=mock_result)
         mock_client.agent = Mock(return_value=mock_agent_client)
         registry._fetch_formats_raw_mcp = AsyncMock(return_value=[])
 
@@ -325,7 +325,7 @@ class TestCreativeAgentRegistry:
         mock_agent_client = Mock()
 
         auth_error = ADCPAuthenticationError("Invalid credentials")
-        mock_agent_client.list_creative_formats = AsyncMock(side_effect=auth_error)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(side_effect=auth_error)
         mock_client.agent = Mock(return_value=mock_agent_client)
 
         # Should raise RuntimeError (wrapped)
@@ -356,7 +356,7 @@ class TestCreativeAgentRegistry:
             agent_uri="https://test-agent.example.com/mcp",
             timeout=30.0,
         )
-        mock_agent_client.list_creative_formats = AsyncMock(side_effect=timeout_error)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(side_effect=timeout_error)
         mock_client.agent = Mock(return_value=mock_agent_client)
 
         # Should raise RuntimeError with timeout message
@@ -382,7 +382,7 @@ class TestCreativeAgentRegistry:
         mock_agent_client = Mock()
 
         conn_error = ADCPConnectionError("Connection refused")
-        mock_agent_client.list_creative_formats = AsyncMock(side_effect=conn_error)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(side_effect=conn_error)
         mock_client.agent = Mock(return_value=mock_agent_client)
 
         # Should raise RuntimeError
@@ -392,7 +392,7 @@ class TestCreativeAgentRegistry:
     @pytest.mark.asyncio
     async def test_fetch_formats_from_agent_handles_library_format(self):
         """Test _fetch_formats_from_agent converts library Format to local Format via model_validate."""
-        from adcp.types import Format as LibraryFormat
+        from adcp.types.legacy import LegacyFormat as LibraryFormat
 
         registry = CreativeAgentRegistry()
 
@@ -419,7 +419,7 @@ class TestCreativeAgentRegistry:
         mock_result.data = Mock()
         mock_result.data.formats = [library_format]
 
-        mock_agent_client.list_creative_formats = AsyncMock(return_value=mock_result)
+        mock_agent_client.list_creative_formats_legacy = AsyncMock(return_value=mock_result)
         mock_client.agent = Mock(return_value=mock_agent_client)
 
         # Call the method

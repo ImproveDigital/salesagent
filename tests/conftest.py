@@ -12,7 +12,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import freezegun
 import pytest
+
+# adcp 8 resolves many top-level ``adcp.*`` exports lazily, and resolving
+# them builds pydantic TypeAdapters. freezegun's ``freeze_time().start()``
+# walks every module in ``sys.modules`` and touches every attribute; on the
+# ``adcp`` package that resolution raises (pydantic cannot build a schema
+# once ``datetime.date`` has been swapped for ``FakeDate``), ``start()``
+# aborts half-way, ``stop()`` never runs, and ``time.monotonic`` stays
+# frozen for the rest of the session (observed as polling loops that never
+# time out). The SDK's own clocks are not under test, so skip its modules.
+freezegun.configure(extend_ignore_list=["adcp"])
 
 # ---------------------------------------------------------------------------
 # Entity marker taxonomy — auto-applied to tests by filename / path patterns

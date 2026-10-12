@@ -35,7 +35,6 @@ class TestMCPAuthMiddlewareExists:
     def test_inherits_from_middleware(self):
         """MCPAuthMiddleware must inherit from fastmcp.server.middleware.Middleware."""
         from fastmcp.server.middleware import Middleware
-
         from src.core.mcp_auth_middleware import MCPAuthMiddleware
 
         assert issubclass(MCPAuthMiddleware, Middleware), (

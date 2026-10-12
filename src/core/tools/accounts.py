@@ -29,7 +29,7 @@ from src.core.database.repositories.push_notification import (
     PushNotificationConfigSnapshot,
 )
 from src.core.database.repositories.uow import AccountUoW
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import AdCPAccountNotFoundError, AdCPAuthenticationError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas.account import (
     Account,
@@ -261,11 +261,13 @@ def _serialize_governance_agents(agents: Any) -> list[dict[str, Any]] | None:
     return result
 
 
-def _account_fields_changed(db_account: DBAccount, entry: Any) -> dict[str, Any]:
+def _account_fields_changed(db_account: DBAccount, entry: Any, *, partial: bool = False) -> dict[str, Any]:
     """Compare incoming sync entry fields against existing DB account.
 
     Returns a dict of fields that changed (key → new value).
     Only compares mutable fields that can be updated via sync.
+    ``partial`` is settings-update mode: fields absent from the entry mean
+    "leave as is" rather than "clear".
     """
     changes: dict[str, Any] = {}
 
@@ -291,6 +293,8 @@ def _account_fields_changed(db_account: DBAccount, entry: Any) -> dict[str, Any]
     if db_gov != incoming_gov:
         changes["governance_agents"] = incoming_gov
 
+    if partial:
+        return {key: value for key, value in changes.items() if value is not None}
     return changes
 
 
@@ -460,6 +464,49 @@ def _extract_natural_key(entry: Any) -> tuple[str, str | None, str, bool | None]
     return brand_domain, brand_id, operator, sandbox
 
 
+def _account_reference_details(ref: Any) -> dict[str, Any]:
+    """Echo the buyer's ``account`` reference in an error payload (no model_dump in _impl)."""
+    target = getattr(ref, "root", ref)
+    account_id = getattr(target, "account_id", None)
+    if account_id is not None:
+        return {"account_id": account_id}
+    brand = getattr(target, "brand", None)
+    details: dict[str, Any] = {
+        "brand": {"domain": getattr(brand, "domain", None), "brand_id": getattr(brand, "brand_id", None)},
+        "operator": getattr(target, "operator", None),
+    }
+    if getattr(target, "sandbox", None) is not None:
+        details["sandbox"] = target.sandbox
+    return details
+
+
+def _resolve_account_reference(repo: Any, ref: Any, *, principal_id: str) -> DBAccount | None:
+    """Resolve a settings-update ``account`` reference to a stored account.
+
+    ``account_id`` references are seller ids in the tenant namespace and must
+    already be accessible to the calling agent; natural-key references reuse
+    the provisioning lookup (operator + brand + sandbox).
+    """
+    target = getattr(ref, "root", ref)
+    account_id = getattr(target, "account_id", None)
+    if account_id is not None:
+        existing = repo.get_by_id(account_id)
+        if existing is None or not repo.has_access(principal_id, existing.account_id):
+            return None
+        return existing
+    brand = getattr(target, "brand", None)
+    operator = getattr(target, "operator", None)
+    if brand is None or operator is None:
+        return None
+    brand_id = getattr(brand, "brand_id", None)
+    return repo.get_by_natural_key(
+        operator=operator,
+        brand_domain=brand.domain,
+        brand_id=str(brand_id) if brand_id is not None else None,
+        sandbox=getattr(target, "sandbox", None),
+    )
+
+
 @traced
 async def _sync_accounts_impl(
     req: SyncAccountsRequest | None = None,
@@ -527,15 +574,42 @@ async def _sync_accounts_impl(
             )
 
         for entry in req.accounts:
-            brand_domain, brand_id, operator, sandbox = _extract_natural_key(entry)
+            account_ref = getattr(entry, "account", None)
+            existing: DBAccount | None = None
+            partial = account_ref is not None
+            if account_ref is not None:
+                # Settings-update mode (sync-accounts-request.json): the entry
+                # targets an existing account and the seller MUST NOT provision.
+                existing = _resolve_account_reference(repo, account_ref, principal_id=principal_id)
+                if existing is None:
+                    raise AdCPAccountNotFoundError(
+                        "sync_accounts: `account` does not reference an account this agent can access",
+                        details={"account": _account_reference_details(account_ref)},
+                    )
+                stored_brand: Any = existing.brand
+                brand_domain = str(
+                    stored_brand.get("domain", "")
+                    if isinstance(stored_brand, dict)
+                    else getattr(stored_brand, "domain", "") or ""
+                )
+                brand_id = None
+                operator = existing.operator or ""
+                sandbox = existing.sandbox
+                result_brand: Any = entry.brand or existing.brand
+            else:
+                brand_domain, brand_id, operator, sandbox = _extract_natural_key(entry)
+                result_brand = entry.brand
             billing_val = _enum_to_str(entry.billing)
 
             # BR-RULE-059 + BR-RULE-061: check tenant + per-principal billing
-            billing_errors = _check_billing_policy(
-                billing_val,
-                identity,
-                principal_billing_enabled=principal_billing_enabled,
-            )
+            # (skipped when a settings-update entry leaves billing untouched).
+            billing_errors = None
+            if billing_val is not None or not partial:
+                billing_errors = _check_billing_policy(
+                    billing_val,
+                    identity,
+                    principal_billing_enabled=principal_billing_enabled,
+                )
             if billing_errors is not None:
                 results.append(
                     _build_sync_result(
@@ -559,14 +633,15 @@ async def _sync_accounts_impl(
             # advertisers). See docs/design/sync-accounts-advertiser-
             # mapping.md § Granularity decision.
             agent_scoped = billing_val == "agent"
-            existing = repo.get_by_natural_key(
-                operator=operator,
-                brand_domain=brand_domain,
-                brand_id=brand_id,
-                sandbox=sandbox,
-                billing=billing_val if agent_scoped else None,
-                principal_id=principal_id if agent_scoped else None,
-            )
+            if existing is None:
+                existing = repo.get_by_natural_key(
+                    operator=operator,
+                    brand_domain=brand_domain,
+                    brand_id=brand_id,
+                    sandbox=sandbox,
+                    billing=billing_val if agent_scoped else None,
+                    principal_id=principal_id if agent_scoped else None,
+                )
 
             if existing is not None:
                 seen_account_ids.add(existing.account_id)
@@ -574,13 +649,13 @@ async def _sync_accounts_impl(
 
                 if dry_run:
                     # Check if fields would change
-                    changes = _account_fields_changed(existing, entry)
+                    changes = _account_fields_changed(existing, entry, partial=partial)
                     access_would_change = not repo.has_access(principal_id, existing.account_id)
                     action = _sync_existing_action(changes, access_would_change)
                     results.append(
                         _build_sync_result(
                             account_id=existing.account_id,
-                            brand=entry.brand,
+                            brand=result_brand,
                             operator=operator,
                             action=action,
                             status=existing.status,
@@ -592,7 +667,7 @@ async def _sync_accounts_impl(
                     continue
 
                 # Check for field changes and update if needed
-                changes = _account_fields_changed(existing, entry)
+                changes = _account_fields_changed(existing, entry, partial=partial)
                 access_granted = repo.ensure_access(principal_id, existing.account_id)
                 if changes:
                     repo.update_fields(existing.account_id, **changes)
@@ -608,7 +683,7 @@ async def _sync_accounts_impl(
                 results.append(
                     _build_sync_result(
                         account_id=existing.account_id,
-                        brand=entry.brand,
+                        brand=result_brand,
                         operator=operator,
                         action=action,
                         status=existing.status,

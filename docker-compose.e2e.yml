@@ -41,6 +41,12 @@ services:
       DATABASE_URL: postgresql://adcp_user:secure_password_change_me@postgres:5432/adcp?sslmode=disable
       SKIP_NGINX: "true"
       SKIP_CRON: "true"
+      # The image sets ENV ADCP_PORT=8000 (the production contract: EXPOSE 8000,
+      # HEALTHCHECK 8000, ECS containerPort). run_server.py only setdefault()s
+      # ADCP_PORT, so without this override core/main.py binds 8000 while
+      # nginx-development.conf and the healthcheck below target adcp-server:8080
+      # (502 through the proxy). Pin the app port to what the stack expects.
+      ADCP_PORT: "8080"
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       SUPER_ADMIN_EMAILS: ${SUPER_ADMIN_EMAILS:-}
       ADCP_TESTING: ${ADCP_TESTING:-true}

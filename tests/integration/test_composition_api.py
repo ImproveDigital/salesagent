@@ -11,8 +11,8 @@ import asyncio
 from unittest.mock import Mock, call
 
 import pytest
-from adcp import GetProductsRequest
-from adcp import GetProductsResponse as LibraryGetProductsResponse
+from adcp.types.legacy import LegacyGetProductsRequest as GetProductsRequest
+from adcp.types.legacy import LegacyGetProductsResponse as LibraryGetProductsResponse
 
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import GetSignalsRequest

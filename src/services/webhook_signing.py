@@ -481,6 +481,11 @@ def _build_rfc9421_headers(
         # Buyers verify with the webhook profile, which requires
         # content-digest coverage on every webhook delivery.
         cover_content_digest=True,
+        # adcp 8 makes the low-level signer's profile explicit (no negotiated
+        # version to infer it from). ``adcp/webhook-signing/v1`` keeps the
+        # 3.1 ``Signature`` encoding even on AdCP 3.2 routes — mirrors the
+        # SDK's own ``adcp.signing.webhook_signer.sign_webhook``.
+        signing_profile_version="3.1",
     )
     return signed.as_dict()
 

@@ -35,6 +35,7 @@ from adcp.server.auth import current_principal
 from adcp.validation.envelope import get_supported_adcp_versions
 from pydantic import BaseModel, ValidationError
 
+from core.platforms._canonical_formats import canonicalize_wire_response, legacy_request_payload
 from src.core.config_loader import get_tenant_by_id
 from src.core.exceptions import AdCPError
 from src.core.resolved_identity import ResolvedIdentity
@@ -55,6 +56,7 @@ from src.core.tools.media_buy_create import _create_media_buy_impl
 from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 from src.core.tools.media_buy_list import _get_media_buys_impl
 from src.core.tools.media_buy_update import _update_media_buy_impl
+from src.core.tools.performance import _provide_performance_feedback_impl
 from src.core.tools.products import _get_products_impl
 from src.core.tools.signals import _get_signals_impl
 from src.core.transport_helpers import enrich_identity_with_account
@@ -243,6 +245,31 @@ def _coerce_to_request_model(req: Any, model_cls: type[BaseModel]) -> Any:
         filtered = {k: v for k, v in dumped.items() if k in allowed}
         return model_cls(**filtered)
     return model_cls.model_validate(req)
+
+
+def _legacy_request_body(tool_name: str, req: Any, *, exclude_unset: bool = False) -> dict[str, Any]:
+    """Dump ``req`` and translate adcp 7 canonical creative identity back to the
+    legacy ``format_id`` / ``format_ids`` shape the impl-local request models use.
+
+    The SDK dispatcher hands platforms canonical requests: legacy buyers'
+    ``format_ids`` have already been rewritten into ``format_options`` /
+    ``format_option_refs`` (``normalize_legacy_creative_request``), and
+    canonical buyers send those shapes natively. In-process declarations still
+    carry their original legacy tuple, so they are kept as objects (not dumped)
+    for the translation to read; everything else resolves through the
+    deterministic option-id index in :mod:`core.platforms._canonical_formats`.
+    """
+    if isinstance(req, dict):
+        body: dict[str, Any] = dict(req)
+    elif hasattr(req, "model_dump"):
+        body = req.model_dump(exclude_unset=True) if exclude_unset else req.model_dump(exclude_none=True)
+        filters = getattr(req, "filters", None)
+        options = getattr(filters, "format_options", None)
+        if options and isinstance(body.get("filters"), dict):
+            body["filters"] = {**body["filters"], "format_options": list(options)}
+    else:
+        body = dict(req)
+    return legacy_request_payload(tool_name, body)
 
 
 def _request_payload(req: Any) -> dict[str, Any]:
@@ -625,10 +652,10 @@ async def _delegate_get_products(req: GetProductsRequest, ctx: RequestContext[An
     the pre-validation-hook boundary in ``core.main`` before the SDK's
     permissive library model can accept or drop extra fields.
     """
-    req_model = _coerce_to_request_model(req, GetProductsRequest)
+    req_model = _coerce_to_request_model(_legacy_request_body("get_products", req), GetProductsRequest)
     identity = _enrich_resolved_account_identity(_build_identity(ctx), getattr(req_model, "account", None))
     response = await _get_products_impl(req_model, identity)
-    return _to_wire(response)
+    return canonicalize_wire_response("get_products", _to_wire(response), tenant_id=identity.tenant_id)
 
 
 @translate_adcp_errors
@@ -653,7 +680,7 @@ async def _delegate_create_media_buy(req: Any, ctx: RequestContext[Any]) -> dict
     project to the correct wire ``code`` instead of leaking through as
     generic ``INTERNAL_ERROR``.
     """
-    req_model = _coerce_to_request_model(req, CreateMediaBuyRequest)
+    req_model = _coerce_to_request_model(_legacy_request_body("create_media_buy", req), CreateMediaBuyRequest)
     requested_adcp_version = _resolve_requested_version(req_model)
     identity = _enrich_resolved_account_identity(_build_identity(ctx), getattr(req_model, "account", None))
     pnc = req_model.push_notification_config
@@ -667,7 +694,8 @@ async def _delegate_create_media_buy(req: Any, ctx: RequestContext[Any]) -> dict
     response = await _create_media_buy_impl(req_model, push_notification_config=pnc_dict, identity=identity)
     response = _with_create_media_buy_idempotency_key(response, req_model)
     _emit_media_buy_created_if_success(identity.tenant_id, response, req_model)
-    return _to_wire(response, requested_adcp_version=requested_adcp_version, tool_name="create_media_buy")
+    wire = _to_wire(response, requested_adcp_version=requested_adcp_version, tool_name="create_media_buy")
+    return canonicalize_wire_response("create_media_buy", wire, tenant_id=identity.tenant_id)
 
 
 def _emit_media_buy_created_if_success(tenant_id: str, result: Any, req_model: Any = None) -> None:
@@ -746,9 +774,10 @@ async def _delegate_update_media_buy(
         patch_dict = dict(patch)
     patch_dict["media_buy_id"] = media_buy_id
     requested_adcp_version = _resolve_requested_version(patch_dict)
-    req_model = _coerce_to_request_model(patch_dict, UpdateMediaBuyRequest)
+    req_model = _coerce_to_request_model(legacy_request_payload("update_media_buy", patch_dict), UpdateMediaBuyRequest)
     response = await asyncio.to_thread(_update_media_buy_impl, req_model, identity)
-    return _to_wire(response, requested_adcp_version=requested_adcp_version, tool_name="update_media_buy")
+    wire = _to_wire(response, requested_adcp_version=requested_adcp_version, tool_name="update_media_buy")
+    return canonicalize_wire_response("update_media_buy", wire, tenant_id=identity.tenant_id)
 
 
 @translate_adcp_errors
@@ -766,12 +795,7 @@ async def _delegate_sync_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
     buyers can't tell missing-package from internal failure.
     """
     identity = _build_identity(ctx)
-    if hasattr(req, "model_dump"):
-        body = req.model_dump(exclude_unset=True)
-    elif isinstance(req, dict):
-        body = dict(req)
-    else:
-        body = dict(req)
+    body = _legacy_request_body("sync_creatives", req, exclude_unset=True)
     # ``validation_mode`` arrives as a ``ValidationMode`` enum on the wire
     # path (the spec schema is an enum; pydantic preserves it through
     # ``model_dump(exclude_unset=True)``). Normalize to the underlying
@@ -780,7 +804,9 @@ async def _delegate_sync_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
     # the assignment loop never raises ``AdCPNotFoundError``.
     raw_mode = body.get("validation_mode")
     validation_mode_str = getattr(raw_mode, "value", raw_mode) or "strict"
-    identity = enrich_identity_with_account(identity, body.get("account"))
+    enriched_identity = enrich_identity_with_account(identity, body.get("account"))
+    if enriched_identity is not None:
+        identity = enriched_identity
     response = await asyncio.to_thread(
         _sync_creatives_impl,
         creatives=body.get("creatives") or [],
@@ -793,8 +819,9 @@ async def _delegate_sync_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
         context=body.get("context"),
         identity=identity,
     )
-    _emit_creative_created_for_new_creatives(identity.tenant_id, response, dry_run=bool(body.get("dry_run", False)))
-    return _to_wire(response)
+    if identity.tenant_id is not None:
+        _emit_creative_created_for_new_creatives(identity.tenant_id, response, dry_run=bool(body.get("dry_run", False)))
+    return canonicalize_wire_response("sync_creatives", _to_wire(response), tenant_id=identity.tenant_id)
 
 
 def _emit_creative_created_for_new_creatives(tenant_id: str, result: Any, *, dry_run: bool) -> None:
@@ -844,7 +871,7 @@ async def _delegate_get_media_buys(req: Any, ctx: RequestContext[Any]) -> dict[s
     identity = _build_identity(ctx)
     req_model = _coerce_to_request_model(req, GetMediaBuysRequest)
     response = await asyncio.to_thread(_get_media_buys_impl, req_model, identity)
-    return _to_wire(response)
+    return canonicalize_wire_response("get_media_buys", _to_wire(response), tenant_id=identity.tenant_id)
 
 
 @translate_adcp_errors
@@ -870,27 +897,33 @@ async def _delegate_list_creative_formats(req: Any, ctx: RequestContext[Any]) ->
 
 @translate_adcp_errors
 async def _delegate_provide_performance_feedback(req: Any, ctx: RequestContext[Any]) -> dict[str, Any]:
-    """Stub — salesagent doesn't yet have a performance-feedback impl.
+    """Forward to ``src/core/tools/performance.py:_provide_performance_feedback_impl``.
 
-    Required by the v6.0-rc.1 SalesPlatform Protocol; the soft-warn at boot
-    fires when the platform omits it. Returns an acknowledgement matching
-    the protocol's response shape so the framework's validator + buyer
-    contract test pass. When a real performance-feedback pipeline lands
-    upstream, this delegate becomes a forward to the new ``_impl``.
+    ``provide-performance-feedback-response.json`` (3.1) is a task-status
+    envelope (``status`` in the AdCP task-state enum) plus ``oneOf``
+    ``{success}`` / ``{errors}``; rejections raise and are projected onto the
+    ``adcp_error`` envelope by ``translate_adcp_errors``.
     """
-    # Coerce to dict for inspection. The library response type accepts
-    # status + ext, so we acknowledge the receipt without persisting.
-    if hasattr(req, "model_dump"):
-        payload = req.model_dump(exclude_none=True)
-    elif isinstance(req, dict):
-        payload = dict(req)
-    else:
-        payload = {}
-    return {
-        "status": "acknowledged",
-        "message": "performance feedback receipt is not yet wired in this salesagent",
-        "echo": payload,
-    }
+    identity = _build_identity(ctx)
+    body = _request_payload(req)
+    await asyncio.to_thread(
+        _provide_performance_feedback_impl,
+        media_buy_id=body["media_buy_id"],
+        performance_index=float(body["performance_index"]),
+        measurement_period=body.get("measurement_period") or {},
+        package_id=body.get("package_id"),
+        creative_id=body.get("creative_id"),
+        metric_type=_wire_value(body, "metric_type"),
+        feedback_source=_wire_value(body, "feedback_source"),
+        identity=identity,
+    )
+    return {"status": "completed", "success": True}
+
+
+def _wire_value(container: Any, key: str) -> Any:
+    """Read ``key`` from a dumped sub-object (dict) or a still-typed model; unwrap enums."""
+    value = container.get(key) if isinstance(container, dict) else getattr(container, key, None)
+    return getattr(value, "value", value)
 
 
 @translate_adcp_errors
@@ -900,14 +933,15 @@ async def _delegate_list_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
     The impl decomposes into individual kwargs (no single request
     model). Default each from the wire shape; callers that send a
     Pydantic model get round-tripped through model_dump.
+
+    The canonical wire carries ``pagination`` {max_results, cursor} and
+    ``sort`` {field, direction}; map them onto the impl's flat kwargs. The
+    legacy flat params (page/limit/sort_by/sort_order) still win when sent.
     """
     identity = _build_identity(ctx)
-    if hasattr(req, "model_dump"):
-        body = req.model_dump(exclude_unset=True)
-    elif isinstance(req, dict):
-        body = dict(req)
-    else:
-        body = {}
+    body = _legacy_request_body("list_creatives", req, exclude_unset=True) if req is not None else {}
+    pagination = body.get("pagination") or {}
+    sort = body.get("sort") or {}
     response = await asyncio.to_thread(
         _list_creatives_impl,
         media_buy_id=body.get("media_buy_id"),
@@ -924,13 +958,14 @@ async def _delegate_list_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
         include_assignments=bool(body.get("include_assignments", False)),
         include_sub_assets=bool(body.get("include_sub_assets", False)),
         page=int(body.get("page") or 1),
-        limit=int(body.get("limit") or 50),
-        sort_by=body.get("sort_by") or "created_date",
-        sort_order=body.get("sort_order") or "desc",
+        limit=int(body.get("limit") or _wire_value(pagination, "max_results") or 50),
+        cursor=_wire_value(pagination, "cursor"),
+        sort_by=body.get("sort_by") or _wire_value(sort, "field") or "created_date",
+        sort_order=body.get("sort_order") or _wire_value(sort, "direction") or "desc",
         context=body.get("context"),
         identity=identity,
     )
-    return _to_wire(response)
+    return canonicalize_wire_response("list_creatives", _to_wire(response), tenant_id=identity.tenant_id)
 
 
 @translate_adcp_errors

@@ -9,11 +9,12 @@ from tests.factories.spec_required_kwargs import required_request_kwargs
 
 def test_brand_target_audience_must_be_string():
     """Test Brand target_audience field accepts strings (adcp 3.12: Brand replaced BrandManifest)."""
-    from adcp.types.generated_poc.brand import Brand, LocalizedName
+    from adcp.types import BrandIdentity as Brand
+    from adcp.types.generated_poc.brand_discovery import LocalizedName
 
     brand = Brand(
         id="test_brand",
-        names=[LocalizedName(name="Test Brand", language="en")],
+        names=[LocalizedName({"en": "Test Brand"})],
         target_audience="spiritual seekers interested in unexplained phenomena",
     )
     assert brand.target_audience == "spiritual seekers interested in unexplained phenomena"
@@ -21,11 +22,12 @@ def test_brand_target_audience_must_be_string():
 
 def test_brand_accepts_extra_fields():
     """Test that Brand accepts arbitrary extra fields (extra=allow)."""
-    from adcp.types.generated_poc.brand import Brand, LocalizedName
+    from adcp.types import BrandIdentity as Brand
+    from adcp.types.generated_poc.brand_discovery import LocalizedName
 
     brand = Brand(
         id="test_brand",
-        names=[LocalizedName(name="Test Brand", language="en")],
+        names=[LocalizedName({"en": "Test Brand"})],
         custom_field="custom_value",
     )
     # Brand accepts extra fields with extra="allow"

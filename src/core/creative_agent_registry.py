@@ -74,10 +74,11 @@ def _manifest_has_direct_url(creative_manifest: dict[str, Any]) -> bool:
     return any(isinstance(asset, dict) and bool(asset.get("url")) for asset in assets.values())
 
 
-from adcp import ADCPMultiAgentClient, ListCreativeFormatsRequest
+from adcp import ADCPMultiAgentClient
 from adcp.exceptions import ADCPAuthenticationError, ADCPConnectionError, ADCPError, ADCPTimeoutError
 from adcp.types import AssetContentType as AssetType
 from adcp.types import Error as AdCPResponseError
+from adcp.types.legacy import LegacyListCreativeFormatsRequest as ListCreativeFormatsRequest
 from yarl import URL
 
 from src.core.canonical_formats import DEFAULT_CREATIVE_AGENT_URL
@@ -343,7 +344,7 @@ class CreativeAgentRegistry:
 
             # Call agent using adcp library
             logger.info(f"_fetch_formats_from_agent: Calling {agent.name} at {agent.agent_url}")
-            result = await client.agent(agent.name).list_creative_formats(request)
+            result = await client.agent(agent.name).list_creative_formats_legacy(request)
             logger.info(f"_fetch_formats_from_agent: Got result status={result.status}, type={type(result)}")
 
             # Handle response based on status

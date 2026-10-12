@@ -16,8 +16,8 @@ from unittest.mock import MagicMock
 import pytest
 from a2a.types import Message, MessageSendParams, Task
 from sqlalchemy import delete
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.database.database_session import get_db_session
 
 # fmt: off

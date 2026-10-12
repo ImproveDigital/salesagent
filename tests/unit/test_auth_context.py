@@ -64,6 +64,7 @@ class TestAuthContextMiddleware:
     def test_bearer_token_extracted(self):
         """Middleware extracts token from Authorization: Bearer header."""
         from src.app import app
+
         from src.core.auth_context import get_auth_context
 
         @app.get("/test-auth/bearer-check")
@@ -81,6 +82,7 @@ class TestAuthContextMiddleware:
     def test_adcp_auth_header_extracted(self):
         """Middleware extracts token from x-adcp-auth header."""
         from src.app import app
+
         from src.core.auth_context import get_auth_context
 
         @app.get("/test-auth/adcp-check")
@@ -98,6 +100,7 @@ class TestAuthContextMiddleware:
     def test_no_auth_gives_none_token(self):
         """Requests without auth headers get AuthContext with auth_token=None."""
         from src.app import app
+
         from src.core.auth_context import get_auth_context
 
         @app.get("/test-auth/noauth-check-v2")
@@ -112,6 +115,7 @@ class TestAuthContextMiddleware:
     def test_headers_captured_in_context(self):
         """Middleware captures request headers in AuthContext."""
         from src.app import app
+
         from src.core.auth_context import get_auth_context
 
         @app.get("/test-auth/headers-check")

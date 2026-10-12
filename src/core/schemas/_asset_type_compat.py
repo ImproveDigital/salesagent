@@ -24,7 +24,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from adcp.types.generated_poc.core.creative_asset import CreativeAsset
+# salesagent's schema extends the legacy ``format_id`` variant of the SDK
+# creative model (``adcp.types.legacy.LegacyCreativeAsset``), so patch that
+# concrete class rather than the canonical ``adcp.types.CreativeAsset``.
+from adcp.types.legacy import LegacyCreativeAsset as CreativeAsset
 from pydantic import BaseModel
 
 # Inline copy of the inference rule (not imported from

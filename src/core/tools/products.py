@@ -7,11 +7,14 @@ shared implementation pattern from CLAUDE.md.
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, cast
 
-from adcp import FormatId
-from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp.types import PropertyListReference
+
+# ``FormatReferenceStructuredObject`` is the base of both ``LegacyFormatId`` and
+# salesagent ``FormatId``; products may carry either, so isinstance against the base.
+from adcp.types.generated_poc.core.format_id import FormatReferenceStructuredObject as FormatId
+from adcp.types.legacy import LegacyGetProductsRequest as GetProductsRequestGenerated
 from pydantic import ValidationError
 
 from src.adapters import get_adapter_default_channels
@@ -881,7 +884,8 @@ def validate_get_products_buying_mode(req: GetProductsRequestGenerated) -> None:
     from src.core.exceptions import AdCPInvalidRequestError
 
     try:
-        assert_buying_mode_consistent(req)
+        # SDK annotates the canonical request; it only reads buying_mode/brief/refine.
+        assert_buying_mode_consistent(cast(Any, req))
     except SdkAdcpError as exc:
         details: dict[str, Any] = {"sdk_error_code": exc.code}
         if exc.field:

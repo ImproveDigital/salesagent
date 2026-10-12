@@ -178,7 +178,7 @@ class TestBuildAgentConfig:
 
         agent = _FakeAgent(
             name="secure-agent",
-            agent_url="http://x",
+            agent_url="http://localhost",  # adcp 7: auth_token over plain http needs a loopback host
             auth={"type": "bearer", "credentials": "secret-token-123"},
             auth_header=None,
             timeout=30,
@@ -193,7 +193,7 @@ class TestBuildAgentConfig:
 
         agent = _FakeAgent(
             name="a",
-            agent_url="http://x",
+            agent_url="http://localhost",  # adcp 7: auth_token over plain http needs a loopback host
             auth={"credentials": "tok"},
             auth_header=None,
             timeout=30,
@@ -397,7 +397,7 @@ class TestBuildCreateSuccess:
 
     def test_pre_built_package_responses_override(self):
         """When package_responses is provided, it is used instead of building from packages."""
-        from adcp.types.aliases import Package as ResponsePackage
+        from adcp.types.legacy import LegacyPackage as ResponsePackage
 
         adapter = _make_adapter_instance()
         pre_built = [ResponsePackage(package_id="custom-p1", paused=False)]

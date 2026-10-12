@@ -19,7 +19,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 
 from tests.e2e.adcp_request_builder import (
     build_adcp_media_buy_request,
-    build_creative,
+    build_canonical_creative,
     build_sync_creatives_request,
     get_test_date_range,
     parse_tool_result,
@@ -69,10 +69,12 @@ class TestAdCPFullLifecycle:
             assert len(pricing_options) > 0, f"Product {product_id} must have at least one pricing option"
             pricing_option_id = pricing_options[0]["pricing_option_id"]
 
-            # Extract a valid format_id from the product
-            format_ids = product.get("format_ids", [])
-            assert len(format_ids) > 0, f"Product {product_id} must have at least one format_id"
-            format_id = format_ids[0]
+            # Extract a valid canonical format option from the product. adcp 7
+            # (AdCP 3.1) products advertise ``format_options`` (canonical
+            # creative identity) in place of the legacy ``format_ids`` tuples.
+            format_options = product.get("format_options", [])
+            assert len(format_options) > 0, f"Product {product_id} must have at least one format option"
+            format_option = format_options[0]
 
             # ============================================================
             # PHASE 2: Create Media Buy
@@ -112,9 +114,9 @@ class TestAdCPFullLifecycle:
             # ============================================================
             creative_id = f"creative_{uuid.uuid4().hex[:8]}"
 
-            creative = build_creative(
+            creative = build_canonical_creative(
                 creative_id=creative_id,
-                format_id=format_id,
+                format_option=format_option,
                 name="Lifecycle Test Creative",
                 asset_url="https://example.com/test-creative.jpg",
                 click_through_url="https://example.com/landing",

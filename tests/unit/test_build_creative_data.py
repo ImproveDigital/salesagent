@@ -7,9 +7,7 @@ snippet, snippet_type, template_variables), and context.
 Beads: salesagent-55b
 """
 
-from adcp.types import FormatId
-
-from src.core.schemas import CreativeAsset
+from src.core.schemas import CreativeAsset, FormatId
 from src.core.tools.creatives import _build_creative_data
 
 _FMT = FormatId(id="banner", agent_url="http://agent.test")

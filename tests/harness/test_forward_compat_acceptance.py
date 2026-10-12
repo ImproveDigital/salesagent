@@ -152,7 +152,6 @@ class TestMcpForwardCompat:
     def test_production_accepts_payload(self, label: str, payload: dict):
         """In production mode, get_products accepts various payload shapes."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         async def _call():
@@ -189,7 +188,6 @@ class TestMcpForwardCompat:
     def test_dev_rejects_unknown_top_level_fields(self, label: str, payload: dict):
         """In dev mode, unknown top-level fields are rejected by TypeAdapter."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         # Only test payloads that have top-level unknowns (not normalized deprecations)
@@ -343,7 +341,6 @@ class TestDeepStripRetryE2E:
     def test_nested_brand_extra_triggers_retry_and_succeeds(self):
         """Brand with future field: TypeAdapter rejects → deep-strip → retry → ok."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         async def _call():
@@ -378,7 +375,6 @@ class TestDeepStripRetryE2E:
     def test_nested_context_extra_triggers_retry_and_succeeds(self):
         """Context with future field: same retry path."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         async def _call():
@@ -413,7 +409,6 @@ class TestDeepStripRetryE2E:
     def test_stripping_no_change_does_not_retry(self):
         """If deep-strip doesn't change args, middleware raises original error (no infinite loop)."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         # Send a field with wrong TYPE (int where string expected) — deep-strip
@@ -459,7 +454,6 @@ class TestDataPreservationE2E:
         receives brand.domain exactly as sent.
         """
         from fastmcp import Client
-
         from src.core.main import mcp
 
         captured_req = {}
@@ -512,7 +506,6 @@ class TestDataPreservationE2E:
     def test_context_session_id_preserved_after_strip(self):
         """Buyer sends context with extra field. After strip, session_id preserved."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         captured_req = {}
@@ -562,7 +555,6 @@ class TestDataPreservationE2E:
         After strip + retry, all known data arrives intact.
         """
         from fastmcp import Client
-
         from src.core.main import mcp
 
         captured_req = {}
@@ -630,7 +622,6 @@ class TestErrorPropagation:
         Sending none should return a clear error, not be silently accepted.
         """
         from fastmcp import Client
-
         from src.core.main import mcp
 
         async def _call():
@@ -668,7 +659,6 @@ class TestErrorPropagation:
         This tests that the retry path doesn't eat the _impl error.
         """
         from fastmcp import Client
-
         from src.core.main import mcp
 
         async def _call():
@@ -890,7 +880,6 @@ class TestMiddlewareAdversarial:
     def test_concurrent_calls_dont_interfere(self):
         """Two concurrent middleware calls — patches don't leak between them."""
         from fastmcp import Client
-
         from src.core.main import mcp
 
         async def _call():

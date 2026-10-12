@@ -2722,9 +2722,8 @@ class TestCrossCuttingObligations:
         Note: This tests the format validation helper directly.
         """
         # Build mocks
-        from adcp.types import FormatId
-
         from src.core.helpers import validate_creative_format_against_product
+        from src.core.schemas import FormatId
 
         creative_format = FormatId(agent_url="https://creative.example.com", id="display_300x250")
         product = MagicMock()

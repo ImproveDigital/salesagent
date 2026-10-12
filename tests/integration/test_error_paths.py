@@ -455,6 +455,7 @@ class TestImportValidation:
     def test_error_class_imported_in_main(self):
         """Verify Error class is imported in main.py (regression test for PR #332)."""
         import src.core.main
+
         from src.core.schemas import Error
 
         # Verify Error is accessible from main module
@@ -491,9 +492,9 @@ class TestRecoveryFieldInErrorResponses:
         """REST 400 from AdCPValidationError includes recovery='correctable'."""
         from unittest.mock import patch
 
+        from src.app import app
         from starlette.testclient import TestClient
 
-        from src.app import app
         from src.core.exceptions import AdCPValidationError
 
         with patch(
@@ -511,9 +512,9 @@ class TestRecoveryFieldInErrorResponses:
         """REST 502 from AdCPAdapterError includes recovery='transient'."""
         from unittest.mock import patch
 
+        from src.app import app
         from starlette.testclient import TestClient
 
-        from src.app import app
         from src.core.exceptions import AdCPAdapterError
 
         with patch(
@@ -531,9 +532,9 @@ class TestRecoveryFieldInErrorResponses:
         """Custom recovery= override is preserved through REST boundary."""
         from unittest.mock import patch
 
+        from src.app import app
         from starlette.testclient import TestClient
 
-        from src.app import app
         from src.core.exceptions import AdCPNotFoundError
 
         with patch(

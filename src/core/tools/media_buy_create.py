@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 
 from adcp.types import Account, ContextObject, MediaBuyStatus
 from adcp.types import GeneratedTaskStatus as AdcpTaskStatus
-from adcp.types import PackageRequest as AdcpPackageRequest
 from adcp.types.aliases import Package as ResponsePackage
+from adcp.types.legacy import LegacyPackageRequest as AdcpPackageRequest
 from pydantic import BaseModel, ValidationError
 from rich.console import Console
 

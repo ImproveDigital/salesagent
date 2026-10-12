@@ -46,6 +46,19 @@ def _call_list_formats(identity: ResolvedIdentity, **kwargs) -> ListCreativeForm
     return _list_creative_formats_impl(req, identity)
 
 
+def _all_format_names(identity: ResolvedIdentity, **kwargs) -> set[str]:
+    """Follow the AdCP pagination cursor so the full catalog is compared, not just page one."""
+    names: set[str] = set()
+    cursor: str | None = None
+    while True:
+        pagination = {"cursor": cursor} if cursor else None
+        response = _call_list_formats(identity, pagination=pagination, **kwargs)
+        names.update(f.name for f in response.formats)
+        if not response.pagination or not response.pagination.has_more or not response.pagination.cursor:
+            return names
+        cursor = response.pagination.cursor
+
+
 # ---------------------------------------------------------------------------
 # BR-RULE-031-01: Format Discovery Filter Conjunction
 # ---------------------------------------------------------------------------
@@ -59,9 +72,8 @@ class TestFormatDiscoveryFilterConjunction:
 
         Covers: BR-RULE-031-01
         """
-        # Get all formats
-        all_formats = _call_list_formats(identity)
-        all_names = {f.name for f in all_formats.formats}
+        # Get all formats (the reference catalog spans more than one page)
+        all_names = _all_format_names(identity)
 
         # Get all formats matching name search "static"
         name_only = _call_list_formats(identity, name_search="static")

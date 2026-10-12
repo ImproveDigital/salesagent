@@ -53,6 +53,7 @@ def test_request_scoped_capabilities_adds_webhook_signing() -> None:
         "profile": "adcp/webhook-signing/v1",
         "algorithms": ["ed25519"],
         "legacy_hmac_fallback": True,
+        "delivery_retry_horizon_seconds": 86400,
     }
     load_mock.assert_called_once_with(tenant_id="tenant_1", signing_mode="rfc9421")
 
@@ -151,6 +152,7 @@ def test_webhook_signing_supported_for_active_local_credential() -> None:
             "profile": "adcp/webhook-signing/v1",
             "algorithms": ["ed25519"],
             "legacy_hmac_fallback": True,
+            "delivery_retry_horizon_seconds": 86400,
         }
     load_mock.assert_called_once_with(tenant_id="tenant_1", signing_mode="rfc9421")
 

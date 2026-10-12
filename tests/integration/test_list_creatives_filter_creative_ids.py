@@ -14,7 +14,7 @@ the entire library, with `creatives[0]` being an unrelated leftover.
 from __future__ import annotations
 
 import pytest
-from adcp import CreativeFilters
+from adcp.types.legacy import LegacyCreativeFilters as CreativeFilters
 
 from tests.factories import CreativeFactory, PrincipalFactory, TenantFactory
 from tests.harness import CreativeListEnv, make_identity

@@ -1598,10 +1598,59 @@ components:
       - count
       title: ListCreativeFormatsForAuthoringResponse
       type: object
+    ListCreativeFormatsForAuthoringResponse.f44f287.BuyerReason:
+      additionalProperties: true
+      properties:
+        code:
+          description: Machine-readable buyer-actionable reason from the standard
+            `enums/error-code.json` vocabulary or a producer-specific extension. Extensions
+            MUST follow the standard `X_{VENDOR}_{CODE}` naming rule. The wire field
+            is open for forward compatibility. Receivers MUST accept unknown values
+            and use the enclosing `error.recovery` plus this object's `message` as
+            the fallback.
+          maxLength: 64
+          minLength: 1
+          title: Code
+          type: string
+        message:
+          description: Buyer-safe explanation of the actionable failure. MUST NOT
+            expose vendor identifiers, ad-server type names, internal object names,
+            internal IDs, stack traces, or other producer-private implementation details.
+          minLength: 1
+          title: Message
+          type: string
+      required:
+      - code
+      - message
+      title: BuyerReason
+      type: object
     ListCreativeFormatsForAuthoringResponse.f44f287.CreativeFormatDiscoveryError:
       additionalProperties: false
       description: Creative-format discovery error context for authoring clients.
       properties:
+        buyer_reason:
+          anyOf:
+          - $ref: '#/components/schemas/ListCreativeFormatsForAuthoringResponse.f44f287.BuyerReason'
+          - type: 'null'
+          default: null
+          description: Optional buyer-actionable classification of the failure. Use
+            this when the enclosing error code or message is too coarse or contains
+            producer-internal context that must not cross the buyer trust boundary.
+            `code` reuses the comprehensive standard vocabulary and recovery classifications
+            published in `enums/error-code.json`, including policy, governance, account,
+            commercial, inventory, and creative failures. The wire field remains open
+            for forward compatibility. `message` MUST be safe to show to the buyer
+            and MUST NOT contain vendor identifiers, ad-server type names, internal
+            object names, internal IDs, stack traces, or other producer-private implementation
+            details. When present, the enclosing `error.recovery` MUST classify the
+            buyer-actionable reason. If both the enclosing code and buyer reason are
+            registered, their standard recovery classifications MUST agree with each
+            other and with `error.recovery`; sellers MUST choose the closest compatible
+            enclosing code rather than retain a conflicting upstream transport wrapper.
+            One buyer_reason classifies one error object. If a rejection contains
+            independently actionable failures from different classes, sellers MUST
+            emit separate error objects or omit buyer_reason rather than select a
+            misleading single class.
         code:
           description: "Error code for programmatic handling. The error-code vocabulary\
             \ is open: `error.code` is wire-typed `string` (not a closed enum), the\
@@ -1632,7 +1681,7 @@ components:
             \ id), sellers SHOULD use the canonical key `accepted_values: <array>`\
             \ under `details` rather than seller-specific variants observed in the\
             \ wild (`available`, `allowed`, `accepted_values` at the error root, etc.).\
-            \ The canonical shape:\n\n```json\n{\n  \"code\": \"INVALID_PRICING_MODEL\"\
+            \ The canonical shape:\n\n```json\n{\n  \"code\": \"INVALID_PRICING_OPTION\"\
             ,\n  \"message\": \"Pricing option not found: po_prism_abandoner_cpm\"\
             ,\n  \"field\": \"pricing_option_id\",\n  \"details\": {\n    \"rejected_value\"\
             : \"po_prism_abandoner_cpm\",\n    \"accepted_values\": [\"po_prism_cart_cpm\"\
@@ -1695,17 +1744,24 @@ components:
           - $ref: '#/components/schemas/ListCreativeFormatsForAuthoringResponse.f44f287.Recovery'
           - type: 'null'
           default: null
-          description: "Agent recovery classification. transient: retry after delay\
-            \ (rate limit, service unavailable, timeout). correctable: fix the request\
-            \ and resend (invalid field, budget too low, creative rejected). terminal:\
-            \ requires human action (account suspended, payment required, account\
-            \ not found). Senders SHOULD populate `recovery` on every error from 3.1\
-            \ onward \u2014 it is the normative carrier of recovery semantics across\
-            \ version skew. A receiver that does not recognize `error.code` (a newer\
-            \ code, or a platform-specific code) MUST still be able to classify the\
-            \ error from `recovery`. The `enumMetadata.recovery` block in `enums/error-code.json`\
-            \ is the documentary mirror for known codes; `error.recovery` on the wire\
-            \ is authoritative."
+          description: 'Agent recovery classification. transient: retry after delay
+            (rate limit, service unavailable, timeout). correctable: fix the request
+            and resend (invalid field, budget too low, creative rejected). terminal:
+            requires human action (account suspended, payment required, account not
+            found). AdCP 3.2 producers MUST populate `recovery` on every error; 3.1
+            producers SHOULD populate it. The shared 3.x schema intentionally does
+            not add `recovery` to `required` so retained and live errors from earlier
+            3.x producers remain decodable. When `buyer_reason` is present, `recovery`
+            is required and MUST classify that buyer-actionable reason. If the enclosing
+            code and buyer reason are both registered, their standard recovery classifications
+            MUST agree with each other and with this field. A receiver that does not
+            recognize `error.code` (a newer code, or a platform-specific code) MUST
+            still be able to classify the error from `recovery`. When a legacy error
+            omits `recovery`, receivers use the registered classification for a known
+            code and fall back to `transient` for an unknown code, subject to the
+            bounded retry budget. The `enumMetadata.recovery` block in `enums/error-code.json`
+            is the documentary mirror for known top-level and buyer-reason codes;
+            `error.recovery` on the wire is authoritative when present.'
         retry_after:
           anyOf:
           - maximum: 3600.0
@@ -1713,9 +1769,12 @@ components:
             type: number
           - type: 'null'
           default: null
-          description: Seconds to wait before retrying the operation. Sellers MUST
-            return values between 1 and 3600. Clients MUST clamp values outside this
-            range.
+          description: Seconds to wait before retrying the operation. AdCP 3.2 producers
+            MUST emit an integer from 1 through 3600. The 3.x schema continues to
+            accept finite fractional values for backward compatibility with earlier
+            producers; consumers receiving one MUST round up to the next whole second
+            before clamping so the retry is never scheduled earlier than intended.
+            Non-finite values are treated as absent.
           title: Retry After
         sdk_id:
           anyOf:

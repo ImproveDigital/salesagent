@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from adcp.types import Product as LibraryProduct
+from adcp.types.legacy import LegacyProduct as LibraryProduct
 
 
 @dataclass(frozen=True)

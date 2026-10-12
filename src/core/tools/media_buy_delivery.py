@@ -136,6 +136,7 @@ from src.core.schemas import (
     ReportingPeriod as MediaBuyReportingPeriod,
 )
 from src.core.testing_hooks import AdCPTestContext, DeliverySimulator, TimeSimulator, apply_testing_hooks
+from src.core.tools._gam_projection import not_materialized_message, unmaterialized_projected_ids
 
 
 def _is_circuit_breaker_open(tenant_id: str) -> bool:
@@ -262,8 +263,23 @@ def _get_media_buy_delivery_impl(
         found_ids = {buy_id for buy_id, _ in target_media_buys}
         excluded_status_by_id = dict(excluded_by_status)
         if req.media_buy_ids:
+            # Imported GAM orders are listed by get_media_buys (read-time
+            # projection) but have no MediaBuy row until claimed, so the
+            # adapter cannot report on them — say so instead of "not found".
+            assert uow.session is not None
+            unmaterialized_ids = unmaterialized_projected_ids(
+                uow.session,
+                tenant["tenant_id"],
+                principal_id,
+                [mid for mid in req.media_buy_ids if mid not in found_ids],
+            )
             for requested_id in req.media_buy_ids:
                 if requested_id in found_ids:
+                    continue
+                if requested_id in unmaterialized_ids:
+                    not_found_errors.append(
+                        Error(code="media_buy_not_materialized", message=not_materialized_message(requested_id))
+                    )
                     continue
                 if requested_id in excluded_status_by_id:
                     actual_status = excluded_status_by_id[requested_id]
@@ -297,7 +313,7 @@ def _get_media_buy_delivery_impl(
 
         # Collect delivery data for each media buy
         deliveries = []
-        total_spend = 0.0
+        spend_by_buy: list[tuple[str, str, float]] = []  # (media_buy_id, currency, spend)
         total_impressions = 0
         media_buy_count = 0
         total_clicks = 0
@@ -688,7 +704,7 @@ def _get_media_buy_delivery_impl(
                 )
 
                 deliveries.append(delivery_data)
-                total_spend += spend
+                spend_by_buy.append((media_buy_id, buy.currency if isinstance(buy.currency, str) else "USD", spend))
                 total_impressions += impressions
                 media_buy_count += 1
                 total_clicks += clicks if clicks is not None else 0
@@ -738,11 +754,15 @@ def _get_media_buy_delivery_impl(
                 notification_type=notification_type,
             )
 
+        response_currency, total_spend, currency_error = _aggregate_spend_by_currency(spend_by_buy)
+        if currency_error is not None:
+            not_found_errors.append(currency_error)
+
         # Create AdCP-compliant response
         context_val = req.context
         response = GetMediaBuyDeliveryResponse(
             reporting_period={"start": reporting_period.start, "end": reporting_period.end},
-            currency="USD",  # TODO: @yusuf - This is wrong. Currency should be at the media buy delivery level, not on aggregated totals.
+            currency=response_currency,
             aggregated_totals=AggregatedTotals(
                 impressions=float(total_impressions),
                 spend=total_spend,
@@ -833,6 +853,37 @@ def _resolve_delivery_status_filter(
 
 
 # -- Helper functions --
+def _aggregate_spend_by_currency(
+    spend_by_buy: list[tuple[str, str, float]],
+) -> tuple[str, float, Error | None]:
+    """Pick the response currency and sum spend only for buys in that currency.
+
+    AdCP delivery responses carry a single top-level ``currency`` for
+    ``aggregated_totals``, and there is no FX conversion in salesagent. The
+    first delivered buy's currency wins; buys in other currencies are left
+    out of the aggregate (their own totals are unaffected) and reported via
+    a ``mixed_currency`` error so the buyer knows the total is partial.
+    """
+    if not spend_by_buy:
+        return "USD", 0.0, None
+    currency = spend_by_buy[0][1]
+    total = sum(spend for _, cur, spend in spend_by_buy if cur == currency)
+    excluded = [f"{mb_id} ({cur})" for mb_id, cur, _ in spend_by_buy if cur != currency]
+    if not excluded:
+        return currency, total, None
+    return (
+        currency,
+        total,
+        Error(
+            code="mixed_currency",
+            message=(
+                f"aggregated_totals.spend covers only {currency} media buys; excluded: {', '.join(excluded)}. "
+                "Query one currency at a time for complete totals."
+            ),
+        ),
+    )
+
+
 def _get_target_media_buys(
     req: GetMediaBuyDeliveryRequest,
     principal_id: str,

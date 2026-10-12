@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from adcp.types import Format
+from adcp.types.legacy import LegacyFormat as Format
 
 from src.adapters.freewheel.formats import freewheel_creative_formats
 from src.core.canonical_formats import DEFAULT_CREATIVE_AGENT_URL

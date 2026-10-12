@@ -43,7 +43,7 @@ class TestStructuredContentFallbackTrigger:
         mock_result.error = "MCP tool list_creative_formats did not return structuredContent. This SDK requires..."
 
         mock_agent_proxy = MagicMock()
-        mock_agent_proxy.list_creative_formats = AsyncMock(return_value=mock_result)
+        mock_agent_proxy.list_creative_formats_legacy = AsyncMock(return_value=mock_result)
         mock_client = MagicMock()
         mock_client.agent.return_value = mock_agent_proxy
 
@@ -63,7 +63,7 @@ class TestStructuredContentFallbackTrigger:
         mock_result.message = None
 
         mock_agent_proxy = MagicMock()
-        mock_agent_proxy.list_creative_formats = AsyncMock(return_value=mock_result)
+        mock_agent_proxy.list_creative_formats_legacy = AsyncMock(return_value=mock_result)
         mock_client = MagicMock()
         mock_client.agent.return_value = mock_agent_proxy
 

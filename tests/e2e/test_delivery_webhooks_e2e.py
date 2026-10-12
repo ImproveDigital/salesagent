@@ -25,7 +25,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 
 from tests.e2e.adcp_request_builder import (
     build_adcp_media_buy_request,
-    build_creative,
+    build_canonical_creative,
     get_test_date_range,
     parse_tool_result,
 )
@@ -149,16 +149,17 @@ class TestDailyDeliveryWebhookFlow:
         product_id = product["product_id"]
         pricing_option_id = product["pricing_options"][0]["pricing_option_id"]
 
-        # Pick formats_ids
-        format_ids = product["format_ids"]
+        # Pick the canonical format options (adcp 7 / AdCP 3.1 products
+        # advertise ``format_options`` instead of ``format_ids``)
+        format_options = product["format_options"]
 
-        return product_id, pricing_option_id, format_ids
+        return product_id, pricing_option_id, format_options
 
-    async def build_inline_creative(self, format_id: dict[str, Any]) -> dict[str, Any]:
-        """Phase 2: Build inline creative for testing (no external sync)."""
-        creative = build_creative(
+    async def build_inline_creative(self, format_option: dict[str, Any]) -> dict[str, Any]:
+        """Phase 2: Build inline canonical creative for testing (no external sync)."""
+        creative = build_canonical_creative(
             creative_id="cr_" + uuid.uuid4().hex[:8],
-            format_id=format_id,
+            format_option=format_option,
             name="Delivery Test Creative",
             asset_url="https://via.placeholder.com/300x250.png",
         )
@@ -229,7 +230,7 @@ class TestDailyDeliveryWebhookFlow:
 
         async with Client(transport=transport) as client:
             # 1. Discover Product
-            product_id, pricing_option_id, format_ids = await self.discover_product(client)
+            product_id, pricing_option_id, format_options = await self.discover_product(client)
 
             # 2. Create Media Buy
             # Use approved creatives from init_database_ci.py

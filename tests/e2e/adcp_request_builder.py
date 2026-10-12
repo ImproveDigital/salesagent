@@ -302,6 +302,74 @@ def build_creative(
     if isinstance(format_id, str):
         format_id = {"agent_url": _DEFAULT_FORMAT_AGENT_URL, "id": format_id}
 
+    creative: dict[str, Any] = {
+        "creative_id": creative_id,
+        "format_id": format_id,
+        "name": name,
+        "content_uri": asset_url,
+        "assets": {"primary": _primary_asset(asset_type, asset_url, width, height)},
+        "status": status,
+    }
+
+    if click_through_url:
+        creative["click_through_url"] = click_through_url
+
+    return creative
+
+
+def build_canonical_creative(
+    creative_id: str,
+    format_option: dict[str, Any],
+    name: str,
+    asset_url: str,
+    click_through_url: str | None = None,
+    status: str = "processing",
+    asset_type: str = "url",
+    width: int | None = None,
+    height: int | None = None,
+) -> dict[str, Any]:
+    """
+    Build an AdCP 3.1 *canonical* creative from a product ``format_options[]`` entry.
+
+    adcp 7 (AdCP 3.1) products advertise ``format_options`` — ``format_option_id``
+    + ``format_kind`` + ``params`` — instead of named ``format_ids``. A canonical
+    creative targets one of those options through ``format_kind`` plus a
+    ``format_option_ref`` (``scope: "product"``: the option is declared inline on
+    the product it came from) rather than a legacy ``format_id`` tuple. A request
+    that carries canonical identity and no ``adcp_version`` negotiates the 3.1
+    creative dialect on the wire, which is what the seller's advertised MCP
+    output schemas describe.
+
+    Args:
+        creative_id: Unique creative identifier
+        format_option: One entry of ``product["format_options"]`` from get_products.
+        name: Human-readable creative name
+        asset_url: URL to the creative asset (converted to assets structure)
+        click_through_url: Optional click-through destination
+        status: Creative status (default: processing).
+        asset_type / width / height: See :func:`build_creative`.
+
+    Returns:
+        Valid AdCP 3.1 canonical Creative dict with assets.
+    """
+    creative: dict[str, Any] = {
+        "creative_id": creative_id,
+        "format_kind": format_option["format_kind"],
+        "format_option_ref": {"scope": "product", "format_option_id": format_option["format_option_id"]},
+        "name": name,
+        "content_uri": asset_url,
+        "assets": {"primary": _primary_asset(asset_type, asset_url, width, height)},
+        "status": status,
+    }
+
+    if click_through_url:
+        creative["click_through_url"] = click_through_url
+
+    return creative
+
+
+def _primary_asset(asset_type: str, asset_url: str, width: int | None, height: int | None) -> dict[str, Any]:
+    """Build the ``assets.primary`` variant shared by both creative builders."""
     primary_asset: dict[str, Any] = {"asset_type": asset_type, "url": asset_url}
     if asset_type in ("image", "video"):
         if width is None or height is None:
@@ -311,20 +379,7 @@ def build_creative(
             )
         primary_asset["width"] = width
         primary_asset["height"] = height
-
-    creative: dict[str, Any] = {
-        "creative_id": creative_id,
-        "format_id": format_id,
-        "name": name,
-        "content_uri": asset_url,
-        "assets": {"primary": primary_asset},
-        "status": status,
-    }
-
-    if click_through_url:
-        creative["click_through_url"] = click_through_url
-
-    return creative
+    return primary_asset
 
 
 def build_update_media_buy_request(

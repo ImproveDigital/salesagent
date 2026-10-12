@@ -23,7 +23,6 @@ import pytest
 
 from src.core.exceptions import AdCPTermsRejectedError
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -300,8 +299,7 @@ class TestCreativeAssignmentNormalization:
 
         assert len(result) == 1, "Duplicate ID must be deduplicated to a single entry."
         assert result[0]["weight"] == 30, (
-            "creative_assignments entry (weight=30) must win over the creative_ids "
-            "default (weight=100)."
+            "creative_assignments entry (weight=30) must win over the creative_ids default (weight=100)."
         )
 
     def test_empty_creative_ids_list_returns_empty_list(self):

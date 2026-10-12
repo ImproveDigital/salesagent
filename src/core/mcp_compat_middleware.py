@@ -12,7 +12,7 @@ from typing import Any
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from mcp.types import CallToolRequestParams
 
 from src.core.request_compat import deep_strip_to_schema, normalize_request_params, strip_unknown_params

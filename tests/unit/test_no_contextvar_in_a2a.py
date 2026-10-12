@@ -41,6 +41,7 @@ class TestNoContextVarFallbackInA2AHandler:
     def test_resolve_a2a_identity_uses_context_headers_not_contextvar(self):
         """_resolve_a2a_identity should read headers from context, not ContextVar."""
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
         from src.core.resolved_identity import ResolvedIdentity
 
         handler = AdCPRequestHandler()
@@ -64,6 +65,7 @@ class TestNoContextVarFallbackInA2AHandler:
     def test_resolve_a2a_identity_uses_empty_headers_without_context(self):
         """_resolve_a2a_identity(context=None) should use empty headers, not ContextVar."""
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
         from src.core.resolved_identity import ResolvedIdentity
 
         handler = AdCPRequestHandler()

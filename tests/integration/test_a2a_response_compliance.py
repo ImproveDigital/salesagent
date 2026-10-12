@@ -9,8 +9,8 @@ Replaces: test_a2a_response_message_fields.py (which tested the old incorrect be
 """
 
 import pytest
-
 from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
 from src.core.schemas import (
     CreateMediaBuySuccess,
     GetMediaBuyDeliveryResponse,

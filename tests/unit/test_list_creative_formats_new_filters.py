@@ -88,7 +88,7 @@ class TestListCreativeFormatsNewFilters:
 
     def test_new_filters_inherited_from_library(self):
         """Verify that new filters come from adcp library (not hand-coded)."""
-        from adcp import ListCreativeFormatsRequest as LibraryRequest
+        from adcp.types.legacy import LegacyListCreativeFormatsRequest as LibraryRequest
 
         # Verify the library has these fields
         lib_fields = LibraryRequest.model_fields
@@ -129,9 +129,7 @@ class TestListCreativeFormatsMCPToolSignature:
         """
         from unittest.mock import patch
 
-        from adcp import FormatId
-
-        from src.core.schemas import ListCreativeFormatsResponse
+        from src.core.schemas import FormatId, ListCreativeFormatsResponse
         from src.core.tools.creative_formats import list_creative_formats
 
         # MCP validates and coerces JSON to FormatId objects

@@ -5,11 +5,11 @@ Tests that list_authorized_properties correctly reads from PublisherPartner tabl
 """
 
 import pytest
+from src.core.tools.properties import _list_authorized_properties_impl
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PublisherPartner, Tenant
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.tools.properties import _list_authorized_properties_impl
 
 
 @pytest.mark.requires_db

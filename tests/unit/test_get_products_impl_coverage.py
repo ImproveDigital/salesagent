@@ -24,10 +24,10 @@ import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from adcp.types import FormatId
 
 from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
+from src.core.schemas import FormatId
 from tests.helpers.adcp_factories import create_test_cpm_pricing_option, create_test_product
 
 

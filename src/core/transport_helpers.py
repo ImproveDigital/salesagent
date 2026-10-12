@@ -12,7 +12,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from adcp.types import AccountReference
+    from adcp.types.generated_poc.core.account_ref import AccountReference, AccountReference1, AccountReference2
 
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import get_http_headers
@@ -126,7 +126,7 @@ def resolve_identity_from_context(
 
 def enrich_identity_with_account(
     identity: ResolvedIdentity | None,
-    account_ref: AccountReference | None = None,
+    account_ref: AccountReference | AccountReference1 | AccountReference2 | None = None,
 ) -> ResolvedIdentity | None:
     """Enrich a ResolvedIdentity with a resolved account_id.
 
@@ -150,7 +150,10 @@ def enrich_identity_with_account(
         return identity
 
     if isinstance(account_ref, dict):
-        from adcp.types import AccountReference
+        # ``adcp.types.AccountReference`` became a bare ``Union`` in adcp 8
+        # (no ``model_validate``); the generated RootModel still wraps the
+        # two variants for validating raw dicts.
+        from adcp.types.generated_poc.core.account_ref import AccountReference
 
         account_ref = AccountReference.model_validate(account_ref)
 

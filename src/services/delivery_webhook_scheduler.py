@@ -400,14 +400,22 @@ class DeliveryWebhookScheduler:
             # enum member or a non-task webhook builder for scheduled reports.
             # ``model_dump(mode="json")`` so enums serialize to their string
             # values (wire format) instead of leaking Enum instances.
-            media_buy_delivery_payload = McpWebhookPayload.model_construct(
-                task_id=media_buy.media_buy_id,
-                task_type=TaskType.get_creative_delivery,
-                status=AdcpTaskStatus.completed,
-                timestamp=datetime.now(UTC),
-                idempotency_key=generate_webhook_idempotency_key(),
-                result=delivery_response.model_dump(mode="json"),  # type: ignore[arg-type]  # blocked by adcp webhook task union
-            )
+            # ``operation_id`` (required on AdCP 3.2 task webhooks) is only
+            # defined for buyer-registered task callbacks; scheduled delivery
+            # reports from a ``reporting_webhook`` registration have none, so
+            # it is echoed only when the matched registration carries it.
+            payload_fields: dict[str, Any] = {
+                "task_id": media_buy.media_buy_id,
+                "task_type": TaskType.get_creative_delivery,
+                "status": AdcpTaskStatus.completed,
+                "timestamp": datetime.now(UTC),
+                "idempotency_key": generate_webhook_idempotency_key(),
+                # raw dict result: blocked by the adcp webhook task union (see above)
+                "result": delivery_response.model_dump(mode="json"),
+            }
+            if push_notification_config.operation_id:
+                payload_fields["operation_id"] = push_notification_config.operation_id
+            media_buy_delivery_payload = McpWebhookPayload.model_construct(**payload_fields)
 
             # Send webhook notification OUTSIDE the session context
             # This ensures the session is closed before async webhook call
