@@ -1213,6 +1213,24 @@ class GoogleAdManager(AdServerAdapter):
 
         reporting_service = GAMReportingService(self.client)
 
+        # AD_SERVER_CPM_AND_CPC_REVENUE is always reported in the network
+        # currency, whatever currency the line items were booked in. Label
+        # spend accordingly; the buy currency is only a last resort when the
+        # network currency is unknown (not stored and network lookup failed).
+        live_network_currency = getattr(reporting_service, "network_currency", None)
+        delivery_currency = (
+            self.config.get("network_currency")
+            or (live_network_currency if isinstance(live_network_currency, str) else None)
+            or str(media_buy.currency or "USD")
+        )
+        if delivery_currency != str(media_buy.currency or delivery_currency):
+            logger.info(
+                "Media buy %s booked in %s; GAM reports delivery spend in network currency %s",
+                media_buy_id,
+                media_buy.currency,
+                delivery_currency,
+            )
+
         # Without a GAM order ID we have no way to scope the report — returning
         # advertiser-wide totals would mix this order's metrics with every other
         # order on the account and produce incorrect numbers on the detail page.
@@ -1233,7 +1251,7 @@ class GoogleAdManager(AdServerAdapter):
                     completed_views=None,
                     completion_rate=None,
                 ),
-                currency=str(media_buy.currency or "USD"),
+                currency=delivery_currency,
             )
 
         # date_range.start/.end are AwareDatetime objects
@@ -1371,7 +1389,7 @@ class GoogleAdManager(AdServerAdapter):
                     else None
                 ),
             ),
-            currency=str(media_buy.currency or "USD"),
+            currency=delivery_currency,
             daily_breakdown=daily_breakdown if daily_breakdown else None,
         )
 
