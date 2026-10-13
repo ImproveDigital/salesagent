@@ -24,6 +24,12 @@ from urllib.parse import urlparse
 import pytz
 import requests
 
+from src.adapters.gam.reporting_rest import (
+    MONEY_METRICS,
+    SOAP_TO_REST_METRICS,
+    GAMRestReportClient,
+    money_to_micros,
+)
 from src.core.signal_ids import adcp_safe_signal_id
 from src.core.statistics import percentile
 
@@ -144,21 +150,32 @@ class ReportingData:
     query_type: str
     dimensions: list[str]
     metrics: dict[str, Any]
+    # Currency the revenue figures were requested in via the REST API.
+    # None means the SOAP path, which always reports network currency.
+    currency_code: str | None = None
 
 
 class GAMReportingService:
     """Service for getting comprehensive reporting data from Google Ad Manager"""
 
-    def __init__(self, gam_client, network_timezone: str = None):
+    def __init__(
+        self,
+        gam_client,
+        network_timezone: str = None,
+        rest_client: GAMRestReportClient | None = None,
+    ):
         """
         Initialize the reporting service
 
         Args:
             gam_client: Initialized Google Ad Manager client
             network_timezone: The timezone of the GAM network (will be auto-detected if not provided)
+            rest_client: REST Reporting API client. Required only to report in a
+                currency other than the network currency (``currency_code``).
         """
         self.client = gam_client
         self.report_service = self.client.GetService("ReportService")
+        self.rest_client = rest_client
 
         # Currency every ReportService revenue column is denominated in.
         # Only known when we looked the network up ourselves.
@@ -186,6 +203,7 @@ class GAMReportingService:
         requested_timezone: str = "America/New_York",
         include_country: bool = False,
         include_ad_unit: bool = False,
+        currency_code: str | None = None,
     ) -> ReportingData:
         """
         Get reporting data for specified date range and filters
@@ -200,6 +218,9 @@ class GAMReportingService:
             requested_timezone: Timezone for the request (data will be converted if different)
             include_country: Include country dimension in the report
             include_ad_unit: Include ad unit dimension in the report
+            currency_code: Report revenue in this ISO 4217 currency instead of the
+                network currency. Routes the report through the REST Reporting API
+                (GAM converts; the currency must be enabled on the network).
 
         Returns:
             ReportingData object containing results and metadata
@@ -213,11 +234,17 @@ class GAMReportingService:
             include_date=date_range != "all_time",
         )
 
-        # Build the report query
-        report_job = self._build_report_query(dimensions, start_date, end_date, advertiser_id, order_id, line_item_id)
-
-        # Run the report
-        report_data = self._run_report(report_job)
+        if currency_code:
+            # REST path: GAM converts revenue into the requested currency.
+            report_data = self._run_report_rest(
+                dimensions, start_date, end_date, advertiser_id, order_id, line_item_id, currency_code
+            )
+        else:
+            # SOAP path: always network currency.
+            report_job = self._build_report_query(
+                dimensions, start_date, end_date, advertiser_id, order_id, line_item_id
+            )
+            report_data = self._run_report(report_job)
 
         # Calculate data freshness
         data_valid_until = self._calculate_data_validity(date_range, requested_timezone)
@@ -238,7 +265,53 @@ class GAMReportingService:
             query_type=date_range,
             dimensions=dimensions,
             metrics=metrics,
+            currency_code=currency_code,
         )
+
+    def _run_report_rest(
+        self,
+        dimensions: list[str],
+        start_date: datetime,
+        end_date: datetime,
+        advertiser_id: str | None,
+        order_id: str | None,
+        line_item_id: str | None,
+        currency_code: str,
+    ) -> list[dict[str, Any]]:
+        """Run the report through the REST Reporting API in ``currency_code``.
+
+        Rows are normalised to the SOAP ``CSV_DUMP`` column names
+        (``Dimension.X`` / ``Column.Y``, revenue in micros) so
+        ``_process_report_data`` is shared by both paths.
+        """
+        if self.rest_client is None:
+            raise ValueError(f"Cannot report in {currency_code}: no REST reporting client configured")
+
+        soap_metrics = list(SOAP_TO_REST_METRICS)
+        rest_metrics = [SOAP_TO_REST_METRICS[name] for name in soap_metrics]
+        definition = self.rest_client.build_historical_definition(
+            dimensions,
+            rest_metrics,
+            start_date.date(),
+            end_date.date(),
+            currency_code=currency_code,
+            advertiser_id=advertiser_id,
+            order_id=order_id,
+            line_item_id=line_item_id,
+        )
+        rows = self.rest_client.run_report(definition)
+
+        normalised: list[dict[str, Any]] = []
+        for row in rows:
+            csv_row: dict[str, Any] = {}
+            for dimension in dimensions:
+                value = row.get(dimension)
+                csv_row[f"Dimension.{dimension}"] = "" if value is None else str(value)
+            for soap_name, rest_name in zip(soap_metrics, rest_metrics, strict=True):
+                value = row.get(rest_name)
+                csv_row[f"Column.{soap_name}"] = money_to_micros(value) if rest_name in MONEY_METRICS else (value or 0)
+            normalised.append(csv_row)
+        return normalised
 
     def _get_report_config(
         self,

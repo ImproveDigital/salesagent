@@ -8,6 +8,7 @@ for Google Ad Manager API access.
 import logging
 from typing import Any
 
+import google.auth.transport.requests
 import google.oauth2.service_account
 from googleads import oauth2
 
@@ -119,6 +120,31 @@ class GAMAuthManager:
             return oauth2_client
         else:
             raise ValueError("No service account credentials configured")
+
+    # Reports only need read access. The SOAP scope (auth/dfp) is not one of
+    # the REST API's two scopes, so service accounts mint a token for the REST
+    # scope explicitly. OAuth refresh tokens carry whatever scope was granted
+    # at consent time and cannot be widened here.
+    REST_SCOPES = ["https://www.googleapis.com/auth/admanager.readonly"]
+
+    def get_rest_auth_header(self) -> dict[str, str]:
+        """Authorization header for the REST Ad Manager API (admanager.googleapis.com)."""
+        if self.service_account_json or self.key_file:
+            if self.service_account_json:
+                import json
+
+                credentials = google.oauth2.service_account.Credentials.from_service_account_info(
+                    json.loads(self.service_account_json), scopes=self.REST_SCOPES
+                )
+            else:
+                credentials = google.oauth2.service_account.Credentials.from_service_account_file(
+                    self.key_file, scopes=self.REST_SCOPES
+                )
+            credentials.refresh(google.auth.transport.requests.Request())
+            return {"Authorization": f"Bearer {credentials.token}"}
+        # OAuth: reuse the googleads client, which refreshes the access token as needed.
+        header = self._get_oauth_credentials().CreateHttpHeader()
+        return {"Authorization": str(header["Authorization"])}
 
     def is_oauth_configured(self) -> bool:
         """Check if OAuth authentication is configured."""

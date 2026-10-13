@@ -18,6 +18,13 @@ from .managers import (
 )
 
 
+def _currency_list(value) -> list[str]:
+    """JSON column may be None or a list; anything else is not a currency list."""
+    if isinstance(value, list | tuple):
+        return [str(code) for code in value]
+    return []
+
+
 def build_gam_config_from_adapter(adapter_config) -> dict:
     """Build GAM config dict from AdapterConfig model.
 
@@ -37,6 +44,9 @@ def build_gam_config_from_adapter(adapter_config) -> dict:
         # ReportService revenue is always denominated in the network currency;
         # delivery responses label spend with this, not the buy currency.
         "network_currency": adapter_config.gam_network_currency,
+        # Currencies GAM can report in besides the network currency (Ad Manager
+        # 360 secondary currencies, captured by the connection test).
+        "secondary_currencies": _currency_list(adapter_config.gam_secondary_currencies),
     }
 
     # Detect auth method from credential presence rather than trusting

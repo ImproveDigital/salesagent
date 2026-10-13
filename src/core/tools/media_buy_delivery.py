@@ -369,6 +369,10 @@ def _get_media_buy_delivery_impl(
                 total_impressions_from_adapter = 0
                 adapter_conversions: float | None = None
                 adapter_viewability: float | None = None
+                # Currency the adapter's spend figures are in (GAM: the report
+                # currency). Wins over the pricing-option label so spend and
+                # currency never disagree.
+                adapter_currency: str | None = None
 
                 if not any(
                     [testing_ctx.dry_run, testing_ctx.mock_time, testing_ctx.jump_to_event, testing_ctx.test_session_id]
@@ -399,6 +403,8 @@ def _get_media_buy_delivery_impl(
                         impressions = int(adapter_response.totals.impressions)
                         adapter_conversions = getattr(adapter_response.totals, "conversions", None)
                         adapter_viewability = getattr(adapter_response.totals, "viewability", None)
+                        if isinstance(adapter_response.currency, str) and adapter_response.currency:
+                            adapter_currency = adapter_response.currency
                         if isinstance(adapter_response.ext, dict):
                             adapter_ext = dict(adapter_response.ext)
 
@@ -619,6 +625,8 @@ def _get_media_buy_delivery_impl(
                         if not isinstance(pkg_currency, str):
                             buy_currency = buy.currency if isinstance(buy.currency, str) else None
                             pkg_currency = buy_currency or "USD"
+                        if adapter_currency:
+                            pkg_currency = adapter_currency
                         if pkg_rate is None:
                             # AdCP ByPackageItem requires rate, but auction-based pricing
                             # has no fixed rate. Emit 0 to satisfy the wire schema; buyers
@@ -704,6 +712,9 @@ def _get_media_buy_delivery_impl(
                 )
 
                 deliveries.append(delivery_data)
+                # Response-level currency / mixed-currency aggregation key on the
+                # buy currency (existing contract); per-package labels above follow
+                # the adapter so spend and label agree where the figures live.
                 spend_by_buy.append((media_buy_id, buy.currency if isinstance(buy.currency, str) else "USD", spend))
                 total_impressions += impressions
                 media_buy_count += 1

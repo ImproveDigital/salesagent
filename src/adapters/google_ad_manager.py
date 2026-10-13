@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import sqlalchemy.exc
 
 if TYPE_CHECKING:
+    from src.adapters.gam.reporting_rest import GAMRestReportClient
+    from src.adapters.gam_reporting_service import GAMReportingService, ReportingData
     from src.core.schemas import Snapshot
 
 from flask import Flask
@@ -1211,25 +1213,20 @@ class GoogleAdManager(AdServerAdapter):
                 currency=str(media_buy.currency or "USD"),
             )
 
-        reporting_service = GAMReportingService(self.client)
+        reporting_service = GAMReportingService(self.client, rest_client=self._rest_report_client())
 
-        # AD_SERVER_CPM_AND_CPC_REVENUE is always reported in the network
-        # currency, whatever currency the line items were booked in. Label
-        # spend accordingly; the buy currency is only a last resort when the
+        # SOAP revenue is always in the network currency, whatever currency the
+        # line items were booked in. When the buy currency is one GAM can
+        # report in, ask the REST API for it; otherwise label spend with the
+        # network currency. The buy currency is only a last resort when the
         # network currency is unknown (not stored and network lookup failed).
         live_network_currency = getattr(reporting_service, "network_currency", None)
-        delivery_currency = (
-            self.config.get("network_currency")
-            or (live_network_currency if isinstance(live_network_currency, str) else None)
-            or str(media_buy.currency or "USD")
+        network_currency: str | None = self.config.get("network_currency") or (
+            live_network_currency if isinstance(live_network_currency, str) else None
         )
-        if delivery_currency != str(media_buy.currency or delivery_currency):
-            logger.info(
-                "Media buy %s booked in %s; GAM reports delivery spend in network currency %s",
-                media_buy_id,
-                media_buy.currency,
-                delivery_currency,
-            )
+        buy_currency = str(media_buy.currency) if media_buy.currency else None
+        report_currency = self._delivery_report_currency(media_buy_id, buy_currency, network_currency)
+        delivery_currency = report_currency or network_currency or buy_currency or "USD"
 
         # Without a GAM order ID we have no way to scope the report — returning
         # advertiser-wide totals would mix this order's metrics with every other
@@ -1272,12 +1269,12 @@ class GoogleAdManager(AdServerAdapter):
             range_type = "all_time"
 
         # Fetch delivery data scoped to this specific GAM order
-        reporting_data = reporting_service.get_reporting_data(
-            date_range=cast("Literal['lifetime', 'this_month', 'today', 'all_time']", range_type),
-            advertiser_id=self.advertiser_id,
-            order_id=gam_order_id,
-            requested_timezone="America/New_York",
+        reporting_data, reported_currency = self._run_order_delivery_report(
+            reporting_service, range_type, gam_order_id, report_currency
         )
+        if report_currency and reported_currency is None:
+            # REST report failed; figures are SOAP network-currency ones.
+            delivery_currency = network_currency or buy_currency or "USD"
 
         # Aggregate totals across all packages
         total_impressions = reporting_data.metrics.get("total_impressions", 0)
@@ -1392,6 +1389,84 @@ class GoogleAdManager(AdServerAdapter):
             currency=delivery_currency,
             daily_breakdown=daily_breakdown if daily_breakdown else None,
         )
+
+    def _rest_report_client(self) -> "GAMRestReportClient | None":
+        """REST Reporting API client for currency-converted reports (None in dry-run)."""
+        if self.dry_run or getattr(self, "client_manager", None) is None:
+            return None
+        cached = getattr(self, "_rest_report_client_instance", None)
+        if cached is None:
+            from src.adapters.gam.reporting_rest import GAMRestReportClient
+
+            cached = GAMRestReportClient(self.network_code, self.client_manager.auth_manager.get_rest_auth_header)
+            self._rest_report_client_instance = cached
+        return cached
+
+    def _delivery_report_currency(
+        self, media_buy_id: str, buy_currency: str | None, network_currency: str | None
+    ) -> str | None:
+        """Currency to request the delivery report in, or None for the network currency.
+
+        The buy currency is requested only when it differs from the network
+        currency and GAM can convert to it (configured secondary currency).
+        """
+        if not buy_currency or not network_currency or buy_currency.upper() == network_currency.upper():
+            return None
+        secondary = {str(code).upper() for code in (self.config.get("secondary_currencies") or [])}
+        if buy_currency.upper() in secondary and self._rest_report_client() is not None:
+            return buy_currency.upper()
+        logger.warning(
+            "Media buy %s booked in %s but GAM network reports in %s (secondary currencies: %s); "
+            "delivery spend will be labelled %s",
+            media_buy_id,
+            buy_currency,
+            network_currency,
+            sorted(secondary) or "none",
+            network_currency,
+        )
+        return None
+
+    def _run_order_delivery_report(
+        self,
+        reporting_service: "GAMReportingService",
+        range_type: str,
+        gam_order_id: str,
+        currency_code: str | None,
+    ) -> tuple["ReportingData", str | None]:
+        """Run the order-scoped delivery report, via REST in ``currency_code`` when set.
+
+        Returns the data and the currency it was reported in (None = network
+        currency). A REST failure (scope not granted, currency not enabled,
+        API error) is logged and falls back to the SOAP network-currency
+        report so the caller still labels spend honestly.
+        """
+        from src.adapters.gam.reporting_rest import GAMRestReportError
+
+        date_range = cast("Literal['lifetime', 'this_month', 'today', 'all_time']", range_type)
+        if currency_code:
+            try:
+                data = reporting_service.get_reporting_data(
+                    date_range=date_range,
+                    advertiser_id=self.advertiser_id,
+                    order_id=gam_order_id,
+                    requested_timezone="America/New_York",
+                    currency_code=currency_code,
+                )
+                return data, currency_code
+            except GAMRestReportError as e:
+                logger.error(
+                    "REST delivery report in %s failed for GAM order %s; falling back to network currency: %s",
+                    currency_code,
+                    gam_order_id,
+                    e,
+                )
+        data = reporting_service.get_reporting_data(
+            date_range=date_range,
+            advertiser_id=self.advertiser_id,
+            order_id=gam_order_id,
+            requested_timezone="America/New_York",
+        )
+        return data, None
 
     def get_packages_snapshot(
         self, package_refs: list[tuple[str, str, str | None]]
