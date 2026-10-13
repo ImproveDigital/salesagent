@@ -14,7 +14,7 @@ _SA = json.dumps(
 )
 
 
-def test_service_account_header_uses_rest_readonly_scope():
+def test_service_account_header_uses_rest_scope():
     creds = Mock()
     creds.token = "sa-token"
     with (
@@ -24,7 +24,8 @@ def test_service_account_header_uses_rest_readonly_scope():
         header = GAMAuthManager({"service_account_json": _SA}).get_rest_auth_header()
 
     assert header == {"Authorization": "Bearer sa-token"}
-    assert factory.call_args.kwargs["scopes"] == ["https://www.googleapis.com/auth/admanager.readonly"]
+    # Report creation is refused under admanager.readonly; the full scope is required.
+    assert factory.call_args.kwargs["scopes"] == ["https://www.googleapis.com/auth/admanager"]
     creds.refresh.assert_called_once()
 
 

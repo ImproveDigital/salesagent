@@ -121,11 +121,13 @@ class GAMAuthManager:
         else:
             raise ValueError("No service account credentials configured")
 
-    # Reports only need read access. The SOAP scope (auth/dfp) is not one of
-    # the REST API's two scopes, so service accounts mint a token for the REST
-    # scope explicitly. OAuth refresh tokens carry whatever scope was granted
-    # at consent time and cannot be widened here.
-    REST_SCOPES = ["https://www.googleapis.com/auth/admanager.readonly"]
+    # The SOAP scope (auth/dfp) is not one of the REST API's two scopes, so
+    # service accounts mint a token for the REST scope explicitly. Creating a
+    # report resource requires the full scope (verified: the read-only scope
+    # gets ACCESS_TOKEN_SCOPE_INSUFFICIENT on ReportService.CreateReport).
+    # OAuth refresh tokens carry whatever scope was granted at consent time
+    # and cannot be widened here.
+    REST_SCOPES = ["https://www.googleapis.com/auth/admanager"]
 
     def get_rest_auth_header(self) -> dict[str, str]:
         """Authorization header for the REST Ad Manager API (admanager.googleapis.com)."""
