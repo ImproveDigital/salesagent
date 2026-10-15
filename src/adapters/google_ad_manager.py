@@ -1114,7 +1114,12 @@ class GoogleAdManager(AdServerAdapter):
         )
 
     def get_media_buy_delivery(
-        self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
+        self,
+        media_buy_id: str,
+        date_range: ReportingPeriod,
+        today: datetime,
+        *,
+        report_in_buy_currency: bool = True,
     ) -> AdapterGetMediaBuyDeliveryResponse:
         """Get delivery metrics for a media buy from GAM using ReportService.
 
@@ -1122,6 +1127,9 @@ class GoogleAdManager(AdServerAdapter):
             media_buy_id: The media buy ID (used to look up GAM order/line items)
             date_range: Reporting period with start/end dates
             today: Current date for time-based calculations
+            report_in_buy_currency: Default True: ask GAM for revenue in the buy
+                currency (ReportQuery.reportCurrency; the currency must be enabled
+                on the network). False: the network currency, for the admin pages.
 
         Returns:
             AdapterGetMediaBuyDeliveryResponse with real metrics from GAM
@@ -1213,23 +1221,25 @@ class GoogleAdManager(AdServerAdapter):
 
         reporting_service = GAMReportingService(self.client)
 
-        # AD_SERVER_CPM_AND_CPC_REVENUE is always reported in the network
-        # currency, whatever currency the line items were booked in. Label
-        # spend accordingly; the buy currency is only a last resort when the
-        # network currency is unknown (not stored and network lookup failed).
+        # SOAP revenue defaults to the network currency, whatever currency the
+        # line items were booked in. AdCP buyers are owed the booking currency,
+        # so when asked (the default) and GAM can report in it, set
+        # ReportQuery.reportCurrency. The admin pages opt out and get the
+        # network currency, which is what the delivered_amount snapshot holds.
+        # Either way the response currency states what the figures are in; the
+        # buy currency is only a last resort when the network currency is
+        # unknown (not stored and network lookup failed).
         live_network_currency = getattr(reporting_service, "network_currency", None)
-        delivery_currency = (
-            self.config.get("network_currency")
-            or (live_network_currency if isinstance(live_network_currency, str) else None)
-            or str(media_buy.currency or "USD")
+        network_currency: str | None = self.config.get("network_currency") or (
+            live_network_currency if isinstance(live_network_currency, str) else None
         )
-        if delivery_currency != str(media_buy.currency or delivery_currency):
-            logger.info(
-                "Media buy %s booked in %s; GAM reports delivery spend in network currency %s",
-                media_buy_id,
-                media_buy.currency,
-                delivery_currency,
-            )
+        buy_currency = str(media_buy.currency) if media_buy.currency else None
+        report_currency = (
+            self._delivery_report_currency(media_buy_id, buy_currency, network_currency)
+            if report_in_buy_currency
+            else None
+        )
+        delivery_currency = report_currency or network_currency or buy_currency or "USD"
 
         # Without a GAM order ID we have no way to scope the report — returning
         # advertiser-wide totals would mix this order's metrics with every other
@@ -1277,6 +1287,7 @@ class GoogleAdManager(AdServerAdapter):
             advertiser_id=self.advertiser_id,
             order_id=gam_order_id,
             requested_timezone="America/New_York",
+            currency_code=report_currency,
         )
 
         # Aggregate totals across all packages
@@ -1392,6 +1403,30 @@ class GoogleAdManager(AdServerAdapter):
             currency=delivery_currency,
             daily_breakdown=daily_breakdown if daily_breakdown else None,
         )
+
+    def _delivery_report_currency(
+        self, media_buy_id: str, buy_currency: str | None, network_currency: str | None
+    ) -> str | None:
+        """Currency to request the delivery report in, or None for the network currency.
+
+        The buy currency is requested only when it differs from the network
+        currency and GAM can convert to it (a configured secondary currency).
+        """
+        if not buy_currency or not network_currency or buy_currency.upper() == network_currency.upper():
+            return None
+        secondary = {str(code).upper() for code in (self.config.get("secondary_currencies") or [])}
+        if buy_currency.upper() in secondary:
+            return buy_currency.upper()
+        logger.warning(
+            "Media buy %s booked in %s but GAM network reports in %s (secondary currencies: %s); "
+            "delivery spend will be labelled %s",
+            media_buy_id,
+            buy_currency,
+            network_currency,
+            sorted(secondary) or "none",
+            network_currency,
+        )
+        return None
 
     def get_packages_snapshot(
         self, package_refs: list[tuple[str, str, str | None]]

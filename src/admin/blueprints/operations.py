@@ -135,9 +135,14 @@ def _sync_delivery_metrics(db_session, tenant_id: str, media_buy, principal) -> 
 
         reporting_period = ReportingPeriod(start=start_date, end=end_date)
 
-        # Fetch delivery metrics from adapter
+        # Fetch delivery metrics in the ad server's reporting currency: the
+        # publisher-facing page and the delivered_amount snapshot are kept in
+        # that currency, not the buy currency.
         delivery_response = adapter.get_media_buy_delivery(
-            media_buy_id=media_buy.media_buy_id, date_range=reporting_period, today=datetime.now(UTC)
+            media_buy_id=media_buy.media_buy_id,
+            date_range=reporting_period,
+            today=datetime.now(UTC),
+            report_in_buy_currency=False,
         )
 
         delivery_metrics = {

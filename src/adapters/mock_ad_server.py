@@ -1073,7 +1073,12 @@ class MockAdServer(AdServerAdapter):
         return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status=status)
 
     def get_media_buy_delivery(
-        self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
+        self,
+        media_buy_id: str,
+        date_range: ReportingPeriod,
+        today: datetime,
+        *,
+        report_in_buy_currency: bool = True,
     ) -> AdapterGetMediaBuyDeliveryResponse:
         """Simulates getting delivery data for a media buy with testing hooks support."""
         self.log(

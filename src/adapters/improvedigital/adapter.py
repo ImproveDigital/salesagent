@@ -1390,7 +1390,12 @@ class ImproveDigitalAdapter(AdServerAdapter):
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="unknown")
 
     def get_media_buy_delivery(
-        self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
+        self,
+        media_buy_id: str,
+        date_range: ReportingPeriod,
+        today: datetime,
+        *,
+        report_in_buy_currency: bool = True,
     ) -> AdapterGetMediaBuyDeliveryResponse:
         if self.dry_run:
             return self._simulated_delivery_response(

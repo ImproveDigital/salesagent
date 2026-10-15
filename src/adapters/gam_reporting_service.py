@@ -144,6 +144,8 @@ class ReportingData:
     query_type: str
     dimensions: list[str]
     metrics: dict[str, Any]
+    # ReportQuery.reportCurrency used for this report. None = network currency.
+    currency_code: str | None = None
 
 
 class GAMReportingService:
@@ -186,6 +188,7 @@ class GAMReportingService:
         requested_timezone: str = "America/New_York",
         include_country: bool = False,
         include_ad_unit: bool = False,
+        currency_code: str | None = None,
     ) -> ReportingData:
         """
         Get reporting data for specified date range and filters
@@ -200,6 +203,9 @@ class GAMReportingService:
             requested_timezone: Timezone for the request (data will be converted if different)
             include_country: Include country dimension in the report
             include_ad_unit: Include ad unit dimension in the report
+            currency_code: ISO 4217 code for ReportQuery.reportCurrency. GAM converts
+                revenue metrics into it; must be the network currency or one of its
+                secondary currencies. None reports in the network currency.
 
         Returns:
             ReportingData object containing results and metadata
@@ -214,7 +220,9 @@ class GAMReportingService:
         )
 
         # Build the report query
-        report_job = self._build_report_query(dimensions, start_date, end_date, advertiser_id, order_id, line_item_id)
+        report_job = self._build_report_query(
+            dimensions, start_date, end_date, advertiser_id, order_id, line_item_id, currency_code=currency_code
+        )
 
         # Run the report
         report_data = self._run_report(report_job)
@@ -238,6 +246,7 @@ class GAMReportingService:
             query_type=date_range,
             dimensions=dimensions,
             metrics=metrics,
+            currency_code=currency_code,
         )
 
     def _get_report_config(
@@ -344,6 +353,7 @@ class GAMReportingService:
         advertiser_id: str | None = None,
         order_id: str | None = None,
         line_item_id: str | None = None,
+        currency_code: str | None = None,
     ) -> dict[str, Any]:
         """Build the GAM report query"""
 
@@ -419,6 +429,11 @@ class GAMReportingService:
                 ),
             }
         }
+
+        # ReportQuery.reportCurrency: "The currency for revenue metrics. Defaults
+        # to the network currency if left null." (ReportService WSDL)
+        if currency_code:
+            report_job["reportQuery"]["reportCurrency"] = currency_code
 
         return report_job
 
