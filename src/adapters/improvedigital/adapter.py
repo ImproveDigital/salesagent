@@ -1421,16 +1421,20 @@ class ImproveDigitalAdapter(AdServerAdapter):
         )
 
         campaign_id = self._resolve_campaign_id(media_buy_id)
-        # AdCP buyers are owed the buy currency. The office currency sources
-        # below (campaign counters, the stats cache) can't provide another
-        # currency; the Report API can (``currency_id``), so a buy booked
-        # against a differently-denominated office is read live in its own
-        # currency. Falls through to the office-currency sources — labelled
-        # honestly — when that isn't possible.
-        if report_in_buy_currency:
-            buy_currency_response = self._buy_currency_delivery(media_buy_id, campaign_id, date_range)
-            if buy_currency_response is not None:
-                return buy_currency_response
+        # AdCP buyers are owed the buy currency; publisher pages are owed the
+        # deployment's REPORTING_CURRENCY. The office-currency sources below
+        # (campaign counters, the stats cache) can't provide another
+        # currency; the Report API can (``currency_id``), so a target
+        # currency other than the office's is read live from it. Falls
+        # through to the office-currency sources — labelled honestly — when
+        # that isn't possible.
+        target_currency = (
+            self._media_buy_currency(media_buy_id) if report_in_buy_currency else self._publisher_reporting_currency()
+        )
+        if target_currency:
+            live_response = self._live_delivery_in(media_buy_id, campaign_id, date_range, target_currency)
+            if live_response is not None:
+                return live_response
         # The Classic counters are LIFETIME figures — only answer with them
         # when the caller effectively asked for lifetime delivery (the
         # details page requests a 3-year span). Windowed requests (delivery
@@ -1483,22 +1487,35 @@ class ImproveDigitalAdapter(AdServerAdapter):
             currency = getattr(buy, "currency", None) if buy is not None else None
         return currency.strip().upper() if isinstance(currency, str) and currency.strip() else None
 
-    def _buy_currency_delivery(
-        self, media_buy_id: str, campaign_id: str, date_range: ReportingPeriod
+    @staticmethod
+    def _publisher_reporting_currency() -> str | None:
+        """Deployment-wide REPORTING_CURRENCY for publisher-facing reads, or None."""
+        from src.core.tenant_currency import publisher_reporting_currency
+
+        return publisher_reporting_currency("improvedigital")
+
+    @property
+    def reporting_currency(self) -> str:
+        """Currency the reporting sync (cache + delivered_amount) reports in:
+        REPORTING_CURRENCY when set, else the office currency."""
+        return self._publisher_reporting_currency() or str(self.currency)
+
+    def _live_delivery_in(
+        self, media_buy_id: str, campaign_id: str, date_range: ReportingPeriod, target_currency: str
     ) -> AdapterGetMediaBuyDeliveryResponse | None:
-        """Delivery in the buy currency from a live Report API preview, or None.
+        """Delivery in ``target_currency`` from a live Report API preview, or None.
 
         The Report API converts ``advertiser_payout`` into any of its
         currencies (``currency_id``), which is the only Improve Digital
         source that can report a campaign in a currency other than its
         office's. The rows are never written to the stats cache: that cache
-        is one currency per tenant (the office currency) and feeds the
-        publisher-facing pages. Returns None — so the caller uses the
-        office-currency sources — when the buy is in the office currency
-        already, the client has no reporting surface, the preview fails
-        (reporting scope pending, upstream error) or reports no rows.
+        is one currency per tenant and feeds the publisher-facing pages.
+        Returns None — so the caller uses the office-currency sources —
+        when the target is the office currency already, the client has no
+        reporting surface, the preview fails (reporting scope pending,
+        upstream error) or reports no rows.
         """
-        buy_currency = self._media_buy_currency(media_buy_id)
+        buy_currency = target_currency.strip().upper()
         if not buy_currency or buy_currency == str(self.currency).upper():
             return None
         if self._client is None or getattr(self._client, "reporting", None) is None:
@@ -1609,7 +1626,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 client=self._client,
                 tenant_id=self.tenant_id or "default",
                 session=session,
-                currency=self.currency,
+                currency=self.reporting_currency,
                 timezone=self.timezone,
             )
             try:
@@ -1658,7 +1675,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 client=self._client,
                 tenant_id=self.tenant_id or "default",
                 session=session,
-                currency=self.currency,
+                currency=self.reporting_currency,
                 timezone=self.timezone,
             )
             try:

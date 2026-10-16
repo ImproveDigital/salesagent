@@ -1723,8 +1723,11 @@ def get_improvedigital_reporting(tenant_id, **kwargs):
                     buys_by_campaign[campaign_id] = buy
                     break
 
-        config_row = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
-        currency = str((config_row.config_json or {}).get("currency") or "EUR") if config_row else "EUR"
+        # REPORTING_CURRENCY when set (what the sync wrote the cache in),
+        # else the office currency — the same resolver the dashboard uses.
+        from src.core.tenant_currency import tenant_reporting_currency
+
+        currency = tenant_reporting_currency(session, tenant_id)
 
     if date_range:
         # Live path — only campaigns booked via salesagent are queried

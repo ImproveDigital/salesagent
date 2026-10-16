@@ -1233,10 +1233,13 @@ class GoogleAdManager(AdServerAdapter):
         network_currency: str | None = self.config.get("network_currency") or (
             live_network_currency if isinstance(live_network_currency, str) else None
         )
+        from src.core.tenant_currency import publisher_reporting_currency
+
         buy_currency = str(media_buy.currency) if media_buy.currency else None
-        report_currency = (
-            self._delivery_report_currency(buy_currency, network_currency) if report_in_buy_currency else None
-        )
+        # Publisher-facing reads (admin pages) report in the deployment's
+        # REPORTING_CURRENCY when one is set, else the network currency.
+        target_currency = buy_currency if report_in_buy_currency else publisher_reporting_currency("google_ad_manager")
+        report_currency = self._delivery_report_currency(target_currency, network_currency)
         delivery_currency = report_currency or network_currency or buy_currency or "USD"
 
         # Without a GAM order ID we have no way to scope the report — returning
@@ -1427,18 +1430,19 @@ class GoogleAdManager(AdServerAdapter):
         )
 
     @staticmethod
-    def _delivery_report_currency(buy_currency: str | None, network_currency: str | None) -> str | None:
+    def _delivery_report_currency(target_currency: str | None, network_currency: str | None) -> str | None:
         """Currency to request the delivery report in, or None for the network currency.
 
         ``ReportQuery.reportCurrency`` accepts any currency GAM reports in
         (the Help Center list the WSDL points to: ~50 codes, converted with
         GAM's exchange rates), not only the network's secondary currencies,
-        so the buy currency is requested whenever it differs from the
-        network currency. A rejected code falls back at the call site.
+        so the target (buy currency for AdCP reads, REPORTING_CURRENCY for
+        publisher reads) is requested whenever it differs from the network
+        currency. A rejected code falls back at the call site.
         """
-        if not buy_currency or not network_currency or buy_currency.upper() == network_currency.upper():
+        if not target_currency or not network_currency or target_currency.upper() == network_currency.upper():
             return None
-        return buy_currency.upper()
+        return target_currency.upper()
 
     def get_packages_snapshot(
         self, package_refs: list[tuple[str, str, str | None]]

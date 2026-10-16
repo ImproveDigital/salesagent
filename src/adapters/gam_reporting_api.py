@@ -114,6 +114,17 @@ def get_tenant_access(tenant_id: str) -> bool:
 _DELIVERY_SYNC_STATUSES = ("active", "approved", "completed")
 
 
+def _reporting_service(gam_client, network_timezone: str | None) -> GAMReportingService:
+    """Reporting service for the publisher-facing pages: every report it
+    builds asks GAM for the deployment's REPORTING_CURRENCY (when set), so
+    the page and the delivery snapshot it persists share one currency."""
+    from src.core.tenant_currency import publisher_reporting_currency
+
+    return GAMReportingService(
+        gam_client, network_timezone, report_currency=publisher_reporting_currency("google_ad_manager")
+    )
+
+
 def _persist_media_buy_delivery_snapshots(tenant_id: str, rows: list[dict]) -> None:
     """Persist all-time delivery totals onto media buys matched by GAM order ID.
 
@@ -233,7 +244,7 @@ def get_gam_reporting(tenant_id: str):
 
         # Create reporting service
         logger.info(f"Creating reporting service for tenant {tenant_id}")
-        reporting_service = GAMReportingService(gam_client, network_timezone)
+        reporting_service = _reporting_service(gam_client, network_timezone)
 
         # Get the reporting data
         logger.info(f"Getting reporting data for tenant {tenant_id}, date_range={date_range}")
@@ -329,7 +340,7 @@ def get_advertiser_summary(tenant_id: str, advertiser_id: str):
         network_timezone = ensure_network_timezone(tenant_id)
 
         # Create reporting service
-        reporting_service = GAMReportingService(gam_client, network_timezone)
+        reporting_service = _reporting_service(gam_client, network_timezone)
 
         # Get the advertiser summary
         # Type narrowing: We validated date_range above
@@ -425,7 +436,7 @@ def get_principal_reporting(tenant_id: str, principal_id: str):
             network_timezone = DEFAULT_REPORTING_TIMEZONE
 
         # Create reporting service
-        reporting_service = GAMReportingService(gam_client, network_timezone)
+        reporting_service = _reporting_service(gam_client, network_timezone)
 
         # Get the reporting data
         # Type narrowing: We validated date_range above
@@ -530,7 +541,7 @@ def get_country_breakdown(tenant_id: str):
         network_timezone = ensure_network_timezone(tenant_id)
 
         # Create reporting service
-        reporting_service = GAMReportingService(gam_client, network_timezone)
+        reporting_service = _reporting_service(gam_client, network_timezone)
 
         # Get the country breakdown
         # Type narrowing: We validated date_range above
@@ -621,7 +632,7 @@ def get_ad_unit_breakdown(tenant_id: str):
         network_timezone = ensure_network_timezone(tenant_id)
 
         # Create reporting service
-        reporting_service = GAMReportingService(gam_client, network_timezone)
+        reporting_service = _reporting_service(gam_client, network_timezone)
 
         # Get the ad unit breakdown
         # Type narrowing: We validated date_range above
@@ -709,7 +720,7 @@ def get_principal_summary(tenant_id: str, principal_id: str):
             network_timezone = DEFAULT_REPORTING_TIMEZONE
 
         # Create reporting service
-        reporting_service = GAMReportingService(gam_client, network_timezone)
+        reporting_service = _reporting_service(gam_client, network_timezone)
 
         # Get the advertiser summary
         # Type narrowing: We validated date_range above

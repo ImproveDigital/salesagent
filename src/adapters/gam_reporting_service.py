@@ -151,7 +151,7 @@ class ReportingData:
 class GAMReportingService:
     """Service for getting comprehensive reporting data from Google Ad Manager"""
 
-    def __init__(self, gam_client, network_timezone: str = None):
+    def __init__(self, gam_client, network_timezone: str = None, report_currency: str | None = None):
         """
         Initialize the reporting service
 
@@ -160,6 +160,9 @@ class GAMReportingService:
             network_timezone: The timezone of the GAM network (will be auto-detected if not provided)
         """
         self.client = gam_client
+        # Default ReportQuery.reportCurrency for every report this service
+        # builds (None = network currency); an explicit per-call currency wins.
+        self.report_currency = report_currency
         self.report_service = self.client.GetService("ReportService")
 
         # Currency every ReportService revenue column is denominated in.
@@ -431,9 +434,12 @@ class GAMReportingService:
         }
 
         # ReportQuery.reportCurrency: "The currency for revenue metrics. Defaults
-        # to the network currency if left null." (ReportService WSDL)
-        if currency_code:
-            report_job["reportQuery"]["reportCurrency"] = currency_code
+        # to the network currency if left null." (ReportService WSDL). An
+        # explicit currency_code wins; otherwise the service-wide
+        # report_currency (the admin reporting pages' REPORTING_CURRENCY).
+        effective_currency = currency_code or self.report_currency
+        if effective_currency:
+            report_job["reportQuery"]["reportCurrency"] = effective_currency
 
         return report_job
 
