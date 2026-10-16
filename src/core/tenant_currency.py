@@ -41,7 +41,7 @@ def publisher_reporting_currency(adapter_type: str | None) -> str | None:
     None means "report in the ad server's own currency": the setting is
     unset, or the adapter cannot ask its platform for another currency.
     """
-    configured = os.environ.get(REPORTING_CURRENCY_ENV, "").strip().upper()
+    configured = os.environ.get(REPORTING_CURRENCY_ENV, "EUR").strip().upper()
     if not configured or adapter_type not in CONVERTIBLE_ADAPTER_TYPES:
         return None
     return configured
