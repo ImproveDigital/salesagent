@@ -412,6 +412,14 @@ def _get_media_buy_delivery_impl(
                         # publisher-facing snapshot in the ad server's reporting
                         # currency, maintained by the admin pages and reporting
                         # syncs.
+                        # TODO(delivery-snapshots): persist these buy-currency
+                        # figures too — a media_buy_delivery_snapshots table
+                        # keyed by (media_buy_id, currency, window, source),
+                        # written here and by the delivery webhook scheduler —
+                        # so the dashboard can pace spend vs budget in the buy
+                        # currency, buyers' reported amounts are auditable,
+                        # and closed windows can be answered without another
+                        # ad server report. Never overwrite delivered_amount.
 
                     except DeliveryDataUnavailable as soft_err:
                         # Adapter signals "integration healthy, no data

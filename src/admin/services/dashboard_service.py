@@ -548,6 +548,9 @@ class DashboardService:
             and buy_currency
             and buy_currency.upper() != snapshot_currency.upper()
         ):
+            # TODO(delivery-snapshots): once buy-currency delivery snapshots
+            # are stored (see media_buy_delivery.py), pace spend vs budget
+            # from them and drop this impressions fallback.
             pacing_basis = "impressions"
             planned_impressions = self._planned_impressions(buy)
             delivered_impressions = int(buy.delivered_impressions or 0)
