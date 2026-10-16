@@ -677,8 +677,13 @@ def _get_media_buy_delivery_impl(
                 status_typed = cast(
                     LiteralType["ready", "active", "paused", "completed", "failed", "reporting_delayed"], status
                 )
+                # Currency of every monetary value in this row: what the ad
+                # server reported the spend in (the buy currency when it could
+                # report in it), else the buy currency for simulated figures.
+                delivery_currency = adapter_currency or (buy.currency if isinstance(buy.currency, str) else "USD")
                 delivery_data = MediaBuyDeliveryData(
                     media_buy_id=media_buy_id,
+                    currency=delivery_currency,
                     status=status_typed,
                     pricing_model=PricingModel(
                         "cpm"
@@ -700,7 +705,7 @@ def _get_media_buy_delivery_impl(
                 )
 
                 deliveries.append(delivery_data)
-                spend_by_buy.append((media_buy_id, buy.currency if isinstance(buy.currency, str) else "USD", spend))
+                spend_by_buy.append((media_buy_id, delivery_currency, spend))
                 total_impressions += impressions
                 media_buy_count += 1
                 total_clicks += clicks if clicks is not None else 0

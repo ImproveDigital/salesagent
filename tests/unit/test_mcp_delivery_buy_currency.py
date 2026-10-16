@@ -6,13 +6,13 @@ network currency. Nothing is converted by the sales agent.
 """
 
 from contextlib import ExitStack
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock, Mock, patch
 
 from src.adapters.gam import build_gam_config_from_adapter
 from src.adapters.gam_reporting_service import GAMReportingService, ReportingData
 from src.adapters.google_ad_manager import GoogleAdManager
-from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
     AdapterPackageDelivery,
@@ -21,8 +21,9 @@ from src.core.schemas import (
     Principal,
     ReportingPeriod,
 )
-from src.core.testing_hooks import AdCPTestContext
 from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
+from tests.factories import PrincipalFactory
+from tests.unit.test_delivery_currency_network import _reporting_data as _network_reporting_data
 
 _MOD = "src.core.tools.media_buy_delivery"
 
@@ -61,19 +62,8 @@ def test_get_reporting_data_passes_currency_to_query_and_records_it(monkeypatch)
 
 
 def _reporting_data(spend: float, currency_code: str | None) -> ReportingData:
-    now = datetime.now(UTC)
-    return ReportingData(
-        data=[{"line_item_id": "111", "impressions": 1002, "clicks": 0, "spend": spend, "ctr": 0.0}],
-        start_date=now,
-        end_date=now,
-        requested_timezone="America/New_York",
-        data_timezone="Europe/Amsterdam",
-        data_valid_until=now,
-        query_type="all_time",
-        dimensions=["LINE_ITEM_ID"],
-        metrics={"total_impressions": 1002, "total_clicks": 0, "total_spend": spend, "average_ctr": 0.0},
-        currency_code=currency_code,
-    )
+    """The network-currency fixture, stamped with the reportCurrency used."""
+    return replace(_network_reporting_data(spend), currency_code=currency_code)
 
 
 class _FakeReportingService:
@@ -148,12 +138,34 @@ def test_admin_pages_opt_out_to_network_currency():
     assert result.totals.spend == 0.62
 
 
-def test_buy_currency_not_enabled_reports_network_currency_honestly():
+def test_buy_currency_requested_even_when_not_a_secondary_currency():
+    """reportCurrency takes any currency GAM reports in (Help Center list), not
+    only the network's trafficking (secondary) currencies."""
     service = _FakeReportingService()
     result = _run_adapter(_adapter(["USD"]), service)
 
-    assert service.calls == [None]
+    assert service.calls == ["AUD"]
+    assert result.currency == "AUD"
+
+
+class _RejectingReportingService(_FakeReportingService):
+    """GAM refuses the requested reportCurrency; the network-currency retry works."""
+
+    def get_reporting_data(self, **kwargs):
+        currency = kwargs.get("currency_code")
+        self.calls.append(currency)
+        if currency:
+            raise Exception("GAM report job failed")
+        return _reporting_data(0.62, None)
+
+
+def test_rejected_report_currency_falls_back_to_network_currency_and_says_so():
+    service = _RejectingReportingService()
+    result = _run_adapter(_adapter([]), service)
+
+    assert service.calls == ["AUD", None]
     assert result.currency == "EUR"
+    assert result.totals.spend == 0.62
 
 
 def test_buy_in_network_currency_needs_no_report_currency():
@@ -207,13 +219,7 @@ def _adapter_response(currency: str) -> AdapterGetMediaBuyDeliveryResponse:
 
 
 def _run_tool(adapter_currency: str):
-    identity = ResolvedIdentity(
-        principal_id="test_principal",
-        tenant_id="test_tenant",
-        tenant={"tenant_id": "test_tenant"},
-        protocol="mcp",
-        testing_context=AdCPTestContext(dry_run=False, mock_time=None, jump_to_event=None, test_session_id=None),
-    )
+    identity = PrincipalFactory.make_identity(tenant={"tenant_id": "test_tenant"})
     uow = MagicMock()
     uow.__enter__.return_value = uow
     uow.__exit__.return_value = False
@@ -237,12 +243,19 @@ def test_tool_gets_buy_currency_by_default_and_does_not_touch_the_snapshot():
     assert adapter.get_media_buy_delivery.call_args.kwargs.get("report_in_buy_currency", True) is True
     delivery = response.media_buy_deliveries[0]
     assert delivery.totals.spend == 1.0
+    assert delivery.currency == "AUD"
     assert delivery.by_package[0].currency == "AUD"
     assert response.currency == "AUD"
     assert not any("delivered_amount" in c.kwargs for c in uow.media_buys.update_fields.call_args_list)
 
 
-def test_tool_package_label_follows_adapter_when_it_fell_back_to_network_currency():
+def test_tool_labels_follow_adapter_when_it_fell_back_to_network_currency():
+    """Row, package and response-level currency all state what the figures are
+    in (EUR), never the buy currency (AUD) the figures are not in."""
     response, _, _ = _run_tool("EUR")
 
-    assert response.media_buy_deliveries[0].by_package[0].currency == "EUR"
+    delivery = response.media_buy_deliveries[0]
+    assert delivery.currency == "EUR"
+    assert delivery.by_package[0].currency == "EUR"
+    assert response.currency == "EUR"
+    assert response.aggregated_totals.spend == 1.0

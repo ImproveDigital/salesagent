@@ -28,6 +28,9 @@ class DashboardService:
     def __init__(self, tenant_id: str):
         self.tenant_id = tenant_id
         self._tenant: Tenant | None = None
+        # Currency of the delivery snapshot (delivered_amount): the ad server's
+        # reporting currency. Resolved per request; None until then.
+        self._primary_currency_code: str | None = None
         self._validate_tenant_id()
 
     def _validate_tenant_id(self):
@@ -148,6 +151,11 @@ class DashboardService:
                 repo = MediaBuyRepository(db_session, self.tenant_id)
                 recent_buys = repo.list_recent(limit, eager_load_principal=True)
 
+                # The delivery snapshot (delivered_amount) is in the ad server's
+                # reporting currency; the calendar estimate is budget-based and
+                # so in the buy currency. Label the spend column accordingly.
+                snapshot_currency = self._primary_currency(db_session)
+
                 # Transform for template consumption
                 # Note: Adding dynamic attributes to MediaBuy instances for template rendering
                 # Using setattr for dynamic attributes that mypy can't know about
@@ -155,6 +163,13 @@ class DashboardService:
                     # Calculate estimated spend based on flight duration and status
                     # Using object.__setattr__ for dynamic template attributes that aren't on the model
                     object.__setattr__(media_buy, "spend", self._calculate_estimated_spend(media_buy))
+                    object.__setattr__(
+                        media_buy,
+                        "spend_currency",
+                        snapshot_currency
+                        if media_buy.delivered_amount is not None
+                        else (media_buy.currency or snapshot_currency),
+                    )
 
                     # Calculate relative time with proper timezone handling
                     object.__setattr__(
@@ -361,22 +376,10 @@ class DashboardService:
     # ------------------------------------------------------------------
 
     def _primary_currency(self, session) -> str:
-        """Return the tenant's primary currency code (GAM network → first CurrencyLimit → EUR)."""
-        from sqlalchemy import select
+        """The ad server's reporting currency (GAM network / Improve Digital office)."""
+        from src.core.tenant_currency import tenant_reporting_currency
 
-        from src.core.database.models import AdapterConfig, CurrencyLimit
-
-        stmt = select(AdapterConfig).filter_by(tenant_id=self.tenant_id)
-        adapter = session.scalars(stmt).first()
-        if adapter and adapter.gam_network_currency:
-            return str(adapter.gam_network_currency)
-
-        limit_stmt = select(CurrencyLimit).filter_by(tenant_id=self.tenant_id).order_by(CurrencyLimit.currency_code)
-        limit = session.scalars(limit_stmt).first()
-        if limit:
-            return str(limit.currency_code)
-
-        return "EUR"
+        return tenant_reporting_currency(session, self.tenant_id)
 
     def get_ledger_dashboard(self) -> dict[str, Any]:
         """Aggregate everything the Ledger dashboard renders.
@@ -389,6 +392,7 @@ class DashboardService:
             repo = MediaBuyRepository(session, self.tenant_id)
             tenant = self._load_tenant(session)
             primary_currency = self._primary_currency(session)
+            self._primary_currency_code = primary_currency
             masthead = self._masthead(session, tenant)
             masthead["currency"] = primary_currency
             incoming = self._incoming(repo)
@@ -531,6 +535,24 @@ class DashboardService:
         delivered = float(buy.delivered_amount) if buy.delivered_amount is not None else 0.0
         delivery_pct = (delivered / budget) if budget > 0 else 0.0
 
+        # delivered_amount is the ad server's reporting currency; budget is the
+        # buy currency. When they differ, spend/budget is meaningless (no FX in
+        # salesagent), so pace on impressions delivered vs planned instead.
+        pacing_basis = "spend"
+        planned_impressions = 0
+        snapshot_currency = self._primary_currency_code
+        buy_currency = buy.currency if isinstance(buy.currency, str) else None
+        if (
+            buy.delivered_amount is not None
+            and snapshot_currency
+            and buy_currency
+            and buy_currency.upper() != snapshot_currency.upper()
+        ):
+            pacing_basis = "impressions"
+            planned_impressions = self._planned_impressions(buy)
+            delivered_impressions = int(buy.delivered_impressions or 0)
+            delivery_pct = (delivered_impressions / planned_impressions) if planned_impressions > 0 else 0.0
+
         # Flight progress.
         # Cast SQLAlchemy `Mapped[Date]` → stdlib `date` so arithmetic
         # type-checks (existing pattern in src/core/tools/media_buy_delivery.py).
@@ -551,7 +573,7 @@ class DashboardService:
 
         # Pacing classification (linear)
         threshold = 0.10
-        if buy.delivered_amount is None:
+        if buy.delivered_amount is None or (pacing_basis == "impressions" and planned_impressions <= 0):
             pacing = "unknown"
         elif delivery_pct < flight_pct - threshold:
             pacing = "under"
@@ -577,12 +599,27 @@ class DashboardService:
             "delivery_pct": round(delivery_pct, 3),
             "flight_pct": round(flight_pct, 3),
             "pacing": pacing,
+            "pacing_basis": pacing_basis,
             "delivery_synced_at": buy.delivery_synced_at,
             "delivery_synced_relative": (
                 self._format_relative_time(buy.delivery_synced_at) if buy.delivery_synced_at else None
             ),
             "media_buy_id": buy.media_buy_id,
         }
+
+    @staticmethod
+    def _planned_impressions(buy: MediaBuy) -> int:
+        """Sum of package impression goals, from package_config.impressions (0 when unknown)."""
+        packages = getattr(buy, "packages", None)
+        if not isinstance(packages, list):
+            return 0
+        total = 0
+        for package in packages:
+            config = getattr(package, "package_config", None) or {}
+            value = config.get("impressions") if isinstance(config, dict) else None
+            if isinstance(value, int | float) and value > 0:
+                total += int(value)
+        return total
 
     def _pipeline(self, session) -> dict[str, Any]:
         """Unique buyers in market this week, grouped by (operator, brand_domain).
@@ -720,7 +757,9 @@ class DashboardService:
                 }
             )
 
-        # Pacing under: scan running buys
+        # Pacing under: scan running buys. The snapshot currency used for
+        # cross-currency pacing is cached by get_landing_data() before this
+        # runs; without it _running_row paces on spend.
         now = datetime.now(UTC)
         under = []
         for b in active:

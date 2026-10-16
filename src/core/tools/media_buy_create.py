@@ -2270,6 +2270,21 @@ def _collect_package_pricing_info_by_index(
     return package_pricing_info_by_index
 
 
+def _improvedigital_office_currency(adapter_config: Any) -> str | None:
+    """Currency of the Improve Digital buying-entity office this tenant books under.
+
+    Stored as ``config_json["currency"]`` (the adapter settings "Default
+    Currency"); ``None`` when unset so no constraint applies.
+    """
+    config_json = getattr(adapter_config, "config_json", None)
+    if not isinstance(config_json, dict):
+        return None
+    configured = config_json.get("currency")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip().upper()
+    return None
+
+
 def _derive_single_request_currency(package_pricing_info_by_index: dict[int, dict[str, Any]]) -> str | None:
     """Return the single selected currency for a media buy, or reject mixed currencies."""
     currencies = sorted(
@@ -2965,6 +2980,20 @@ async def _create_media_buy_impl(
                         f"Contact the publisher to enable this currency in GAM."
                     )
                     raise ValueError(error_msg)
+            elif adapter_config and adapter_config.adapter_type == "improvedigital":
+                # Improve Digital books every Classic campaign under one
+                # buying-entity office, and the office fixes the campaign
+                # currency (line items inherit it and reject any other). A
+                # buy in another currency would be trafficked at face value
+                # in the office currency, so refuse it here rather than
+                # mis-price it.
+                office_currency = _improvedigital_office_currency(adapter_config)
+                if office_currency and request_currency.upper() != office_currency:
+                    raise ValueError(
+                        f"Currency {request_currency} is not supported by this publisher's Improve Digital "
+                        f"buying entity office, which books in {office_currency}. "
+                        f"Choose a {office_currency} pricing option or contact the publisher."
+                    )
 
             # Validate minimum product spend (legacy + new pricing_options)
             # NOTE: minimum package budget validation temporarily disabled.

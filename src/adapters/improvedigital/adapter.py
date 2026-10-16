@@ -1421,6 +1421,16 @@ class ImproveDigitalAdapter(AdServerAdapter):
         )
 
         campaign_id = self._resolve_campaign_id(media_buy_id)
+        # AdCP buyers are owed the buy currency. The office currency sources
+        # below (campaign counters, the stats cache) can't provide another
+        # currency; the Report API can (``currency_id``), so a buy booked
+        # against a differently-denominated office is read live in its own
+        # currency. Falls through to the office-currency sources — labelled
+        # honestly — when that isn't possible.
+        if report_in_buy_currency:
+            buy_currency_response = self._buy_currency_delivery(media_buy_id, campaign_id, date_range)
+            if buy_currency_response is not None:
+                return buy_currency_response
         # The Classic counters are LIFETIME figures — only answer with them
         # when the caller effectively asked for lifetime delivery (the
         # details page requests a 3-year span). Windowed requests (delivery
@@ -1461,6 +1471,70 @@ class ImproveDigitalAdapter(AdServerAdapter):
             stat_rows,
             package_id_attr="line_item_id",
             default_currency=self.currency,
+        )
+
+    def _media_buy_currency(self, media_buy_id: str) -> str | None:
+        """Currency the media buy was booked in (``media_buys.currency``), or None."""
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.media_buy import MediaBuyRepository
+
+        with get_db_session() as session:
+            buy = MediaBuyRepository(session, self.tenant_id or "default").get_by_id(media_buy_id)
+            currency = getattr(buy, "currency", None) if buy is not None else None
+        return currency.strip().upper() if isinstance(currency, str) and currency.strip() else None
+
+    def _buy_currency_delivery(
+        self, media_buy_id: str, campaign_id: str, date_range: ReportingPeriod
+    ) -> AdapterGetMediaBuyDeliveryResponse | None:
+        """Delivery in the buy currency from a live Report API preview, or None.
+
+        The Report API converts ``advertiser_payout`` into any of its
+        currencies (``currency_id``), which is the only Improve Digital
+        source that can report a campaign in a currency other than its
+        office's. The rows are never written to the stats cache: that cache
+        is one currency per tenant (the office currency) and feeds the
+        publisher-facing pages. Returns None — so the caller uses the
+        office-currency sources — when the buy is in the office currency
+        already, the client has no reporting surface, the preview fails
+        (reporting scope pending, upstream error) or reports no rows.
+        """
+        buy_currency = self._media_buy_currency(media_buy_id)
+        if not buy_currency or buy_currency == str(self.currency).upper():
+            return None
+        if self._client is None or getattr(self._client, "reporting", None) is None:
+            return None
+        if not str(campaign_id).isdigit():
+            return None
+        from src.adapters.improvedigital.reporting_sync import live_stat_rows, relative_date_range_from
+
+        window_start = date_range.start.date() if date_range is not None and date_range.start else None
+        try:
+            rows = live_stat_rows(
+                self._client,
+                self.tenant_id or "default",
+                [int(campaign_id)],
+                relative_date_range_from(window_start),
+                self.timezone,
+                buy_currency,
+            )
+        except (ImproveDigitalError, KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "Improve Digital buy-currency (%s) delivery read failed for campaign %s — "
+                "reporting in the office currency %s instead: %s",
+                buy_currency,
+                campaign_id,
+                self.currency,
+                exc,
+            )
+            return None
+        if not rows:
+            return None
+        return self._aggregate_stat_rows_to_delivery_response(
+            media_buy_id,
+            date_range,
+            rows,
+            package_id_attr="line_item_id",
+            default_currency=buy_currency,
         )
 
     def _live_campaign_delivery(

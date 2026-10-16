@@ -1656,70 +1656,12 @@ def _improvedigital_live_stat_rows(
     reporting sync). Returns stat-row-shaped objects so
     :func:`_improvedigital_reporting_payload` treats both sources alike.
     """
-    from datetime import UTC, datetime
-    from types import SimpleNamespace
+    from src.adapters.improvedigital.reporting_sync import live_stat_rows, quick_date_range
 
-    from src.adapters.improvedigital.reporting_sync import (
-        PREVIEW_ROW_LIMIT,
-        ImproveDigitalReportingSync,
-        _as_float,
-        _as_int,
-        build_report_request,
-        filter_to_existing_campaigns,
-        quick_date_range,
-        resolve_currency_id,
-    )
-
-    # Environment gate — the Report API warehouse serves foreign-environment
-    # campaign ids; only query campaigns this environment actually knows.
-    campaign_ids = [int(cid) for cid in filter_to_existing_campaigns(client, tenant_id, [str(c) for c in campaign_ids])]
-    if not campaign_ids:
-        return []
     # Shared request builder + currency resolver — one wire contract with
     # the reporting sync, so the live view can never drift from it.
     # quick_date_range translates TODAY (500s upstream) to a relative range.
-    request_body = build_report_request(
-        currency_id=resolve_currency_id(client, currency),
-        date_range=quick_date_range(quick_range),
-        campaign_ids=campaign_ids,
-        timezone=timezone,
-    )
-    payload = {
-        "rows": PREVIEW_ROW_LIMIT,
-        "report_generation_request": {**request_body, "action": "PREVIEW_REPORT"},
-    }
-    logger.info(
-        "Improve Digital live report view: POST /report/ext/preview window=%s timezone=%s campaigns=%s",
-        quick_range,
-        timezone,
-        campaign_ids,
-    )
-    import time as _time
-
-    started = _time.monotonic()
-    rows = ImproveDigitalReportingSync._parse_rows(client.reporting.preview(payload))
-    logger.info(
-        "Improve Digital live report view: %d line-item row(s) in %.1fs",
-        len(rows),
-        _time.monotonic() - started,
-    )
-    as_of = datetime.now(UTC)
-    stat_rows = []
-    for row in rows:
-        spend = _as_float(row.get("advertiser_payout"))
-        stat_rows.append(
-            SimpleNamespace(
-                campaign_id=str(row["campaign_id"]) if row.get("campaign_id") not in (None, "") else None,
-                line_item_id=str(row["line_item_id"]),
-                impressions=_as_int(row.get("impressions")),
-                clicks=_as_int(row.get("clicks")),
-                completed_views=_as_int(row.get("complete")),
-                spend_micros=int(round(spend * 1_000_000)) if spend is not None else 0,
-                currency=currency,
-                as_of=as_of,
-            )
-        )
-    return stat_rows
+    return live_stat_rows(client, tenant_id, campaign_ids, quick_date_range(quick_range), timezone, currency)
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/improvedigital/reporting", methods=["GET"])

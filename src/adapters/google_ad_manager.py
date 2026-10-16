@@ -1235,9 +1235,7 @@ class GoogleAdManager(AdServerAdapter):
         )
         buy_currency = str(media_buy.currency) if media_buy.currency else None
         report_currency = (
-            self._delivery_report_currency(media_buy_id, buy_currency, network_currency)
-            if report_in_buy_currency
-            else None
+            self._delivery_report_currency(buy_currency, network_currency) if report_in_buy_currency else None
         )
         delivery_currency = report_currency or network_currency or buy_currency or "USD"
 
@@ -1282,13 +1280,37 @@ class GoogleAdManager(AdServerAdapter):
             range_type = "all_time"
 
         # Fetch delivery data scoped to this specific GAM order
-        reporting_data = reporting_service.get_reporting_data(
-            date_range=cast("Literal['lifetime', 'this_month', 'today', 'all_time']", range_type),
-            advertiser_id=self.advertiser_id,
-            order_id=gam_order_id,
-            requested_timezone="America/New_York",
-            currency_code=report_currency,
-        )
+        range_literal = cast("Literal['lifetime', 'this_month', 'today', 'all_time']", range_type)
+        try:
+            reporting_data = reporting_service.get_reporting_data(
+                date_range=range_literal,
+                advertiser_id=self.advertiser_id,
+                order_id=gam_order_id,
+                requested_timezone="America/New_York",
+                currency_code=report_currency,
+            )
+        except Exception as report_err:
+            if not report_currency:
+                raise
+            # GAM refused the buy currency (not a currency it can report in).
+            # Report in the network currency and say so: the response
+            # currency must always match the figures.
+            logger.warning(
+                "GAM could not report media buy %s in %s (%s); falling back to network currency %s",
+                media_buy_id,
+                report_currency,
+                report_err,
+                network_currency,
+            )
+            report_currency = None
+            delivery_currency = network_currency or buy_currency or "USD"
+            reporting_data = reporting_service.get_reporting_data(
+                date_range=range_literal,
+                advertiser_id=self.advertiser_id,
+                order_id=gam_order_id,
+                requested_timezone="America/New_York",
+                currency_code=None,
+            )
 
         # Aggregate totals across all packages
         total_impressions = reporting_data.metrics.get("total_impressions", 0)
@@ -1404,29 +1426,19 @@ class GoogleAdManager(AdServerAdapter):
             daily_breakdown=daily_breakdown if daily_breakdown else None,
         )
 
-    def _delivery_report_currency(
-        self, media_buy_id: str, buy_currency: str | None, network_currency: str | None
-    ) -> str | None:
+    @staticmethod
+    def _delivery_report_currency(buy_currency: str | None, network_currency: str | None) -> str | None:
         """Currency to request the delivery report in, or None for the network currency.
 
-        The buy currency is requested only when it differs from the network
-        currency and GAM can convert to it (a configured secondary currency).
+        ``ReportQuery.reportCurrency`` accepts any currency GAM reports in
+        (the Help Center list the WSDL points to: ~50 codes, converted with
+        GAM's exchange rates), not only the network's secondary currencies,
+        so the buy currency is requested whenever it differs from the
+        network currency. A rejected code falls back at the call site.
         """
         if not buy_currency or not network_currency or buy_currency.upper() == network_currency.upper():
             return None
-        secondary = {str(code).upper() for code in (self.config.get("secondary_currencies") or [])}
-        if buy_currency.upper() in secondary:
-            return buy_currency.upper()
-        logger.warning(
-            "Media buy %s booked in %s but GAM network reports in %s (secondary currencies: %s); "
-            "delivery spend will be labelled %s",
-            media_buy_id,
-            buy_currency,
-            network_currency,
-            sorted(secondary) or "none",
-            network_currency,
-        )
-        return None
+        return buy_currency.upper()
 
     def get_packages_snapshot(
         self, package_refs: list[tuple[str, str, str | None]]
