@@ -199,9 +199,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
             # sync inventory while setup completes.
             if not (self.client_id and self.client_secret):
                 raise ValueError("Improve Digital config requires client_id + client_secret")
-            if not (self.buying_entity_id and self.buying_entity_office_id):
+            if not self.buying_entity_id:
                 raise ValueError(
-                    "Improve Digital config requires buying_entity_id + buying_entity_office_id — "
+                    "Improve Digital config requires buying_entity_id — "
                     "the Classic campaign API rejects campaigns without them (discover via "
                     "the adapter settings' Test Connection, or ask the Improve Digital team)"
                 )
@@ -383,10 +383,17 @@ class ImproveDigitalAdapter(AdServerAdapter):
             return targeting_error
 
         buy_name = self._buy_name(request)
+        # One office per currency on the platform: the campaign books under
+        # the buying-entity office mapped to the buy currency on the tenant's
+        # currency limits (Policies & Workflows → Budget Controls).
+        buy_currency = self._booking_currency(package_pricing_info)
+        office_id = None if self.dry_run else self._office_for_currency(buy_currency)
 
         if self.dry_run:
             self._audit_create_media_buy(request, start_time, end_time)
-            campaign_payload = self._campaign_payload(buy_name, start_time, end_time)
+            campaign_payload = self._campaign_payload(
+                buy_name, start_time, end_time, currency=buy_currency, office_id=office_id
+            )
             self.log(f"Would call: POST {self.base_url}/rtb/v1/classic/campaigns")
             self.log(f"  Campaign: {campaign_payload}")
             self.log(
@@ -395,7 +402,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
             )
             if self._has_campaign_metadata():
                 self.log(f"Would call: POST {self.base_url}/api/metadata-campaigns")
-                self.log(f"  Metadata: {self._campaign_metadata_payload(0, buy_name, start_time, end_time)}")
+                self.log(
+                    f"  Metadata: {self._campaign_metadata_payload(0, buy_name, start_time, end_time, currency=buy_currency)}"
+                )
             for package in packages:
                 rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
                 payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
@@ -417,6 +426,20 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # Live mode — Classic campaign > line items (one per package) >
         # placement/package assignment.
         assert self._client is not None
+        if office_id is None:
+            return CreateMediaBuyError(
+                errors=[
+                    Error(
+                        code="currency_not_bookable",
+                        message=(
+                            f"No Improve Digital buying entity office is mapped to {buy_currency} for this "
+                            "publisher. Map the office that bills in this currency under "
+                            "Policies & Workflows → Budget Controls, or book in a mapped currency."
+                        ),
+                        details=None,
+                    )
+                ]
+            )
         missing = self._missing_booking_config()
         if missing:
             return CreateMediaBuyError(
@@ -444,7 +467,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
         try:
             with self._client.record_requests() as api_requests:
                 campaign = self._client.campaigns.create_campaign(
-                    self._campaign_payload(buy_name, start_time, end_time)
+                    self._campaign_payload(buy_name, start_time, end_time, currency=buy_currency, office_id=office_id)
                 )
                 campaign_id = int(campaign["id"])
                 v3_echoed["campaign_reference_number_echoed"] = self._put_campaign_reference(campaign_id)
@@ -452,7 +475,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
                 # the line items so a rejection cleans up the campaign alone.
                 if self._has_campaign_metadata():
                     self._client.metadata.upsert_campaign_metadata(
-                        self._campaign_metadata_payload(campaign_id, buy_name, start_time, end_time)
+                        self._campaign_metadata_payload(
+                            campaign_id, buy_name, start_time, end_time, currency=buy_currency
+                        )
                     )
                     logger.info("Improve Digital: campaign metadata attached for campaign %s", campaign_id)
                 else:
@@ -798,14 +823,40 @@ class ImproveDigitalAdapter(AdServerAdapter):
         moment = (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC)
         return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond // 1000:03d}Z"
 
-    def _campaign_payload(self, buy_name: str, start_time: datetime, end_time: datetime) -> dict[str, Any]:
+    def _booking_currency(self, package_pricing_info: dict[str, dict] | None) -> str:
+        """Currency the buy was priced in (the selected pricing option's), else the default."""
+        for info in (package_pricing_info or {}).values():
+            code = info.get("currency") if isinstance(info, dict) else None
+            if isinstance(code, str) and code.strip():
+                return code.strip().upper()
+        return str(self.currency).upper()
+
+    def _office_for_currency(self, currency: str) -> int | None:
+        """Buying-entity office mapped to ``currency`` on the tenant's currency limits, or None."""
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.currency_limit import CurrencyLimitRepository
+
+        with get_db_session() as session:
+            return CurrencyLimitRepository(session, self.tenant_id or "default").office_for_currency(currency)
+
+    def _campaign_payload(
+        self,
+        buy_name: str,
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        currency: str | None = None,
+        office_id: int | None = None,
+    ) -> dict[str, Any]:
         """Build a ``CampaignDto`` body.
 
         The Classic create schema requires (validated live on the dev
         platform): name, start_date, time_zone, type, buying_entity_id —
         plus improve_demand_contact_id per the platform docs. Classic
         (direct) campaigns carry ``type: "Improve"`` (the Improve adserver
-        hosts and serves the creatives).
+        hosts and serves the creatives). ``currency`` is the buy currency and
+        ``office_id`` the buying-entity office that bills in it; the platform
+        derives the campaign currency from the office, so the two must agree.
         """
         payload: dict[str, Any] = {
             "name": buy_name,
@@ -813,7 +864,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
             "start_date": self._format_datetime(start_time),
             "end_date": self._format_datetime(end_time),
             "time_zone": self.timezone,
-            "currency": self.currency,
+            "currency": (currency or str(self.currency)).upper(),
             "improve_demand_contact_id": self.improve_demand_contact_id,
             "buying_entity_id": int(self.buying_entity_id) if self.buying_entity_id else None,
             # Numeric platform advertiser IDs only — principal mappings may
@@ -827,9 +878,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
             # The V3 create API will add ``campaign_reference_number`` later.
             "reference_number": self.campaign_reference_number,
         }
-        if self.buying_entity_office_id:
-            payload["buying_entity_office_id"] = int(self.buying_entity_office_id)
-            payload["buying_entity_office_ids"] = [int(self.buying_entity_office_id)]
+        if office_id is not None:
+            payload["buying_entity_office_id"] = int(office_id)
+            payload["buying_entity_office_ids"] = [int(office_id)]
         if self.agency_id:
             payload["agencyId"] = int(self.agency_id)
         return payload
@@ -852,7 +903,13 @@ class ImproveDigitalAdapter(AdServerAdapter):
         )
 
     def _campaign_metadata_payload(
-        self, campaign_id: int, buy_name: str, start_time: datetime, end_time: datetime
+        self,
+        campaign_id: int,
+        buy_name: str,
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        currency: str | None = None,
     ) -> dict[str, Any]:
         """Build the ``CampaignMetadataDto`` for a freshly created campaign.
 
@@ -875,7 +932,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
             "campaignName": buy_name,
             "campaignStartDate": self._format_iso_datetime(start_time),
             "campaignEndDate": self._format_iso_datetime(end_time),
-            "currencyCode": self.currency,
+            "currencyCode": (currency or str(self.currency)).upper(),
             "entityType": "c",
             "completed": True,
             "isCompleted": True,
@@ -1446,7 +1503,11 @@ class ImproveDigitalAdapter(AdServerAdapter):
             if date_range is not None and date_range.start and date_range.end
             else 0
         )
-        if window_days >= 365:
+        # The inline counters are in the campaign's own (office) currency;
+        # with one office per currency that may differ from the reporting
+        # currency, in which case the cache/preview path below answers.
+        campaign_currency = self._media_buy_currency(media_buy_id) or str(self.currency).upper()
+        if window_days >= 365 and campaign_currency == str(self.reporting_currency).upper():
             try:
                 return self._live_campaign_delivery(media_buy_id, campaign_id, date_range)
             except (ImproveDigitalError, AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -1516,7 +1577,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
         upstream error) or reports no rows.
         """
         buy_currency = target_currency.strip().upper()
-        if not buy_currency or buy_currency == str(self.currency).upper():
+        # The stats cache (and the sync that fills it) hold the reporting
+        # currency, so only a different target needs a live read.
+        if not buy_currency or buy_currency == str(self.reporting_currency).upper():
             return None
         if self._client is None or getattr(self._client, "reporting", None) is None:
             return None

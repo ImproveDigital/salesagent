@@ -38,8 +38,9 @@ CONVERTIBLE_ADAPTER_TYPES = frozenset({"google_ad_manager", "improvedigital"})
 def publisher_reporting_currency(adapter_type: str | None) -> str | None:
     """The deployment-wide reporting currency for this ad server, or None.
 
-    None means "report in the ad server's own currency": the setting is
-    unset, or the adapter cannot ask its platform for another currency.
+    Defaults to EUR when ``REPORTING_CURRENCY`` is unset. None means "report
+    in the ad server's own currency": the setting is an empty string, or the
+    adapter cannot ask its platform for another currency.
     """
     configured = os.environ.get(REPORTING_CURRENCY_ENV, "EUR").strip().upper()
     if not configured or adapter_type not in CONVERTIBLE_ADAPTER_TYPES:

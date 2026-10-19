@@ -66,6 +66,14 @@
                 These currencies are enabled in your GAM network and can be used for orders.
             </small>
         </div>
+        {% elif adapter_config and adapter_config.get('adapter_type') == 'improvedigital' %}
+        <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem;">
+            <strong style="color: #1e40af;">Improve Digital buying entity offices:</strong>
+            <span style="color: #1e3a8a;">each currency maps to the office that bills in it; campaigns in that currency book under that office.</span>
+            <small style="display: block; color: #3b82f6; margin-top: 0.25rem;">
+                Add a currency by picking an office — the currency comes from the office. Default currency for bundles: {{ adapter_config.get('default_currency') or 'EUR' }}.
+            </small>
+        </div>
         {% endif %}
 
         {% if embedded_view %}
@@ -111,6 +119,17 @@
                                             Not in GAM
                                         </span>
                                         {% endif %}
+                                    {% elif adapter_config and adapter_config.get('adapter_type') == 'improvedigital' %}
+                                        {% if limit.buying_entity_office_id %}
+                                        <span style="background: #e0e7ff; color: #3730a3; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; white-space: nowrap;" title="Improve Digital buying entity office that bills in this currency">
+                                            Office {{ limit.buying_entity_office_id }}
+                                        </span>
+                                        {% else %}
+                                        <span style="background: #fef3c7; color: #92400e; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; white-space: nowrap;" title="No office mapped — campaigns cannot be booked in this currency. Remove it and add it again from the office picker.">
+                                            No office
+                                        </span>
+                                        {% endif %}
+                                        <input type="hidden" name="currency_limits[{{ limit.currency_code }}][buying_entity_office_id]" value="{{ limit.buying_entity_office_id or '' }}">
                                     {% endif %}
                                 </div>
                             </div>
@@ -761,6 +780,16 @@ Exclude any products that don't match the brand's tone.</pre>
                         {% endfor %}
                     </select>
                     <small class="form-text text-muted">Currencies supported by your GAM network</small>
+                    {% elif adapter_config and adapter_config.get('adapter_type') == 'improvedigital' %}
+                    {# Improve Digital tenant: pick the buying entity office; the currency is the office's billing currency #}
+                    <select class="form-control" id="new-office-id"
+                            data-buying-entity-id="{{ adapter_config.get('buying_entity_id') or '' }}"
+                            onchange="onNewOfficePicked()">
+                        <option value="">Loading offices…</option>
+                    </select>
+                    <input type="text" class="form-control mt-2" id="new-currency-code" readonly placeholder="Currency follows the office"
+                           style="background: #f3f4f6; font-weight: 600; width: 120px;">
+                    <small class="form-text text-muted" id="new-office-hint">Offices of buying entity {{ adapter_config.get('buying_entity_id') or '(not configured)' }} that book Classic campaigns. Each bills in one currency.</small>
                     {% else %}
                     {# Non-GAM tenant (mock adapter): show text input with autocomplete #}
                     <input type="text" class="form-control" id="new-currency-code" list="currency-list" placeholder="e.g., EUR, GBP, CAD" maxlength="3" style="text-transform: uppercase;">

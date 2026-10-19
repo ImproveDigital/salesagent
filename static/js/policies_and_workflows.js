@@ -175,6 +175,55 @@ function showAddCurrencyModal() {
 
     const modal = new bootstrap.Modal(document.getElementById('addCurrencyModal'));
     modal.show();
+    loadImproveDigitalOffices();
+}
+
+// Improve Digital tenants: the Add Currency modal is an office picker. Each
+// buying-entity office bills in exactly one currency, and campaigns in that
+// currency book under it, so the currency code is derived from the office.
+let _newOffices = [];
+
+function loadImproveDigitalOffices() {
+    const officeSelect = document.getElementById('new-office-id');
+    if (!officeSelect) return; // GAM / mock tenants keep the plain currency input
+    const hint = document.getElementById('new-office-hint');
+    const buyingEntityId = parseInt(officeSelect.dataset.buyingEntityId || '', 10);
+    officeSelect.innerHTML = '<option value="">Loading offices…</option>';
+    if (!buyingEntityId) {
+        officeSelect.innerHTML = '<option value="">Configure the buying entity on the adapter settings page first</option>';
+        return;
+    }
+    fetch(`${config.scriptName}/api/tenant/${config.tenantId}/adapters/improvedigital/discover-buying-entities`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({buying_entity_id: buyingEntityId}),
+    })
+        .then((response) => response.json())
+        .then((data) => {
+            if (!data.success) {
+                officeSelect.innerHTML = '<option value="">' + (data.error || 'Office lookup failed') + '</option>';
+                return;
+            }
+            _newOffices = (data.offices || []).filter((office) => /^[A-Z]{3}$/.test(office.billing_currency_code || ''));
+            officeSelect.innerHTML = '<option value="">Select an office…</option>';
+            _newOffices.forEach((office) => {
+                const opt = document.createElement('option');
+                opt.value = String(office.id);
+                opt.textContent = `${office.office} — ${office.billing_currency_code} (${office.id})`;
+                officeSelect.appendChild(opt);
+            });
+            if (hint) hint.textContent = `${_newOffices.length} Classic offices found. Each bills in one currency.`;
+        })
+        .catch((error) => {
+            officeSelect.innerHTML = '<option value="">Error: ' + error.message + '</option>';
+        });
+}
+
+function onNewOfficePicked() {
+    const officeSelect = document.getElementById('new-office-id');
+    const office = _newOffices.find((o) => String(o.id) === officeSelect.value);
+    document.getElementById('new-currency-code').value = office ? office.billing_currency_code : '';
 }
 
 function addCurrencyLimit() {
@@ -190,6 +239,30 @@ function addCurrencyLimit() {
         alert('Please enter a valid 3-letter currency code (e.g., EUR, GBP, CAD)');
         return;
     }
+
+    // Improve Digital: the office is the source of truth for the currency,
+    // and one office cannot serve two currencies.
+    const officeSelect = document.getElementById('new-office-id');
+    let officeId = '';
+    if (officeSelect) {
+        officeId = (officeSelect.value || '').trim();
+        if (!/^[0-9]+$/.test(officeId)) {
+            alert('Pick the Improve Digital office that bills in this currency');
+            return;
+        }
+        const officeInUse = document.querySelector(`input[name$="[buying_entity_office_id]"][value="${officeId}"]`);
+        if (officeInUse && officeInUse.closest('.currency-limit-item')) {
+            const deleteField = officeInUse.closest('.currency-limit-item').querySelector('input[name$="[_delete]"]');
+            if (!deleteField || deleteField.value !== 'true') {
+                alert(`Office ${officeId} is already mapped to ${officeInUse.closest('.currency-limit-item').dataset.currency}`);
+                return;
+            }
+        }
+    }
+    const officeBadge = officeId
+        ? `<span style="background: #e0e7ff; color: #3730a3; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; white-space: nowrap;">Office ${officeId}</span>
+                       <input type="hidden" name="currency_limits[${currencyCode}][buying_entity_office_id]" value="${officeId}">`
+        : '';
 
     const existingCurrency = document.querySelector(`.currency-limit-item[data-currency="${currencyCode}"]`);
     if (existingCurrency) {
@@ -217,8 +290,11 @@ function addCurrencyLimit() {
             <div style="display: grid; grid-template-columns: 150px 1fr 1fr; gap: 1rem; align-items: center;">
                 <div>
                     <label style="display: block; font-weight: 600; color: #1f2937; margin-bottom: 0.25rem;">Currency</label>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
                     <input type="text" readonly value="${currencyCode}"
-                           style="padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; background: #f3f4f6; width: 100%; font-weight: 600;">
+                           style="padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; background: #f3f4f6; width: 80px; font-weight: 600;">
+                    ${officeBadge}
+                    </div>
                 </div>
                 <div>
                     <label style="display: block; font-size: 0.875rem; color: #4b5563; margin-bottom: 0.25rem;">

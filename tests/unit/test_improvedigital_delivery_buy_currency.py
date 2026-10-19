@@ -57,7 +57,7 @@ def _period(days: int = 30) -> ReportingPeriod:
     return ReportingPeriod(start=now - timedelta(days=days), end=now)
 
 
-def _run(adapter, buy_currency: str, **kwargs):
+def _run(adapter, buy_currency: str, cache_currency: str = "EUR", **kwargs):
     with (
         patch("src.core.database.database_session.get_db_session"),
         patch("src.core.database.repositories.media_buy.MediaBuyRepository") as buy_repo_cls,
@@ -69,7 +69,9 @@ def _run(adapter, buy_currency: str, **kwargs):
         buy_repo_cls.return_value.get_by_id.return_value = SimpleNamespace(
             external_id="improvedigital_101", currency=buy_currency
         )
-        stats_repo_cls.return_value.list_by_campaign.return_value = list(_CACHE_ROWS)
+        stats_repo_cls.return_value.list_by_campaign.return_value = [
+            SimpleNamespace(**{**vars(row), "currency": cache_currency}) for row in _CACHE_ROWS
+        ]
         response = adapter.get_media_buy_delivery("mb_1", _period(), datetime.now(UTC), **kwargs)
     return response, stats_repo_cls.return_value
 

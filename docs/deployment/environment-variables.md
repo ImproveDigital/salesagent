@@ -137,7 +137,7 @@ For GAM adapter integration:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REPORTING_CURRENCY` | - | ISO 4217 code the publisher-facing pages (dashboard, reporting, media buy delivery) report spend in, for every tenant. GAM (`ReportQuery.reportCurrency`) and Improve Digital (Report API `currency_id`) convert server-side with their own daily exchange rates; the sales agent never converts. Unset = each tenant's ad server currency (GAM network currency / Improve Digital office currency). Ignored for ad servers that cannot report in another currency. Buyer-facing AdCP responses always use the buy currency. Converted figures will not reconcile to invoices for a network or office in another currency. |
+| `REPORTING_CURRENCY` | `EUR` | ISO 4217 code the publisher-facing pages (dashboard, reporting, media buy delivery) report spend in, for every tenant. GAM (`ReportQuery.reportCurrency`) and Improve Digital (Report API `currency_id`) convert server-side with their own daily exchange rates; the sales agent never converts. An empty value means each tenant's ad server currency (GAM network currency / Improve Digital office currency). Ignored for ad servers that cannot report in another currency. Buyer-facing AdCP responses always use the buy currency. Converted figures will not reconcile to invoices for a network or office in another currency. |
 
 ## Multi-Tenant Mode
 

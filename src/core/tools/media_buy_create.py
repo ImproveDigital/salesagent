@@ -2270,21 +2270,6 @@ def _collect_package_pricing_info_by_index(
     return package_pricing_info_by_index
 
 
-def _improvedigital_office_currency(adapter_config: Any) -> str | None:
-    """Currency of the Improve Digital buying-entity office this tenant books under.
-
-    Stored as ``config_json["currency"]`` (the adapter settings "Default
-    Currency"); ``None`` when unset so no constraint applies.
-    """
-    config_json = getattr(adapter_config, "config_json", None)
-    if not isinstance(config_json, dict):
-        return None
-    configured = config_json.get("currency")
-    if isinstance(configured, str) and configured.strip():
-        return configured.strip().upper()
-    return None
-
-
 def _derive_single_request_currency(package_pricing_info_by_index: dict[int, dict[str, Any]]) -> str | None:
     """Return the single selected currency for a media buy, or reject mixed currencies."""
     currencies = sorted(
@@ -2981,18 +2966,17 @@ async def _create_media_buy_impl(
                     )
                     raise ValueError(error_msg)
             elif adapter_config and adapter_config.adapter_type == "improvedigital":
-                # Improve Digital books every Classic campaign under one
-                # buying-entity office, and the office fixes the campaign
-                # currency (line items inherit it and reject any other). A
-                # buy in another currency would be trafficked at face value
-                # in the office currency, so refuse it here rather than
-                # mis-price it.
-                office_currency = _improvedigital_office_currency(adapter_config)
-                if office_currency and request_currency.upper() != office_currency:
+                # Improve Digital books each Classic campaign under the
+                # buying-entity office that bills in the buy currency (one
+                # office per currency, mapped on the tenant's currency
+                # limits). No office for this currency means it cannot be
+                # trafficked at all, so refuse the buy rather than mis-price it.
+                if getattr(currency_limit, "buying_entity_office_id", None) is None:
                     raise ValueError(
-                        f"Currency {request_currency} is not supported by this publisher's Improve Digital "
-                        f"buying entity office, which books in {office_currency}. "
-                        f"Choose a {office_currency} pricing option or contact the publisher."
+                        f"Currency {request_currency} has no Improve Digital buying entity office mapped "
+                        f"for this publisher. Choose a pricing option in a currency the publisher books in, "
+                        f"or ask the publisher to map an office to {request_currency} under "
+                        f"Policies & Workflows → Budget Controls."
                     )
 
             # Validate minimum product spend (legacy + new pricing_options)

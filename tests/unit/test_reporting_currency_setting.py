@@ -34,9 +34,11 @@ def test_setting_applies_only_to_ad_servers_that_can_report_in_it(monkeypatch):
     assert publisher_reporting_currency(None) is None
 
 
-def test_unset_setting_means_ad_server_currency(monkeypatch):
+def test_unset_setting_defaults_to_eur_and_empty_means_ad_server_currency(monkeypatch):
     monkeypatch.delenv("REPORTING_CURRENCY", raising=False)
+    assert publisher_reporting_currency("google_ad_manager") == "EUR"
 
+    monkeypatch.setenv("REPORTING_CURRENCY", "")
     assert publisher_reporting_currency("google_ad_manager") is None
 
 
@@ -123,16 +125,32 @@ def test_reporting_page_service_defaults_every_report_to_the_setting(monkeypatch
 # --- Improve Digital --------------------------------------------------------------------
 
 
-def test_improvedigital_publisher_read_uses_the_setting_via_report_api(monkeypatch):
+def test_improvedigital_publisher_read_uses_the_cache_the_sync_wrote_in_the_setting(monkeypatch):
+    """The reporting sync runs in REPORTING_CURRENCY, so the cache already holds
+    the setting currency and a publisher read never needs a live preview."""
     monkeypatch.setenv("REPORTING_CURRENCY", "USD")
     adapter = make_live_adapter()  # office currency EUR
     adapter._client.reporting = _FakeReporting()
 
-    response, stats_repo = _run(adapter, "EUR", report_in_buy_currency=False)
+    response, stats_repo = _run(adapter, "EUR", report_in_buy_currency=False, cache_currency="USD")
+
+    assert adapter._client.reporting.payloads == []
+    stats_repo.list_by_campaign.assert_called_once_with("101")
+    assert response.currency == "USD"
+
+
+def test_improvedigital_buyer_read_goes_live_when_buy_currency_is_not_the_setting(monkeypatch):
+    """Cache is in the setting currency (USD); an EUR buy's AdCP read must ask the
+    Report API for EUR instead of answering from USD rows."""
+    monkeypatch.setenv("REPORTING_CURRENCY", "USD")
+    adapter = make_live_adapter()
+    adapter._client.reporting = _FakeReporting()
+
+    response, stats_repo = _run(adapter, "EUR", cache_currency="USD")
 
     request = adapter._client.reporting.payloads[0]["report_generation_request"]
-    assert request["currency_id"] == 2
-    assert response.currency == "USD"
+    assert request["currency_id"] == 1
+    assert response.currency == "EUR"
     stats_repo.bulk_upsert.assert_not_called()
 
 
