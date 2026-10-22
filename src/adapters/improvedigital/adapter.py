@@ -925,10 +925,15 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # (media_buy_create._goal_units_from_budget) so a BUDGET-goal line item
         # always books the money the impression cap was sized for.
         budget = float(package.budget) if package.budget is not None else round(package.impressions * rate / 1000, 2)
+        # Marketplace doc ("Line item level" → Basic settings → Status):
+        # Active = "if ready (complete) the LI will be sent to the adserver",
+        # Inactive = "will not be sent to the adserver even if ready". Readiness
+        # (inventory + creatives assigned) already gates serving, so a booked
+        # package is created Active; pausing is a separate update action.
         payload: dict[str, Any] = {
             "name": package.name or package.package_id,
             "type": "Standard",
-            "line_item_status": "Inactive",
+            "line_item_status": "Active",
             "goal": goal,
             "start_date": self._format_datetime(start_time),
             "end_date": self._format_datetime(end_time),
