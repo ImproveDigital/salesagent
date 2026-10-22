@@ -53,7 +53,7 @@
             Configure budget limits per currency. At least one currency is required for media buys.
         </p>
 
-        {% if adapter_config and adapter_config.get('network_currency') %}
+        {% if adapter_config and adapter_config.get('adapter_type') == 'google_ad_manager' and adapter_config.get('network_currency') %}
         <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem;">
             <strong style="color: #1e40af;">GAM Network Currencies:</strong>
             <span style="color: #1e3a8a;">{{ adapter_config.get('network_currency') }}</span>
@@ -112,7 +112,7 @@
                                 <div style="display: flex; align-items: center; gap: 0.5rem;">
                                     <input type="text" readonly value="{{ limit.currency_code }}"
                                            style="padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; background: #f3f4f6; width: 80px; font-weight: 600;">
-                                    {% if adapter_config and adapter_config.get('network_currency') %}
+                                    {% if adapter_config and adapter_config.get('adapter_type') == 'google_ad_manager' and adapter_config.get('network_currency') %}
                                         {% set gam_currencies = [adapter_config.get('network_currency')] + (adapter_config.get('secondary_currencies') or []) %}
                                         {% if limit.currency_code not in gam_currencies %}
                                         <span style="background: #fef3c7; color: #92400e; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; white-space: nowrap;" title="This currency is not enabled in your GAM network">
@@ -770,7 +770,7 @@ Exclude any products that don't match the brand's tone.</pre>
             <div class="modal-body">
                 <div class="form-group">
                     <label for="new-currency-code">Currency</label>
-                    {% if adapter_config and adapter_config.get('network_currency') %}
+                    {% if adapter_config and adapter_config.get('adapter_type') == 'google_ad_manager' and adapter_config.get('network_currency') %}
                     {# GAM tenant: show dropdown with only GAM-supported currencies #}
                     {% set gam_currencies = [adapter_config.get('network_currency')] + (adapter_config.get('secondary_currencies') or []) %}
                     <select class="form-control" id="new-currency-code">
@@ -787,9 +787,21 @@ Exclude any products that don't match the brand's tone.</pre>
                             onchange="onNewOfficePicked()">
                         <option value="">Loading offices…</option>
                     </select>
+                    <div id="new-office-manual" hidden>
+                        <label for="new-office-id-manual" class="mt-2">Buying entity office ID</label>
+                        <input type="number" class="form-control" id="new-office-id-manual" min="1" step="1"
+                               placeholder="e.g. 5068 — from your Improve Digital account team" oninput="onNewOfficePicked()">
+                        <label for="new-currency-manual" class="mt-2">Currency the office bills in</label>
+                        <select class="form-control" id="new-currency-manual" onchange="onNewOfficePicked()">
+                            <option value="">Select a currency…</option>
+                            {% for code in improvedigital_currencies %}
+                            <option value="{{ code }}">{{ code }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
                     <input type="text" class="form-control mt-2" id="new-currency-code" readonly placeholder="Currency follows the office"
                            style="background: #f3f4f6; font-weight: 600; width: 120px;">
-                    <small class="form-text text-muted" id="new-office-hint">Offices of buying entity {{ adapter_config.get('buying_entity_id') or '(not configured)' }} that book Classic campaigns. Each bills in one currency.</small>
+                    <small class="form-text text-muted" id="new-office-hint">Offices of buying entity {{ adapter_config.get('buying_entity_id') or '(not configured)' }} that book Classic campaigns. Each bills in one of Improve Digital's {{ improvedigital_currencies|length }} currencies.</small>
                     {% else %}
                     {# Non-GAM tenant (mock adapter): show text input with autocomplete #}
                     <input type="text" class="form-control" id="new-currency-code" list="currency-list" placeholder="e.g., EUR, GBP, CAD" maxlength="3" style="text-transform: uppercase;">

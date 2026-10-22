@@ -224,18 +224,28 @@ def policies_page(tenant_id):
         # template can read ``adapter_config.get(...)``.
         adapter_obj = repo.get_adapter_config()
         adapter_config: dict[str, Any] = {}
+        improvedigital_currencies: list[str] = []
         if adapter_obj:
-            adapter_config = {
-                "adapter_type": adapter_obj.adapter_type,
-                "network_currency": getattr(adapter_obj, "gam_network_currency", None),
-                "secondary_currencies": getattr(adapter_obj, "gam_secondary_currencies", None) or [],
-            }
-            if adapter_obj.adapter_type == "improvedigital":
+            adapter_config = {"adapter_type": adapter_obj.adapter_type}
+            if adapter_obj.adapter_type == "google_ad_manager":
+                # Only a GAM tenant's network currencies drive the GAM UI; a
+                # tenant switched to another ad server may still carry stale
+                # gam_* columns, which must not take over its Budget Controls.
+                adapter_config["network_currency"] = getattr(adapter_obj, "gam_network_currency", None)
+                adapter_config["secondary_currencies"] = getattr(adapter_obj, "gam_secondary_currencies", None) or []
+            elif adapter_obj.adapter_type == "improvedigital":
                 # The Add Currency modal becomes an office picker: offices of
-                # this buying entity, each billing in one currency.
+                # this buying entity, each billing in one currency. The
+                # platform's currency dictionary backs the manual fallback
+                # when office discovery is unavailable.
+                from src.adapters.improvedigital.schemas import ImproveDigitalConnectionConfig
+
                 stored = adapter_obj.config_json if isinstance(adapter_obj.config_json, dict) else {}
                 adapter_config["buying_entity_id"] = stored.get("buying_entity_id")
                 adapter_config["default_currency"] = stored.get("currency")
+                currency_field = ImproveDigitalConnectionConfig.model_fields["currency"]
+                extra = currency_field.json_schema_extra if isinstance(currency_field.json_schema_extra, dict) else {}
+                improvedigital_currencies = [str(code) for code in (extra.get("enum") or [])]
 
         # Currency limits — embedded tenants see read-only; open tenants
         # get the full add/remove UI. Template reads ``currency_limits``.
@@ -262,6 +272,7 @@ def policies_page(tenant_id):
             currency_limits=currency_limits,
             has_gemini_key=has_gemini_key,
             available_currencies=get_available_currencies(),
+            improvedigital_currencies=improvedigital_currencies,
         )
 
 

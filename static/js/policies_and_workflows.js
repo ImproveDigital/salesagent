@@ -183,14 +183,37 @@ function showAddCurrencyModal() {
 // currency book under it, so the currency code is derived from the office.
 let _newOffices = [];
 
+// When discovery cannot list offices (no buying entity yet, credentials
+// without admin scope, API down) the modal falls back to typing the office
+// ID and choosing the currency it bills in from the platform's dictionary.
+function _showManualOfficeEntry(reason) {
+    const officeSelect = document.getElementById('new-office-id');
+    const manual = document.getElementById('new-office-manual');
+    const hint = document.getElementById('new-office-hint');
+    officeSelect.hidden = true;
+    officeSelect.innerHTML = '<option value=""></option>';
+    manual.hidden = false;
+    document.getElementById('new-office-id-manual').value = '';
+    document.getElementById('new-currency-manual').value = '';
+    if (hint) hint.textContent = reason + ' Enter the office ID and the currency it bills in.';
+}
+
+function _manualOfficeEntryActive() {
+    const manual = document.getElementById('new-office-manual');
+    return manual && !manual.hidden;
+}
+
 function loadImproveDigitalOffices() {
     const officeSelect = document.getElementById('new-office-id');
     if (!officeSelect) return; // GAM / mock tenants keep the plain currency input
     const hint = document.getElementById('new-office-hint');
+    const manual = document.getElementById('new-office-manual');
+    officeSelect.hidden = false;
+    if (manual) manual.hidden = true;
     const buyingEntityId = parseInt(officeSelect.dataset.buyingEntityId || '', 10);
     officeSelect.innerHTML = '<option value="">Loading offices…</option>';
     if (!buyingEntityId) {
-        officeSelect.innerHTML = '<option value="">Configure the buying entity on the adapter settings page first</option>';
+        _showManualOfficeEntry('No buying entity is configured on the adapter settings page, so offices cannot be listed.');
         return;
     }
     fetch(`${config.scriptName}/api/tenant/${config.tenantId}/adapters/improvedigital/discover-buying-entities`, {
@@ -202,10 +225,14 @@ function loadImproveDigitalOffices() {
         .then((response) => response.json())
         .then((data) => {
             if (!data.success) {
-                officeSelect.innerHTML = '<option value="">' + (data.error || 'Office lookup failed') + '</option>';
+                _showManualOfficeEntry((data.error || 'Office lookup failed') + '.');
                 return;
             }
             _newOffices = (data.offices || []).filter((office) => /^[A-Z]{3}$/.test(office.billing_currency_code || ''));
+            if (_newOffices.length === 0) {
+                _showManualOfficeEntry('Discovery returned no Classic office for this buying entity.');
+                return;
+            }
             officeSelect.innerHTML = '<option value="">Select an office…</option>';
             _newOffices.forEach((office) => {
                 const opt = document.createElement('option');
@@ -216,14 +243,25 @@ function loadImproveDigitalOffices() {
             if (hint) hint.textContent = `${_newOffices.length} Classic offices found. Each bills in one currency.`;
         })
         .catch((error) => {
-            officeSelect.innerHTML = '<option value="">Error: ' + error.message + '</option>';
+            _showManualOfficeEntry('Office lookup failed: ' + error.message + '.');
         });
 }
 
-function onNewOfficePicked() {
+function _selectedOffice() {
+    // {id, currency} from the picker, or from the manual fallback.
+    if (_manualOfficeEntryActive()) {
+        return {
+            id: (document.getElementById('new-office-id-manual').value || '').trim(),
+            currency: (document.getElementById('new-currency-manual').value || '').trim().toUpperCase(),
+        };
+    }
     const officeSelect = document.getElementById('new-office-id');
     const office = _newOffices.find((o) => String(o.id) === officeSelect.value);
-    document.getElementById('new-currency-code').value = office ? office.billing_currency_code : '';
+    return office ? {id: String(office.id), currency: office.billing_currency_code} : {id: '', currency: ''};
+}
+
+function onNewOfficePicked() {
+    document.getElementById('new-currency-code').value = _selectedOffice().currency;
 }
 
 function addCurrencyLimit() {
@@ -245,9 +283,9 @@ function addCurrencyLimit() {
     const officeSelect = document.getElementById('new-office-id');
     let officeId = '';
     if (officeSelect) {
-        officeId = (officeSelect.value || '').trim();
-        if (!/^[0-9]+$/.test(officeId)) {
-            alert('Pick the Improve Digital office that bills in this currency');
+        officeId = _selectedOffice().id;
+        if (!/^[1-9][0-9]*$/.test(officeId)) {
+            alert('Pick the Improve Digital office that bills in this currency (or enter its ID)');
             return;
         }
         const officeInUse = document.querySelector(`input[name$="[buying_entity_office_id]"][value="${officeId}"]`);
