@@ -221,6 +221,10 @@ def get_adapter(
                             "default_advertiser_id": impd_validated.default_advertiser_id,
                             "agency_id": impd_validated.agency_id,
                             "buying_entity_id": impd_validated.buying_entity_id,
+                            # Deprecated: the adapter resolves the office per
+                            # booking from the buy currency's CurrencyLimit row
+                            # and ignores this value. Forwarded only so every
+                            # schema field reaches the adapter config.
                             "buying_entity_office_id": impd_validated.buying_entity_office_id,
                             "campaign_type": impd_validated.campaign_type,
                             "business_unit_id": impd_validated.business_unit_id,

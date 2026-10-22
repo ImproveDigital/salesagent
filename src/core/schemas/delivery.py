@@ -180,6 +180,13 @@ class MediaBuyDeliveryData(SalesAgentBaseModel):
     """
 
     media_buy_id: str = Field(description="Publisher's media buy identifier")
+    # AdCP 3.2 ``media_buy_deliveries[].currency``: the denomination of every
+    # monetary value in this row (totals, package spend, rates). Preferred over
+    # the deprecated response-level ``currency``.
+    currency: str | None = Field(
+        default=None,
+        description="ISO 4217 currency code for all monetary values in this media buy's delivery row",
+    )
     # FIXME(salesagent-jz3y): Library uses Status enum with ``pending_activation``
     # where salesagent uses ``ready``. Align naming to spec when updating
     # _compute_media_buy_status and all status references.

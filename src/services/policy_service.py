@@ -48,6 +48,9 @@ class CurrencyLimitData:
     currency_code: str
     min_package_budget: Decimal | None = None
     max_daily_package_spend: Decimal | None = None
+    # Improve Digital: the buying-entity office that bills in this currency.
+    # Campaigns in this currency book under it. None for other ad servers.
+    buying_entity_office_id: int | None = None
     _delete: bool = False
 
 
@@ -94,6 +97,7 @@ class PolicySettings:
                     "currency_code": c.currency_code,
                     "min_package_budget": float(c.min_package_budget) if c.min_package_budget else None,
                     "max_daily_package_spend": float(c.max_daily_package_spend) if c.max_daily_package_spend else None,
+                    "buying_entity_office_id": c.buying_entity_office_id,
                 }
                 for c in self.currencies
                 if not c._delete
@@ -157,6 +161,9 @@ class PolicyService:
         """
         errors = {}
         seen_codes = set()
+        # Improve Digital: one office bills in exactly one currency, so two
+        # currencies cannot share an office.
+        seen_offices: dict[int, str] = {}
 
         for currency in currencies:
             # Skip deleted currencies
@@ -189,6 +196,18 @@ class PolicyService:
                 and currency.min_package_budget > currency.max_daily_package_spend
             ):
                 errors[f"{currency.currency_code}_range"] = "Minimum budget cannot exceed maximum spend"
+
+            office_id = currency.buying_entity_office_id
+            if office_id is not None:
+                if office_id <= 0:
+                    errors[f"{currency.currency_code}_office"] = "Buying entity office ID must be a positive integer"
+                elif office_id in seen_offices:
+                    errors[f"{currency.currency_code}_office"] = (
+                        f"Office {office_id} is already mapped to {seen_offices[office_id]}; "
+                        "an Improve Digital office bills in exactly one currency"
+                    )
+                else:
+                    seen_offices[office_id] = currency.currency_code
 
         if errors:
             raise ValidationError(errors)
@@ -439,6 +458,7 @@ class PolicyService:
                 limit = existing_limits[currency_data.currency_code]
                 limit.min_package_budget = currency_data.min_package_budget
                 limit.max_daily_package_spend = currency_data.max_daily_package_spend
+                limit.buying_entity_office_id = currency_data.buying_entity_office_id
                 limit.updated_at = datetime.now(UTC)
             else:
                 # Create new
@@ -447,5 +467,6 @@ class PolicyService:
                     currency_code=currency_data.currency_code,
                     min_package_budget=currency_data.min_package_budget,
                     max_daily_package_spend=currency_data.max_daily_package_spend,
+                    buying_entity_office_id=currency_data.buying_entity_office_id,
                 )
                 session.add(limit)

@@ -145,6 +145,7 @@ class TestDailyBreakdownFields:
 class TestMediaBuyDeliveryDataFields:
     EXPECTED_FIELDS = {
         "media_buy_id",
+        "currency",  # AdCP 3.2 media_buy_deliveries[].currency
         "status",
         "expected_availability",
         "is_adjusted",

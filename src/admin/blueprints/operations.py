@@ -135,9 +135,14 @@ def _sync_delivery_metrics(db_session, tenant_id: str, media_buy, principal) -> 
 
         reporting_period = ReportingPeriod(start=start_date, end=end_date)
 
-        # Fetch delivery metrics from adapter
+        # Fetch delivery metrics in the ad server's reporting currency: the
+        # publisher-facing page and the delivered_amount snapshot are kept in
+        # that currency, not the buy currency.
         delivery_response = adapter.get_media_buy_delivery(
-            media_buy_id=media_buy.media_buy_id, date_range=reporting_period, today=datetime.now(UTC)
+            media_buy_id=media_buy.media_buy_id,
+            date_range=reporting_period,
+            today=datetime.now(UTC),
+            report_in_buy_currency=False,
         )
 
         delivery_metrics = {
@@ -192,7 +197,8 @@ def reporting(tenant_id):
     from flask import render_template
 
     from src.core.database.database_session import get_db_session
-    from src.core.database.models import AdapterConfig, CurrencyLimit, Tenant
+    from src.core.database.models import Tenant
+    from src.core.tenant_currency import tenant_reporting_currency
 
     with get_db_session() as db_session:
         tenant_obj = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -212,12 +218,13 @@ def reporting(tenant_id):
             "is_active": tenant_obj.is_active,
         }
 
+        # Both reporting pages show spend in the ad server's own currency
+        # (Improve Digital office currency / GAM network currency), the same
+        # currency the delivery snapshot and dashboard use.
+        currency = tenant_reporting_currency(db_session, tenant_id)
+
         # Improve Digital tenants get the Report-API-cache dashboard.
         if tenant_obj.ad_server == "improvedigital":
-            adapter_config = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
-            currency = "EUR"
-            if adapter_config and (adapter_config.config_json or {}).get("currency"):
-                currency = str(adapter_config.config_json["currency"])
             return render_template("improvedigital_reporting.html", tenant=tenant, currency=currency)
 
         # Check if tenant is using Google Ad Manager
@@ -231,19 +238,6 @@ def reporting(tenant_id):
                 ),
                 400,
             )
-
-        # Resolve the tenant's reporting currency the same way the dashboard
-        # does: GAM network currency → first CurrencyLimit → EUR.
-        currency = "EUR"
-        adapter_config = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
-        if adapter_config and adapter_config.gam_network_currency:
-            currency = str(adapter_config.gam_network_currency)
-        else:
-            currency_limit = db_session.scalars(
-                select(CurrencyLimit).filter_by(tenant_id=tenant_id).order_by(CurrencyLimit.currency_code)
-            ).first()
-            if currency_limit:
-                currency = str(currency_limit.currency_code)
 
         return render_template("gam_reporting.html", tenant=tenant, currency=currency)
 
