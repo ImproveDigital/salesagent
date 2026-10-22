@@ -178,6 +178,87 @@ def quick_date_range(quick: str) -> dict[str, Any]:
     return {"quick": quick}
 
 
+def relative_date_range_from(start: date | None) -> dict[str, Any]:
+    """A relative range from ``start`` up to today, as the wire accepts it.
+
+    ``fixed`` ranges error on the dev platform and ``quick: TODAY`` 500s;
+    a relative day count works for any window, clamped to [1, MAX_WINDOW_DAYS].
+    """
+    days = (datetime.now(UTC).date() - start).days + 1 if start is not None else MIN_WINDOW_DAYS
+    days = max(1, min(days, MAX_WINDOW_DAYS))
+    return {"relative": {"from_count": days, "from_unit": "DAY", "to_count": 0, "to_unit": "DAY"}}
+
+
+def live_stat_rows(
+    client: Any,
+    tenant_id: str,
+    campaign_ids: list[int],
+    date_range: dict[str, Any],
+    timezone: str,
+    currency: str,
+) -> list[Any]:
+    """One live ``POST /report/ext/preview`` for ``campaign_ids`` in ``currency``.
+
+    Returns stat-row-shaped objects (``line_item_id``, ``campaign_id``,
+    ``impressions``, ``clicks``, ``completed_views``, ``spend_micros``,
+    ``currency``, ``as_of``) so callers can treat them like
+    ``improvedigital_line_item_stats`` rows WITHOUT writing the cache — the
+    cache holds one currency per tenant (the office currency), while a live
+    read may ask the Report API for any of its 15 currencies (``currency_id``,
+    converted upstream). Used by the reporting page's date-filtered view and
+    by the adapter's buy-currency delivery read.
+    """
+    import time as _time
+    from types import SimpleNamespace
+
+    # Environment gate — the Report API warehouse serves foreign-environment
+    # campaign ids; only query campaigns this environment actually knows.
+    campaign_ids = [int(cid) for cid in filter_to_existing_campaigns(client, tenant_id, [str(c) for c in campaign_ids])]
+    if not campaign_ids:
+        return []
+    request_body = build_report_request(
+        currency_id=resolve_currency_id(client, currency),
+        date_range=date_range,
+        campaign_ids=campaign_ids,
+        timezone=timezone,
+    )
+    payload = {
+        "rows": PREVIEW_ROW_LIMIT,
+        "report_generation_request": {**request_body, "action": "PREVIEW_REPORT"},
+    }
+    logger.info(
+        "Improve Digital live report view: POST /report/ext/preview window=%s timezone=%s currency=%s campaigns=%s",
+        date_range,
+        timezone,
+        currency,
+        campaign_ids,
+    )
+    started = _time.monotonic()
+    rows = ImproveDigitalReportingSync._parse_rows(client.reporting.preview(payload))
+    logger.info(
+        "Improve Digital live report view: %d line-item row(s) in %.1fs",
+        len(rows),
+        _time.monotonic() - started,
+    )
+    as_of = datetime.now(UTC)
+    stat_rows = []
+    for row in rows:
+        spend = _as_float(row.get("advertiser_payout"))
+        stat_rows.append(
+            SimpleNamespace(
+                campaign_id=str(row["campaign_id"]) if row.get("campaign_id") not in (None, "") else None,
+                line_item_id=str(row["line_item_id"]),
+                impressions=_as_int(row.get("impressions")),
+                clicks=_as_int(row.get("clicks")),
+                completed_views=_as_int(row.get("complete")),
+                spend_micros=int(round(spend * 1_000_000)) if spend is not None else 0,
+                currency=currency,
+                as_of=as_of,
+            )
+        )
+    return stat_rows
+
+
 def build_report_request(
     *, currency_id: int, date_range: dict[str, Any], campaign_ids: list[int], timezone: str, title: str = ""
 ) -> dict[str, Any]:

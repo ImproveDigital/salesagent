@@ -681,6 +681,11 @@ class CurrencyLimit(Base):
     # Prevents buyers from creating many small line items to bypass limits
     max_daily_package_spend: Mapped[Decimal | None] = mapped_column(DECIMAL(15, 2), nullable=True)
 
+    # Improve Digital: the buying-entity office that bills in this currency.
+    # Classic campaigns in this currency book under it (one office = one
+    # currency on the platform). NULL for other ad servers.
+    buying_entity_office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

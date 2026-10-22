@@ -96,6 +96,17 @@ def main() -> int:
         row.adapter_type = "improvedigital"
         row.config_json = config_json
         tenant.ad_server = "improvedigital"
+        # The office lives on the currency limit row (one office per
+        # currency); booking resolves it from the buy currency.
+        if args.buying_entity_office_id:
+            from src.core.database.models import CurrencyLimit
+
+            code = args.currency.strip().upper()
+            limit = session.get(CurrencyLimit, (args.tenant, code))
+            if limit is None:
+                limit = CurrencyLimit(tenant_id=args.tenant, currency_code=code)
+                session.add(limit)
+            limit.buying_entity_office_id = int(args.buying_entity_office_id)
         session.commit()
 
     print(

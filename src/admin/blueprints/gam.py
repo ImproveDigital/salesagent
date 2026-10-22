@@ -1135,8 +1135,12 @@ def test_gam_connection(tenant_id):
                 result["warning"] = f"Connected but couldn't fetch all resources: {str(e)}"
 
         # Persist currency/timezone from the verified network into adapter_config.
-        # Only fills fields that are currently empty — never overwrites network_code,
-        # auth_method, credentials, or any other existing config.
+        # Currencies are refreshed on every successful test: they are read-only
+        # facts of the network (NetworkService ``currencyCode`` /
+        # ``secondaryCurrencyCodes``) and a currency enabled in GAM after the
+        # first test must reach booking validation and delivery reporting.
+        # Never overwrites network_code, auth_method, credentials, or any other
+        # existing config; the timezone is only filled when empty.
         if networks:
             try:
                 network = networks[0]
@@ -1148,10 +1152,12 @@ def test_gam_connection(tenant_id):
 
                     adapter_config = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
                     if adapter_config:
-                        if detected_currency and not adapter_config.gam_network_currency:
-                            adapter_config.gam_network_currency = detected_currency
-                        if detected_secondary and not adapter_config.gam_secondary_currencies:
-                            adapter_config.gam_secondary_currencies = detected_secondary
+                        if detected_currency:
+                            adapter_config.gam_network_currency = str(detected_currency).strip()[:3].upper()
+                        if detected_currency:
+                            adapter_config.gam_secondary_currencies = [
+                                str(code).strip()[:3].upper() for code in detected_secondary if code
+                            ] or None
                         if detected_timezone and not adapter_config.gam_network_timezone:
                             adapter_config.gam_network_timezone = detected_timezone
                         db_session.commit()

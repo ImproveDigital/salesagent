@@ -787,7 +787,12 @@ class SpringServeAdapter(AdServerAdapter):
         return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status=status)
 
     def get_media_buy_delivery(
-        self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
+        self,
+        media_buy_id: str,
+        date_range: ReportingPeriod,
+        today: datetime,
+        *,
+        report_in_buy_currency: bool = True,
     ) -> AdapterGetMediaBuyDeliveryResponse:
         """Aggregate delivery totals from the demand-tag-stats cache.
 

@@ -134,8 +134,13 @@ POST /rtb/v1/classic/campaigns
 ```
 
 - `name` is `adcp_<po_number>`, falling back to `adcp_<unix_timestamp>`.
-- `buying_entity_office_id` / `buying_entity_office_ids` and `agencyId` are
-  omitted when not configured.
+- `currency` is the buy currency (the selected pricing option's).
+  `buying_entity_office_id` / `buying_entity_office_ids` is the buying-entity
+  office mapped to that currency on the tenant's currency limits (Policies &
+  Workflows → Budget Controls; one office per currency, the office's
+  `billing_currency_code` sets the row's currency). A currency with no mapped
+  office is refused before any API call (`currency_not_bookable`). `agencyId`
+  is omitted when not configured.
 - `advertiserId` is the principal's platform mapping, but only when it is
   numeric — metadata-advertiser UUIDs are sent as `null`.
 - `reference_number` is the buyer agent's ID, read from the principal's

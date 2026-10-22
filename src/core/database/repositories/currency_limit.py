@@ -36,6 +36,16 @@ class CurrencyLimitRepository:
         )
         return self._session.scalars(stmt).first()
 
+    def office_for_currency(self, currency_code: str) -> int | None:
+        """Improve Digital buying-entity office that books in ``currency_code``, or None.
+
+        None means the tenant has no office mapped to this currency (or no
+        limit row at all), so a Classic campaign cannot be booked in it.
+        """
+        limit = self.get_for_currency(currency_code.strip().upper())
+        office_id = getattr(limit, "buying_entity_office_id", None) if limit is not None else None
+        return int(office_id) if office_id is not None else None
+
     def list_all(self) -> list[CurrencyLimit]:
         """Return every CurrencyLimit row for this tenant.
 

@@ -4,9 +4,11 @@ Improve Digital Adapter Connection Configuration Template
 Included in the settings page when the Improve Digital adapter is selected.
 Auth is OAuth2 client_credentials only (client_id + client_secret) against
 the 360Yield Marketplace API. Phase 1 targets Classic (direct) campaigns —
-every campaign books under a buying entity + office (discoverable via the
-Admin API when the credentials carry admin scope); the office's default
-demand contact applies unless overridden.
+every campaign books under a buying entity (discoverable via the Admin API
+when the credentials carry admin scope) and the entity office that bills in
+the buy currency, mapped per currency on the tenant's currency limits
+(Policies &amp; Workflows); the office's default demand contact applies
+unless overridden.
 
 Expected context:
 - adapter_config: dict with current adapter configuration
@@ -81,10 +83,6 @@ Expected context:
                         onchange="onImproveDigitalEntityPicked()">
                     <option value="">Select a buying entity…</option>
                 </select>
-                <select id="improvedigital_office_picker" class="form-control" style="display: none;"
-                        onchange="onImproveDigitalOfficePicked()">
-                    <option value="">Select an office…</option>
-                </select>
             </div>
             <small class="form-text text-muted">
                 Discovery needs admin-scoped credentials; otherwise
@@ -102,13 +100,10 @@ Expected context:
         </div>
 
         <div class="form-group">
-            <label for="improvedigital_buying_entity_office_id">Buying Entity Office ID</label>
-            <input type="number" id="improvedigital_buying_entity_office_id" name="improvedigital_buying_entity_office_id"
-                   value="{{ adapter_config.get('buying_entity_office_id', '') if adapter_config else '' }}"
-                   placeholder="Required — currency-specific office of the buying entity"
-                   {% if adapter_config and adapter_config.get('buying_entity_office_id') %}readonly{% endif %}>
             <small class="form-text text-muted">
-                Offices are per-currency — pick the one matching the default currency below.
+                Buying entity offices are mapped per currency under
+                <strong>Policies &amp; Workflows → Budget Controls</strong>: each currency you add there
+                is tied to the office that bills in it, and campaigns book under that office.
             </small>
         </div>
 
@@ -118,8 +113,7 @@ Expected context:
                    value="{{ adapter_config.get('improve_demand_contact_id', '') if adapter_config else '' }}"
                    placeholder="Your API user's user_id — office default applies when empty">
             <small class="form-text text-muted">
-                Editable. Test Connection fills it from your API user, and picking an office
-                overwrites it with that office's default contact — type over either.
+                Editable. Test Connection fills it from your API user — type over it to override.
             </small>
         </div>
 
@@ -145,8 +139,8 @@ Expected context:
                    placeholder="Optional — sent on Classic line items">
             <small class="form-text text-muted">
                 Sent as <code>buyer_id</code> on every Classic line item. The picker fills
-                from <strong>Test Connection</strong> (your API user's buyers) or from the
-                selected office; leave empty to let the platform derive it from the campaign.
+                from <strong>Test Connection</strong> (your API user's buyers); leave empty
+                to let the platform derive it from the campaign.
             </small>
         </div>
 
@@ -333,7 +327,6 @@ Expected context:
 function _improvedigitalPayload() {
     const clientSecretEl = document.getElementById('improvedigital_client_secret');
     const buyingEntityEl = document.getElementById('improvedigital_buying_entity_id');
-    const officeEl = document.getElementById('improvedigital_buying_entity_office_id');
     const demandContactEl = document.getElementById('improvedigital_demand_contact_id');
     const businessUnitEl = document.getElementById('improvedigital_business_unit_id');
     const buyerEl = document.getElementById('improvedigital_buyer_id');
@@ -342,7 +335,6 @@ function _improvedigitalPayload() {
     const config = {
         client_id: document.getElementById('improvedigital_client_id').value || null,
         buying_entity_id: buyingEntityEl.value ? parseInt(buyingEntityEl.value, 10) : null,
-        buying_entity_office_id: officeEl.value ? parseInt(officeEl.value, 10) : null,
         improve_demand_contact_id: demandContactEl.value ? parseInt(demandContactEl.value, 10) : null,
         business_unit_id: businessUnitEl.value ? parseInt(businessUnitEl.value, 10) : null,
         buyer_id: buyerEl.value ? parseInt(buyerEl.value, 10) : null,
@@ -387,8 +379,7 @@ const _IMPROVEDIGITAL_REQUIRED = [
     {id: 'improvedigital_client_id', label: 'Client ID', how: 'issued by Improve Digital'},
     {id: 'improvedigital_api_base_url', label: 'API Base URL', how: 'pick the 360Yield host'},
     {id: 'improvedigital_buying_entity_id', label: 'Buying Entity ID', how: 'Discover from API'},
-    {id: 'improvedigital_buying_entity_office_id', label: 'Buying Entity Office ID', how: 'Discover from API'},
-    {id: 'improvedigital_demand_contact_id', label: 'Demand Contact ID', how: 'Test Connection or office pick'},
+    {id: 'improvedigital_demand_contact_id', label: 'Demand Contact ID', how: 'Test Connection'},
     {id: 'improvedigital_business_unit_id', label: 'Business Unit ID', how: 'Test Connection'}
 ];
 
@@ -504,13 +495,10 @@ function onImproveDigitalBuyerPicked() {
     updateImproveDigitalReadiness();
 }
 
-// Entity and office are locked once discovered so a stray keystroke can't
-// desync them from each other. The demand contact stays editable — it is a
-// deliberate override of the office default.
+// The entity is locked once discovered so a stray keystroke can't change it.
+// The demand contact stays editable — it is a deliberate override.
 function _setImproveDigitalIdsReadonly(readonly) {
-    ['improvedigital_buying_entity_id', 'improvedigital_buying_entity_office_id'].forEach(id => {
-        document.getElementById(id).readOnly = readonly;
-    });
+    document.getElementById('improvedigital_buying_entity_id').readOnly = readonly;
 }
 
 function unlockImproveDigitalIds() {
@@ -564,79 +552,21 @@ function discoverImproveDigitalEntities() {
     });
 }
 
-let _improvedigitalOffices = [];
 
 function onImproveDigitalEntityPicked() {
-    const scriptRoot = '{{ request.script_root }}' || '';
-    const tenantId = '{{ tenant_id }}';
     const statusEl = document.getElementById('improvedigital-discovery-status');
     const entityPicker = document.getElementById('improvedigital_entity_picker');
-    const officePicker = document.getElementById('improvedigital_office_picker');
-    if (!entityPicker.value) { officePicker.style.display = 'none'; return; }
+    if (!entityPicker.value) return;
 
     const entityIdEl = document.getElementById('improvedigital_buying_entity_id');
     entityIdEl.readOnly = false;
     entityIdEl.value = entityPicker.value;
     entityIdEl.readOnly = true;
     updateImproveDigitalReadiness();
-    statusEl.innerHTML = '<span style="color: #6b7280;">Loading offices…</span>';
-
-    const payload = _improvedigitalCredsPayload();
-    payload.buying_entity_id = parseInt(entityPicker.value, 10);
-
-    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/improvedigital/discover-buying-entities', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        credentials: 'same-origin',
-        body: JSON.stringify(payload)
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (!data.success) {
-            statusEl.innerHTML = '<span style="color: #ef4444;">✗ ' + (data.error || 'Office lookup failed') + '</span>';
-            return;
-        }
-        _improvedigitalOffices = data.offices || [];
-        officePicker.innerHTML = '<option value="">Select an office…</option>';
-        _improvedigitalOffices.forEach(office => {
-            const opt = document.createElement('option');
-            opt.value = office.id;
-            opt.textContent = office.office + ' — ' + (office.billing_currency_code || '?') + ' (' + office.id + ')';
-            officePicker.appendChild(opt);
-        });
-        officePicker.style.display = 'block';
-        statusEl.innerHTML = '<span style="color: #10b981;">✓ ' + _improvedigitalOffices.length + ' Classic offices</span>';
-    })
-    .catch(error => {
-        statusEl.innerHTML = '<span style="color: #ef4444;">✗ Error: ' + error.message + '</span>';
-    });
-}
-
-function onImproveDigitalOfficePicked() {
-    const statusEl = document.getElementById('improvedigital-discovery-status');
-    const officePicker = document.getElementById('improvedigital_office_picker');
-    if (!officePicker.value) return;
-    const office = _improvedigitalOffices.find(o => String(o.id) === officePicker.value);
-    if (!office) return;
-
-    _setImproveDigitalIdsReadonly(false);
-    document.getElementById('improvedigital_buying_entity_office_id').value = office.id;
-    if (office.improve_demand_contact_id) {
-        document.getElementById('improvedigital_demand_contact_id').value = office.improve_demand_contact_id;
-    }
-    _setImproveDigitalIdsReadonly(true);
-    // An office that pins buyers narrows the Buyer ID choice to those rows.
-    if (_renderImproveDigitalBuyerOptions(office.buyers) === 1) {
-        document.getElementById('improvedigital_buyer_id').value = office.buyers[0].id;
-    }
-    updateImproveDigitalReadiness();
-    const currency = document.getElementById('improvedigital_currency').value;
-    if (office.billing_currency_code && office.billing_currency_code !== currency) {
-        statusEl.innerHTML = '<span style="color: #f59e0b;">⚠ Office bills in ' + office.billing_currency_code +
-            ' but the default currency is ' + currency + '</span>';
-    } else {
-        statusEl.innerHTML = '<span style="color: #10b981;">✓ IDs filled from office "' + office.office + '"</span>';
-    }
+    // Offices are per currency and live on the currency limits, where the
+    // Add Currency picker lists this entity's Classic offices.
+    statusEl.innerHTML = '<span style="color: #10b981;">✓ Buying entity set — map its offices to currencies under ' +
+        'Policies &amp; Workflows → Budget Controls</span>';
 }
 
 function saveImproveDigitalConfig() {
@@ -771,8 +701,7 @@ function testImproveDigitalConnection() {
                 (data.base_url || '360Yield') + '</span>';
             // Booking needs business_unit_id and a demand contact; the API
             // user's own unit and user_id are the right values, so fill in
-            // whichever the operator hasn't set. The office pick (when
-            // discovery runs) overrides the demand contact afterwards.
+            // whichever the operator hasn't set.
             const filled = [];
             const buEl = document.getElementById('improvedigital_business_unit_id');
             if (buEl && !buEl.value && data.user && data.user.business_unit_id) {
