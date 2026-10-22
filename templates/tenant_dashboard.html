@@ -920,8 +920,8 @@
                 </div>
                 <div>
                     <div class="sa-pipeline__row-amount">{{ currency_symbol(r.currency) }}{{ "{:,.2f}".format(r.rate_per_week) }}/wk</div>
-                    <div class="sa-pipeline__row-stale{% if r.pacing == 'under' %}" style="color: var(--sa-warning);{% endif %}">
-                        {{ r.pacing }}
+                    <div class="sa-pipeline__row-stale{% if r.pacing == 'under' %}" style="color: var(--sa-warning);{% endif %}" title="{% if r.pacing_basis == 'impressions' %}Spend is reported in the ad server currency, budget in the buy currency, so pacing uses impressions delivered vs planned{% else %}Spend delivered vs budget{% endif %}">
+                        {{ r.pacing }}{% if r.pacing_basis == 'impressions' %} · by impressions{% endif %}
                     </div>
                 </div>
             </a>
@@ -1108,7 +1108,7 @@
                     {% endif %}
                 </td>
                 <td class="col-object">{{ currency_symbol(buy.currency) }}{{ "{:,.2f}".format(buy.budget) }}</td>
-                <td class="col-object">{{ currency_symbol(buy.currency) }}{{ "{:,.2f}".format(buy.spend) }}</td>
+                <td class="col-object">{{ currency_symbol(buy.spend_currency if buy.spend_currency is defined else buy.currency) }}{{ "{:,.2f}".format(buy.spend) }}</td>
                 <td class="col-status">{{ buy.created_at_relative }}</td>
             </tr>
             {% else %}

@@ -71,8 +71,11 @@ def _adapter_response(media_buy_id: str, **kwargs) -> AdapterGetMediaBuyDelivery
 def test_impl_reports_buy_currency_and_excludes_other_currencies_from_spend():
     buys = [("mb_eur", _buy("mb_eur", "EUR")), ("mb_usd", _buy("mb_usd", "USD"))]
     adapter = MagicMock()
+    # Each adapter read reports in the currency the buy was booked in.
     adapter.get_media_buy_delivery.side_effect = lambda media_buy_id, **_: _adapter_response(
-        media_buy_id, spend=2.0 if media_buy_id == "mb_eur" else 100.0, currency="EUR"
+        media_buy_id,
+        spend=2.0 if media_buy_id == "mb_eur" else 100.0,
+        currency="EUR" if media_buy_id == "mb_eur" else "USD",
     )
     delivery_repo = MagicMock()
     delivery_repo.get_max_sequence_number.return_value = 0

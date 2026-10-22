@@ -144,12 +144,14 @@ class ReportingData:
     query_type: str
     dimensions: list[str]
     metrics: dict[str, Any]
+    # ReportQuery.reportCurrency used for this report. None = network currency.
+    currency_code: str | None = None
 
 
 class GAMReportingService:
     """Service for getting comprehensive reporting data from Google Ad Manager"""
 
-    def __init__(self, gam_client, network_timezone: str = None):
+    def __init__(self, gam_client, network_timezone: str = None, report_currency: str | None = None):
         """
         Initialize the reporting service
 
@@ -158,6 +160,9 @@ class GAMReportingService:
             network_timezone: The timezone of the GAM network (will be auto-detected if not provided)
         """
         self.client = gam_client
+        # Default ReportQuery.reportCurrency for every report this service
+        # builds (None = network currency); an explicit per-call currency wins.
+        self.report_currency = report_currency
         self.report_service = self.client.GetService("ReportService")
 
         # Currency every ReportService revenue column is denominated in.
@@ -186,6 +191,7 @@ class GAMReportingService:
         requested_timezone: str = "America/New_York",
         include_country: bool = False,
         include_ad_unit: bool = False,
+        currency_code: str | None = None,
     ) -> ReportingData:
         """
         Get reporting data for specified date range and filters
@@ -200,6 +206,9 @@ class GAMReportingService:
             requested_timezone: Timezone for the request (data will be converted if different)
             include_country: Include country dimension in the report
             include_ad_unit: Include ad unit dimension in the report
+            currency_code: ISO 4217 code for ReportQuery.reportCurrency. GAM converts
+                revenue metrics into it; must be the network currency or one of its
+                secondary currencies. None reports in the network currency.
 
         Returns:
             ReportingData object containing results and metadata
@@ -214,7 +223,9 @@ class GAMReportingService:
         )
 
         # Build the report query
-        report_job = self._build_report_query(dimensions, start_date, end_date, advertiser_id, order_id, line_item_id)
+        report_job = self._build_report_query(
+            dimensions, start_date, end_date, advertiser_id, order_id, line_item_id, currency_code=currency_code
+        )
 
         # Run the report
         report_data = self._run_report(report_job)
@@ -238,6 +249,7 @@ class GAMReportingService:
             query_type=date_range,
             dimensions=dimensions,
             metrics=metrics,
+            currency_code=currency_code,
         )
 
     def _get_report_config(
@@ -344,6 +356,7 @@ class GAMReportingService:
         advertiser_id: str | None = None,
         order_id: str | None = None,
         line_item_id: str | None = None,
+        currency_code: str | None = None,
     ) -> dict[str, Any]:
         """Build the GAM report query"""
 
@@ -419,6 +432,14 @@ class GAMReportingService:
                 ),
             }
         }
+
+        # ReportQuery.reportCurrency: "The currency for revenue metrics. Defaults
+        # to the network currency if left null." (ReportService WSDL). An
+        # explicit currency_code wins; otherwise the service-wide
+        # report_currency (the admin reporting pages' REPORTING_CURRENCY).
+        effective_currency = currency_code or self.report_currency
+        if effective_currency:
+            report_job["reportQuery"]["reportCurrency"] = effective_currency
 
         return report_job
 

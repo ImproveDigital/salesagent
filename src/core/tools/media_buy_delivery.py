@@ -369,6 +369,9 @@ def _get_media_buy_delivery_impl(
                 total_impressions_from_adapter = 0
                 adapter_conversions: float | None = None
                 adapter_viewability: float | None = None
+                # Currency the adapter's spend figures are in. Wins over the
+                # pricing-option label so spend and currency never disagree.
+                adapter_currency: str | None = None
 
                 if not any(
                     [testing_ctx.dry_run, testing_ctx.mock_time, testing_ctx.jump_to_event, testing_ctx.test_session_id]
@@ -399,25 +402,24 @@ def _get_media_buy_delivery_impl(
                         impressions = int(adapter_response.totals.impressions)
                         adapter_conversions = getattr(adapter_response.totals, "conversions", None)
                         adapter_viewability = getattr(adapter_response.totals, "viewability", None)
+                        if isinstance(adapter_response.currency, str) and adapter_response.currency:
+                            adapter_currency = adapter_response.currency
                         if isinstance(adapter_response.ext, dict):
                             adapter_ext = dict(adapter_response.ext)
 
-                        # Persist a delivery snapshot on the media buy so the
-                        # publisher dashboard can read pacing without making
-                        # an adapter call on every render. Opportunistic — a
-                        # scheduled poll (follow-up issue) will keep this
-                        # fresh independent of buyer cadence.
-                        try:
-                            from decimal import Decimal as _Decimal
-
-                            repo.update_fields(
-                                media_buy_id,
-                                delivered_impressions=int(total_impressions_from_adapter),
-                                delivered_amount=_Decimal(str(round(total_spend_from_adapter, 2))),
-                                delivery_synced_at=datetime.now(UTC),
-                            )
-                        except Exception as snap_err:
-                            logger.warning(f"Failed to persist delivery snapshot for {media_buy_id}: {snap_err}")
+                        # No delivery snapshot write here: these figures are in
+                        # the buy currency, while delivered_amount is the
+                        # publisher-facing snapshot in the ad server's reporting
+                        # currency, maintained by the admin pages and reporting
+                        # syncs.
+                        # TODO(delivery-snapshots): persist these buy-currency
+                        # figures too — a media_buy_delivery_snapshots table
+                        # keyed by (media_buy_id, currency, window, source),
+                        # written here and by the delivery webhook scheduler —
+                        # so the dashboard can pace spend vs budget in the buy
+                        # currency, buyers' reported amounts are auditable,
+                        # and closed windows can be answered without another
+                        # ad server report. Never overwrite delivered_amount.
 
                     except DeliveryDataUnavailable as soft_err:
                         # Adapter signals "integration healthy, no data
@@ -619,6 +621,8 @@ def _get_media_buy_delivery_impl(
                         if not isinstance(pkg_currency, str):
                             buy_currency = buy.currency if isinstance(buy.currency, str) else None
                             pkg_currency = buy_currency or "USD"
+                        if adapter_currency:
+                            pkg_currency = adapter_currency
                         if pkg_rate is None:
                             # AdCP ByPackageItem requires rate, but auction-based pricing
                             # has no fixed rate. Emit 0 to satisfy the wire schema; buyers
@@ -681,8 +685,13 @@ def _get_media_buy_delivery_impl(
                 status_typed = cast(
                     LiteralType["ready", "active", "paused", "completed", "failed", "reporting_delayed"], status
                 )
+                # Currency of every monetary value in this row: what the ad
+                # server reported the spend in (the buy currency when it could
+                # report in it), else the buy currency for simulated figures.
+                delivery_currency = adapter_currency or (buy.currency if isinstance(buy.currency, str) else "USD")
                 delivery_data = MediaBuyDeliveryData(
                     media_buy_id=media_buy_id,
+                    currency=delivery_currency,
                     status=status_typed,
                     pricing_model=PricingModel(
                         "cpm"
@@ -704,7 +713,7 @@ def _get_media_buy_delivery_impl(
                 )
 
                 deliveries.append(delivery_data)
-                spend_by_buy.append((media_buy_id, buy.currency if isinstance(buy.currency, str) else "USD", spend))
+                spend_by_buy.append((media_buy_id, delivery_currency, spend))
                 total_impressions += impressions
                 media_buy_count += 1
                 total_clicks += clicks if clicks is not None else 0

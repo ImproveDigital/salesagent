@@ -224,12 +224,28 @@ def policies_page(tenant_id):
         # template can read ``adapter_config.get(...)``.
         adapter_obj = repo.get_adapter_config()
         adapter_config: dict[str, Any] = {}
+        improvedigital_currencies: list[str] = []
         if adapter_obj:
-            adapter_config = {
-                "adapter_type": adapter_obj.adapter_type,
-                "network_currency": getattr(adapter_obj, "gam_network_currency", None),
-                "secondary_currencies": getattr(adapter_obj, "gam_secondary_currencies", None) or [],
-            }
+            adapter_config = {"adapter_type": adapter_obj.adapter_type}
+            if adapter_obj.adapter_type == "google_ad_manager":
+                # Only a GAM tenant's network currencies drive the GAM UI; a
+                # tenant switched to another ad server may still carry stale
+                # gam_* columns, which must not take over its Budget Controls.
+                adapter_config["network_currency"] = getattr(adapter_obj, "gam_network_currency", None)
+                adapter_config["secondary_currencies"] = getattr(adapter_obj, "gam_secondary_currencies", None) or []
+            elif adapter_obj.adapter_type == "improvedigital":
+                # The Add Currency modal becomes an office picker: offices of
+                # this buying entity, each billing in one currency. The
+                # platform's currency dictionary backs the manual fallback
+                # when office discovery is unavailable.
+                from src.adapters.improvedigital.schemas import ImproveDigitalConnectionConfig
+
+                stored = adapter_obj.config_json if isinstance(adapter_obj.config_json, dict) else {}
+                adapter_config["buying_entity_id"] = stored.get("buying_entity_id")
+                adapter_config["default_currency"] = stored.get("currency")
+                currency_field = ImproveDigitalConnectionConfig.model_fields["currency"]
+                extra = currency_field.json_schema_extra if isinstance(currency_field.json_schema_extra, dict) else {}
+                improvedigital_currencies = [str(code) for code in (extra.get("enum") or [])]
 
         # Currency limits — embedded tenants see read-only; open tenants
         # get the full add/remove UI. Template reads ``currency_limits``.
@@ -256,6 +272,7 @@ def policies_page(tenant_id):
             currency_limits=currency_limits,
             has_gemini_key=has_gemini_key,
             available_currencies=get_available_currencies(),
+            improvedigital_currencies=improvedigital_currencies,
         )
 
 
@@ -362,12 +379,20 @@ def update_general(tenant_id):
                     flash(f"Invalid currency limit values for {currency_code}", "error")
                     return redirect(url_for("tenants.tenant_settings", tenant_id=tenant_id, section="general"))
 
+                # Improve Digital office for this currency; only touched when
+                # the form carries the field, so other forms never clear it.
+                office_key = f"currency_limits[{currency_code}][buying_entity_office_id]"
+                office_str = request.form.get(office_key, "").strip()
+                office_id = int(office_str) if office_str.isdigit() else None
+
                 # Update or create
                 if currency_code in existing_limits:
                     # Update existing
                     limit = existing_limits[currency_code]
                     limit.min_package_budget = min_value
                     limit.max_daily_package_spend = max_value
+                    if office_key in request.form:
+                        limit.buying_entity_office_id = office_id
                     limit.updated_at = datetime.now(UTC)
                 else:
                     # Create new
@@ -376,6 +401,7 @@ def update_general(tenant_id):
                         currency_code=currency_code,
                         min_package_budget=min_value,
                         max_daily_package_spend=max_value,
+                        buying_entity_office_id=office_id,
                     )
                     db_session.add(limit)
 
@@ -1198,6 +1224,10 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
                     currency_data[currency_code]["max"] = Decimal(val_str) if val_str else None
                 elif "[_delete]" in key:
                     currency_data[currency_code]["_delete"] = form_data.get(key) in ["true", True]
+                elif "[buying_entity_office_id]" in key:
+                    # Improve Digital office that bills in this currency.
+                    val_str = str(form_data.get(key, "") or "").strip()
+                    currency_data[currency_code]["office"] = int(val_str) if val_str.isdigit() else None
 
     if currency_data:
         updates["currencies"] = [
@@ -1205,6 +1235,7 @@ def parse_form_data_to_policy_updates(form_data) -> dict[str, Any]:
                 currency_code=code,
                 min_package_budget=data.get("min"),
                 max_daily_package_spend=data.get("max"),
+                buying_entity_office_id=data.get("office"),
                 _delete=data.get("_delete", False),
             )
             for code, data in currency_data.items()

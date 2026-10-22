@@ -868,9 +868,24 @@ class AdServerAdapter(ABC):
 
     @abstractmethod
     def get_media_buy_delivery(
-        self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
+        self,
+        media_buy_id: str,
+        date_range: ReportingPeriod,
+        today: datetime,
+        *,
+        report_in_buy_currency: bool = True,
     ) -> AdapterGetMediaBuyDeliveryResponse:
-        """Gets delivery data for a media buy."""
+        """Gets delivery data for a media buy.
+
+        By default spend is reported in the currency the buy was booked in,
+        which is what AdCP buyers are owed (AdCP 3.2: no seller-side
+        conversion). The publisher-facing admin pages pass
+        ``report_in_buy_currency=False`` to get the ad server's own reporting
+        currency, which is what the ``delivered_amount`` snapshot holds.
+        Adapters whose platform only reports in the booking currency ignore
+        the flag. The response's ``currency`` always states which currency
+        the figures are in.
+        """
         pass
 
     def get_packages_snapshot(

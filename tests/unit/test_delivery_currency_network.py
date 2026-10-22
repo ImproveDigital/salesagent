@@ -70,7 +70,10 @@ def _run_delivery(adapter: GoogleAdManager, mock_db, mock_service_class, *, serv
 
     now = datetime.now(UTC)
     period = ReportingPeriod(start=now - timedelta(days=3 * 365), end=now)
-    return adapter.get_media_buy_delivery("mb_aud", period, now)
+    # Publisher-facing read (admin pages): the network currency, never the
+    # buy currency. AdCP reads pass report_in_buy_currency=True and are
+    # covered by test_mcp_delivery_buy_currency.py.
+    return adapter.get_media_buy_delivery("mb_aud", period, now, report_in_buy_currency=False)
 
 
 @patch("src.core.database.database_session.get_db_session")

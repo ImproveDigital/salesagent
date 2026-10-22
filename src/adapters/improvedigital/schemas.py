@@ -59,10 +59,11 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
     buying_entity_office_id: int | None = Field(
         default=None,
         description=(
-            "Buying entity office (currency-specific) assigned to every campaign — "
-            "must belong to buying_entity_id and match the configured currency"
+            "DEPRECATED — offices now live on the tenant's currency limits "
+            "(Policies & Workflows → Budget Controls), one office per currency; the "
+            "adapter no longer reads this value. Kept so stored configs still validate."
         ),
-        json_schema_extra={"ui_order": 5},
+        json_schema_extra={"ui_order": 5, "deprecated": True},
     )
     improve_demand_contact_id: int | None = Field(
         default=None,

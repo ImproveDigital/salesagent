@@ -2965,6 +2965,19 @@ async def _create_media_buy_impl(
                         f"Contact the publisher to enable this currency in GAM."
                     )
                     raise ValueError(error_msg)
+            elif adapter_config and adapter_config.adapter_type == "improvedigital":
+                # Improve Digital books each Classic campaign under the
+                # buying-entity office that bills in the buy currency (one
+                # office per currency, mapped on the tenant's currency
+                # limits). No office for this currency means it cannot be
+                # trafficked at all, so refuse the buy rather than mis-price it.
+                if getattr(currency_limit, "buying_entity_office_id", None) is None:
+                    raise ValueError(
+                        f"Currency {request_currency} has no Improve Digital buying entity office mapped "
+                        f"for this publisher. Choose a pricing option in a currency the publisher books in, "
+                        f"or ask the publisher to map an office to {request_currency} under "
+                        f"Policies & Workflows → Budget Controls."
+                    )
 
             # Validate minimum product spend (legacy + new pricing_options)
             # NOTE: minimum package budget validation temporarily disabled.
