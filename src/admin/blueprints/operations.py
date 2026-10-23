@@ -101,13 +101,13 @@ def _sync_delivery_metrics(db_session, tenant_id: str, media_buy, principal) -> 
         from datetime import timedelta
 
         from src.core.config_loader import set_current_tenant
-        from src.core.database.models import Tenant
+        from src.core.database.repositories.tenant_config import TenantConfigRepository
         from src.core.helpers.adapter_helpers import get_adapter
         from src.core.schemas import Principal as PrincipalSchema
         from src.core.schemas import ReportingPeriod
 
         # Set tenant context before calling get_adapter (required for adapter initialization)
-        tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+        tenant = TenantConfigRepository(db_session, tenant_id).get_tenant()
         if tenant:
             set_current_tenant(
                 {
@@ -167,6 +167,67 @@ def _sync_delivery_metrics(db_session, tenant_id: str, media_buy, principal) -> 
         logger.warning(f"Could not fetch delivery metrics for {media_buy.media_buy_id}: {e}")
         # Continue without metrics - don't fail the whole page
         return None
+
+
+def _delivery_metrics_payload(tenant_id: str, media_buy_id: str) -> tuple[dict, int]:
+    """Fetch live delivery for one media buy and render the metrics partial.
+
+    Backs the asynchronous load on the media buy detail page. Runs the same
+    ``_sync_delivery_metrics`` as before (so ``delivered_amount`` keeps being
+    refreshed on every view) but in its own request. Returns ``(payload,
+    http_status)``; ``payload["html"]`` is the rendered
+    ``_media_buy_delivery_metrics.html`` partial the page swaps in.
+    """
+    from flask import render_template
+
+    from src.core.database.database_session import get_db_session
+    from src.core.database.repositories.principal import PrincipalRepository
+
+    with get_db_session() as db_session:
+        media_buy = MediaBuyRepository(db_session, tenant_id).get_by_id(media_buy_id)
+        if media_buy is None:
+            return {"error": "Media buy not found"}, 404
+        principal = (
+            PrincipalRepository(db_session, tenant_id).get_by_id(media_buy.principal_id)
+            if media_buy.principal_id
+            else None
+        )
+        if media_buy.status not in _DELIVERY_SYNC_STATUSES or principal is None:
+            html = render_template("_media_buy_delivery_metrics.html", delivery_metrics=None, media_buy=media_buy)
+            return {"delivery_metrics": None, "html": html}, 200
+        delivery_metrics = _sync_delivery_metrics(db_session, tenant_id, media_buy, principal)
+        html = render_template(
+            "_media_buy_delivery_metrics.html", delivery_metrics=delivery_metrics, media_buy=media_buy
+        )
+        summary = (
+            {
+                "impressions": delivery_metrics.get("impressions"),
+                "spend": delivery_metrics.get("spend"),
+                "currency": delivery_metrics.get("currency"),
+                "clicks": delivery_metrics.get("clicks"),
+            }
+            if delivery_metrics
+            else None
+        )
+        return {"delivery_metrics": summary, "html": html}, 200
+
+
+@operations_bp.route("/media-buy/<media_buy_id>/delivery-metrics", methods=["GET"])
+@require_tenant_access(api_mode=True)
+def media_buy_delivery_metrics(tenant_id, media_buy_id):
+    """JSON endpoint the media buy detail page calls after rendering.
+
+    ``api_mode=True`` so an expired session answers with JSON, not a login
+    page, which the page script would otherwise try to parse.
+    """
+    from flask import jsonify
+
+    try:
+        payload, status = _delivery_metrics_payload(tenant_id, media_buy_id)
+    except Exception as e:  # the page must degrade to its snapshot, never 500 on the ad server
+        logger.warning(f"Delivery metrics fetch failed for {media_buy_id}: {e}")
+        return jsonify({"error": "Could not fetch delivery metrics from the ad server"}), 502
+    return jsonify(payload), status
 
 
 # @operations_bp.route("/targeting", methods=["GET"])
@@ -364,8 +425,12 @@ def media_buy_detail(tenant_id, media_buy_id):
                     "message": "This media buy is pending. It may be waiting for creatives or other requirements.",
                 }
 
-            # Fetch delivery metrics if media buy is active or completed
-            delivery_metrics = _sync_delivery_metrics(db_session, tenant_id, media_buy, principal)
+            # Delivery metrics are NOT fetched here: the ad server call (a GAM
+            # report job, an Improve Digital Report API query) runs in a
+            # separate request to ``media_buy_delivery_metrics`` after the
+            # page has rendered, so the page never blocks on the ad server.
+            # The template shows the stored snapshot meanwhile.
+            delivery_metrics = None
 
             # #101 — webhook delivery activity for the per-buy admin tab.
             # Operator-scoped: shows deliveries from any principal that
