@@ -364,6 +364,10 @@ class ImproveDigitalReportingSync:
             update_media_buys: Roll totals up to ``delivered_*`` columns.
                 Read paths that merely warm the cache pass False so a
                 delivery *read* never mutates publisher-facing pacing data.
+            submit_generation: Also register the report as a server-side
+                generation job (auditable, async). The scheduled sync keeps
+                this on; on-demand reads pass False and rely on the
+                synchronous preview alone.
 
         Raises:
             ReportingScopeNotGranted: Report API 403 for this client.

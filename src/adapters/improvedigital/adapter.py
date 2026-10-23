@@ -1726,8 +1726,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
                     submit_generation=False,
                 )
             except (ReportingScopeNotGranted, ImproveDigitalError) as exc:
+                # Not remembered: an upstream error should be retried on the
+                # next view, unlike a genuine "nothing delivered yet".
                 logger.info("Improve Digital targeted delivery pull failed for campaign %s: %s", campaign_id, exc)
-                _empty_delivery_pulls[cache_key] = time.monotonic()
                 return []
             rows = ImproveDigitalLineItemStatsRepository(session, self.tenant_id or "default").list_by_campaign(
                 campaign_id

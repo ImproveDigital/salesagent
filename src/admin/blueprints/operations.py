@@ -430,7 +430,6 @@ def media_buy_detail(tenant_id, media_buy_id):
             # separate request to ``media_buy_delivery_metrics`` after the
             # page has rendered, so the page never blocks on the ad server.
             # The template shows the stored snapshot meanwhile.
-            delivery_metrics = None
 
             # #101 — webhook delivery activity for the per-buy admin tab.
             # Operator-scoped: shows deliveries from any principal that
@@ -456,7 +455,6 @@ def media_buy_detail(tenant_id, media_buy_id):
                 creative_assignments_by_package=creative_assignments_by_package,
                 computed_state=computed_state,
                 readiness=readiness,
-                delivery_metrics=delivery_metrics,
                 webhook_deliveries=webhook_deliveries,
             )
     except Exception as e:

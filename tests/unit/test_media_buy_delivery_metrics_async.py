@@ -36,7 +36,6 @@ def _payload(buy, principal, metrics):
     app = create_app()
     with (
         app.test_request_context("/tenant/t1/media-buy/mb_1/delivery-metrics"),
-        patch(f"{_MOD}.get_db_session", create=True),
         patch("src.core.database.database_session.get_db_session"),
         patch(f"{_MOD}.MediaBuyRepository") as buy_repo_cls,
         patch("src.core.database.repositories.principal.PrincipalRepository") as principal_repo_cls,
