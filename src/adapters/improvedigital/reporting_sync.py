@@ -337,6 +337,7 @@ class ImproveDigitalReportingSync:
         *,
         earliest_start: date | None = None,
         update_media_buys: bool = True,
+        submit_generation: bool = True,
     ) -> ReportingSyncResult:
         """Fetch metrics for the tenant's active campaigns and upsert the cache.
 
@@ -363,6 +364,10 @@ class ImproveDigitalReportingSync:
             update_media_buys: Roll totals up to ``delivered_*`` columns.
                 Read paths that merely warm the cache pass False so a
                 delivery *read* never mutates publisher-facing pacing data.
+            submit_generation: Also register the report as a server-side
+                generation job (auditable, async). The scheduled sync keeps
+                this on; on-demand reads pass False and rely on the
+                synchronous preview alone.
 
         Raises:
             ReportingScopeNotGranted: Report API 403 for this client.
@@ -421,7 +426,11 @@ class ImproveDigitalReportingSync:
             currency_id,
             PREVIEW_ROW_LIMIT,
         )
-        self._submit_generation(request_body)  # logs [3/6] itself
+        # The generation job is an auditable server-side artefact for the
+        # scheduled sync; on-demand reads (a details-page cache miss) only
+        # need the synchronous preview and must not create a job per view.
+        if submit_generation:
+            self._submit_generation(request_body)  # logs [3/6] itself
         payload = {
             "rows": PREVIEW_ROW_LIMIT,
             "report_generation_request": {**request_body, "action": "PREVIEW_REPORT"},

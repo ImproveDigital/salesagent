@@ -183,6 +183,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/blueprints/oidc.py", "test_initiate"),
     ("src/admin/blueprints/operations.py", "approve_media_buy"),
     ("src/admin/blueprints/operations.py", "media_buy_detail"),
+    ("src/admin/blueprints/operations.py", "reporting"),  # select(Tenant) — breadcrumb/tenant lookup
     ("src/admin/blueprints/policy.py", "index"),
     ("src/admin/blueprints/policy.py", "review_task"),
     ("src/admin/blueprints/policy.py", "update"),

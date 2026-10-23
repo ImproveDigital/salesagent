@@ -1,0 +1,79 @@
+{#
+Delivery metrics body for the media buy detail page.
+
+Rendered server-side by ``operations.media_buy_delivery_metrics`` after the
+page has loaded (the ad server call runs off the page request) and swapped
+into ``#delivery-metrics-body`` by the page script. Expects:
+- delivery_metrics: dict from ``_sync_delivery_metrics`` (impressions, spend,
+  currency, clicks, ctr, by_package) or None when the ad server has nothing yet
+- media_buy: the MediaBuy row (adapter_type for the per-package label)
+#}
+{% if delivery_metrics %}
+<div class="detail-rows">
+    <div class="detail-row">
+        <span class="label">Impressions:</span>
+        <span class="value">{{ "{:,}".format(delivery_metrics.impressions|int) }}</span>
+    </div>
+    <div class="detail-row">
+        <span class="label">Spend:</span>
+        <span class="value">{{ delivery_metrics.currency }} {{ "{:,.2f}".format(delivery_metrics.spend) }}</span>
+    </div>
+    {% if delivery_metrics.clicks %}
+    <div class="detail-row">
+        <span class="label">Clicks:</span>
+        <span class="value">{{ "{:,}".format(delivery_metrics.clicks|int) }}</span>
+    </div>
+    {% endif %}
+    {% if delivery_metrics.ctr %}
+    <div class="detail-row">
+        <span class="label">CTR:</span>
+        <span class="value">{{ "{:.2f}".format(delivery_metrics.ctr) }}%</span>
+    </div>
+    {% endif %}
+</div>
+
+{% if delivery_metrics.by_package %}
+<div style="margin-top: 1rem;">
+    <h3 style="font-size: 0.9rem; color: #666; margin-bottom: 0.5rem;">By Package</h3>
+    <div style="display: grid; gap: 0.5rem;">
+    {# Improve Digital aggregates delivery per platform line item, so the
+       by_package id is the line item id — label it as such. #}
+    {% set pkg_label = 'Line Item' if media_buy.adapter_type == 'improvedigital' else 'Package' %}
+    {% for pkg in delivery_metrics.by_package %}
+    <div style="border: 1px solid #e0e0e0; border-radius: 4px; padding: 0.75rem; background: #f9f9f9;">
+        <div style="font-weight: 500; margin-bottom: 0.5rem;">
+            <span style="color: #666; font-weight: 400;">{{ pkg_label }}:</span> {{ pkg.package_id }}
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; font-size: 0.85rem;">
+            <div>
+                <span style="color: #666;">Impressions:</span>
+                <strong>{{ "{:,}".format(pkg.impressions|int) }}</strong>
+            </div>
+            <div>
+                <span style="color: #666;">Spend:</span>
+                <strong>{{ "{:,.2f}".format(pkg.spend) }}</strong>
+            </div>
+            {% if pkg.clicks %}
+            <div>
+                <span style="color: #666;">Clicks:</span>
+                <strong>{{ "{:,}".format(pkg.clicks|int) }}</strong>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0; font-size: 0.85rem; color: #666;">
+    <em>Metrics fetched from {{ media_buy.adapter_type|default('ad server') }} just now</em>
+</div>
+{% else %}
+<p style="color: #666; margin: 0;">
+    <em>No delivery reported by the ad server yet.</em>
+    {% if media_buy.delivery_synced_at %}
+    <span style="display: block; margin-top: 0.25rem;">Last successful sync: {{ media_buy.delivery_synced_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>
+    {% endif %}
+</p>
+{% endif %}

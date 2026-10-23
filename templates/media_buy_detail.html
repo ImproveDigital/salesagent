@@ -108,8 +108,11 @@
     </div>
 </div>
 
-{% if delivery_metrics %}
-<div class="custom-card">
+{% if media_buy.status in ['active', 'approved', 'completed'] %}
+{# Delivery metrics load after the page renders: the ad server call
+   (GAM report job / Improve Digital Report API) runs in a separate request
+   to operations.media_buy_delivery_metrics, so the page itself stays fast. #}
+<div class="custom-card" id="delivery-metrics-card">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <h2 style="margin: 0;">📊 Delivery Metrics</h2>
         {% if media_buy.raw_request and media_buy.raw_request.get('reporting_webhook') %}
@@ -120,82 +123,27 @@
         </form>
         {% endif %}
     </div>
-    <div class="detail-rows">
-        <div class="detail-row">
-            <span class="label">Impressions:</span>
-            <span class="value">{{ "{:,}".format(delivery_metrics.impressions|int) }}</span>
-        </div>
-        <div class="detail-row">
-            <span class="label">Spend:</span>
-            <span class="value">{{ delivery_metrics.currency }} {{ "{:,.2f}".format(delivery_metrics.spend) }}</span>
-        </div>
-        {% if delivery_metrics.clicks %}
-        <div class="detail-row">
-            <span class="label">Clicks:</span>
-            <span class="value">{{ "{:,}".format(delivery_metrics.clicks|int) }}</span>
-        </div>
-        {% endif %}
-        {% if delivery_metrics.ctr %}
-        <div class="detail-row">
-            <span class="label">CTR:</span>
-            <span class="value">{{ "{:.2f}".format(delivery_metrics.ctr) }}%</span>
-        </div>
-        {% endif %}
-    </div>
-
-    {% if delivery_metrics.by_package %}
-    <div style="margin-top: 1rem;">
-        <h3 style="font-size: 0.9rem; color: #666; margin-bottom: 0.5rem;">By Package</h3>
-        <div style="display: grid; gap: 0.5rem;">
-        {# Improve Digital aggregates delivery per platform line item, so the
-           by_package id is the line item id — label it as such. #}
-        {% set pkg_label = 'Line Item' if media_buy.adapter_type == 'improvedigital' else 'Package' %}
-        {% for pkg in delivery_metrics.by_package %}
-        <div style="border: 1px solid #e0e0e0; border-radius: 4px; padding: 0.75rem; background: #f9f9f9;">
-            <div style="font-weight: 500; margin-bottom: 0.5rem;">
-                <span style="color: #666; font-weight: 400;">{{ pkg_label }}:</span> {{ pkg.package_id }}
+    <div id="delivery-metrics-body">
+        {% if media_buy.delivered_amount is not none or media_buy.delivered_impressions is not none %}
+        <div class="detail-rows">
+            <div class="detail-row">
+                <span class="label">Impressions:</span>
+                <span class="value">{{ "{:,}".format((media_buy.delivered_impressions or 0)|int) }}</span>
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; font-size: 0.85rem;">
-                <div>
-                    <span style="color: #666;">Impressions:</span>
-                    <strong>{{ "{:,}".format(pkg.impressions|int) }}</strong>
-                </div>
-                <div>
-                    <span style="color: #666;">Spend:</span>
-                    <strong>{{ "{:,.2f}".format(pkg.spend) }}</strong>
-                </div>
-                {% if pkg.clicks %}
-                <div>
-                    <span style="color: #666;">Clicks:</span>
-                    <strong>{{ "{:,}".format(pkg.clicks|int) }}</strong>
-                </div>
-                {% endif %}
+            <div class="detail-row">
+                <span class="label">Spend:</span>
+                <span class="value">{{ "{:,.2f}".format(media_buy.delivered_amount or 0) }}</span>
             </div>
         </div>
-        {% endfor %}
+        <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0; font-size: 0.85rem; color: #666;">
+            <em id="delivery-metrics-status">Last synced {{ media_buy.delivery_synced_at.strftime('%Y-%m-%d %H:%M UTC') if media_buy.delivery_synced_at else 'earlier' }} · refreshing from {{ media_buy.adapter_type|default('the ad server') }}…</em>
         </div>
-    </div>
-    {% endif %}
-
-    <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0; font-size: 0.85rem; color: #666;">
-        <em>Metrics fetched from {{ media_buy.adapter_type|default('ad server') }} in real-time</em>
-    </div>
-</div>
-{% elif media_buy.status in ['active', 'approved', 'completed'] %}
-<div class="custom-card">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-        <h2 style="margin: 0;">📊 Delivery Metrics</h2>
-        {% if media_buy.raw_request and media_buy.raw_request.get('reporting_webhook') %}
-        <form method="POST" action="{{ url_for('operations.trigger_delivery_webhook', tenant_id=tenant_id, media_buy_id=media_buy.media_buy_id) }}" style="margin: 0;">
-            <button type="submit" class="btn btn-sm btn-secondary" title="Trigger delivery report webhook now" onclick="return confirm('Send delivery report webhook now?');">
-                🔔 Test Webhook
-            </button>
-        </form>
+        {% else %}
+        <p style="color: #666; margin: 0;">
+            <em id="delivery-metrics-status">Loading delivery metrics from {{ media_buy.adapter_type|default('the ad server') }}…</em>
+        </p>
         {% endif %}
     </div>
-    <p style="color: #666; margin: 0;">
-        <em>Delivery metrics are being loaded from the ad server...</em>
-    </p>
 </div>
 {% endif %}
 
@@ -951,5 +899,83 @@ style.textContent = `
     }
 `;
 document.head.appendChild(style);
+
+// Delivery metrics load after render: the ad server call runs in its own
+// request so the page is never blocked on a GAM report job or an Improve
+// Digital Report API query. The server renders the metrics partial; we swap
+// it in. Failure keeps the snapshot and offers a retry.
+(function () {
+    const body = document.getElementById('delivery-metrics-body');
+    if (!body) return;
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const url = scriptRoot + '/tenant/{{ tenant_id }}/media-buy/{{ media_buy.media_buy_id }}/delivery-metrics';
+
+    // One status line, reused across attempts (the snapshot markup keeps its
+    // own #delivery-metrics-status; after a failure we create one if needed).
+    function statusLine() {
+        let el = document.getElementById('delivery-metrics-status');
+        if (!el) {
+            el = document.createElement('em');
+            el.id = 'delivery-metrics-status';
+            el.style.display = 'block';
+            el.style.marginTop = '0.5rem';
+            body.appendChild(el);
+        }
+        return el;
+    }
+
+    function showFailure(message) {
+        const el = statusLine();
+        el.textContent = 'Could not refresh delivery metrics: ' + message + '. ';
+        el.style.color = '#b45309';
+        const retry = document.createElement('a');
+        retry.href = '#';
+        retry.textContent = 'Retry';
+        retry.addEventListener('click', function (event) { event.preventDefault(); load(); });
+        el.appendChild(retry);
+    }
+
+    // The server runs the ad-server fetch in the background and each poll
+    // answers immediately, so no proxy timeout applies however long GAM or
+    // Improve Digital take. Poll every 3s for up to 10 minutes.
+    const POLL_MS = 3000;
+    const GIVE_UP_MS = 10 * 60 * 1000;
+    let startedAt = 0;
+
+    function poll() {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30000);
+        fetch(url, { headers: { 'Accept': 'application/json' }, credentials: 'same-origin', signal: controller.signal })
+            .then((r) => {
+                const isJson = (r.headers.get('content-type') || '').includes('application/json');
+                if (!isJson) throw new Error(r.status === 401 || r.status === 403 ? 'your session has expired, reload the page' : 'unexpected response (' + r.status + ')');
+                return r.json().then((data) => ({ ok: r.ok, data }));
+            })
+            .then(({ ok, data }) => {
+                if (!ok || !data || !data.state) throw new Error((data && data.error) || 'no metrics returned');
+                if (data.state === 'pending') {
+                    if (Date.now() - startedAt > GIVE_UP_MS) throw new Error('the ad server did not answer within 10 minutes');
+                    setTimeout(poll, POLL_MS);
+                    return;
+                }
+                if (data.state === 'error') throw new Error(data.error || 'ad server error');
+                body.innerHTML = data.html;
+            })
+            .catch((err) => {
+                showFailure(err.name === 'AbortError' ? 'the server did not answer a poll within 30 seconds' : err.message);
+            })
+            .finally(() => clearTimeout(timer));
+    }
+
+    function load() {
+        const el = statusLine();
+        el.textContent = 'Refreshing from {{ media_buy.adapter_type|default('the ad server') }}…';
+        el.style.color = '';
+        startedAt = Date.now();
+        poll();
+    }
+
+    load();
+})();
 </script>
 {% endblock %}

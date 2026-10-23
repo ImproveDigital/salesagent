@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import html
 import logging
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -78,6 +79,13 @@ from src.core.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# On-demand Report API pulls that returned no rows, keyed (tenant_id,
+# campaign_id) -> monotonic time. A campaign that has not delivered yet is
+# viewed far more often than it changes; without this, every details-page
+# view of such a buy ran a warehouse query against the Report API.
+_EMPTY_PULL_TTL_SECONDS = 600.0
+_empty_delivery_pulls: dict[tuple[str, str], float] = {}
 
 
 def _domain_from_url(url: Any) -> str | None:
@@ -982,10 +990,15 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # (media_buy_create._goal_units_from_budget) so a BUDGET-goal line item
         # always books the money the impression cap was sized for.
         budget = float(package.budget) if package.budget is not None else round(package.impressions * rate / 1000, 2)
+        # Marketplace doc ("Line item level" → Basic settings → Status):
+        # Active = "if ready (complete) the LI will be sent to the adserver",
+        # Inactive = "will not be sent to the adserver even if ready". Readiness
+        # (inventory + creatives assigned) already gates serving, so a booked
+        # package is created Active; pausing is a separate update action.
         payload: dict[str, Any] = {
             "name": package.name or package.package_id,
             "type": "Standard",
-            "line_item_status": "Inactive",
+            "line_item_status": "Active",
             "goal": goal,
             "start_date": self._format_datetime(start_time),
             "end_date": self._format_datetime(end_time),
@@ -1485,9 +1498,11 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # currency other than the office's is read live from it. Falls
         # through to the office-currency sources — labelled honestly — when
         # that isn't possible.
-        target_currency = (
-            self._media_buy_currency(media_buy_id) if report_in_buy_currency else self._publisher_reporting_currency()
-        )
+        # One database read for the buy currency: it decides the target for
+        # AdCP reads and whether the campaign counters are in the reporting
+        # currency (the database may be remote, so each read is a round trip).
+        buy_currency = self._media_buy_currency(media_buy_id)
+        target_currency = buy_currency if report_in_buy_currency else self._publisher_reporting_currency()
         if target_currency:
             live_response = self._live_delivery_in(media_buy_id, campaign_id, date_range, target_currency)
             if live_response is not None:
@@ -1506,7 +1521,7 @@ class ImproveDigitalAdapter(AdServerAdapter):
         # The inline counters are in the campaign's own (office) currency;
         # with one office per currency that may differ from the reporting
         # currency, in which case the cache/preview path below answers.
-        campaign_currency = self._media_buy_currency(media_buy_id) or str(self.currency).upper()
+        campaign_currency = buy_currency or str(self.currency).upper()
         if window_days >= 365 and campaign_currency == str(self.reporting_currency).upper():
             try:
                 return self._live_campaign_delivery(media_buy_id, campaign_id, date_range)
@@ -1683,6 +1698,13 @@ class ImproveDigitalAdapter(AdServerAdapter):
             return []
         if not str(campaign_id).isdigit():
             return []
+        # A campaign that reported nothing a moment ago will report nothing
+        # now: remember empty pulls for a while so repeated page views of a
+        # buy that has not delivered yet don't each run a Report API query.
+        cache_key = (self.tenant_id or "default", str(campaign_id))
+        last_empty = _empty_delivery_pulls.get(cache_key)
+        if last_empty is not None and time.monotonic() - last_empty < _EMPTY_PULL_TTL_SECONDS:
+            return []
         earliest_start = date_range.start.date() if date_range is not None and date_range.start else None
         with get_db_session() as session:
             syncer = ImproveDigitalReportingSync(
@@ -1695,13 +1717,27 @@ class ImproveDigitalAdapter(AdServerAdapter):
             try:
                 # update_media_buys=False: a delivery *read* warms the cache
                 # but must not mutate publisher-facing delivered_* columns.
-                syncer.run(campaign_ids=[campaign_id], earliest_start=earliest_start, update_media_buys=False)
+                # submit_generation=False: the synchronous preview is enough
+                # for a read; no server-side report job per page view.
+                syncer.run(
+                    campaign_ids=[campaign_id],
+                    earliest_start=earliest_start,
+                    update_media_buys=False,
+                    submit_generation=False,
+                )
             except (ReportingScopeNotGranted, ImproveDigitalError) as exc:
+                # Not remembered: an upstream error should be retried on the
+                # next view, unlike a genuine "nothing delivered yet".
                 logger.info("Improve Digital targeted delivery pull failed for campaign %s: %s", campaign_id, exc)
                 return []
-            return ImproveDigitalLineItemStatsRepository(session, self.tenant_id or "default").list_by_campaign(
+            rows = ImproveDigitalLineItemStatsRepository(session, self.tenant_id or "default").list_by_campaign(
                 campaign_id
             )
+        if rows:
+            _empty_delivery_pulls.pop(cache_key, None)
+        else:
+            _empty_delivery_pulls[cache_key] = time.monotonic()
+        return rows
 
     # ----- reporting sync -----
 
