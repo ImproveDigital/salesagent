@@ -2,11 +2,7 @@
 
 import asyncio
 import logging
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any
 
 from flask import Blueprint, request
 from sqlalchemy import select
@@ -173,72 +169,11 @@ def _sync_delivery_metrics(db_session, tenant_id: str, media_buy, principal) -> 
         return None
 
 
-# Delivery refreshes running (or just finished) off the request thread, keyed
-# (tenant_id, media_buy_id). The media buy page polls ``media_buy_delivery_metrics``;
-# each poll answers in database time, so no proxy in front of the app can time
-# out while GAM runs a report job or Improve Digital queries its warehouse.
-_delivery_refreshes: dict[tuple[str, str], dict[str, Any]] = {}
-_delivery_refresh_lock = threading.Lock()
-# Bounded like the creative AI-review executor: at most a few ad-server
-# fetches in flight per process, the rest queue.
-_delivery_refresh_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="delivery_refresh_")
-_DELIVERY_REFRESH_MAX_SECONDS = 600.0  # give up on a refresh older than this (GAM's own report cap)
-_DELIVERY_RESULT_TTL_SECONDS = 120.0  # a finished result waits this long to be collected by a poll
-
-
-def _run_delivery_refresh(tenant_id: str, media_buy_id: str) -> None:
-    """Executor task: fetch delivery and record the outcome."""
-    from src.core.database.database_session import get_db_session
-    from src.core.database.repositories.principal import PrincipalRepository
-
-    key = (tenant_id, media_buy_id)
-    outcome: dict[str, Any] = {"metrics": None, "error": None}
-    try:
-        with get_db_session() as db_session:
-            media_buy = MediaBuyRepository(db_session, tenant_id).get_by_id(media_buy_id)
-            principal = (
-                PrincipalRepository(db_session, tenant_id).get_by_id(media_buy.principal_id)
-                if media_buy is not None and media_buy.principal_id
-                else None
-            )
-            if media_buy is not None:
-                outcome["metrics"] = _sync_delivery_metrics(db_session, tenant_id, media_buy, principal)
-    except Exception as e:  # never let a thread die silently; the page shows the message
-        logger.warning(f"Delivery refresh failed for {media_buy_id}: {e}")
-        outcome["error"] = str(e)
-    with _delivery_refresh_lock:
-        entry = _delivery_refreshes.get(key)
-        if entry is not None:
-            entry.update(outcome, done=True, finished=time.monotonic())
-
-
-def _start_delivery_refresh(tenant_id: str, media_buy_id: str) -> dict[str, Any]:
-    """Return the refresh entry for this buy, submitting a refresh when none is running."""
-    key = (tenant_id, media_buy_id)
-    now = time.monotonic()
-    start_thread = False
-    with _delivery_refresh_lock:
-        entry = _delivery_refreshes.get(key)
-        stale = entry is not None and not entry["done"] and now - entry["started"] > _DELIVERY_REFRESH_MAX_SECONDS
-        expired = entry is not None and entry["done"] and now - entry["finished"] > _DELIVERY_RESULT_TTL_SECONDS
-        if entry is None or stale or expired:
-            entry = {"started": now, "done": False, "metrics": None, "error": None, "finished": None}
-            _delivery_refreshes[key] = entry
-            start_thread = True
-    # Submitted outside the lock: the worker takes the same lock to record its
-    # outcome, so it must never be launched (or run inline) while we hold it.
-    if start_thread:
-        _delivery_refresh_executor.submit(_run_delivery_refresh, tenant_id, media_buy_id)
-    return entry
-
-
 def _delivery_metrics_payload(tenant_id: str, media_buy_id: str) -> tuple[dict, int]:
-    """One poll of the media buy page's delivery refresh.
+    """Refresh one buy's delivery from the ad server and render the metrics partial.
 
-    States: ``pending`` (refresh running, poll again), ``done`` (``html`` is
-    the rendered ``_media_buy_delivery_metrics.html`` partial; the refresh
-    also wrote the ``delivered_*`` snapshot) or ``error``. Ineligible buys
-    are ``done`` immediately without touching the ad server.
+    Called once per media buy page view, after the page has rendered from
+    the database snapshot, so the page itself never waits on the ad server.
     """
     from flask import render_template
 
@@ -254,21 +189,7 @@ def _delivery_metrics_payload(tenant_id: str, media_buy_id: str) -> tuple[dict, 
             if media_buy.principal_id
             else None
         )
-        if media_buy.status not in _DELIVERY_SYNC_STATUSES or principal is None:
-            html = render_template("_media_buy_delivery_metrics.html", delivery_metrics=None, media_buy=media_buy)
-            return {"state": "done", "delivery_metrics": None, "html": html}, 200
-
-        entry = _start_delivery_refresh(tenant_id, media_buy_id)
-        if not entry["done"]:
-            return {"state": "pending"}, 200
-
-        # Collected: a later page view starts a fresh refresh.
-        with _delivery_refresh_lock:
-            _delivery_refreshes.pop((tenant_id, media_buy_id), None)
-        if entry["error"]:
-            return {"state": "error", "error": entry["error"]}, 200
-        delivery_metrics = entry["metrics"]
-        db_session.refresh(media_buy)  # the refresh thread updated the snapshot columns
+        delivery_metrics = _sync_delivery_metrics(db_session, tenant_id, media_buy, principal)
         html = render_template(
             "_media_buy_delivery_metrics.html", delivery_metrics=delivery_metrics, media_buy=media_buy
         )
@@ -282,13 +203,13 @@ def _delivery_metrics_payload(tenant_id: str, media_buy_id: str) -> tuple[dict, 
             if delivery_metrics
             else None
         )
-        return {"state": "done", "delivery_metrics": summary, "html": html}, 200
+        return {"delivery_metrics": summary, "html": html}, 200
 
 
 @operations_bp.route("/media-buy/<media_buy_id>/delivery-metrics", methods=["GET"])
 @require_tenant_access(api_mode=True)
 def media_buy_delivery_metrics(tenant_id, media_buy_id):
-    """Polled by the media buy detail page after it renders.
+    """Fetched once by the media buy detail page after it renders.
 
     ``api_mode=True`` so an expired session answers with JSON, not a login
     page, which the page script would otherwise try to parse.
@@ -298,8 +219,8 @@ def media_buy_delivery_metrics(tenant_id, media_buy_id):
     try:
         payload, status = _delivery_metrics_payload(tenant_id, media_buy_id)
     except Exception as e:  # the page must degrade to its snapshot, never 500 on the ad server
-        logger.warning(f"Delivery metrics poll failed for {media_buy_id}: {e}")
-        return jsonify({"state": "error", "error": "Could not fetch delivery metrics from the ad server"}), 502
+        logger.warning(f"Delivery metrics fetch failed for {media_buy_id}: {e}")
+        return jsonify({"error": "Could not fetch delivery metrics from the ad server"}), 502
     return jsonify(payload), status
 
 
