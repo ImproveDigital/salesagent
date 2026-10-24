@@ -5,6 +5,7 @@ signing_keys/
 __pycache__
 adcp.db
 *.db
+.mcp.json
 .env
 .env.local
 .env.production

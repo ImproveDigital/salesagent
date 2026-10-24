@@ -811,6 +811,7 @@ MEDIA_ASSET_FALLBACK_IDS = {
 # Common asset IDs for clickthrough URLs
 CLICKTHROUGH_ASSET_IDS = {
     "click_url",
+    "clickthrough_url",
     "clickthrough",
     "click",
     "landing_page",
