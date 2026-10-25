@@ -278,6 +278,17 @@ Expected context:
             </small>
         </div>
 
+        <div class="form-group">
+            <label for="improvedigital_default_iab_category">Default IAB Category</label>
+            <input type="text" id="improvedigital_default_iab_category" name="improvedigital_default_iab_category"
+                   class="form-control" placeholder="e.g. IAB19 or IAB9-30" pattern="[Ii][Aa][Bb][0-9]{1,2}(-[0-9]{1,2})?"
+                   value="{{ adapter_config.get('default_iab_category', '') or '' if adapter_config else '' }}">
+            <small class="form-text text-muted">
+                IAB v1 category required on every creative. Used when the buy's advertiser industry
+                does not map to one; buys with creatives are refused when neither is available.
+            </small>
+        </div>
+
         <div class="form-group" style="margin-top: 1rem;">
             <label for="improvedigital_manual_approval_required">
                 <input type="checkbox" id="improvedigital_manual_approval_required" name="improvedigital_manual_approval_required"
@@ -350,6 +361,7 @@ function _improvedigitalPayload() {
         agency_id: agencyEl.value ? parseInt(agencyEl.value, 10) : null,
         currency: document.getElementById('improvedigital_currency').value,
         timezone: document.getElementById('improvedigital_timezone').value || 'UTC',
+        default_iab_category: document.getElementById('improvedigital_default_iab_category').value.trim() || null,
         manual_approval_required: document.getElementById('improvedigital_manual_approval_required').checked
     };
     if (clientSecretEl.value) config.client_secret = clientSecretEl.value;

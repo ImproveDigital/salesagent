@@ -241,6 +241,7 @@ def get_adapter(
                             "sales_person_id": impd_validated.sales_person_id,
                             "currency": impd_validated.currency,
                             "timezone": impd_validated.timezone,
+                            "default_iab_category": impd_validated.default_iab_category,
                             "manual_approval_required": impd_validated.manual_approval_required,
                         }
                     )

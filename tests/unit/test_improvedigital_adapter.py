@@ -279,6 +279,9 @@ class TestClassicCreatives:
                     # CreativeDto requires advertiser_domain (derived from the
                     # click URL when not given) — validated live on dev.
                     "click_url": "https://brand.example.com/landing",
+                    # CreativeDto.iab_category is mandatory; derived from the
+                    # buy's AdCP advertiser_industry.
+                    "advertiser_industry": "technology.software",
                 }
             ],
             today=datetime.now(UTC),

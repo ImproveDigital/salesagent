@@ -242,6 +242,7 @@ from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
     _convert_creative_to_adapter_asset,
     adapter_asset_requires_dimensions,
+    advertiser_industry_value,
     build_adapter_asset_from_stored_creative,
     extract_click_url,
     extract_impression_tracker_url,
@@ -1155,16 +1156,22 @@ def _upload_approval_creatives_via_adapter(
 
     # Statuses come back one per asset, in order; successful rows carry the
     # platform creative ID in ``creative_id`` (the original ID is replaced).
+    # A rejected creative fails the approval — a booked campaign with no
+    # creative attached must not report success.
     platform_ids_by_creative: dict[str, str] = {}
+    upload_errors: list[str] = []
     for asset, status in zip(assets, asset_statuses, strict=False):
         if str(getattr(status, "status", "") or "").lower() == "failed":
-            logger.error(
-                f"[APPROVAL] Failed to upload creative {asset['creative_id']}: {getattr(status, 'message', None)}"
-            )
+            upload_errors.append(f"{asset['creative_id']}: {getattr(status, 'message', None)}")
             continue
         platform_creative_id = getattr(status, "creative_id", None)
         if platform_creative_id:
             platform_ids_by_creative[str(asset["creative_id"])] = str(platform_creative_id)
+    if upload_errors:
+        raise AdCPAdapterError(
+            "Ad server rejected creative(s): " + "; ".join(upload_errors),
+            details={"error_code": "CREATIVE_UPLOAD_FAILED"},
+        )
 
     for creative_id, platform_creative_id in platform_ids_by_creative.items():
         creative = creative_map.get(creative_id)
@@ -1186,8 +1193,19 @@ def _upload_approval_creatives_via_adapter(
             line_item_id = platform_line_item_ids.get(package_assignment["package_id"])
             if line_item_id:
                 creatives_by_line_item.setdefault(str(line_item_id), []).append(platform_creative_id)
+    binding_errors: list[str] = []
     for line_item_id, line_item_creative_ids in creatives_by_line_item.items():
-        adapter.associate_creatives([line_item_id], line_item_creative_ids)
+        results = adapter.associate_creatives([line_item_id], line_item_creative_ids) or []
+        binding_errors.extend(
+            f"creative {result.get('creative_id')} → line item {result.get('line_item_id')}: {result.get('message')}"
+            for result in results
+            if isinstance(result, dict) and result.get("status") == "failed"
+        )
+    if binding_errors:
+        raise AdCPAdapterError(
+            "Ad server could not bind creative(s) to line items: " + "; ".join(binding_errors),
+            details={"error_code": "CREATIVE_ASSOCIATION_FAILED"},
+        )
 
 
 def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool, str | None]:
@@ -1716,6 +1734,9 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         "click_url": click_url,  # Separate click-through URL for GAM destinationUrl
                         "asset_type": creative_data.get("asset_type", "image"),
                         "name": creative.name or f"Creative {creative.creative_id}",
+                        # Adapters that need an ad category (Improve Digital
+                        # iab_category) derive it from the buy's industry.
+                        "advertiser_industry": advertiser_industry_value(getattr(request, "advertiser_industry", None)),
                     }
 
                     # Add impression tracker URL in the format expected by GAM adapter
@@ -4649,6 +4670,9 @@ async def _create_media_buy_impl(
                                         creative,
                                         package_id=response_package_id,
                                         format_spec=format_spec,
+                                    )
+                                    asset["advertiser_industry"] = advertiser_industry_value(
+                                        getattr(req, "advertiser_industry", None)
                                     )
 
                                     # Validate required fields - FAIL FAST, do not skip

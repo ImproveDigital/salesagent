@@ -60,6 +60,7 @@ from src.adapters.base import (
 from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
 from src.adapters.improvedigital.client import ImproveDigitalAuthError, ImproveDigitalClient, ImproveDigitalError
 from src.adapters.improvedigital.formats import improvedigital_creative_formats
+from src.adapters.improvedigital.iab import iab_category_for_industry
 from src.adapters.improvedigital.schemas import ImproveDigitalConnectionConfig, ImproveDigitalProductConfig
 from src.adapters.improvedigital.targeting import build_targeting, validate_targeting
 from src.core.schemas import (
@@ -185,6 +186,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
         self.base_url = (self.config.get("api_base_url") or "https://api.360yield.com").rstrip("/")
         self.currency = self.config.get("currency", "EUR")
         self.timezone = self.config.get("timezone", "UTC")
+        # Fallback for CreativeDto.iab_category when the buy's
+        # advertiser_industry has no IAB v1 mapping (see iab.py).
+        self.default_iab_category = self.config.get("default_iab_category")
 
         # Same-instance cache: line_item_id → campaign_id, populated by
         # create_media_buy so associate_creatives (called later in the same
@@ -443,6 +447,25 @@ class ImproveDigitalAdapter(AdServerAdapter):
                             f"No Improve Digital buying entity office is mapped to {buy_currency} for this "
                             "publisher. Map the office that bills in this currency under "
                             "Policies & Workflows → Budget Controls, or book in a mapped currency."
+                        ),
+                        details=None,
+                    )
+                ]
+            )
+        # CreativeDto.iab_category is mandatory. Refuse before anything is
+        # created upstream, so a buy carrying creatives never books a
+        # campaign whose creatives the platform would then reject.
+        if self._request_has_creatives(request) and not self._resolve_iab_category(
+            getattr(request, "advertiser_industry", None)
+        ):
+            return CreateMediaBuyError(
+                errors=[
+                    Error(
+                        code="iab_category_required",
+                        message=(
+                            "Improve Digital creatives need an IAB category. Send an advertiser_industry "
+                            "that maps to one, or set the default IAB category in the tenant's Improve "
+                            "Digital adapter settings."
                         ),
                         details=None,
                     )
@@ -1135,15 +1158,16 @@ class ImproveDigitalAdapter(AdServerAdapter):
         for asset in assets:
             creative_id = str(asset.get("creative_id") or asset.get("id") or "")
             payload = self._creative_payload(asset)
-            if payload is None:
+            missing = self._missing_creative_fields(asset, payload)
+            if payload is None or missing:
                 statuses.append(
                     AssetStatus(
                         creative_id=creative_id,
                         status="failed",
                         message=(
-                            "Improve Digital Classic creatives need a tag/URL, a size, and an "
-                            "advertiser domain (CreativeDto requires name, type, size, status, "
-                            "tag, advertiser_domain)"
+                            f"Improve Digital Classic creative is missing: {', '.join(missing)} "
+                            "(CreativeDto requires name, type, size, status, tag, advertiser_domain "
+                            "and an IAB category)"
                         ),
                     )
                 )
@@ -1298,6 +1322,9 @@ class ImproveDigitalAdapter(AdServerAdapter):
             "tag": str(tag),
             "advertiser_domain": advertiser_domain,
         }
+        iab_category = asset.get("iab_category") or self._resolve_iab_category(asset.get("advertiser_industry"))
+        if iab_category:
+            payload["iab_category"] = iab_category
         if creative_type == "Third Party Tag":
             # Required alongside the tag (validated live): the served
             # medium and the platforms the tag may render on.
@@ -1305,6 +1332,38 @@ class ImproveDigitalAdapter(AdServerAdapter):
             payload["platform_types"] = ["Web"]
             payload["tag_secure"] = True
         return payload
+
+    def _resolve_iab_category(self, advertiser_industry: Any) -> str | None:
+        """IAB v1 category from the buy's advertiser industry, else the
+        tenant default (``default_iab_category`` connection setting)."""
+        return iab_category_for_industry(advertiser_industry) or getattr(self, "default_iab_category", None)
+
+    @staticmethod
+    def _missing_creative_fields(asset: dict[str, Any], payload: dict[str, Any] | None) -> list[str]:
+        """Names of the platform-required creative pieces an asset lacks."""
+        missing: list[str] = []
+        if not (asset.get("snippet") or asset.get("tag") or asset.get("url")):
+            missing.append("tag or media URL")
+        if asset.get("width") is None or asset.get("height") is None:
+            missing.append("size (width/height)")
+        if not (payload or {}).get("advertiser_domain") and not (
+            asset.get("advertiser_domain")
+            or asset.get("click_url")
+            or asset.get("click_through_url")
+            or asset.get("landing_page_url")
+        ):
+            missing.append("advertiser domain (taken from the click-through URL)")
+        if payload is not None and not payload.get("iab_category"):
+            missing.append("IAB category (from advertiser_industry or the tenant default_iab_category)")
+        return missing
+
+    @staticmethod
+    def _request_has_creatives(request: CreateMediaBuyRequest) -> bool:
+        """Whether any package carries creatives (inline or by reference)."""
+        for package in getattr(request, "packages", None) or []:
+            if any(getattr(package, field, None) for field in ("creatives", "creative_ids", "creative_assignments")):
+                return True
+        return False
 
     @staticmethod
     def _image_tag(asset: dict[str, Any]) -> str | None:

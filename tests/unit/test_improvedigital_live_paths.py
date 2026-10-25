@@ -447,6 +447,7 @@ class TestCreativesLive:
                     "width": 300,
                     "height": 250,
                     "advertiser_domain": "brand.example.com",
+                    "advertiser_industry": "technology.software",
                 }
             ],
             today=datetime.now(UTC),
@@ -460,6 +461,7 @@ class TestCreativesLive:
         assert body["size"] == "300x250 (Medium Rectangle)"
         assert body["size_id"] == 4
         assert body["advertiser_domain"] == "brand.example.com"
+        assert body["iab_category"] == "IAB19"
         assert body["third_party_type"] == "display"
         assert body["platform_types"] == ["Web"]
         assert "type" not in body
@@ -511,6 +513,7 @@ class TestCreativesLive:
                     "width": 300,
                     "height": 250,
                     "advertiser_domain": "brand.example.com",
+                    "advertiser_industry": "technology.software",
                 }
             ],
             today=datetime.now(UTC),

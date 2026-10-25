@@ -808,6 +808,13 @@ MEDIA_ASSET_FALLBACK_IDS = {
     "audio",
 }
 
+
+def advertiser_industry_value(industry: Any) -> str | None:
+    """Plain string for an AdCP advertiser industry (enum, RootModel or str)."""
+    value = getattr(industry, "value", None) or getattr(industry, "root", None) or industry
+    return str(value) if value else None
+
+
 # Common asset IDs for clickthrough URLs
 CLICKTHROUGH_ASSET_IDS = {
     "click_url",

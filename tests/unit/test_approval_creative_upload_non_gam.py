@@ -12,6 +12,9 @@ returned platform creative IDs to the packages' platform line items.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from src.core.exceptions import AdCPAdapterError
 from src.core.tools.media_buy_create import _upload_approval_creatives_via_adapter
 
 
@@ -56,23 +59,45 @@ class TestApprovalCreativeUploadNonGam:
         session.add.assert_called_once_with(creative)
         adapter.associate_creatives.assert_called_once_with(["5501"], ["991"])
 
-    def test_failed_upload_is_skipped_not_persisted(self):
+    def test_failed_upload_fails_approval_and_is_not_persisted(self):
+        # A rejected creative must fail the approval — previously it was only
+        # logged and the buy reported success with no creative attached.
         adapter = _adapter([SimpleNamespace(creative_id="cr_1", status="failed", message="rejected")])
         creative = SimpleNamespace(data={})
         session = MagicMock()
 
-        _upload_approval_creatives_via_adapter(
-            adapter=adapter,
-            platform_media_buy_id="improvedigital_314399",
-            assets=[_asset("cr_1", "pkg_1")],
-            creative_map={"cr_1": creative},
-            platform_line_item_ids={"pkg_1": "5501"},
-            session=session,
-        )
+        with pytest.raises(AdCPAdapterError, match="cr_1: rejected") as exc_info:
+            _upload_approval_creatives_via_adapter(
+                adapter=adapter,
+                platform_media_buy_id="improvedigital_314399",
+                assets=[_asset("cr_1", "pkg_1")],
+                creative_map={"cr_1": creative},
+                platform_line_item_ids={"pkg_1": "5501"},
+                session=session,
+            )
 
+        assert exc_info.value.details["error_code"] == "CREATIVE_UPLOAD_FAILED"
         assert "platform_creative_id" not in creative.data
         session.add.assert_not_called()
         adapter.associate_creatives.assert_not_called()
+
+    def test_failed_line_item_binding_fails_approval(self):
+        adapter = _adapter([SimpleNamespace(creative_id="991", status="approved", message=None)])
+        adapter.associate_creatives.return_value = [
+            {"line_item_id": "5501", "creative_id": "991", "status": "failed", "message": "no campaign"}
+        ]
+
+        with pytest.raises(AdCPAdapterError, match="991 → line item 5501: no campaign") as exc_info:
+            _upload_approval_creatives_via_adapter(
+                adapter=adapter,
+                platform_media_buy_id="improvedigital_314399",
+                assets=[_asset("cr_1", "pkg_1")],
+                creative_map={"cr_1": SimpleNamespace(data={})},
+                platform_line_item_ids={"pkg_1": "5501"},
+                session=MagicMock(),
+            )
+
+        assert exc_info.value.details["error_code"] == "CREATIVE_ASSOCIATION_FAILED"
 
     def test_existing_platform_creative_id_is_preserved(self):
         adapter = _adapter([SimpleNamespace(creative_id="991", status="approved", message=None)])
