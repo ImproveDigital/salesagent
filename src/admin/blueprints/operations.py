@@ -32,7 +32,9 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def _validate_media_buy_approval(media_buy, assignments, creatives, now: datetime) -> str | None:
+def _validate_media_buy_approval(
+    media_buy, assignments, creatives, now: datetime, require_click_url: bool = False
+) -> str | None:
     """Validate that a media buy is ready to be approved.
 
     Returns a human-readable error message if approval must be blocked, or
@@ -43,7 +45,10 @@ def _validate_media_buy_approval(media_buy, assignments, creatives, now: datetim
     1. At least one creative must be assigned.
     2. No assigned creative may be rejected.
     3. Every assigned creative must be approved.
-    4. The flight window must be consistent and not already ended.
+    4. (``require_click_url``) Every assigned creative must carry a
+       click-through URL — Improve Digital derives the mandatory
+       advertiser domain from it and rejects creatives without one.
+    5. The flight window must be consistent and not already ended.
     """
     if not assignments:
         return "Cannot approve: no creatives are assigned to this media buy. Assign and approve creatives first."
@@ -70,6 +75,20 @@ def _validate_media_buy_approval(media_buy, assignments, creatives, now: datetim
             f"Cannot approve: {len(unapproved)} creative(s) are not yet approved "
             f"({', '.join(unapproved)}). Approve the creatives first."
         )
+
+    if require_click_url:
+        from src.core.helpers.creative_helpers import extract_click_url
+
+        without_click_url = [
+            c.creative_id
+            for c in creatives
+            if not extract_click_url(c.data or {}, None, apply_macro_substitution=False)
+        ]
+        if without_click_url:
+            return (
+                f"Cannot approve: creative(s) {', '.join(without_click_url)} have no click-through URL. "
+                "Improve Digital requires one on every creative."
+            )
 
     start_time = _as_utc(getattr(media_buy, "start_time", None))
     end_time = _as_utc(getattr(media_buy, "end_time", None))
@@ -545,8 +564,15 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                         if pre_creative_ids
                         else []
                     )
+                    from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+                    tenant_row = TenantConfigRepository(db_session, tenant_id).get_tenant()
                     validation_error = _validate_media_buy_approval(
-                        media_buy, pre_assignments, pre_creatives, datetime.now(UTC)
+                        media_buy,
+                        pre_assignments,
+                        pre_creatives,
+                        datetime.now(UTC),
+                        require_click_url=(getattr(tenant_row, "ad_server", None) == "improvedigital"),
                     )
                     if validation_error:
                         flash(validation_error, "error")
