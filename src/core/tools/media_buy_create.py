@@ -717,6 +717,7 @@ def _validate_creatives_before_adapter_call(
     packages: list[MediaPackage],
     tenant_id: str,
     session: "Session | None" = None,
+    require_click_url: bool = False,
 ) -> None:
     """Validate all creatives have required fields BEFORE calling adapter.
 
@@ -729,6 +730,10 @@ def _validate_creatives_before_adapter_call(
         packages: List of Package objects with creative_ids
         tenant_id: Tenant ID for database lookup
         session: SQLAlchemy session (from UoW).
+        require_click_url: Also require a click-through URL asset on every
+            reference creative. Improve Digital derives the mandatory
+            ``advertiser_domain`` from it, so without one the platform
+            rejects the creative after the campaign is already booked.
 
     Raises:
         AdCPValidationError: If any creative is missing required fields (URL, dimensions)
@@ -794,6 +799,12 @@ def _validate_creatives_before_adapter_call(
         if requires_dimensions and (not width or not height):
             validation_errors.append(
                 f"Reference creative {creative.creative_id} missing dimensions (width={width}, height={height})"
+            )
+        if require_click_url and not extract_click_url(creative_data, format_spec, apply_macro_substitution=False):
+            validation_errors.append(
+                f"Reference creative {creative.creative_id} (format={creative.format}) "
+                "missing a click-through URL asset (e.g. 'click_url' with url_type 'clickthrough'); "
+                "the ad server derives the required advertiser domain from it"
             )
 
     # --- Format compatibility check: creative format vs product accepted formats ---
@@ -876,6 +887,10 @@ def _tenant_uses_springserve(tenant_context: Any) -> bool:
 
 def _tenant_uses_google_ad_manager(tenant_context: Any) -> bool:
     return _tenant_adapter_name(tenant_context) in {"google_ad_manager", "gam"}
+
+
+def _tenant_uses_improve_digital(tenant_context: Any) -> bool:
+    return _tenant_adapter_name(tenant_context) == "improvedigital"
 
 
 def _tenant_adapter_name(tenant_context: Any) -> str:
@@ -1552,7 +1567,12 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
             # PRE-VALIDATE: Check all creatives have required fields BEFORE calling adapter
             # This prevents GAM order creation when creatives are invalid (all-or-nothing approach)
-            _validate_creatives_before_adapter_call(packages, tenant_id, session=session)
+            _validate_creatives_before_adapter_call(
+                packages,
+                tenant_id,
+                session=session,
+                require_click_url=_tenant_uses_improve_digital(tenant_context),
+            )
             if _tenant_uses_springserve(tenant_context):
                 adapter_for_preparation = get_adapter(
                     principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_context
