@@ -68,7 +68,13 @@ const AAO_STATUS_STYLES = {
     no_properties: { bg: '#fee2e2', fg: '#991b1b', label: 'No properties listed' },
     unreachable: { bg: '#fee2e2', fg: '#991b1b', label: 'Unreachable' },
     stale: { bg: '#e0e7ff', fg: '#3730a3', label: 'Refresh needed' },
+    // Authorized by an admin without an adagents.json listing. Kept across
+    // refreshes until the publisher authorizes us for real.
+    manual: { bg: '#e0f2fe', fg: '#075985', label: 'Manually authorized' },
 };
+
+const MANUAL_AUTHORIZATION_WARNING =
+    'Not listed in the publisher’s adagents.json. Buyer agents that check it may skip this publisher.';
 
 function aaoStatusChip(kind) {
     const s = AAO_STATUS_STYLES[kind] || AAO_STATUS_STYLES.stale;
@@ -168,11 +174,15 @@ function loadPublishers() {
                         ? '<span style="color: #9ca3af;">— / —</span>'
                         : `<strong>${partner.authorized_properties || 0}</strong> / ${partner.total_properties || 0}`;
                 const refreshed = relativeTime(partner.last_refreshed_at || partner.last_synced_at);
+                const manualHint = partner.manual_authorization
+                    ? `<div style="font-size: 0.75rem; color: #075985; margin-top: 0.25rem;">${MANUAL_AUTHORIZATION_WARNING}</div>`
+                    : '';
                 const onboardingHint =
                     statusKind === 'pending' ||
                     statusKind === 'unreachable' ||
                     statusKind === 'no_properties' ||
-                    statusKind === 'unbound'
+                    statusKind === 'unbound' ||
+                    statusKind === 'manual'
                         ? `<div style="margin-top: 0.5rem; font-size: 0.75rem;">
                                <a href="${escapeHtml(partner.aao_onboarding_url)}" target="_blank" rel="noopener" style="color: #2563eb;">
                                    Send AAO link to publisher →
@@ -180,9 +190,27 @@ function loadPublishers() {
                            </div>`
                         : '';
 
+                let manualButton = '';
+                if (partner.manual_authorization) {
+                    manualButton = `
+                        <button onclick="removeManualAuthorization(${partner.id}, '${escapeHtml(partner.publisher_domain)}')"
+                                class="btn btn-sm" style="background: #f3f4f6; color: #374151; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; margin-right: 0.25rem;">
+                            Remove manual authorization
+                        </button>`;
+                } else if (statusKind !== 'authorized' && statusKind !== 'unbound') {
+                    // Keyed on the visible status, not is_verified: dev/mock
+                    // auto-verified rows still show "Pending" and need the button.
+                    manualButton = `
+                        <button onclick="authorizePublisherManually(${partner.id}, '${escapeHtml(partner.publisher_domain)}')"
+                                class="btn btn-sm" style="background: #e0f2fe; color: #075985; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; margin-right: 0.25rem;">
+                            Authorize manually
+                        </button>`;
+                }
+
                 const actionButtons = isEmbedded
                     ? '<span style="color: #9ca3af; font-size: 0.75rem;">Platform-managed</span>'
                     : `
+                        ${manualButton}
                         <button onclick="refreshPublisher(${partner.id})"
                                 class="btn btn-sm" style="background: #eff6ff; color: #1e40af; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; margin-right: 0.25rem;">
                             Refresh
@@ -202,6 +230,7 @@ function loadPublishers() {
                         <td style="padding: 0.75rem;">
                             ${chip}
                             ${errorMsg ? `<div style="font-size: 0.75rem; color: #dc2626; margin-top: 0.25rem;">${escapeHtml(errorMsg)}</div>` : ''}
+                            ${manualHint}
                             ${onboardingHint}
                         </td>
                         <td style="padding: 0.75rem; color: #374151;">${counts}</td>
@@ -254,6 +283,8 @@ function addPublisher(event) {
 
     const domain = document.getElementById('publisher-domain').value.trim();
     const displayName = document.getElementById('publisher-display-name').value.trim();
+    const manualCheckbox = document.getElementById('publisher-manual-authorization');
+    const authorizeManually = manualCheckbox ? manualCheckbox.checked : false;
     const submitBtn = document.getElementById('add-publisher-submit');
 
     if (!domain) {
@@ -284,6 +315,13 @@ function addPublisher(event) {
             }
 
             hideAddPublisherModal();
+
+            // The add endpoint never authorizes manually; that is a separate,
+            // admin-only call so the role check and audit log live in one place.
+            if (authorizeManually && !data.is_verified) {
+                return postManualAuthorization(data.id, 'POST').then(() => loadPublishers());
+            }
+
             loadPublishers();
 
             if (data.message) {
@@ -353,6 +391,55 @@ function syncAllPublishers() {
             icon.style.animation = '';
             alert('Error: ' + error.message);
         });
+}
+
+// Manual authorization: POST authorizes, DELETE removes it. Resolves to the
+// updated partner, or null after showing the error.
+function postManualAuthorization(partnerId, method) {
+    return fetch(`${config.scriptName}/tenant/${config.tenantId}/publisher-partners/${partnerId}/manual-authorization`, {
+        method: method,
+        credentials: 'same-origin',
+    })
+        .then((r) => r.json())
+        .then((data) => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+                return null;
+            }
+            return data;
+        })
+        .catch((err) => {
+            alert('Error: ' + err.message);
+            return null;
+        });
+}
+
+function authorizePublisherManually(partnerId, domain) {
+    const ok = confirm(
+        `Authorize ${domain} manually?\n\n` +
+            'Use this when the publisher has agreed to work with you but has not yet added your agent URL ' +
+            'to their adagents.json. Their inventory can then be used in products.\n\n' +
+            'Buyer agents that check adagents.json may still skip this publisher until it lists your agent URL.'
+    );
+    if (!ok) return;
+    postManualAuthorization(partnerId, 'POST').then((data) => {
+        if (data) loadPublishers();
+    });
+}
+
+function removeManualAuthorization(partnerId, domain) {
+    if (
+        !confirm(
+            `Remove the manual authorization for ${domain}?\n\n` +
+                'Its properties are removed and can no longer be added to products. ' +
+                'It goes back to Pending until its adagents.json lists your agent URL.'
+        )
+    ) {
+        return;
+    }
+    postManualAuthorization(partnerId, 'DELETE').then((data) => {
+        if (data) loadPublishers();
+    });
 }
 
 // Refresh a single publisher (forces fresh AAO fetch).

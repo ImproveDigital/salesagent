@@ -15,9 +15,11 @@ from flask import Blueprint, Response, flash, jsonify, redirect, render_template
 from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
+from src.admin.utils.audit_decorator import log_admin_action
 from src.core.config import get_config
 from src.core.database.database_session import get_db_session
 from src.core.database.models import AuthorizedProperty, PublisherPartner, Tenant
+from src.core.database.repositories.tenant_config import MANUAL_AUTHORIZATION_KIND, TenantConfigRepository
 from src.core.domain_config import get_tenant_url
 from src.core.security.url_validator import BLOCKED_HOSTNAMES, check_url_ssrf
 from src.services._adagents_shapes import get_authorized_properties_by_agent
@@ -82,6 +84,13 @@ def _persist_status(partner: PublisherPartner, status: PublisherPartnerStatus) -
         partner.last_synced_at = datetime.now(UTC)
 
 
+def _keeps_manual_authorization(partner: PublisherPartner, status: PublisherPartnerStatus) -> bool:
+    """True when an AAO re-check must not overwrite a manual authorization.
+
+    Only a real authorization from the publisher replaces it."""
+    return partner.aao_status_kind == MANUAL_AUTHORIZATION_KIND and status.status not in ("authorized", "unbound")
+
+
 def _partner_to_dict(partner: PublisherPartner) -> dict:
     """Serialize a PublisherPartner row for the JSON list endpoint."""
     aao_url = f"https://agenticadvertising.org/publisher/{partner.publisher_domain}"
@@ -128,6 +137,7 @@ def _partner_to_dict(partner: PublisherPartner) -> dict:
         "total_properties": total,
         "authorized_properties": authorized,
         "aao_status": ui_status,
+        "manual_authorization": partner.aao_status_kind == MANUAL_AUTHORIZATION_KIND,
         "aao_onboarding_url": aao_url,
         "created_at": partner.created_at.isoformat(),
         # Legacy alias for unmigrated callers.
@@ -344,6 +354,9 @@ def delete_publisher_partner(tenant_id: str, partner_id: int) -> Response | tupl
             if not partner:
                 return jsonify({"error": "Publisher not found"}), 404
 
+            # Its properties go too, or they stay selectable on the product page
+            # (and keep the setup checklist green) after the publisher is gone.
+            TenantConfigRepository(session, tenant_id).delete_publisher_properties(partner.publisher_domain)
             session.delete(partner)
             session.commit()
 
@@ -357,7 +370,11 @@ def delete_publisher_partner(tenant_id: str, partner_id: int) -> Response | tupl
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners/sync", methods=["POST"])
 @require_tenant_access(api_mode=True, role=("admin", "member"), allow_embedded_writes=True)
 def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
-    """Sync verification status for all publisher partners."""
+    """Sync verification status for all publisher partners.
+
+    Manually authorized partners stay authorized unless the publisher now
+    authorizes our agent for real, in which case they switch to that status.
+    """
     try:
         with get_db_session() as session:
             # Get tenant
@@ -530,8 +547,12 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
             now = datetime.now(UTC)
             safe_partners: list[PublisherPartner] = []
             ssrf_errors = 0
+            manual_kept = 0
             for partner in partners:
                 ssrf_ok, ssrf_err = check_url_ssrf(f"https://{partner.publisher_domain}")
+                if not ssrf_ok and partner.aao_status_kind == MANUAL_AUTHORIZATION_KIND:
+                    manual_kept += 1
+                    continue
                 if not ssrf_ok:
                     partner.sync_status = "error"
                     partner.sync_error = f"Refused: {ssrf_err}"
@@ -556,12 +577,16 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
             statuses_by_domain = {s.publisher_domain: s for s in statuses}
 
             verified_domains = []
-            synced = 0
-            verified = 0
+            synced = manual_kept
+            verified = manual_kept
             errors = ssrf_errors
             for partner in safe_partners:
                 status = statuses_by_domain.get(partner.publisher_domain)
                 if status is None:
+                    continue
+                if _keeps_manual_authorization(partner, status):
+                    verified += 1
+                    synced += 1
                     continue
                 _persist_status(partner, status)
                 if status.status in ("authorized", "unbound"):
@@ -669,13 +694,71 @@ def refresh_publisher_partner(tenant_id: str, partner_id: int) -> Response | tup
             finally:
                 loop.close()
 
-            _persist_status(partner, status)
-            session.commit()
+            if not _keeps_manual_authorization(partner, status):
+                _persist_status(partner, status)
+                session.commit()
 
             return jsonify(_partner_to_dict(partner))
 
     except Exception as e:
         logger.error(f"Error refreshing publisher partner: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@publisher_partners_bp.route("/<tenant_id>/publisher-partners/<int:partner_id>/manual-authorization", methods=["POST"])
+@log_admin_action(
+    "authorize_publisher_manually", extract_details=lambda result, **kw: {"partner_id": kw.get("partner_id")}
+)
+@require_tenant_access(api_mode=True, role=("admin",))
+def authorize_publisher_manually(tenant_id: str, partner_id: int) -> Response | tuple[Response, int]:
+    """Authorize a publisher partner by hand, without an adagents.json listing.
+
+    For publishers that haven't added our agent URL to their adagents.json
+    yet. Buyer agents that verify adagents.json will still see us as not
+    authorized; this only unblocks the setup checklist and product setup.
+    """
+    try:
+        with get_db_session() as session:
+            repo = TenantConfigRepository(session, tenant_id)
+            partner = repo.get_publisher_partner(partner_id)
+            if not partner:
+                return jsonify({"error": "Publisher not found"}), 404
+
+            repo.authorize_publisher_partner_manually(partner)
+            session.commit()
+            logger.info(f"Publisher {partner.publisher_domain} authorized manually for tenant {tenant_id}")
+            return jsonify(_partner_to_dict(partner))
+
+    except Exception as e:
+        logger.error(f"Error authorizing publisher partner manually: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@publisher_partners_bp.route(
+    "/<tenant_id>/publisher-partners/<int:partner_id>/manual-authorization", methods=["DELETE"]
+)
+@log_admin_action(
+    "revoke_manual_publisher_authorization", extract_details=lambda result, **kw: {"partner_id": kw.get("partner_id")}
+)
+@require_tenant_access(api_mode=True, role=("admin",))
+def revoke_manual_publisher_authorization(tenant_id: str, partner_id: int) -> Response | tuple[Response, int]:
+    """Remove a manual authorization; the partner goes back to pending."""
+    try:
+        with get_db_session() as session:
+            repo = TenantConfigRepository(session, tenant_id)
+            partner = repo.get_publisher_partner(partner_id)
+            if not partner:
+                return jsonify({"error": "Publisher not found"}), 404
+            if partner.aao_status_kind != MANUAL_AUTHORIZATION_KIND:
+                return jsonify({"error": "Publisher is not manually authorized"}), 409
+
+            repo.revoke_manual_publisher_authorization(partner)
+            session.commit()
+            logger.info(f"Manual authorization removed for {partner.publisher_domain} on tenant {tenant_id}")
+            return jsonify(_partner_to_dict(partner))
+
+    except Exception as e:
+        logger.error(f"Error removing manual publisher authorization: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 

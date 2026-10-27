@@ -18,6 +18,7 @@ from pydantic import Field, field_serializer, field_validator, model_validator
 from src.adapters._secret_fields import decrypt_secret_value, encrypt_secret_value
 from src.adapters.base import BaseConnectionConfig, BaseProductConfig
 from src.adapters.improvedigital._transport import DEFAULT_BASE_URL
+from src.adapters.improvedigital.iab import IAB_CATEGORY_PATTERN
 
 # Placement-search seller_types filter values (from the rtb/v3 OpenAPI spec).
 IMPROVEDIGITAL_SELLER_TYPES = ["PUBLISHER", "INTERMEDIARY", "BOTH"]
@@ -180,6 +181,14 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
         description="Default campaign timezone (IANA name, e.g. Europe/Amsterdam) — required by the campaign API",
         json_schema_extra={"ui_order": 13},
     )
+    default_iab_category: str | None = Field(
+        default=None,
+        description=(
+            "IAB v1 category (e.g. IAB19 or IAB9-30) stamped on creatives when the buy's "
+            "advertiser_industry does not map to one — CreativeDto.iab_category is mandatory"
+        ),
+        json_schema_extra={"ui_order": 14},
+    )
 
     @field_serializer("client_secret")
     def _encrypt_client_secret(self, value: str | None) -> str | None:
@@ -189,6 +198,16 @@ class ImproveDigitalConnectionConfig(BaseConnectionConfig):
     @classmethod
     def _decrypt_client_secret(cls, value: str | None) -> str | None:
         return decrypt_secret_value(value)
+
+    @field_validator("default_iab_category", mode="after")
+    @classmethod
+    def _iab_category_must_be_v1_code(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        value = value.strip().upper()
+        if not IAB_CATEGORY_PATTERN.match(value):
+            raise ValueError("default_iab_category must be an IAB v1 code such as IAB19 or IAB9-30")
+        return value
 
     @field_validator("api_base_url", mode="after")
     @classmethod

@@ -242,6 +242,7 @@ from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
     _convert_creative_to_adapter_asset,
     adapter_asset_requires_dimensions,
+    advertiser_industry_value,
     build_adapter_asset_from_stored_creative,
     extract_click_url,
     extract_impression_tracker_url,
@@ -716,6 +717,7 @@ def _validate_creatives_before_adapter_call(
     packages: list[MediaPackage],
     tenant_id: str,
     session: "Session | None" = None,
+    require_click_url: bool = False,
 ) -> None:
     """Validate all creatives have required fields BEFORE calling adapter.
 
@@ -728,6 +730,10 @@ def _validate_creatives_before_adapter_call(
         packages: List of Package objects with creative_ids
         tenant_id: Tenant ID for database lookup
         session: SQLAlchemy session (from UoW).
+        require_click_url: Also require a click-through URL asset on every
+            reference creative. Improve Digital derives the mandatory
+            ``advertiser_domain`` from it, so without one the platform
+            rejects the creative after the campaign is already booked.
 
     Raises:
         AdCPValidationError: If any creative is missing required fields (URL, dimensions)
@@ -793,6 +799,12 @@ def _validate_creatives_before_adapter_call(
         if requires_dimensions and (not width or not height):
             validation_errors.append(
                 f"Reference creative {creative.creative_id} missing dimensions (width={width}, height={height})"
+            )
+        if require_click_url and not extract_click_url(creative_data, format_spec, apply_macro_substitution=False):
+            validation_errors.append(
+                f"Reference creative {creative.creative_id} (format={creative.format}) "
+                "missing a click-through URL asset (e.g. 'click_url' with url_type 'clickthrough'); "
+                "the ad server derives the required advertiser domain from it"
             )
 
     # --- Format compatibility check: creative format vs product accepted formats ---
@@ -875,6 +887,10 @@ def _tenant_uses_springserve(tenant_context: Any) -> bool:
 
 def _tenant_uses_google_ad_manager(tenant_context: Any) -> bool:
     return _tenant_adapter_name(tenant_context) in {"google_ad_manager", "gam"}
+
+
+def _tenant_uses_improve_digital(tenant_context: Any) -> bool:
+    return _tenant_adapter_name(tenant_context) == "improvedigital"
 
 
 def _tenant_adapter_name(tenant_context: Any) -> str:
@@ -1155,16 +1171,22 @@ def _upload_approval_creatives_via_adapter(
 
     # Statuses come back one per asset, in order; successful rows carry the
     # platform creative ID in ``creative_id`` (the original ID is replaced).
+    # A rejected creative fails the approval — a booked campaign with no
+    # creative attached must not report success.
     platform_ids_by_creative: dict[str, str] = {}
+    upload_errors: list[str] = []
     for asset, status in zip(assets, asset_statuses, strict=False):
         if str(getattr(status, "status", "") or "").lower() == "failed":
-            logger.error(
-                f"[APPROVAL] Failed to upload creative {asset['creative_id']}: {getattr(status, 'message', None)}"
-            )
+            upload_errors.append(f"{asset['creative_id']}: {getattr(status, 'message', None)}")
             continue
         platform_creative_id = getattr(status, "creative_id", None)
         if platform_creative_id:
             platform_ids_by_creative[str(asset["creative_id"])] = str(platform_creative_id)
+    if upload_errors:
+        raise AdCPAdapterError(
+            "Ad server rejected creative(s): " + "; ".join(upload_errors),
+            details={"error_code": "CREATIVE_UPLOAD_FAILED"},
+        )
 
     for creative_id, platform_creative_id in platform_ids_by_creative.items():
         creative = creative_map.get(creative_id)
@@ -1186,8 +1208,19 @@ def _upload_approval_creatives_via_adapter(
             line_item_id = platform_line_item_ids.get(package_assignment["package_id"])
             if line_item_id:
                 creatives_by_line_item.setdefault(str(line_item_id), []).append(platform_creative_id)
+    binding_errors: list[str] = []
     for line_item_id, line_item_creative_ids in creatives_by_line_item.items():
-        adapter.associate_creatives([line_item_id], line_item_creative_ids)
+        results = adapter.associate_creatives([line_item_id], line_item_creative_ids) or []
+        binding_errors.extend(
+            f"creative {result.get('creative_id')} → line item {result.get('line_item_id')}: {result.get('message')}"
+            for result in results
+            if isinstance(result, dict) and result.get("status") == "failed"
+        )
+    if binding_errors:
+        raise AdCPAdapterError(
+            "Ad server could not bind creative(s) to line items: " + "; ".join(binding_errors),
+            details={"error_code": "CREATIVE_ASSOCIATION_FAILED"},
+        )
 
 
 def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool, str | None]:
@@ -1534,7 +1567,12 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
             # PRE-VALIDATE: Check all creatives have required fields BEFORE calling adapter
             # This prevents GAM order creation when creatives are invalid (all-or-nothing approach)
-            _validate_creatives_before_adapter_call(packages, tenant_id, session=session)
+            _validate_creatives_before_adapter_call(
+                packages,
+                tenant_id,
+                session=session,
+                require_click_url=_tenant_uses_improve_digital(tenant_context),
+            )
             if _tenant_uses_springserve(tenant_context):
                 adapter_for_preparation = get_adapter(
                     principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_context
@@ -1716,6 +1754,9 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         "click_url": click_url,  # Separate click-through URL for GAM destinationUrl
                         "asset_type": creative_data.get("asset_type", "image"),
                         "name": creative.name or f"Creative {creative.creative_id}",
+                        # Adapters that need an ad category (Improve Digital
+                        # iab_category) derive it from the buy's industry.
+                        "advertiser_industry": advertiser_industry_value(getattr(request, "advertiser_industry", None)),
                     }
 
                     # Add impression tracker URL in the format expected by GAM adapter
@@ -4649,6 +4690,9 @@ async def _create_media_buy_impl(
                                         creative,
                                         package_id=response_package_id,
                                         format_spec=format_spec,
+                                    )
+                                    asset["advertiser_industry"] = advertiser_industry_value(
+                                        getattr(req, "advertiser_industry", None)
                                     )
 
                                     # Validate required fields - FAIL FAST, do not skip
