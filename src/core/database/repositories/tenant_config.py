@@ -11,6 +11,7 @@ beads: salesagent-9y0
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select
@@ -27,6 +28,15 @@ from src.core.database.models import (
     Tenant,
 )
 from src.services.agent_url_resolver import resolve_agent_url
+
+# ``PublisherPartner.aao_status_kind`` value for a partner an admin authorized
+# by hand, without our agent URL being listed in the publisher's adagents.json.
+# AAO re-checks keep it unless the publisher has since authorized us for real.
+MANUAL_AUTHORIZATION_KIND = "manual"
+
+
+def _manual_property_id(publisher_domain: str) -> str:
+    return f"manual_{publisher_domain.replace('.', '_').replace('-', '_')}"
 
 
 class TenantConfigRepository:
@@ -84,6 +94,84 @@ class TenantConfigRepository:
         self._session.add(partner)
         self._session.flush()
         return partner
+
+    def get_publisher_partner(self, partner_id: int) -> PublisherPartner | None:
+        """Get one publisher partner by ID for the tenant."""
+        stmt = select(PublisherPartner).filter_by(tenant_id=self._tenant_id, id=partner_id)
+        return self._session.scalars(stmt).first()
+
+    def authorize_publisher_partner_manually(self, partner: PublisherPartner) -> None:
+        """Mark a partner as authorized without an adagents.json listing.
+
+        Also ensures an ``all_inventory``-tagged website property for the
+        domain, so products can select ``<domain>:all_inventory``.
+        """
+        tag_stmt = select(PropertyTag).filter_by(tenant_id=self._tenant_id, tag_id="all_inventory")
+        if self._session.scalars(tag_stmt).first() is None:
+            self._session.add(
+                PropertyTag(
+                    tag_id="all_inventory",
+                    tenant_id=self._tenant_id,
+                    name="All Inventory",
+                    description="Default tag that applies to all properties.",
+                )
+            )
+        domain = partner.publisher_domain
+        if self.get_authorized_property_by_id(_manual_property_id(domain)) is None:
+            self._session.add(
+                AuthorizedProperty(
+                    tenant_id=self._tenant_id,
+                    property_id=_manual_property_id(domain),
+                    property_type="website",
+                    name=domain,
+                    publisher_domain=domain,
+                    identifiers=[{"type": "domain", "value": domain}],
+                    tags=["all_inventory"],
+                    verification_status="verified",
+                    verification_error="Authorized manually by an admin (not listed in adagents.json)",
+                )
+            )
+        self._session.flush()
+
+        property_count = sum(1 for p in self.list_authorized_properties() if p.publisher_domain == domain)
+        now = datetime.now(UTC)
+        partner.is_verified = True
+        partner.aao_status_kind = MANUAL_AUTHORIZATION_KIND
+        partner.sync_status = "success"
+        partner.sync_error = None
+        partner.last_fetch_error = None
+        partner.total_properties = property_count
+        partner.authorized_properties = property_count
+        partner.last_synced_at = now
+        partner.last_refreshed_at = now
+        self._session.flush()
+
+    def delete_publisher_properties(self, publisher_domain: str) -> None:
+        """Delete every authorized property of one publisher domain.
+
+        A publisher's properties go with its authorization, whatever created
+        them (manual authorization, adagents.json sync, the dev/mock fallback
+        or the legacy property form) — otherwise they stay selectable on the
+        product page after the publisher is removed or no longer authorized.
+        """
+        self._session.execute(
+            delete(AuthorizedProperty).where(
+                AuthorizedProperty.tenant_id == self._tenant_id,
+                AuthorizedProperty.publisher_domain == publisher_domain,
+            )
+        )
+
+    def revoke_manual_publisher_authorization(self, partner: PublisherPartner) -> None:
+        """Undo a manual authorization: back to pending until the next AAO check."""
+        self.delete_publisher_properties(partner.publisher_domain)
+        partner.is_verified = False
+        partner.aao_status_kind = None
+        partner.sync_status = "pending"
+        partner.sync_error = "Manual authorization removed. Refresh to check the publisher's adagents.json."
+        partner.total_properties = None
+        partner.authorized_properties = None
+        partner.last_refreshed_at = None
+        self._session.flush()
 
     def get_authorized_property_by_id(self, property_id: str) -> AuthorizedProperty | None:
         """Get one authorized property by ID for the tenant."""
@@ -156,6 +244,9 @@ class TenantConfigRepository:
             }
         ]
         for partner in self.list_publisher_partners():
+            if partner.aao_status_kind == MANUAL_AUTHORIZATION_KIND:
+                # Manual authorization doesn't depend on the agent URL.
+                continue
             partner.is_verified = False
             partner.total_properties = None
             partner.authorized_properties = None

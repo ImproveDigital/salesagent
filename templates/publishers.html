@@ -120,6 +120,7 @@
         <p style="color: #6b7280; font-size: 0.875rem; margin-bottom: 1rem;">
             Add publishers by domain. We fetch <code>/.well-known/adagents.json</code> from each one
             and show how many properties they list, plus how many authorize your agent URL above.
+            If a publisher hasn't listed your agent URL yet, an admin can <strong>Authorize manually</strong>.
         </p>
 
         <div id="publishers-summary" style="margin-bottom: 1rem;"></div>
@@ -157,6 +158,17 @@
                        placeholder="Example Publisher"
                        style="width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 6px;">
                 <small style="color: #6b7280;">Friendly name for this publisher</small>
+            </div>
+
+            <div class="form-group">
+                <label for="publisher-manual-authorization" style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;">
+                    <input type="checkbox" id="publisher-manual-authorization" name="manual_authorization">
+                    Authorize manually
+                </label>
+                <small style="color: #6b7280;">
+                    Admins only. Treat this publisher as authorized even if its <code>adagents.json</code> doesn't list
+                    your agent URL yet. Buyer agents that check that file may still skip this publisher.
+                </small>
             </div>
 
             <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.5rem;">
