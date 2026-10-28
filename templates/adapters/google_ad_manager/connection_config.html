@@ -7,7 +7,6 @@ It handles OAuth setup, service account configuration, and network code detectio
 Expected context variables:
 - adapter_config: dict with current adapter configuration
 - gam_oauth_configured: bool indicating if OAuth env vars are set
-- single_tenant_mode: bool indicating if running in single-tenant mode
 - scriptRoot: URL prefix for reverse proxy support
 #}
 
@@ -217,9 +216,23 @@ Expected context variables:
             {% else %}
             <!-- No service account yet -->
             <div class="status-card" style="background: #f9fafb; border-left: 4px solid #9ca3af;">
-                {% if single_tenant_mode %}
+                <!-- Option 1: create a service account in our GCP project -->
                 <p style="margin: 0 0 1rem 0; font-size: 0.875rem;">
-                    To use a service account, create one in your GCP project and download the JSON key file.
+                    We'll create a service account in our GCP project and provide you with the email address.
+                    You then authorize this email as an API user in your Google Ad Manager (Admin → Global Settings → API access → Add a service account user) with the Trafficker role.
+                </p>
+                <button onclick="createServiceAccount()" class="btn btn-success" id="create-service-account-btn">
+                    Create Service Account
+                </button>
+
+                <!-- Option 2: paste your own service account JSON key -->
+                <div style="display: flex; align-items: center; gap: 0.75rem; margin: 1.5rem 0; color: #6b7280; font-size: 0.875rem;">
+                    <hr style="flex: 1; border: none; border-top: 1px solid #d1d5db; margin: 0;">
+                    <span>or use your own service account</span>
+                    <hr style="flex: 1; border: none; border-top: 1px solid #d1d5db; margin: 0;">
+                </div>
+                <p style="margin: 0 0 1rem 0; font-size: 0.875rem;">
+                    Create a service account in your own GCP project and download the JSON key file.
                     Then authorize the service account email as an API user in Google Ad Manager (Admin → Global Settings → API access → Add a service account user) with the Trafficker role.
                 </p>
 
@@ -249,15 +262,6 @@ Expected context variables:
                         Save Service Account Configuration
                     </button>
                 </div>
-                {% else %}
-                <p style="margin: 0 0 1rem 0; font-size: 0.875rem;">
-                    We'll create a service account in our GCP project and provide you with the email address.
-                    You then authorize this email as an API user in your Google Ad Manager (Admin → Global Settings → API access → Add a service account user) with the Trafficker role.
-                </p>
-                <button onclick="createServiceAccount()" class="btn btn-success" id="create-service-account-btn">
-                    Create Service Account
-                </button>
-                {% endif %}
             </div>
             {% endif %}
         </div>
