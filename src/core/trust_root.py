@@ -51,11 +51,12 @@ _ID_INVALID_CHARS = re.compile(r"[^a-z0-9_]")
 
 def house_from_env() -> dict[str, str] | None:
     """The deployment-wide ``house`` block, or None when not configured."""
-    domain = os.environ.get("BRAND_HOUSE_DOMAIN", "").strip().lower()
+    domain = os.environ.get("BRAND_HOUSE_DOMAIN", "improvedigital.com").strip().lower()
     if not domain:
         return None
-    name = os.environ.get("BRAND_HOUSE_NAME", "").strip() or domain
+    name = os.environ.get("BRAND_HOUSE_NAME", "Improve Digital").strip() or domain
     return {"domain": domain, "name": name}
+
 
 
 def _origin(url: str) -> str:
