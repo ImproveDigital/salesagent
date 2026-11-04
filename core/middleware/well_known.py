@@ -30,10 +30,10 @@ from src.core.trust_root import (
     ADAGENTS_JSON_PATH,
     BRAND_JSON_PATH,
     JWKS_PATH,
+    agent_url_for_origin,
     build_adagents_json,
     build_brand_json,
     build_jwks,
-    house_from_env,
 )
 from src.services.agent_url_resolver import resolve_agent_url
 
@@ -47,8 +47,12 @@ CACHE_MAX_AGE_SECONDS = 300
 TenantResolver = Callable[[str], Awaitable[Any]]
 
 
-def build_trust_root_document(tenant_id: str, path: str, host: str) -> dict[str, Any] | None:
-    """Build the document at *path* for *tenant_id*, or None (-> 404)."""
+def build_trust_root_document(tenant_id: str, path: str, host: str, origin: str) -> dict[str, Any] | None:
+    """Build the document at *path* for *tenant_id*, or None (-> 404).
+
+    *host* is the normalized serving host (adagents.json property filter);
+    *origin* is the serving ``scheme://host[:port]`` (brand.json agent URL).
+    """
     # Lazy: both modules pull in heavier import graphs than this middleware needs at load.
     from core.platforms._capabilities_envelope import WEBHOOK_DELIVERY_RETRY_HORIZON_SECONDS
     from src.services.webhook_signing import WEBHOOK_SIGNING_PURPOSE
@@ -68,14 +72,13 @@ def build_trust_root_document(tenant_id: str, path: str, host: str) -> dict[str,
         )
         if path == JWKS_PATH:
             return build_jwks(keys)
+        if path == BRAND_JSON_PATH:
+            return build_brand_json(tenant, agent_url_for_origin(tenant, origin), keys)
 
         agent_url = resolve_agent_url(tenant)
         if not agent_url:
             logger.info("[TRUST-ROOT] tenant %s has no agent URL; %s not served", tenant_id, path)
             return None
-        if path == BRAND_JSON_PATH:
-            return build_brand_json(tenant, agent_url, keys, house_from_env())
-
         properties = [
             prop for prop in uow.tenant_config.list_authorized_properties() if prop.publisher_domain.lower() == host
         ]
@@ -113,7 +116,8 @@ class WellKnownTrustRootMiddleware:
             logger.info("[TRUST-ROOT] no tenant for host %s", host)
             return not_found
 
-        document = await asyncio.to_thread(build_trust_root_document, tenant.id, scope["path"], host)
+        origin = f"{scope.get('scheme', 'https')}://{raw_host.strip().lower()}"
+        document = await asyncio.to_thread(build_trust_root_document, tenant.id, scope["path"], host, origin)
         if document is None:
             return not_found
         return JSONResponse(document, headers={"Cache-Control": f"public, max-age={CACHE_MAX_AGE_SECONDS}"})

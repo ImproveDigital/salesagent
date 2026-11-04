@@ -26,7 +26,13 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from core.middleware.well_known import WellKnownTrustRootMiddleware
-from src.core.trust_root import brand_json_url, build_adagents_json, build_brand_json, build_jwks, house_from_env
+from src.core.trust_root import (
+    agent_url_for_origin,
+    brand_json_url,
+    build_adagents_json,
+    build_brand_json,
+    build_jwks,
+)
 
 _SCHEMAS = Path(adcp.__file__).parent / "_schemas" / "3.2"
 AGENT_URL = "https://azerion-gaming.sales-agent.yieldpro.improvedigital.com/mcp"
@@ -64,17 +70,13 @@ def _key(created_at: datetime = UPDATED) -> SimpleNamespace:
     return SimpleNamespace(public_jwk=jwk, created_at=created_at, rotated_out_at=None)
 
 
-HOUSE = {"domain": "improvedigital.com", "name": "Improve Digital"}
-
-
 class TestBrandJson:
-    def test_house_portfolio_is_schema_valid_and_resolvable(self):
-        doc = build_brand_json(_tenant(), AGENT_URL, [], HOUSE)
+    def test_top_level_agents_is_schema_valid_and_resolvable(self):
+        doc = build_brand_json(_tenant(), AGENT_URL, [])
 
         assert _schema_errors("brand.json", doc) == []
-        assert doc["house"]["domain"] == "improvedigital.com"
-        assert doc["brands"] == [{"id": "azerion_gaming", "names": [{"en": "Azerion Gaming"}]}]
-        assert "agents" not in doc  # the resolver ignores top-level agents next to a house
+        assert "house" not in doc and "brands" not in doc
+        assert [agent["url"] for agent in doc["agents"]] == [AGENT_URL]  # registry: jq '.agents[].url'
         picked = _select_agent(
             doc, f"https://{HOST}/.well-known/brand.json", agent_type="sales", agent_id=None, brand_id=None
         )
@@ -84,34 +86,29 @@ class TestBrandJson:
     def test_agent_url_is_served_byte_exact(self):
         """A bare-origin agent URL must not gain a trailing slash (buyers byte-compare it)."""
         origin = f"https://{HOST}"
-        doc = build_brand_json(_tenant(public_agent_url=origin), origin, [], HOUSE)
+        doc = build_brand_json(_tenant(public_agent_url=origin), origin, [])
 
-        assert doc["house"]["agents"][0]["url"] == origin
-        assert doc["house"]["agents"][0]["id"] == "azerion_gaming_sales"
-
-    def test_without_house_serves_brand_agent_variant(self):
-        doc = build_brand_json(_tenant(), AGENT_URL, [], None)
-
-        assert _schema_errors("brand.json", doc) == []
-        assert "house" not in doc
-        picked = _select_agent(
-            doc, f"https://{HOST}/.well-known/brand.json", agent_type="sales", agent_id=None, brand_id=None
-        )
-        assert picked.url == AGENT_URL
+        assert doc["agents"][0]["url"] == origin
+        assert doc["agents"][0]["id"] == "azerion_gaming_sales"
 
     def test_last_updated_tracks_newest_key(self):
         newer = UPDATED + timedelta(days=1)
-        doc = build_brand_json(_tenant(), AGENT_URL, [_key(created_at=newer)], HOUSE)
+        doc = build_brand_json(_tenant(), AGENT_URL, [_key(created_at=newer)])
 
         assert doc["last_updated"] == "2026-11-05T00:00:00Z"
 
-    def test_house_from_env(self, monkeypatch):
-        monkeypatch.delenv("BRAND_HOUSE_DOMAIN", raising=False)
-        assert house_from_env() is None
 
-        monkeypatch.setenv("BRAND_HOUSE_DOMAIN", "ImproveDigital.com")
-        monkeypatch.setenv("BRAND_HOUSE_NAME", "Improve Digital")
-        assert house_from_env() == HOUSE
+class TestAgentUrlForOrigin:
+    def test_configured_url_on_another_host_is_not_declared(self):
+        """Regression: public_agent_url on salesagent.azerion.com leaked into the improvedigital.com brand.json."""
+        tenant = _tenant(public_agent_url="https://salesagent.azerion.com")
+
+        assert agent_url_for_origin(tenant, f"https://{HOST}") == AGENT_URL
+
+    def test_configured_url_on_serving_host_is_used_verbatim(self):
+        tenant = _tenant(public_agent_url=f"https://{HOST}")
+
+        assert agent_url_for_origin(tenant, f"https://{HOST.upper()}") == f"https://{HOST}"
 
 
 class TestBrandJsonUrl:
@@ -188,7 +185,7 @@ class TestMiddleware:
         assert resp.status_code == 200
         assert resp.json() == {"keys": []}
         assert resp.headers["cache-control"] == "public, max-age=300"
-        build.assert_called_once_with("t1", "/.well-known/jwks.json", HOST)
+        build.assert_called_once_with("t1", "/.well-known/jwks.json", HOST, f"http://{HOST}:443")
 
     def test_unknown_host_is_404(self):
         resp = _client({}).get("/.well-known/brand.json", headers={"host": "unknown.example.org"})

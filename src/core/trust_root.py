@@ -3,12 +3,10 @@
 Three documents, served per tenant host by
 ``core.middleware.well_known.WellKnownTrustRootMiddleware``:
 
-* ``brand.json`` — House Portfolio variant. ``house`` comes from deployment
-  env (``BRAND_HOUSE_DOMAIN`` / ``BRAND_HOUSE_NAME``); the tenant is the one
-  brand; the sales agent sits in ``house.agents[]``. ``house.agents`` (not a
-  top-level ``agents[]``) because the adcp resolver ignores top-level agents
-  on a document that has a ``house`` object. Without ``BRAND_HOUSE_DOMAIN``
-  the Brand Agent variant (top-level ``agents[]``) is served instead.
+* ``brand.json`` — Brand Agent variant: one top-level ``agents[]`` entry for
+  the sales agent on the host serving the document. Top-level because agent
+  registries verify endpoint control with ``.agents[].url``, and the schema
+  forbids a top-level ``agents[]`` next to a ``house`` block.
 * ``jwks.json`` — the tenant's webhook-signing public keys.
 * ``adagents.json`` — authorized properties whose ``publisher_domain`` is the
   host serving the document. Never fabricates an authorization: no backing
@@ -23,7 +21,6 @@ registered.
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -32,7 +29,6 @@ from urllib.parse import urlsplit
 
 from adcp import get_adcp_spec_version
 from adcp.types.generated_poc.brand_discovery import BrandDiscovery3 as LibraryBrandAgentDocument
-from adcp.types.generated_poc.brand_discovery import BrandDiscovery4 as LibraryHousePortfolioDocument
 from adcp.types.generated_poc.core.agent_signing_key import AgentSigningKey as LibraryAgentSigningKey
 
 from src.services.agent_url_resolver import resolve_agent_url
@@ -43,25 +39,32 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 BRAND_JSON_PATH = "/.well-known/brand.json"
 JWKS_PATH = "/.well-known/jwks.json"
 ADAGENTS_JSON_PATH = "/.well-known/adagents.json"
+#: The MCP endpoint path ``adcp.server.serve`` mounts; the agent URL buyers register.
+MCP_PATH = "/mcp"
 
 _SCHEMA_BASE = f"https://adcontextprotocol.org/schemas/{get_adcp_spec_version()}"
 _SALES_AGENT_TYPE = "sales"
 _ID_INVALID_CHARS = re.compile(r"[^a-z0-9_]")
 
 
-def house_from_env() -> dict[str, str] | None:
-    """The deployment-wide ``house`` block, or None when not configured."""
-    domain = os.environ.get("BRAND_HOUSE_DOMAIN", "improvedigital.com").strip().lower()
-    if not domain:
-        return None
-    name = os.environ.get("BRAND_HOUSE_NAME", "Improve Digital").strip() or domain
-    return {"domain": domain, "name": name}
-
-
-
 def _origin(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}"
+
+
+def agent_url_for_origin(tenant: Tenant, origin: str) -> str:
+    """The agent URL brand.json declares when served at *origin*.
+
+    brand.json on a host speaks for the agent on THAT host — a registry
+    byte-compares ``agents[].url`` with the agent URL it was given and checks
+    the document's own host for control. The configured agent URL is used
+    verbatim when it lives on *origin* (so an operator can pin the exact
+    spelling); otherwise the MCP endpoint on *origin* is declared.
+    """
+    configured = resolve_agent_url(tenant)
+    if configured and _origin(configured).lower() == origin.lower():
+        return configured
+    return f"{origin}{MCP_PATH}"
 
 
 def _schema_id(value: str) -> str:
@@ -105,28 +108,19 @@ def build_brand_json(
     tenant: Tenant,
     agent_url: str,
     keys: Sequence[TenantSigningCredential],
-    house: dict[str, str] | None,
 ) -> dict[str, Any]:
     """brand.json declaring *agent_url* as this tenant's sales agent."""
-    brand_id = _schema_id(tenant.subdomain)
     agent = {
-        "id": f"{brand_id}_sales"[:100],
+        "id": f"{_schema_id(tenant.subdomain)}_sales"[:100],
         "type": _SALES_AGENT_TYPE,
         "url": agent_url,
         "jwks_uri": f"{_origin(agent_url)}{JWKS_PATH}",
         "description": f"{tenant.name} sales agent"[:500],
     }
-    document: dict[str, Any] = {"$schema": f"{_SCHEMA_BASE}/brand.json", "version": "1.0"}
-    if house is not None:
-        document["house"] = {**house, "agents": [agent]}
-        document["brands"] = [{"id": brand_id, "names": [{"en": tenant.name}]}]
-        model: type[LibraryHousePortfolioDocument | LibraryBrandAgentDocument] = LibraryHousePortfolioDocument
-    else:
-        document["agents"] = [agent]
-        model = LibraryBrandAgentDocument
+    document: dict[str, Any] = {"$schema": f"{_SCHEMA_BASE}/brand.json", "version": "1.0", "agents": [agent]}
     if last_updated := _last_updated(tenant, keys):
         document["last_updated"] = last_updated
-    model.model_validate(document)
+    LibraryBrandAgentDocument.model_validate(document)
     return document
 
 
