@@ -126,6 +126,7 @@ from core.decisioning.proposal_store import close_proposal_store, get_proposal_s
 from core.middleware.admin_mount import AdminWSGIMount
 from core.middleware.dual_credential_audit import DualCredentialAuditMiddleware
 from core.middleware.origin_guard import BuyerProtocolOriginGuardMiddleware
+from core.middleware.well_known import WellKnownTrustRootMiddleware
 from core.platforms.gam import GamPlatform
 from core.platforms.mock import MockSellerPlatform
 from core.proposal.manager import SalesAgentProposalManager
@@ -943,6 +944,13 @@ def _serve_kwargs(
 
     admin_wsgi = WSGIMiddleware(_create_admin_app())
     allowed_origins = _allowed_origins()
+    managed_instance = _env_bool("MANAGED_INSTANCE", default=False)
+    use_subdomain_routing = include_subdomain_routing and not managed_instance
+    # Routed deployments share one cached Host -> tenant router between
+    # SubdomainTenantMiddleware and the /.well-known trust-root documents;
+    # managed/test wirings have no router, so the documents resolve directly.
+    subdomain_router = build_subdomain_router() if use_subdomain_routing else None
+    resolve_tenant = subdomain_router.resolve if subdomain_router is not None else _resolve_tenant
 
     asgi_middleware: list = [
         (TracingMiddleware, {}),
@@ -964,6 +972,11 @@ def _serve_kwargs(
                 "allow_headers": ["*"],
             },
         ),
+        # Public, unauthenticated /.well-known/{brand,jwks,adagents}.json
+        # (src/core/trust_root.py). Ahead of every auth layer by design:
+        # these documents bootstrap trust. Resolves its own tenant from Host
+        # so it also works when SubdomainTenantMiddleware is not installed.
+        (WellKnownTrustRootMiddleware, {"resolve_tenant": resolve_tenant}),
         (EmbeddedBuyerAuthBridgeMiddleware, {}),
         # DualCredentialAuditMiddleware logs WARNING when an inbound
         # request carries two different bearer tokens (one in
@@ -979,10 +992,7 @@ def _serve_kwargs(
         # Preserve the Origin half for browser-driven MCP/A2A requests.
         (BuyerProtocolOriginGuardMiddleware, {"allowed_origins": allowed_origins}),
     ]
-    managed_instance = _env_bool("MANAGED_INSTANCE", default=False)
-    use_subdomain_routing = include_subdomain_routing and not managed_instance
-    if use_subdomain_routing:
-        subdomain_router = build_subdomain_router()
+    if subdomain_router is not None:
         asgi_middleware.append(
             (SubdomainTenantMiddleware, {"router": subdomain_router}),
         )

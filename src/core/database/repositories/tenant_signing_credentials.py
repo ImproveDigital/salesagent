@@ -15,7 +15,7 @@ about-to-be-rotated kid.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -58,6 +58,19 @@ class TenantSigningCredentialRepository:
         """
         rows = self.list_for_purpose(purpose, include_inactive=False)
         return rows[0] if rows else None
+
+    def list_publishable(self, purpose: str, *, now: datetime, grace_seconds: int) -> list[TenantSigningCredential]:
+        """Active keys plus keys rotated out within the last *grace_seconds*.
+
+        Feeds the public JWKS: a receiver verifying a webhook signed just
+        before rotation must still find the outgoing kid.
+        """
+        cutoff = now - timedelta(seconds=grace_seconds)
+        return [
+            row
+            for row in self.list_for_purpose(purpose, include_inactive=True)
+            if row.is_active or (row.rotated_out_at is not None and row.rotated_out_at >= cutoff)
+        ]
 
     def get_by_kid(self, purpose: str, key_id: str) -> TenantSigningCredential | None:
         stmt = select(TenantSigningCredential).where(

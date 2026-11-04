@@ -146,6 +146,8 @@ For GAM adapter integration:
 | `ADCP_MULTI_TENANT` | `false` | Enable multi-tenant mode with subdomain routing |
 | `SALES_AGENT_DOMAIN` | - | Base domain for tenant subdomains (e.g., `sales-agent.example.com`) |
 | `BASE_DOMAIN` | - | Top-level domain for cookies (e.g., `example.com`) |
+| `BRAND_HOUSE_DOMAIN` | - | `house.domain` in each tenant's `/.well-known/brand.json` (e.g., `improvedigital.com`). Unset serves the Brand Agent variant (top-level `agents[]`, no house/brands). |
+| `BRAND_HOUSE_NAME` | `BRAND_HOUSE_DOMAIN` | `house.name` in `/.well-known/brand.json` (e.g., `Improve Digital`) |
 
 ### SSO Requirements by Deployment Mode
 
