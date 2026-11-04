@@ -35,7 +35,7 @@ from dataclasses import replace
 from typing import Any
 
 from adcp.decisioning import DecisioningCapabilities
-from adcp.decisioning.capabilities import Portfolio, WebhookSigning
+from adcp.decisioning.capabilities import Identity, Portfolio, WebhookSigning
 from adcp.server.tenant_router import current_tenant
 
 from src.core.embedded_runtime import publisher_owns_compose_products
@@ -93,6 +93,26 @@ def _publisher_domains_for_tenant_id(tenant_id: str | None) -> list[str]:
         return []
 
 
+def _brand_json_url_for_tenant_id(tenant_id: str | None) -> str | None:
+    """``identity.brand_json_url`` — hop 1 of a buyer's agent-URL -> JWKS walk.
+
+    Same failure posture as the publisher-domain read: discovery never 500s.
+    """
+    if not tenant_id:
+        return None
+    from src.core.database.repositories.uow import TenantConfigUoW
+    from src.core.trust_root import brand_json_url
+
+    try:
+        with TenantConfigUoW(tenant_id) as uow:
+            assert uow.tenant_config is not None
+            tenant = uow.tenant_config.get_tenant()
+            return brand_json_url(tenant) if tenant is not None else None
+    except Exception:
+        logger.warning("brand_json_url lookup failed for tenant %r; omitting identity", tenant_id, exc_info=True)
+        return None
+
+
 def _publisher_domains_for_current_tenant() -> list[str]:
     """Backward-compatible helper for tests and contextvar-only callers."""
     return _publisher_domains_for_tenant_id(_tenant_id_from_context())
@@ -146,6 +166,11 @@ def capabilities_for_request(
     managed_externally = bool(webhook_signing.supported)
     if base_capabilities.webhook_signing_managed_externally != managed_externally:
         updates["webhook_signing_managed_externally"] = managed_externally
+
+    if brand_json_url := _brand_json_url_for_tenant_id(tenant_id):
+        base_identity = base_capabilities.identity
+        base_fields = base_identity.model_dump(exclude_none=True) if base_identity is not None else {}
+        updates["identity"] = Identity.model_validate({**base_fields, "brand_json_url": brand_json_url})
 
     if not updates:
         return None

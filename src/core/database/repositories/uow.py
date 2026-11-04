@@ -44,6 +44,7 @@ from src.core.database.repositories.product import ProductRepository
 from src.core.database.repositories.push_notification import PushNotificationConfigRepository
 from src.core.database.repositories.tenant_config import TenantConfigRepository
 from src.core.database.repositories.tenant_signal import TenantSignalRepository
+from src.core.database.repositories.tenant_signing_credentials import TenantSigningCredentialRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,27 @@ class TenantConfigUoW(BaseUoW):
 
     def _clear_repos(self) -> None:
         self.tenant_config = None
+
+
+class TrustRootUoW(BaseUoW):
+    """Unit of Work for the public ``/.well-known`` trust-root documents.
+
+    One session backs the tenant read, the authorized-property read and the
+    signing-key read, so brand.json / jwks.json / adagents.json are each built
+    from a single consistent snapshot.
+    """
+
+    tenant_config: TenantConfigRepository | None
+    signing_credentials: TenantSigningCredentialRepository | None
+
+    def _init_repos(self) -> None:
+        assert self._session is not None
+        self.tenant_config = TenantConfigRepository(self._session, self._tenant_id)
+        self.signing_credentials = TenantSigningCredentialRepository(self._session, self._tenant_id)
+
+    def _clear_repos(self) -> None:
+        self.tenant_config = None
+        self.signing_credentials = None
 
 
 class TenantSignalUoW(BaseUoW):
