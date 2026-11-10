@@ -247,6 +247,25 @@ def _replay_update_media_buy(step, tenant_id: str, db) -> tuple[bool, str | None
     return True, None
 
 
+def _expired_media_buy_approval_error(
+    workflow_repo: WorkflowRepository, media_buy_repo: MediaBuyRepository, step_id: str
+) -> str | None:
+    """Block approving a create_media_buy step whose flight window has ended.
+
+    Approval pushes the order to the ad server, which must never happen for a
+    buy that can no longer deliver.
+    """
+    from src.core.helpers.media_buy_flight import flight_has_ended
+
+    for mapping in workflow_repo.get_mappings_for_step(step_id):
+        if mapping.object_type != "media_buy":
+            continue
+        media_buy = media_buy_repo.get_by_id(mapping.object_id)
+        if media_buy and media_buy.status == "pending_approval" and flight_has_ended(media_buy, datetime.now(UTC)):
+            return "Cannot approve: the media buy's flight window has already ended."
+    return None
+
+
 @workflows_bp.route("/<tenant_id>/workflows/<workflow_id>/steps/<step_id>/approve", methods=["POST"])
 @require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 @log_admin_action("approve_workflow_step")
@@ -259,6 +278,10 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
 
             user_info = session.get("user", {})
             user_email = user_info.get("email", "system") if isinstance(user_info, dict) else str(user_info)
+
+            expired_error = _expired_media_buy_approval_error(workflow_repo, MediaBuyRepository(db, tenant_id), step_id)
+            if expired_error:
+                return jsonify({"success": False, "error": expired_error}), 409
 
             step = workflow_repo.update_status(
                 step_id,

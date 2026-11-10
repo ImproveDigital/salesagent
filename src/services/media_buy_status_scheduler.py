@@ -5,6 +5,8 @@ their flight dates:
 - pending_activation -> active (when start_time has passed and creatives approved)
 - scheduled -> active (when start_time has passed)
 - active -> completed (when end_time has passed)
+- pending_approval / pending_ad_server_approval -> canceled (when end_time has
+  passed before approval landed; the open approval workflow step is closed)
 
 This ensures media buys don't get stuck in transitional states when approved
 before their start date.
@@ -21,8 +23,13 @@ from sqlalchemy import select
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyRepository
+from src.core.database.repositories.workflow import WorkflowRepository
+from src.core.helpers.media_buy_flight import APPROVAL_PENDING_STATUSES
 
 logger = logging.getLogger(__name__)
+
+# Recorded on approval workflow steps closed because the flight window ended.
+EXPIRED_APPROVAL_MESSAGE = "Flight window ended before the media buy was approved; approval request expired."
 
 # Configurable via env var - default 60 seconds
 STATUS_CHECK_INTERVAL_SECONDS = int(os.getenv("MEDIA_BUY_STATUS_CHECK_INTERVAL") or "60")
@@ -85,8 +92,9 @@ class MediaBuyStatusScheduler:
                 # Find media buys that need status updates (cross-tenant scheduler query)
                 # 1. pending_activation or scheduled -> should become active if start_time passed
                 # 2. active -> should become completed if end_time passed
+                # 3. approval-pending -> should become canceled if end_time passed
                 media_buys = MediaBuyRepository.get_all_by_statuses(
-                    session, ["pending_activation", "scheduled", "active"]
+                    session, ["pending_activation", "scheduled", "active", *sorted(APPROVAL_PENDING_STATUSES)]
                 )
 
                 for media_buy in media_buys:
@@ -95,6 +103,8 @@ class MediaBuyStatusScheduler:
                     if new_status and new_status != media_buy.status:
                         old_status = media_buy.status
                         media_buy.status = new_status
+                        if new_status == "canceled":
+                            self._expire_approval_steps(media_buy, session, now)
                         updated_count += 1
                         logger.info(f"Updated media buy {media_buy.media_buy_id} status: {old_status} -> {new_status}")
 
@@ -144,6 +154,11 @@ class MediaBuyStatusScheduler:
 
         current_status = media_buy.status
 
+        # Awaiting approval: nothing is delivering, so the only date-driven
+        # transition is expiry once the flight window has closed.
+        if current_status in APPROVAL_PENDING_STATUSES:
+            return "canceled" if now > end_time else None
+
         # Check if campaign has ended
         if now > end_time:
             if current_status != "completed":
@@ -164,6 +179,16 @@ class MediaBuyStatusScheduler:
                     return "active"
 
         return None
+
+    def _expire_approval_steps(self, media_buy: MediaBuy, session, now: datetime) -> None:
+        """Close approval steps left open on a buy whose flight ended unapproved.
+
+        Keeps the admin detail page / workflow queue from offering an Approve
+        action that could push an already-expired order to the ad server.
+        """
+        repo = WorkflowRepository(session, media_buy.tenant_id)
+        for step in repo.list_open_approval_steps_for_object("media_buy", media_buy.media_buy_id):
+            repo.update_status(step.step_id, status="failed", completed_at=now, error_message=EXPIRED_APPROVAL_MESSAGE)
 
     def _are_creatives_approved(self, media_buy: MediaBuy, session) -> bool:
         """Check if all creatives for a media buy are approved.

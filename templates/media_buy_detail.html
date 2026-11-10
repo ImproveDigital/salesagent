@@ -27,12 +27,15 @@
         <div>
             <strong>⚠️ Manual Approval Required</strong>
             <p style="margin: 0.5rem 0 0 0;">{{ status_message.message if status_message else "This media buy needs approval before it can proceed." }}</p>
+            {% if flight_ended %}
+            <p style="margin: 0.5rem 0 0 0;"><strong>The flight window has already ended — this media buy can no longer be approved.</strong></p>
+            {% endif %}
         </div>
         {% if publisher_owns('campaign_approval') %}
         <div style="display: flex; gap: 0.5rem;">
             <form method="POST" action="{{ url_for('operations.approve_media_buy', tenant_id=tenant_id, media_buy_id=media_buy.media_buy_id) }}" style="display: inline;" onsubmit="return handleApprovalSubmit(event, this)">
                 <input type="hidden" name="action" value="approve">
-                <button type="submit" class="btn btn-success btn-sm" id="approveBtn">
+                <button type="submit" class="btn btn-success btn-sm" id="approveBtn"{% if flight_ended %} disabled title="Flight window has ended"{% endif %}>
                     ✅ Approve
                 </button>
             </form>
