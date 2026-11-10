@@ -48,12 +48,40 @@ class TestMatchesListFilter:
         """mb_4f866d3b9846: needs_approval badge, 0/1 packages ready, no creatives."""
         readiness = _readiness("needs_approval", packages_with_creatives=0, creatives_total=0)
         assert matches_list_filter(readiness, "needs_creatives")
+        assert not matches_list_filter(readiness, "needs_approval")
+
+    @pytest.mark.parametrize(
+        "gap",
+        [
+            {"packages_total": 2, "packages_with_creatives": 1},  # a package without creatives
+            {"rejected": 1},  # rejected creative needs replacing
+        ],
+    )
+    def test_awaiting_approval_buy_with_missing_creatives_only_under_needs_creatives(self, gap):
+        readiness = _readiness("needs_approval", **gap)
+        assert matches_list_filter(readiness, "needs_creatives")
+        assert not matches_list_filter(readiness, "needs_approval")
+
+    @pytest.mark.parametrize("pending", [0, 1])
+    def test_awaiting_approval_buy_with_all_creatives_only_under_needs_approval(self, pending):
+        readiness = _readiness("needs_approval", pending=pending)
         assert matches_list_filter(readiness, "needs_approval")
+        assert not matches_list_filter(readiness, "needs_creatives")
 
     def test_pending_ad_server_buy_with_rejected_creative_needs_creatives(self):
         readiness = _readiness("pending_ad_server_approval", rejected=1)
         assert matches_list_filter(readiness, "needs_creatives")
         assert matches_list_filter(readiness, "pending_ad_server_approval")
+
+    @pytest.mark.parametrize("state", ["needs_approval", "pending_ad_server_approval", "paused"])
+    def test_creatives_awaiting_approval_do_not_pull_buy_into_needs_creatives(self, state):
+        """Uploaded creatives awaiting approval need a decision, not new creatives."""
+        readiness = _readiness(state, pending=1)
+        assert not matches_list_filter(readiness, "needs_creatives")
+
+    def test_needs_creatives_state_with_pending_creatives_still_listed(self):
+        """The badge says needs_creatives, so the filter must agree."""
+        assert matches_list_filter(_readiness("needs_creatives", pending=1), "needs_creatives")
 
     def test_fully_creatived_approval_buy_not_under_needs_creatives(self):
         assert not matches_list_filter(_readiness("needs_approval"), "needs_creatives")
