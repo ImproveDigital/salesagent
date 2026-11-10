@@ -473,10 +473,18 @@ class DashboardService:
 
     def _incoming(self, repo: MediaBuyRepository) -> dict[str, Any]:
         """Offers waiting on a yes / no / counter from the publisher."""
-        pending = repo.list_by_statuses(["pending_approval", "pending_creative_approval"])
-        pending.sort(key=lambda b: b.created_at or datetime.min.replace(tzinfo=UTC), reverse=True)
+        from src.core.helpers.media_buy_flight import flight_has_ended
 
         now = datetime.now(UTC)
+        # An offer whose flight already ended can't be accepted — it is not
+        # waiting on the publisher (the status scheduler expires it).
+        pending = [
+            b
+            for b in repo.list_by_statuses(["pending_approval", "pending_creative_approval"])
+            if not flight_has_ended(b, now)
+        ]
+        pending.sort(key=lambda b: b.created_at or datetime.min.replace(tzinfo=UTC), reverse=True)
+
         rows: list[dict[str, Any]] = []
         urgent_threshold = timedelta(hours=4)
         for buy in pending[:6]:
@@ -734,12 +742,15 @@ class DashboardService:
                 }
             )
 
-        # Deals expiring in next 24h (live, end_date today or tomorrow).
-        # Cast Mapped[Date] → stdlib date for the comparison (mypy strictness).
+        # Deals expiring in the next 24h: live buys whose flight end is still
+        # ahead but within 24h. Flights that already ended are excluded.
+        from src.core.helpers.media_buy_flight import flight_end_utc
+
         active = repo.list_by_statuses(["active", "live"])
-        today = datetime.now(UTC).date()
-        tomorrow = today + timedelta(days=1)
-        expiring = [b for b in active if b.end_date and today <= type_cast(date, b.end_date) <= tomorrow]
+        now = datetime.now(UTC)
+        expiring = [
+            b for b in active if (end := flight_end_utc(b)) is not None and now < end <= now + timedelta(hours=24)
+        ]
         if expiring:
             # Single buy → deep-link to its detail; multiple → filtered list.
             expiring_url = (
@@ -763,7 +774,6 @@ class DashboardService:
         # Pacing under: scan running buys. The snapshot currency used for
         # cross-currency pacing is cached by get_landing_data() before this
         # runs; without it _running_row paces on spend.
-        now = datetime.now(UTC)
         under = []
         for b in active:
             if getattr(b, "is_paused", False):

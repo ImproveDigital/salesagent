@@ -42,14 +42,23 @@ def _validate_media_buy_approval(
     unit-tested directly.
 
     Gates, in priority order:
-    1. At least one creative must be assigned.
-    2. No assigned creative may be rejected.
-    3. Every assigned creative must be approved.
-    4. (``require_click_url``) Every assigned creative must carry a
+    1. The flight window must not have already ended — nothing else can
+       make an expired buy approvable, so report this first.
+    2. At least one creative must be assigned.
+    3. No assigned creative may be rejected.
+    4. Every assigned creative must be approved.
+    5. (``require_click_url``) Every assigned creative must carry a
        click-through URL — Improve Digital derives the mandatory
        advertiser domain from it and rejects creatives without one.
-    5. The flight window must be consistent and not already ended.
+    6. The flight window must be consistent (end after start).
     """
+    start_time = _as_utc(getattr(media_buy, "start_time", None))
+    end_time = _as_utc(getattr(media_buy, "end_time", None))
+    if end_time and end_time <= now:
+        from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE
+
+        return FLIGHT_ENDED_DECISION_MESSAGE.format(action="approve")
+
     if not assignments:
         return "Cannot approve: no creatives are assigned to this media buy. Assign and approve creatives first."
 
@@ -90,10 +99,6 @@ def _validate_media_buy_approval(
                 "Improve Digital requires one on every creative."
             )
 
-    start_time = _as_utc(getattr(media_buy, "start_time", None))
-    end_time = _as_utc(getattr(media_buy, "end_time", None))
-    if end_time and end_time <= now:
-        return "Cannot approve: the flight window has already ended."
     if start_time and end_time and end_time <= start_time:
         return "Cannot approve: the flight end time must be after the start time."
 
@@ -424,6 +429,10 @@ def media_buy_detail(tenant_id, media_buy_id):
             readiness = MediaBuyReadinessService.get_readiness_state(media_buy_id, tenant_id, db_session)
             computed_state = readiness["state"]
 
+            from src.core.helpers.media_buy_flight import flight_has_ended
+
+            flight_ended = flight_has_ended(media_buy, datetime.now(UTC))
+
             # Determine status message
             status_message = None
             if pending_approval_step:
@@ -469,6 +478,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                 computed_state=computed_state,
                 readiness=readiness,
                 webhook_deliveries=webhook_deliveries,
+                flight_ended=flight_ended,
             )
     except Exception as e:
         logger.error(f"Error viewing media buy: {e}", exc_info=True)
@@ -726,6 +736,21 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     flash("Media buy approved successfully", "success")
 
             elif action == "reject":
+                # Expired buys stay pending until the buyer reschedules the
+                # flight; rejecting is blocked like approving.
+                from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE, flight_has_ended
+
+                if (
+                    step_data["tool_name"] != "update_media_buy"
+                    and media_buy
+                    and media_buy.status == "pending_approval"
+                    and flight_has_ended(media_buy, datetime.now(UTC))
+                ):
+                    flash(FLIGHT_ENDED_DECISION_MESSAGE.format(action="reject"), "error")
+                    return redirect(
+                        url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                    )
+
                 step.status = "rejected"
                 step.error_message = reason or "Rejected by administrator"
                 step.updated_at = datetime.now(UTC)
