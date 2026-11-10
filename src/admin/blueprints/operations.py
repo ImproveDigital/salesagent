@@ -55,7 +55,9 @@ def _validate_media_buy_approval(
     start_time = _as_utc(getattr(media_buy, "start_time", None))
     end_time = _as_utc(getattr(media_buy, "end_time", None))
     if end_time and end_time <= now:
-        return "Cannot approve: the flight window has already ended."
+        from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE
+
+        return FLIGHT_ENDED_DECISION_MESSAGE.format(action="approve")
 
     if not assignments:
         return "Cannot approve: no creatives are assigned to this media buy. Assign and approve creatives first."
@@ -734,6 +736,21 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     flash("Media buy approved successfully", "success")
 
             elif action == "reject":
+                # Expired buys stay pending until the buyer reschedules the
+                # flight; rejecting is blocked like approving.
+                from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE, flight_has_ended
+
+                if (
+                    step_data["tool_name"] != "update_media_buy"
+                    and media_buy
+                    and media_buy.status == "pending_approval"
+                    and flight_has_ended(media_buy, datetime.now(UTC))
+                ):
+                    flash(FLIGHT_ENDED_DECISION_MESSAGE.format(action="reject"), "error")
+                    return redirect(
+                        url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                    )
+
                 step.status = "rejected"
                 step.error_message = reason or "Rejected by administrator"
                 step.updated_at = datetime.now(UTC)

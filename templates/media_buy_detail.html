@@ -28,7 +28,7 @@
             <strong>⚠️ Manual Approval Required</strong>
             <p style="margin: 0.5rem 0 0 0;">{{ status_message.message if status_message else "This media buy needs approval before it can proceed." }}</p>
             {% if flight_ended %}
-            <p style="margin: 0.5rem 0 0 0;"><strong>The flight window has already ended — this media buy can no longer be approved.</strong></p>
+            <p style="margin: 0.5rem 0 0 0;"><strong>The flight window has ended — Approve and Reject are blocked.</strong> To unblock, the media buy's flight dates (start/end) must be updated to a future window.</p>
             {% endif %}
         </div>
         {% if publisher_owns('campaign_approval') %}
@@ -39,7 +39,7 @@
                     ✅ Approve
                 </button>
             </form>
-            <button type="button" class="btn btn-danger btn-sm" onclick="showRejectModal()">
+            <button type="button" class="btn btn-danger btn-sm" onclick="showRejectModal()"{% if flight_ended %} disabled title="Flight window has ended"{% endif %}>
                 ❌ Reject
             </button>
         </div>

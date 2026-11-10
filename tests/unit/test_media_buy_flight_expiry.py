@@ -1,6 +1,7 @@
 """FMS-2148: media buys whose flight ended while awaiting approval.
 
-- The status scheduler expires approval-pending buys past their flight end.
+- Approve/Reject are blocked on an expired pending buy, with a note that the
+  flight dates must be updated to unblock (the buy itself stays pending).
 - The approval gate reports an ended flight before any creative issue.
 - The dashboard excludes ended flights from Incoming and "expiring in <24h".
 """
@@ -13,9 +14,9 @@ import pytest
 
 from src.admin.app import create_app
 from src.admin.blueprints.operations import _validate_media_buy_approval
+from src.admin.blueprints.workflows import _expired_media_buy_decision_error
 from src.admin.services.dashboard_service import DashboardService
-from src.core.helpers.media_buy_flight import flight_end_utc, flight_has_ended
-from src.services.media_buy_status_scheduler import MediaBuyStatusScheduler
+from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE, flight_end_utc, flight_has_ended
 
 NOW = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
 
@@ -48,26 +49,39 @@ class TestFlightHelpers:
         assert not flight_has_ended(SimpleNamespace(end_time=None, end_date=None), NOW)
 
 
-class TestSchedulerExpiresApprovalPendingBuys:
-    @pytest.mark.parametrize("status", ["pending_approval", "pending_ad_server_approval"])
-    def test_ended_flight_becomes_canceled(self, status):
-        new_status = MediaBuyStatusScheduler()._compute_new_status(_buy(status), NOW, session=None)
-        assert new_status == "canceled"
+def _workflow_repos(tool_name, media_buy):
+    workflow_repo = Mock()
+    workflow_repo.get_by_step_id.return_value = SimpleNamespace(tool_name=tool_name)
+    workflow_repo.get_mappings_for_step.return_value = [SimpleNamespace(object_type="media_buy", object_id="mb_test")]
+    media_buy_repo = Mock()
+    media_buy_repo.get_by_id.return_value = media_buy
+    return workflow_repo, media_buy_repo
 
-    @pytest.mark.parametrize("status", ["pending_approval", "pending_ad_server_approval"])
-    def test_in_flight_buy_stays_pending(self, status):
-        """Approval-pending buys are never auto-activated by date math."""
-        buy = _buy(status, start_offset=timedelta(days=-1), end_offset=timedelta(days=3))
-        assert MediaBuyStatusScheduler()._compute_new_status(buy, NOW, session=None) is None
 
-    def test_active_buy_still_completes(self):
-        assert MediaBuyStatusScheduler()._compute_new_status(_buy("active"), NOW, session=None) == "completed"
+class TestWorkflowDecisionBlockedOnExpiredBuy:
+    @pytest.mark.parametrize("action", ["approve", "reject"])
+    def test_expired_create_step_is_blocked_with_unblock_note(self, action):
+        repos = _workflow_repos("create_media_buy", _buy())
+        error = _expired_media_buy_decision_error(*repos, "step_1", action)
+        assert error == FLIGHT_ENDED_DECISION_MESSAGE.format(action=action)
+        assert "Update the media buy's flight dates" in error
+
+    def test_rescheduled_buy_is_unblocked(self):
+        # The workflow guard reads the real clock, so anchor the new flight to it.
+        now = datetime.now(UTC)
+        buy = _buy(start_time=now + timedelta(days=1), end_time=now + timedelta(days=5))
+        assert _expired_media_buy_decision_error(*_workflow_repos("create_media_buy", buy), "step_1", "approve") is None
+
+    def test_update_step_on_expired_buy_is_not_blocked(self):
+        """The buyer's reschedule may itself need approval — it must not deadlock."""
+        repos = _workflow_repos("update_media_buy", _buy())
+        assert _expired_media_buy_decision_error(*repos, "step_1", "approve") is None
 
 
 class TestApprovalGateFlightEndedFirst:
     def test_ended_flight_reported_before_missing_creatives(self):
         error = _validate_media_buy_approval(_buy(), [], [], NOW)
-        assert error == "Cannot approve: the flight window has already ended."
+        assert error == FLIGHT_ENDED_DECISION_MESSAGE.format(action="approve")
 
 
 @pytest.fixture

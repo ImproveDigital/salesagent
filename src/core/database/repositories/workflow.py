@@ -155,22 +155,6 @@ class WorkflowRepository:
             .order_by(ObjectWorkflowMapping.created_at.desc())
         ).first()
 
-    def list_open_approval_steps_for_object(self, object_type: str, object_id: str) -> list[WorkflowStep]:
-        """Get the object's workflow steps still awaiting a manual approval decision."""
-        return list(
-            self._session.scalars(
-                select(WorkflowStep)
-                .join(ObjectWorkflowMapping, ObjectWorkflowMapping.step_id == WorkflowStep.step_id)
-                .join(DBContext, WorkflowStep.context_id == DBContext.context_id)
-                .where(
-                    ObjectWorkflowMapping.object_type == object_type,
-                    ObjectWorkflowMapping.object_id == object_id,
-                    DBContext.tenant_id == self._tenant_id,
-                    WorkflowStep.status.in_(["requires_approval", "pending_approval"]),
-                )
-            ).all()
-        )
-
     def get_step_by_id(self, step_id: str) -> WorkflowStep | None:
         """Get a workflow step by its primary key within the tenant."""
         return self._session.scalars(

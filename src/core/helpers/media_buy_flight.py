@@ -1,4 +1,4 @@
-"""Flight-window helpers shared by the scheduler, approval gates and dashboard.
+"""Flight-window helpers shared by the approval gates and dashboard.
 
 A media buy's flight end is ``end_time`` when set, otherwise the end of the
 ``end_date`` day (inclusive). Naive datetimes are treated as UTC.
@@ -7,10 +7,13 @@ A media buy's flight end is ``end_time`` when set, otherwise the end of the
 from datetime import UTC, date, datetime
 from typing import Any
 
-# Internal statuses where the buy awaits a (publisher or ad-server) approval
-# and is therefore not delivering. A flight that ends while parked here can
-# never deliver, so it must move to a terminal status.
-APPROVAL_PENDING_STATUSES: frozenset[str] = frozenset({"pending_approval", "pending_ad_server_approval"})
+# Shown when approve/reject is attempted on a buy whose flight already ended.
+# The buy stays pending: once the buyer moves the flight to a future window
+# (update_media_buy start_time/end_time), approve/reject unblock on their own.
+FLIGHT_ENDED_DECISION_MESSAGE = (
+    "Cannot {action}: the flight window has already ended. "
+    "Update the media buy's flight dates (start/end) to a future window to unblock this decision."
+)
 
 
 def flight_end_utc(media_buy: Any) -> datetime | None:
