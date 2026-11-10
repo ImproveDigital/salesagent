@@ -65,12 +65,15 @@ def normalize_list_filter(status_filter: str | None) -> str | None:
     return status_filter if status_filter in LIST_FILTERS else None
 
 
-def needs_creative_action(readiness: "ReadinessDetails") -> bool:
-    """True when packages lack creative assignments or creatives are missing/pending/rejected."""
+def has_missing_creatives(readiness: "ReadinessDetails") -> bool:
+    """True when creatives must still be supplied: unassigned packages, none uploaded, or rejected.
+
+    Creatives that are uploaded and only awaiting approval are not missing —
+    that buy needs an approval decision, not new creatives.
+    """
     packages_total = readiness["packages_total"]
     return (
         readiness["packages_with_creatives"] < packages_total
-        or readiness["creatives_pending"] > 0
         or readiness["creatives_rejected"] > 0
         or (packages_total > 0 and readiness["creatives_total"] == 0)
     )
@@ -81,12 +84,19 @@ def matches_list_filter(readiness: "ReadinessDetails", status_filter: str) -> bo
 
     Filters match the readiness ``state`` shown in the badge, except
     "Needs Creatives", which also includes buys whose state is driven by a
-    higher-priority status (e.g. awaiting approval) but still have creative
-    gaps — the same gaps the readiness column reports as "0/n packages ready".
+    higher-priority status (e.g. awaiting approval) but still have missing
+    creatives — the same gaps the readiness column reports as "0/n packages
+    ready". Creatives merely awaiting approval do not pull such a buy in.
+
+    "Needs Approval" is the complement for awaiting-approval buys: one with
+    missing creatives can't be approved yet (the approval gate blocks it), so
+    it is listed only under "Needs Creatives" and the two chips never overlap.
     """
     state = readiness["state"]
     if status_filter == "needs_creatives":
-        return state == "needs_creatives" or (state not in ("completed", "failed") and needs_creative_action(readiness))
+        return state == "needs_creatives" or (state not in ("completed", "failed") and has_missing_creatives(readiness))
+    if status_filter == "needs_approval":
+        return state == "needs_approval" and not has_missing_creatives(readiness)
     return state == status_filter
 
 
