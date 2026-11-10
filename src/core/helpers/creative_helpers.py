@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 from pydantic import BaseModel
 
-from src.core.canonical_formats import canonicalize_creative_agent_url
+from src.core.canonical_formats import canonicalize_creative_agent_url, product_validation_format_ids
 from src.core.format_cache import canonical_format_satisfies
 
 if TYPE_CHECKING:
@@ -570,8 +570,9 @@ def validate_creative_format_against_product(
         >>> if not is_valid:
         ...     raise ValueError(error)
     """
-    # Extract format_ids from product
-    product_format_ids = product.format_ids or []
+    # Extract format_ids from product. DB products resolve through the inventory
+    # profile so validation matches what buyers are shown.
+    product_format_ids = product_validation_format_ids(product)
     product_id = product.product_id
     product_name = product.name
 
