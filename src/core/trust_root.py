@@ -52,18 +52,14 @@ def _origin(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def agent_url_for_origin(tenant: Tenant, origin: str) -> str:
-    """The agent URL brand.json declares when served at *origin*.
+def agent_url_for_origin(origin: str) -> str:
+    """The agent URL brand.json declares when served at *origin*: always its MCP endpoint.
 
     brand.json on a host speaks for the agent on THAT host — a registry
     byte-compares ``agents[].url`` with the agent URL it was given and checks
-    the document's own host for control. The configured agent URL is used
-    verbatim when it lives on *origin* (so an operator can pin the exact
-    spelling); otherwise the MCP endpoint on *origin* is declared.
+    the document's own host for control. Tenant settings are deliberately not
+    consulted: the MCP endpoint is always ``<origin>/mcp``.
     """
-    configured = resolve_agent_url(tenant)
-    if configured and _origin(configured).lower() == origin.lower():
-        return configured
     return f"{origin}{MCP_PATH}"
 
 

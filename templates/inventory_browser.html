@@ -221,6 +221,22 @@ const treeApiUrl = `${scriptRoot}/api/tenant/${tenantId}/inventory/tree`;
 let selectedInventory = null;
 let adUnitTree = null;
 
+function showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `alert alert-${type} position-fixed top-0 end-0 m-3`;
+    toast.style.zIndex = '9999';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+}
+
+// ISO-style local timestamp (YYYY-MM-DD HH:MM:SS), matching the rest of the admin.
+function formatDateTime(date) {
+    const pad = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+        + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     // Check for URL parameters to pre-filter
@@ -285,7 +301,7 @@ function updateSyncStatus(data) {
         }
 
         syncStatus.innerHTML = `
-            Last synced: ${lastSync.toLocaleString()}
+            Last synced: ${formatDateTime(lastSync)}
             <span class="text-muted">(${timeAgo})</span>
             ${data.needs_refresh ? '<span class="badge bg-warning ms-2">Needs Refresh</span>' : ''}
         `;
@@ -295,8 +311,12 @@ function updateSyncStatus(data) {
 }
 
 function updateStats(data) {
+    // Active items only — the Sync Inventory page shows totals across all statuses.
+    // total_units is the root-node count in lazy mode; total_active_count is the real figure.
+    const adUnits = data.total_active_count ?? data.total_units ?? 0;
     document.getElementById('inventoryStats').innerHTML = `
-        <div><strong>Ad Units:</strong> ${data.total_units || 0}</div>
+        <div class="text-muted small mb-1">Active items only</div>
+        <div><strong>Ad Units:</strong> ${adUnits}</div>
         <div><strong>Placements:</strong> ${data.placements || 0}</div>
         <div><strong>Labels:</strong> ${data.labels || 0}</div>
         <div><strong>Targeting Keys:</strong> ${data.custom_targeting_keys || 0}</div>
@@ -487,20 +507,29 @@ function searchInventory() {
     const status = document.getElementById('inventoryStatus').value;
 
     const params = new URLSearchParams();
-    if (query) params.append('q', query);
+    if (query) params.append('search', query);
     if (type) params.append('type', type);
-    if (status) params.append('status', status);
+    // inventory-list defaults to ACTIVE; "All Status" must opt out explicitly.
+    params.append('status', status || 'ALL');
 
-    fetch(`${scriptRoot}/api/tenant/${tenantId}/inventory/search?${params}`, {
+    fetch(`${scriptRoot}/api/tenant/${tenantId}/inventory-list?${params}`, {
         credentials: 'same-origin'
     })
-        .then(response => response.json())
+        .then(response => response.json().catch(() => ({})).then(data => {
+            if (!response.ok) {
+                throw new Error(data.error || `Server error: ${response.status}`);
+            }
+            return data;
+        }))
         .then(data => {
-            showSearchResults(data.results);
+            showSearchResults(data.items || []);
+            if (data.has_more) {
+                showToast('Showing the first matches only — refine your search to narrow the results.', 'warning');
+            }
         })
         .catch(error => {
             console.error('Search error:', error);
-            alert('Search failed: ' + error.message);
+            showToast('Search failed: ' + error.message, 'danger');
         });
 }
 

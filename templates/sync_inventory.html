@@ -122,6 +122,22 @@ const scriptRoot = '{{ request.script_root }}';
 const isGam = {{ 'true' if is_gam else 'false' }};
 const adapterType = '{{ adapter_type }}';
 
+function showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `alert alert-${type} position-fixed top-0 end-0 m-3`;
+    toast.style.zIndex = '9999';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+}
+
+// ISO-style local timestamp (YYYY-MM-DD HH:MM:SS), matching the rest of the admin.
+function formatDateTime(date) {
+    const pad = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+        + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 // Non-GAM adapters with supports_inventory_sync: sync through the shared
 // orchestration. Some adapters finish in-request and return counts; others
 // (Improve Digital) enqueue a background job and answer 202 with a sync_id,
@@ -231,8 +247,9 @@ function syncInventory(mode) {
                 return;
             }
             const syncLabel = mode === 'full' ? 'Full reset' : 'Incremental sync';
-            alert(`${syncLabel} started. Sync ID: ${data.sync_id}\nThe page will reload when sync completes.`);
-            pollSyncStatus(data.sync_id, btn, original);
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...';
+            showToast(`${syncLabel} started — this page updates when it finishes.`, 'info');
+            pollSyncStatus(data.sync_id, btn, original, syncLabel);
         })
         .catch(err => {
             console.error('Sync error:', err);
@@ -267,8 +284,8 @@ function syncTargetingData() {
                 btn.innerHTML = original;
                 return;
             }
-            alert(`Targeting sync started. Sync ID: ${data.sync_id}`);
-            pollSyncStatus(data.sync_id, btn, original);
+            showToast('Targeting sync started — this page updates when it finishes.', 'info');
+            pollSyncStatus(data.sync_id, btn, original, 'Targeting sync');
         })
         .catch(err => {
             console.error('Targeting sync error:', err);
@@ -278,23 +295,32 @@ function syncTargetingData() {
         });
 }
 
-function pollSyncStatus(syncId, btn, originalLabel) {
+function pollSyncStatus(syncId, btn, originalLabel, syncLabel = 'Sync') {
     let attempts = 0;
     const maxAttempts = 240;  // 20 minutes at 5s intervals
+    const finish = () => {
+        clearInterval(interval);
+        btn.disabled = false;
+        btn.innerHTML = originalLabel;
+    };
     const interval = setInterval(() => {
         attempts++;
         if (attempts > maxAttempts) {
-            clearInterval(interval);
-            btn.disabled = false;
-            btn.innerHTML = originalLabel;
+            finish();
+            showToast(`${syncLabel} is still running — reload the page later to check its status.`, 'warning');
             return;
         }
         fetch(`${scriptRoot}/tenant/${tenantId}/gam/sync-status/${syncId}`, { credentials: 'same-origin' })
             .then(r => r.json())
             .then(data => {
-                if (data.status === 'completed' || data.status === 'failed') {
-                    clearInterval(interval);
-                    location.reload();
+                if (data.status === 'completed') {
+                    finish();
+                    showToast(`${syncLabel} completed.`, 'success');
+                    loadInventoryStatus();
+                } else if (data.status === 'failed') {
+                    finish();
+                    showToast(`${syncLabel} failed: ${data.error || 'unknown error'}`, 'danger');
+                    loadInventoryStatus();
                 }
             })
             .catch(() => {});
@@ -312,13 +338,15 @@ function loadInventoryStatus() {
             const lastSyncs = Object.values(sync).map(s => s.last_synced).filter(Boolean).sort();
             const lastSync = lastSyncs.length ? lastSyncs[lastSyncs.length - 1] : null;
             if (lastSync) {
-                status.textContent = `Last synced: ${new Date(lastSync).toLocaleString()}`;
+                status.textContent = `Last synced: ${formatDateTime(new Date(lastSync))}`;
             } else {
                 status.textContent = 'No sync yet — run an Incremental Sync to populate inventory.';
             }
             const lines = [];
             for (const [type, info] of Object.entries(sync)) {
-                lines.push(`<div><strong>${type}</strong>: ${info.total_count}</div>`);
+                // Total across all statuses; Browse Inventory shows the active subset.
+                const active = (info.status_counts || {}).ACTIVE || 0;
+                lines.push(`<div><strong>${type}</strong>: ${info.total_count} total <span class="text-muted">(${active} active)</span></div>`);
             }
             stats.innerHTML = lines.join('') || '<div class="text-muted">No inventory.</div>';
         })

@@ -96,6 +96,27 @@ def canonical_format_identity(format_ref: Any) -> tuple[str, str, int | None, in
     )
 
 
+def format_label(format_ref: Any, show_original_id: bool = False) -> str:
+    """Return a human-readable label for a FormatId-like value, e.g. ``display_image 728x90``.
+
+    With ``show_original_id``, a legacy ID that was canonicalized is kept in the
+    label (``display_300x250_image (display_image 300x250)``) so the caller can
+    recognise the value they sent.
+    """
+    _agent_url, format_id, width, height, _duration_ms = canonical_format_identity(format_ref)
+    label = f"{format_id} {width}x{height}" if width and height else format_id
+    if show_original_id:
+        original_id = format_ref.get("id") if isinstance(format_ref, dict) else getattr(format_ref, "id", None)
+        if original_id and str(original_id) != format_id:
+            return f"{original_id} ({label})"
+    return label
+
+
+def format_labels(format_refs: Any, show_original_id: bool = False) -> str:
+    """Return a sorted, de-duplicated, comma-separated list of format labels."""
+    return ", ".join(sorted({format_label(format_ref, show_original_id) for format_ref in format_refs}))
+
+
 def canonical_format_matches(requested: Any, supported: Any) -> bool:
     """Return whether two FormatId-like values are compatible.
 

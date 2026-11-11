@@ -7,6 +7,7 @@ across Refresh / Refresh-all until the publisher authorizes us for real or
 the admin removes the manual authorization.
 """
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -189,6 +190,64 @@ class TestManualAuthorizationSurvivesRechecks:
         assert response.status_code == 200
         assert response.get_json()["aao_status"] == "manual"
         assert _partner(env).is_verified is True
+
+    def _authorize_with_old_refresh(self, client, env) -> datetime:
+        """Authorize manually, then age the refresh stamp so a re-check is observable."""
+        client.post(_url(env))
+        old = datetime(2026, 10, 28, 7, 31, 49, tzinfo=UTC)
+        partner = _partner(env)
+        partner.last_refreshed_at = old
+        partner.last_synced_at = old
+        env._session.commit()
+        return old
+
+    def test_refresh_records_fetch_failure_on_manual_partner(self, client, env, aao):
+        """FMS-2153: Refresh on a manual partner must not be a silent no-op."""
+        _login(client)
+        old = self._authorize_with_old_refresh(client, env)
+        aao.return_value = PublisherPartnerStatus(
+            publisher_domain=DOMAIN,
+            total_properties=0,
+            authorized_properties=0,
+            status="unreachable",
+            aao_onboarding_url=f"https://agenticadvertising.org/publisher/{DOMAIN}",
+            error="HTTP 404 fetching adagents.json",
+        )
+
+        body = client.post(f"/tenant/{TENANT_ID}/publisher-partners/{env.partner_id}/refresh").get_json()
+
+        assert body["refresh_status"] == "unreachable"
+        assert body["last_fetch_error"] == "HTTP 404 fetching adagents.json"
+        assert body["aao_status"] == "manual"
+        partner = _partner(env)
+        assert partner.last_refreshed_at > old
+        assert partner.last_synced_at == old  # no successful fetch
+        assert partner.aao_status_kind == "manual"
+
+    def test_refresh_stamps_successful_check_on_manual_partner(self, client, env, aao):
+        _login(client)
+        old = self._authorize_with_old_refresh(client, env)
+        aao.return_value = _status("pending")
+
+        body = client.post(f"/tenant/{TENANT_ID}/publisher-partners/{env.partner_id}/refresh").get_json()
+
+        assert body["refresh_status"] == "pending"
+        assert body["last_fetch_error"] is None
+        partner = _partner(env)
+        assert partner.last_refreshed_at > old
+        assert partner.last_synced_at > old
+        assert partner.is_verified is True
+
+    def test_refresh_all_stamps_check_on_manual_partner(self, client, env, aao):
+        _login(client)
+        old = self._authorize_with_old_refresh(client, env)
+        aao.return_value = _status("pending")
+
+        client.post(f"/tenant/{TENANT_ID}/publisher-partners/sync")
+
+        partner = _partner(env)
+        assert partner.last_refreshed_at > old
+        assert partner.aao_status_kind == "manual"
 
     def test_refresh_upgrades_to_real_authorization_once_publisher_lists_us(self, client, env, aao):
         _login(client)

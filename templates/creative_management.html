@@ -73,7 +73,7 @@
                     </div>
                     <div style="color: #666; font-size: 0.9rem;">
                         <strong>Advertiser:</strong> {{ creative.principal_name }} |
-                        <strong>Format:</strong> <span class="format-badge">{{ creative.format }}</span>
+                        <strong>Format:</strong> <span class="format-badge">{{ creative.format }}{% if creative.format_size %} {{ creative.format_size }}{% endif %}</span>
                         {% if creative.promoted_offering %}
                         | <strong>Promoted Offering:</strong> {{ creative.promoted_offering }}
                         {% endif %}
@@ -150,11 +150,17 @@
                 <div style="margin-top: 0.5rem; display: flex; flex-wrap: gap: 0.5rem;">
                     {% for buy in creative.media_buys %}
                     <a href="{{ url_for('operations.reporting', tenant_id=tenant_id) }}#{{ buy.media_buy_id }}"
-                       style="padding: 0.25rem 0.75rem; background: #f3f4f6; border-radius: 4px; text-decoration: none; color: #374151; font-size: 0.85rem;">
-                        {{ buy.order_name }} ({{ buy.status }})
+                       {% if buy.format_mismatch %}title="{{ buy.format_mismatch }}"{% endif %}
+                       style="padding: 0.25rem 0.75rem; background: {{ '#fef2f2' if buy.format_mismatch else '#f3f4f6' }}; border-radius: 4px; text-decoration: none; color: {{ '#b91c1c' if buy.format_mismatch else '#374151' }}; font-size: 0.85rem;">
+                        {% if buy.format_mismatch %}⚠️ {% endif %}{{ buy.order_name }} ({{ buy.status }})
                     </a>
                     {% endfor %}
                 </div>
+                {% for buy in creative.media_buys if buy.format_mismatch %}
+                <div style="margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: #fef2f2; border-left: 4px solid #dc2626; border-radius: 4px; color: #b91c1c; font-size: 0.85rem;">
+                    ⚠️ <strong>Format mismatch</strong> on {{ buy.order_name }} (package {{ buy.package_id }}): {{ buy.format_mismatch }}
+                </div>
+                {% endfor %}
             </div>
             {% endif %}
 
@@ -322,7 +328,12 @@ function approveCreative(creativeId) {
     })
     .then(response => {
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // Surface the server's reason (e.g. format mismatch) instead of a bare status
+            return response.json()
+                .catch(() => ({}))
+                .then(body => {
+                    throw new Error(body.error || `HTTP ${response.status}: ${response.statusText}`);
+                });
         }
         return response.json();
     })
