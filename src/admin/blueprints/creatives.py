@@ -28,6 +28,7 @@ from src.core.database.models import (
 )
 from src.core.database.repositories.creative import CreativeRepository
 from src.core.feature_flags import is_creative_pre_approval_gate_enabled
+from src.core.helpers.creative_helpers import stored_creative_format_mismatch
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 # TODO: Missing module - these functions need to be implemented
@@ -308,6 +309,16 @@ def index(tenant_id, **kwargs):
     return redirect(url_for("creatives.review_creatives", tenant_id=tenant_id))
 
 
+def _assignment_format_mismatch(uow: AdminCreativeUoW, creative: Any, assignment: Any) -> str | None:
+    """Describe why a creative does not fit the product of the package it is assigned to, if it doesn't."""
+    assert uow.media_buys is not None
+    assert uow.products is not None
+    package = uow.media_buys.get_package(assignment.media_buy_id, assignment.package_id)
+    product_id = package.package_config.get("product_id") if package and package.package_config else None
+    product = uow.products.get_by_id(product_id) if product_id else None
+    return stored_creative_format_mismatch(creative, product) if product else None
+
+
 @creatives_bp.route("/review", methods=["GET"])
 @require_tenant_access()
 def review_creatives(tenant_id, **kwargs):
@@ -341,11 +352,14 @@ def review_creatives(tenant_id, **kwargs):
             for assignment in assignments:
                 media_buy = uow.media_buys.get_by_id(assignment.media_buy_id)
                 if media_buy:
+                    # Flag assignments whose creative format the package's product does not accept
+                    format_mismatch = _assignment_format_mismatch(uow, creative, assignment)
                     media_buys.append(
                         {
                             "media_buy_id": media_buy.media_buy_id,
                             "order_name": media_buy.order_name,
                             "package_id": assignment.package_id,
+                            "format_mismatch": format_mismatch,
                             "status": media_buy.status,
                             "start_date": media_buy.start_date,
                             "end_date": media_buy.end_date,
@@ -365,11 +379,19 @@ def review_creatives(tenant_id, **kwargs):
                             if product:
                                 promoted_offering = product.name
 
+            format_params = creative.format_parameters if isinstance(creative.format_parameters, dict) else {}
+            format_size = (
+                f"{format_params['width']}x{format_params['height']}"
+                if format_params.get("width") and format_params.get("height")
+                else None
+            )
+
             creative_list.append(
                 {
                     "creative_id": creative.creative_id,
                     "name": creative.name,
                     "format": creative.format,
+                    "format_size": format_size,
                     "status": creative.status,
                     "principal_name": principal_name,
                     "principal_id": creative.principal_id,
@@ -553,6 +575,25 @@ def approve_creative(tenant_id, creative_id, **kwargs):
 
             if not creative:
                 return jsonify({"error": "Creative not found"}), 404
+
+            # Refuse approval while the creative is assigned to a package whose product
+            # does not accept its format — approving would traffic it at the wrong size.
+            format_mismatches = [
+                f"{assignment.media_buy_id} / {assignment.package_id}: {mismatch}"
+                for assignment in uow.assignments.get_by_creative(creative_id)
+                if (mismatch := _assignment_format_mismatch(uow, creative, assignment))
+            ]
+            if format_mismatches:
+                return (
+                    jsonify(
+                        {
+                            "error": "Cannot approve: creative format does not match the assigned product. "
+                            + "; ".join(format_mismatches),
+                            "format_mismatches": format_mismatches,
+                        }
+                    ),
+                    409,
+                )
 
             # Check if there was a prior AI review that disagreed
             prior_ai_review = uow.creatives.get_prior_ai_review(creative_id)

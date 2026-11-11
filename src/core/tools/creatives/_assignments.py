@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from src.core.canonical_formats import product_validation_format_ids
 from src.core.database.repositories.uow import CreativeUoW
 from src.core.exceptions import AdCPNotFoundError, AdCPValidationError
 from src.core.format_cache import canonical_format_identity
@@ -113,14 +114,15 @@ def _process_assignments(
                         # Get product formats
                         product = assignment_repo.get_product_by_id(product_id)
 
-                        if product and product.format_ids:
+                        product_formats = product_validation_format_ids(product) if product else []
+                        if product and product_formats:
                             # Build set of supported canonical format identities.
                             # Older persisted products may still carry legacy
                             # reference-agent IDs like display_300x250; compare
                             # them as display_image + width/height so canonical
                             # migration does not collapse all display sizes.
                             supported_formats: set[tuple[str, str, int | None, int | None, int | None]] = set()
-                            for fmt in product.format_ids:
+                            for fmt in product_formats:
                                 if isinstance(fmt, dict):
                                     agent_url_val = fmt.get("agent_url")
                                     format_id_val = fmt.get("id") or fmt.get("format_id")

@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from src.core.database.models import GamAdvertiser, MediaBuy, MediaPackage
+from src.core.database.models import Creative, GamAdvertiser, MediaBuy, MediaPackage, Product
 
 
 class MediaBuyRepository:
@@ -265,6 +265,28 @@ class MediaBuyRepository:
                 MediaPackage.package_id == package_id,
             )
         ).first()
+
+    def get_product_by_id(self, product_id: str) -> Product | None:
+        """Get the product a package was booked against, scoped to this tenant."""
+        return self._session.scalars(
+            select(Product).where(
+                Product.tenant_id == self._tenant_id,
+                Product.product_id == product_id,
+            )
+        ).first()
+
+    def get_creatives_by_ids(self, creative_ids: list[str]) -> list[Creative]:
+        """Get creatives by ID for assignment validation, scoped to this tenant."""
+        if not creative_ids:
+            return []
+        return list(
+            self._session.scalars(
+                select(Creative).where(
+                    Creative.tenant_id == self._tenant_id,
+                    Creative.creative_id.in_(creative_ids),
+                )
+            ).all()
+        )
 
     def get_packages_for_ids(self, media_buy_ids: list[str]) -> dict[str, list[MediaPackage]]:
         """Get packages for multiple media buys, grouped by media_buy_id.

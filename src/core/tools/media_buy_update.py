@@ -44,6 +44,7 @@ from src.core.audit_logger import get_audit_logger
 from src.core.auth import (
     get_principal_object,
 )
+from src.core.canonical_formats import product_validation_format_ids
 from src.core.context_manager import get_context_manager
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
 from src.core.format_cache import canonical_format_satisfies
@@ -1448,7 +1449,8 @@ def _update_media_buy_impl(
                         )
                         product = session.scalars(product_stmt).first()
 
-                        if product and product.format_ids:
+                        product_formats = product_validation_format_ids(product) if product else []
+                        if product and product_formats:
                             # Check each creative's format
                             for creative in creatives_list:
                                 format_parameters = (
@@ -1461,7 +1463,7 @@ def _update_media_buy_impl(
                                 }
                                 is_supported = any(
                                     canonical_format_satisfies(creative_format_ref, supported_format)
-                                    for supported_format in product.format_ids
+                                    for supported_format in product_formats
                                 )
 
                                 if not is_supported:
@@ -1475,7 +1477,7 @@ def _update_media_buy_impl(
                                             f"{fmt.get('agent_url')}/{fmt.get('id') or fmt.get('format_id')}"
                                             if isinstance(fmt, dict)
                                             else str(fmt)
-                                            for fmt in product.format_ids
+                                            for fmt in product_formats
                                         ]
                                     )
                                     validation_errors.append(
@@ -1689,6 +1691,62 @@ def _update_media_buy_impl(
                                     context=req.context,
                                 )
                                 return response_data
+
+                    # Validate creative formats against the package's product formats,
+                    # same contract as the creative_ids handler above.
+                    format_pkg = uow.media_buys.get_package(actual_media_buy_id, pkg_update.package_id)
+                    format_product_id = (
+                        format_pkg.package_config.get("product_id")
+                        if format_pkg and format_pkg.package_config
+                        else None
+                    )
+                    format_product = uow.media_buys.get_product_by_id(format_product_id) if format_product_id else None
+                    format_product_formats = product_validation_format_ids(format_product) if format_product else []
+                    assigned_creative_ids = [ca.creative_id for ca in pkg_update.creative_assignments]
+                    assigned_creatives = uow.media_buys.get_creatives_by_ids(assigned_creative_ids)
+                    missing_creative_ids = sorted(
+                        set(assigned_creative_ids) - {creative.creative_id for creative in assigned_creatives}
+                    )
+                    if missing_creative_ids:
+                        error_msg = f"Creative IDs not found: {', '.join(missing_creative_ids)}"
+                        logger.error(f"[UPDATE] {error_msg}")
+                        return UpdateMediaBuyError(
+                            errors=[Error(code="creatives_not_found", message=error_msg)],
+                            context=req.context,
+                        )
+                    if format_product and format_product_formats:
+                        format_errors = []
+                        for assigned_creative in assigned_creatives:
+                            assigned_params = (
+                                assigned_creative.format_parameters
+                                if isinstance(assigned_creative.format_parameters, dict)
+                                else {}
+                            )
+                            assigned_format_ref = {
+                                "agent_url": assigned_creative.agent_url,
+                                "id": assigned_creative.format,
+                                **assigned_params,
+                            }
+                            if not any(
+                                canonical_format_satisfies(assigned_format_ref, supported_format)
+                                for supported_format in format_product_formats
+                            ):
+                                format_errors.append(
+                                    f"Creative {assigned_creative.creative_id} format "
+                                    f"'{assigned_creative.agent_url}/{assigned_creative.format}' "
+                                    f"is not supported by product '{format_product.name}'"
+                                )
+                        if format_errors:
+                            error_msg = (
+                                "Cannot update media buy with invalid creatives. "
+                                "The following creatives cannot be assigned:\n"
+                                + "\n".join(f"  • {err}" for err in format_errors)
+                            )
+                            logger.error(f"[UPDATE] {error_msg}")
+                            raise AdCPValidationError(
+                                error_msg,
+                                details={"error_code": "INVALID_CREATIVES", "creative_errors": format_errors},
+                            )
 
                     updated_assignments = []
                     new_assignments_created = []

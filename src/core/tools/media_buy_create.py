@@ -231,6 +231,7 @@ from src.core.audit_logger import get_audit_logger
 from src.core.auth import (
     get_principal_object,
 )
+from src.core.canonical_formats import product_validation_format_ids
 from src.core.context_manager import get_context_manager
 from src.core.database.models import MediaBuy
 from src.core.database.models import Principal as ModelPrincipal
@@ -837,7 +838,7 @@ def _validate_creatives_before_adapter_call(
         # Build product_id -> accepted namespaced formats
         product_format_map: dict[str, list[Any]] = {}
         for product in products_list:
-            product_format_map[product.product_id] = list(product.format_ids or [])
+            product_format_map[product.product_id] = product_validation_format_ids(product)
 
         # Check each package's creatives against its product's accepted formats
         for package in packages:
