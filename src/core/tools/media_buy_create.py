@@ -2332,6 +2332,38 @@ def _derive_single_request_currency(package_pricing_info_by_index: dict[int, dic
     return currencies[0]
 
 
+def _validate_total_budget(req: CreateMediaBuyRequest, request_currency: str, package_budget_sum: float) -> None:
+    """Reject a total_budget that disagrees with the resolved buy currency or package budgets.
+
+    Per AdCP, total_budget.currency must match the selected pricing options'
+    currency, and in fixed allocation mode total_budget.amount MUST equal the
+    sum of package budgets. Seller-optimized buys draw from a shared total, so
+    the sum check does not apply there.
+    """
+    total_budget = getattr(req, "total_budget", None)
+    if total_budget is None:
+        return
+
+    if total_budget.currency != request_currency:
+        raise ValueError(
+            f"total_budget.currency {total_budget.currency} does not match the currency of the selected "
+            f"pricing options ({request_currency}). Send total_budget in {request_currency} or choose "
+            f"pricing options in {total_budget.currency}."
+        )
+
+    allocation = getattr(req, "budget_allocation", None)
+    allocation = getattr(allocation, "root", allocation)  # BudgetAllocation is a RootModel union
+    mode = getattr(allocation, "mode", None)
+    if getattr(mode, "value", mode) == "seller_optimized":
+        return
+
+    if abs(float(total_budget.amount) - package_budget_sum) > 0.005:
+        raise ValueError(
+            f"total_budget.amount {total_budget.amount} does not equal the sum of package budgets "
+            f"({package_budget_sum}). In fixed allocation mode these must match."
+        )
+
+
 def _derive_legacy_request_currency(req: CreateMediaBuyRequest) -> str | None:
     """Best-effort currency extraction for deprecated request shapes."""
     legacy_currency = getattr(req, "currency", None)
@@ -2973,6 +3005,8 @@ async def _create_media_buy_impl(
             request_currency = request_currency or legacy_request_currency
             if not request_currency:
                 request_currency = "USD"
+
+            _validate_total_budget(req, request_currency, total_budget)
 
             # Get currency limits for this tenant and currency
             currency_stmt = select(CurrencyLimit).where(
