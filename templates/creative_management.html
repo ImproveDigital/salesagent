@@ -328,7 +328,12 @@ function approveCreative(creativeId) {
     })
     .then(response => {
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // Surface the server's reason (e.g. format mismatch) instead of a bare status
+            return response.json()
+                .catch(() => ({}))
+                .then(body => {
+                    throw new Error(body.error || `HTTP ${response.status}: ${response.statusText}`);
+                });
         }
         return response.json();
     })

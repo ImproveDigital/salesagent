@@ -309,6 +309,16 @@ def index(tenant_id, **kwargs):
     return redirect(url_for("creatives.review_creatives", tenant_id=tenant_id))
 
 
+def _assignment_format_mismatch(uow: AdminCreativeUoW, creative: Any, assignment: Any) -> str | None:
+    """Describe why a creative does not fit the product of the package it is assigned to, if it doesn't."""
+    assert uow.media_buys is not None
+    assert uow.products is not None
+    package = uow.media_buys.get_package(assignment.media_buy_id, assignment.package_id)
+    product_id = package.package_config.get("product_id") if package and package.package_config else None
+    product = uow.products.get_by_id(product_id) if product_id else None
+    return stored_creative_format_mismatch(creative, product) if product else None
+
+
 @creatives_bp.route("/review", methods=["GET"])
 @require_tenant_access()
 def review_creatives(tenant_id, **kwargs):
@@ -343,14 +353,7 @@ def review_creatives(tenant_id, **kwargs):
                 media_buy = uow.media_buys.get_by_id(assignment.media_buy_id)
                 if media_buy:
                     # Flag assignments whose creative format the package's product does not accept
-                    format_mismatch = None
-                    package = uow.media_buys.get_package(assignment.media_buy_id, assignment.package_id)
-                    package_product_id = (
-                        package.package_config.get("product_id") if package and package.package_config else None
-                    )
-                    package_product = uow.products.get_by_id(package_product_id) if package_product_id else None
-                    if package_product:
-                        format_mismatch = stored_creative_format_mismatch(creative, package_product)
+                    format_mismatch = _assignment_format_mismatch(uow, creative, assignment)
                     media_buys.append(
                         {
                             "media_buy_id": media_buy.media_buy_id,
@@ -572,6 +575,25 @@ def approve_creative(tenant_id, creative_id, **kwargs):
 
             if not creative:
                 return jsonify({"error": "Creative not found"}), 404
+
+            # Refuse approval while the creative is assigned to a package whose product
+            # does not accept its format — approving would traffic it at the wrong size.
+            format_mismatches = [
+                f"{assignment.media_buy_id} / {assignment.package_id}: {mismatch}"
+                for assignment in uow.assignments.get_by_creative(creative_id)
+                if (mismatch := _assignment_format_mismatch(uow, creative, assignment))
+            ]
+            if format_mismatches:
+                return (
+                    jsonify(
+                        {
+                            "error": "Cannot approve: creative format does not match the assigned product. "
+                            + "; ".join(format_mismatches),
+                            "format_mismatches": format_mismatches,
+                        }
+                    ),
+                    409,
+                )
 
             # Check if there was a prior AI review that disagreed
             prior_ai_review = uow.creatives.get_prior_ai_review(creative_id)
