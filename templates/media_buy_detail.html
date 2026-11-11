@@ -291,8 +291,13 @@
                             </div>
                             <div class="creative-detail-row">
                                 <span class="label">Format:</span>
-                                <span class="value">{{ item.creative.format or 'N/A' }}</span>
+                                <span class="value">{{ item.creative.format or 'N/A' }}{% if item.creative.format_parameters and item.creative.format_parameters.get('width') and item.creative.format_parameters.get('height') %} {{ item.creative.format_parameters.get('width') }}x{{ item.creative.format_parameters.get('height') }}{% endif %}</span>
                             </div>
+                            {% if item.format_mismatch %}
+                            <div style="margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: #fef2f2; border-left: 4px solid #dc2626; border-radius: 4px; color: #b91c1c; font-size: 0.85rem;">
+                                ⚠️ <strong>Format mismatch:</strong> {{ item.format_mismatch }}
+                            </div>
+                            {% endif %}
                             <div class="creative-detail-row">
                                 <span class="label">Weight:</span>
                                 <span class="value">{{ item.assignment.weight }}%</span>

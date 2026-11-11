@@ -392,15 +392,23 @@ def media_buy_detail(tenant_id, media_buy_id):
             assignment_results = db_session.execute(stmt).all()
 
             # Group assignments by package_id
+            from src.core.helpers.creative_helpers import stored_creative_format_mismatch
+
+            product_by_package_id = {item["package"].package_id: item["product"] for item in packages}
             creative_assignments_by_package = {}
             for assignment, creative in assignment_results:
                 pkg_id = assignment.package_id
                 if pkg_id not in creative_assignments_by_package:
                     creative_assignments_by_package[pkg_id] = []
+                package_product = product_by_package_id.get(pkg_id)
                 creative_assignments_by_package[pkg_id].append(
                     {
                         "assignment": assignment,
                         "creative": creative,
+                        # Flag creatives whose format the package's product does not accept
+                        "format_mismatch": (
+                            stored_creative_format_mismatch(creative, package_product) if package_product else None
+                        ),
                     }
                 )
 

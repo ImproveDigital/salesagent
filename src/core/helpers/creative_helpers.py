@@ -7,7 +7,7 @@ from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 from pydantic import BaseModel
 
 from src.core.canonical_formats import canonicalize_creative_agent_url, product_validation_format_ids
-from src.core.format_cache import canonical_format_satisfies
+from src.core.format_cache import canonical_format_identity, canonical_format_satisfies
 
 if TYPE_CHECKING:
     from src.core.database.models import Product as DBProduct
@@ -625,6 +625,33 @@ def validate_creative_format_against_product(
     )
 
     return False, error_msg
+
+
+def _format_label(format_ref: Any) -> str:
+    _agent_url, format_id, width, height, _duration_ms = canonical_format_identity(format_ref)
+    return f"{format_id} {width}x{height}" if width and height else format_id
+
+
+def stored_creative_format_mismatch(creative: Any, product: Any) -> str | None:
+    """Describe why a stored creative does not fit a product's formats, or return None if it fits.
+
+    Used by the admin UI to flag assignments that are no longer valid, e.g. when a
+    product's formats were edited after the creative was assigned.
+    """
+    accepted = product_validation_format_ids(product)
+    if not accepted:
+        return None
+
+    format_parameters = creative.format_parameters if isinstance(creative.format_parameters, dict) else {}
+    creative_format = {"agent_url": creative.agent_url, "id": creative.format, **format_parameters}
+    if any(canonical_format_satisfies(creative_format, product_format) for product_format in accepted):
+        return None
+
+    accepted_labels = ", ".join(sorted({_format_label(product_format) for product_format in accepted}))
+    return (
+        f"Creative format {_format_label(creative_format)} is not accepted by product "
+        f"'{product.name}' (accepts: {accepted_labels})"
+    )
 
 
 def process_and_upload_package_creatives(

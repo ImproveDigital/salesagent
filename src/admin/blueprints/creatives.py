@@ -28,6 +28,7 @@ from src.core.database.models import (
 )
 from src.core.database.repositories.creative import CreativeRepository
 from src.core.feature_flags import is_creative_pre_approval_gate_enabled
+from src.core.helpers.creative_helpers import stored_creative_format_mismatch
 from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 # TODO: Missing module - these functions need to be implemented
@@ -341,11 +342,21 @@ def review_creatives(tenant_id, **kwargs):
             for assignment in assignments:
                 media_buy = uow.media_buys.get_by_id(assignment.media_buy_id)
                 if media_buy:
+                    # Flag assignments whose creative format the package's product does not accept
+                    format_mismatch = None
+                    package = uow.media_buys.get_package(assignment.media_buy_id, assignment.package_id)
+                    package_product_id = (
+                        package.package_config.get("product_id") if package and package.package_config else None
+                    )
+                    package_product = uow.products.get_by_id(package_product_id) if package_product_id else None
+                    if package_product:
+                        format_mismatch = stored_creative_format_mismatch(creative, package_product)
                     media_buys.append(
                         {
                             "media_buy_id": media_buy.media_buy_id,
                             "order_name": media_buy.order_name,
                             "package_id": assignment.package_id,
+                            "format_mismatch": format_mismatch,
                             "status": media_buy.status,
                             "start_date": media_buy.start_date,
                             "end_date": media_buy.end_date,
@@ -365,11 +376,19 @@ def review_creatives(tenant_id, **kwargs):
                             if product:
                                 promoted_offering = product.name
 
+            format_params = creative.format_parameters if isinstance(creative.format_parameters, dict) else {}
+            format_size = (
+                f"{format_params['width']}x{format_params['height']}"
+                if format_params.get("width") and format_params.get("height")
+                else None
+            )
+
             creative_list.append(
                 {
                     "creative_id": creative.creative_id,
                     "name": creative.name,
                     "format": creative.format,
+                    "format_size": format_size,
                     "status": creative.status,
                     "principal_name": principal_name,
                     "principal_id": creative.principal_id,

@@ -25,8 +25,10 @@ from src.admin.utils.embedded_capabilities import capability_owned_response, pub
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PricingOption, Product, ProductInventoryMapping, Tenant
 from src.core.database.product_pricing import get_product_pricing_options
+from src.core.database.repositories.creative import CreativeAssignmentRepository
 from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.format_references import format_id_identity, format_id_storage_dict, try_format_id_from_ref
+from src.core.helpers.creative_helpers import stored_creative_format_mismatch
 from src.core.schemas import Format
 from src.core.validation import sanitize_form_data
 from src.services.gam_product_config_service import GAMProductConfigService
@@ -2150,6 +2152,23 @@ def edit_product(tenant_id, product_id):
                     previous_allowed_principal_ids=previous_allowed_principal_ids,
                     pricing_changed=True,
                 )
+
+                # Warn when the edit leaves already-assigned creatives outside the product's formats
+                stale_assignments = [
+                    f"{assignment.creative_id} on {assignment.media_buy_id}"
+                    for assignment, creative in CreativeAssignmentRepository(
+                        db_session, tenant_id
+                    ).list_with_creatives_for_product(product_id)
+                    if stored_creative_format_mismatch(creative, product)
+                ]
+                if stale_assignments:
+                    shown = ", ".join(stale_assignments[:5])
+                    more = f" and {len(stale_assignments) - 5} more" if len(stale_assignments) > 5 else ""
+                    flash(
+                        f"{len(stale_assignments)} assigned creative(s) no longer match this product's formats: "
+                        f"{shown}{more}. Review them on the Creatives page.",
+                        "warning",
+                    )
 
                 flash(f"Product '{product.name}' updated successfully", "success")
                 return redirect(url_for("products.list_products", tenant_id=tenant_id))
