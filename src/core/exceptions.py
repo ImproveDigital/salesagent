@@ -248,6 +248,20 @@ class AdCPTermsRejectedError(AdCPError):
     recovery: RecoveryHint = "correctable"
 
 
+class AdCPUnsupportedFeatureError(AdCPError):
+    """Request uses a feature this seller does not advertise (422).
+
+    Per AdCP spec, sellers MUST reject requests relying on undeclared
+    capabilities (e.g. ``budget_allocation.mode: "seller_optimized"`` without
+    ``media_buy.features.seller_optimized_budget``) rather than coercing them.
+    Correctable: the buyer can drop the feature and retry.
+    """
+
+    status_code = 422
+    error_code = "UNSUPPORTED_FEATURE"
+    recovery: RecoveryHint = "correctable"
+
+
 class AdCPRateLimitError(AdCPError):
     """Too many requests (429)."""
 
