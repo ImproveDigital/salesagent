@@ -7,7 +7,7 @@ from adcp.types.legacy import LegacyFormatId as LibraryFormatId
 from pydantic import BaseModel
 
 from src.core.canonical_formats import canonicalize_creative_agent_url, product_validation_format_ids
-from src.core.format_cache import canonical_format_identity, canonical_format_satisfies
+from src.core.format_cache import canonical_format_satisfies, format_label, format_labels
 
 if TYPE_CHECKING:
     from src.core.database.models import Product as DBProduct
@@ -587,49 +587,19 @@ def validate_creative_format_against_product(
     if not creative_agent_url or not creative_id:
         return False, "Creative format_id is missing agent_url or id"
 
-    # Helper to normalize URLs for comparison (strip trailing slashes)
-    # Pydantic AnyUrl adds trailing slash when converting to string, causing mismatches
-    def normalize_url(url_val: Any) -> str:
-        if not url_val:
-            return ""
-        return str(url_val).rstrip("/")
-
     # Canonical comparison keeps legacy fixed-size IDs compatible with AdCP
     # parameterized IDs, e.g. display_300x250_image vs display_image+300x250.
     for product_format in product_format_ids:
         if canonical_format_satisfies(creative_format_id, product_format):
             return True, None
 
-    # Build error message with supported formats
-    supported_formats = []
-    for fmt in product_format_ids:
-        # Handle both FormatId objects and dicts
-        if isinstance(fmt, dict):
-            agent_url: str | None = fmt.get("agent_url")
-            fmt_id: str | None = fmt.get("id") or fmt.get("format_id")
-        elif isinstance(fmt, LibraryFormatId):
-            # Convert AnyUrl to string for consistent handling
-            agent_url = str(fmt.agent_url) if fmt.agent_url else None
-            fmt_id = fmt.id
-        else:
-            continue
-
-        if agent_url and fmt_id:
-            # Use normalized URL in display to avoid double slashes
-            supported_formats.append(f"{normalize_url(agent_url)}/{fmt_id}")
-
-    creative_format_display = f"{normalize_url(creative_agent_url)}/{creative_id}"
+    # Labels carry the size, so same-id formats of different sizes stay distinguishable
     error_msg = (
-        f"Creative format '{creative_format_display}' does not match product '{product_name}' ({product_id}). "
-        f"Supported formats: {supported_formats}"
+        f"Creative format '{format_label(creative_format_id, show_original_id=True)}' does not match product "
+        f"'{product_name}' ({product_id}). Supported formats: {format_labels(product_format_ids, show_original_id=True)}"
     )
 
     return False, error_msg
-
-
-def _format_label(format_ref: Any) -> str:
-    _agent_url, format_id, width, height, _duration_ms = canonical_format_identity(format_ref)
-    return f"{format_id} {width}x{height}" if width and height else format_id
 
 
 def stored_creative_format_mismatch(creative: Any, product: Any) -> str | None:
@@ -647,10 +617,9 @@ def stored_creative_format_mismatch(creative: Any, product: Any) -> str | None:
     if any(canonical_format_satisfies(creative_format, product_format) for product_format in accepted):
         return None
 
-    accepted_labels = ", ".join(sorted({_format_label(product_format) for product_format in accepted}))
     return (
-        f"Creative format {_format_label(creative_format)} is not accepted by product "
-        f"'{product.name}' (accepts: {accepted_labels})"
+        f"Creative format {format_label(creative_format)} is not accepted by product "
+        f"'{product.name}' (accepts: {format_labels(accepted)})"
     )
 
 

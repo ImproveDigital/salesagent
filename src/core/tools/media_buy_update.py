@@ -47,7 +47,7 @@ from src.core.auth import (
 from src.core.canonical_formats import product_validation_format_ids
 from src.core.context_manager import get_context_manager
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
-from src.core.format_cache import canonical_format_satisfies
+from src.core.format_cache import canonical_format_satisfies, format_label, format_labels
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
@@ -1467,23 +1467,11 @@ def _update_media_buy_impl(
                                 )
 
                                 if not is_supported:
-                                    creative_format_display = (
-                                        f"{creative.agent_url}/{creative.format}"
-                                        if creative.agent_url
-                                        else creative.format
-                                    )
-                                    supported_formats_display = ", ".join(
-                                        [
-                                            f"{fmt.get('agent_url')}/{fmt.get('id') or fmt.get('format_id')}"
-                                            if isinstance(fmt, dict)
-                                            else str(fmt)
-                                            for fmt in product_formats
-                                        ]
-                                    )
                                     validation_errors.append(
-                                        f"Creative {creative.creative_id} format '{creative_format_display}' "
+                                        f"Creative {creative.creative_id} format "
+                                        f"'{format_label(creative_format_ref, show_original_id=True)}' "
                                         f"is not supported by product '{product.name}'. "
-                                        f"Supported formats: {supported_formats_display}"
+                                        f"Supported formats: {format_labels(product_formats, show_original_id=True)}"
                                     )
 
                     if validation_errors:
