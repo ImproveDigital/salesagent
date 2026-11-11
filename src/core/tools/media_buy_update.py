@@ -1702,10 +1702,19 @@ def _update_media_buy_impl(
                     )
                     format_product = uow.media_buys.get_product_by_id(format_product_id) if format_product_id else None
                     format_product_formats = product_validation_format_ids(format_product) if format_product else []
-                    if format_product and format_product_formats:
-                        assigned_creatives = uow.media_buys.get_creatives_by_ids(
-                            [ca.creative_id for ca in pkg_update.creative_assignments]
+                    assigned_creative_ids = [ca.creative_id for ca in pkg_update.creative_assignments]
+                    assigned_creatives = uow.media_buys.get_creatives_by_ids(assigned_creative_ids)
+                    missing_creative_ids = sorted(
+                        set(assigned_creative_ids) - {creative.creative_id for creative in assigned_creatives}
+                    )
+                    if missing_creative_ids:
+                        error_msg = f"Creative IDs not found: {', '.join(missing_creative_ids)}"
+                        logger.error(f"[UPDATE] {error_msg}")
+                        return UpdateMediaBuyError(
+                            errors=[Error(code="creatives_not_found", message=error_msg)],
+                            context=req.context,
                         )
+                    if format_product and format_product_formats:
                         format_errors = []
                         for assigned_creative in assigned_creatives:
                             assigned_params = (

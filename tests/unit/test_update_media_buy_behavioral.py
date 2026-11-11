@@ -2025,6 +2025,12 @@ class TestUC003UpdateCreativeAssignments:
         mock_pkg.package_config = {"product_id": "prod_1"}
         standard_mocks["uow_instance"].media_buys.get_package.return_value = mock_pkg
 
+        # Creative exists; product has no format restrictions
+        standard_mocks["uow_instance"].media_buys.get_creatives_by_ids.return_value = [MagicMock(creative_id="C1")]
+        standard_mocks["uow_instance"].media_buys.get_product_by_id.return_value = MagicMock(
+            format_ids=[], inventory_profile_id=None
+        )
+
         # Product with placements
         mock_product = MagicMock()
         mock_product.placements = [
@@ -2124,6 +2130,7 @@ class TestUC003UpdateCreativeAssignments:
             ]
         )
         mock_session.scalars.side_effect = lambda _stmt: next(scalars_calls)
+        standard_mocks["uow_instance"].media_buys.get_creatives_by_ids.return_value = []
 
         identity = _make_identity()
         req = UpdateMediaBuyRequest(
@@ -2140,10 +2147,11 @@ class TestUC003UpdateCreativeAssignments:
         )
         result = _update_media_buy_impl(req=req, identity=identity)
 
-        # The creative_assignments path creates assignments even for
-        # non-existing creatives (existence check is in creative_ids path).
-        # This test documents the current behavior.
-        assert isinstance(result, UpdateMediaBuySuccess)
+        # The creative_assignments path rejects non-existing creatives,
+        # same as the creative_ids path.
+        assert isinstance(result, UpdateMediaBuyError)
+        assert result.errors[0].code == "creatives_not_found"
+        assert "C999" in result.errors[0].message
 
 
 # ---------------------------------------------------------------------------
