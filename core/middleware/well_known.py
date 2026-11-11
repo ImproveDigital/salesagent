@@ -73,7 +73,7 @@ def build_trust_root_document(tenant_id: str, path: str, host: str, origin: str)
         if path == JWKS_PATH:
             return build_jwks(keys)
         if path == BRAND_JSON_PATH:
-            return build_brand_json(tenant, agent_url_for_origin(tenant, origin), keys)
+            return build_brand_json(tenant, agent_url_for_origin(origin), keys)
 
         agent_url = resolve_agent_url(tenant)
         if not agent_url:

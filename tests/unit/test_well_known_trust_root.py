@@ -99,16 +99,9 @@ class TestBrandJson:
 
 
 class TestAgentUrlForOrigin:
-    def test_configured_url_on_another_host_is_not_declared(self):
-        """Regression: public_agent_url on salesagent.azerion.com leaked into the improvedigital.com brand.json."""
-        tenant = _tenant(public_agent_url="https://salesagent.azerion.com")
-
-        assert agent_url_for_origin(tenant, f"https://{HOST}") == AGENT_URL
-
-    def test_configured_url_on_serving_host_is_used_verbatim(self):
-        tenant = _tenant(public_agent_url=f"https://{HOST}")
-
-        assert agent_url_for_origin(tenant, f"https://{HOST.upper()}") == f"https://{HOST}"
+    def test_always_the_mcp_endpoint_on_the_serving_host(self):
+        """Regression: tenant settings (bare origin, other host) leaked into agents[].url instead of <host>/mcp."""
+        assert agent_url_for_origin(f"https://{HOST}") == AGENT_URL
 
 
 class TestBrandJsonUrl:

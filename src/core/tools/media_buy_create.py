@@ -38,6 +38,7 @@ from src.core.exceptions import (
     AdCPNotFoundError,
     AdCPProductNotFoundError,
     AdCPTermsRejectedError,
+    AdCPUnsupportedFeatureError,
     AdCPValidationError,
 )
 from src.core.tracing import traced
@@ -146,6 +147,25 @@ def _validate_measurement_terms(req: "CreateMediaBuyRequest") -> None:
                     "min_supported_variance_percent": _MIN_SUPPORTED_VARIANCE_PERCENT,
                 },
             )
+
+
+def _reject_unsupported_budget_allocation(req: "CreateMediaBuyRequest") -> None:
+    """Reject ``budget_allocation.mode: "seller_optimized"``.
+
+    This seller does not advertise ``media_buy.features.seller_optimized_budget``.
+    Per AdCP, such sellers MUST reject seller_optimized requests with
+    UNSUPPORTED_FEATURE before any provider mutation and MUST NOT coerce them
+    to fixed allocation.
+    """
+    allocation = getattr(req, "budget_allocation", None)
+    allocation = getattr(allocation, "root", allocation)  # BudgetAllocation is a RootModel union
+    mode = getattr(allocation, "mode", None)
+    if getattr(mode, "value", mode) == "seller_optimized":
+        raise AdCPUnsupportedFeatureError(
+            "budget_allocation.mode 'seller_optimized' is not supported by this seller. "
+            "Use fixed allocation (omit budget_allocation or send {mode: 'fixed'}) with a budget on every package.",
+            details={"field": "budget_allocation.mode"},
+        )
 
 
 def _effective_manual_approval_required(
@@ -2703,6 +2723,7 @@ async def _create_media_buy_impl(
     # workflow / DB side effects. Surfaces as TERMS_REJECTED (correctable) on the
     # wire so buyer agents relax terms and retry with a fresh idempotency_key.
     _validate_measurement_terms(req)
+    _reject_unsupported_budget_allocation(req)
 
     # Validate setup completion (only in production, skip for testing/dev)
     _skip_setup_check = os.environ.get("ADCP_SKIP_SETUP_CHECK") == "true"
