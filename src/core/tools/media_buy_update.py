@@ -49,6 +49,7 @@ from src.core.context_manager import get_context_manager
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
 from src.core.format_cache import canonical_format_satisfies, format_label, format_labels
 from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.creative_helpers import stored_creative_format_mismatch
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AffectedPackage,
@@ -510,6 +511,45 @@ def _validate_update_submission(
     return None
 
 
+def _reject_mismatched_creative_formats(
+    req: UpdateMediaBuyRequest, media_buy_id: str, media_buys: MediaBuyRepository
+) -> None:
+    """Reject creative assignments whose format the package's product does not accept.
+
+    Runs before an update is deferred for manual approval. The per-package
+    checks on the apply path sit *after* that gate, so on tenants that route
+    updates through manual approval a mismatched assignment was accepted as a
+    deferred ``requires_approval`` and only failed on approval replay
+    (FMS-2162). Updates that apply immediately are validated by the apply
+    path, which also owns the "creative not found" error.
+    """
+    errors: list[str] = []
+    for pkg_update in req.packages or []:
+        creative_ids = [
+            *(pkg_update.creative_ids or []),
+            *(assignment.creative_id for assignment in pkg_update.creative_assignments or []),
+        ]
+        if not pkg_update.package_id or not creative_ids:
+            continue
+        package = media_buys.get_package(media_buy_id, pkg_update.package_id)
+        product_id = package.package_config.get("product_id") if package and package.package_config else None
+        product = media_buys.get_product_by_id(product_id) if product_id else None
+        if product is None:
+            continue
+        for creative in media_buys.get_creatives_by_ids(list(dict.fromkeys(creative_ids))):
+            mismatch = stored_creative_format_mismatch(creative, product)
+            if mismatch:
+                errors.append(f"Creative {creative.creative_id} (package {pkg_update.package_id}): {mismatch}")
+
+    if errors:
+        error_msg = (
+            "Cannot update media buy with invalid creatives. "
+            "The following creatives cannot be assigned:\n" + "\n".join(f"  • {err}" for err in errors)
+        )
+        logger.error(f"[UPDATE] {error_msg}")
+        raise AdCPValidationError(error_msg, details={"error_code": "INVALID_CREATIVES", "creative_errors": errors})
+
+
 def _verify_principal(media_buy_id: str, context: "ResolvedIdentity", repo: MediaBuyRepository) -> None:
     """Verify that the principal from context owns the media buy.
 
@@ -907,6 +947,15 @@ def _update_media_buy_impl(
             and not bypass_manual_approval
             and not cancel_requested
         ):
+            # The apply path validates creative formats, but it only runs after
+            # this deferral. Reject a mismatched assignment now rather than
+            # queueing an update that can only fail on approval replay.
+            try:
+                _reject_mismatched_creative_formats(req, media_buy_id_to_use, uow.media_buys)
+            except AdCPValidationError as exc:
+                ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=exc.message)
+                raise
+
             # Store the original request alongside the response so the approval
             # execution path can re-execute the update after human approval.
             # This mirrors create_media_buy's raw_request pattern.
