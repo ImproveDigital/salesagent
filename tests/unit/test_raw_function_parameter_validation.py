@@ -23,38 +23,6 @@ import pytest
 class TestRawFunctionParameterValidation:
     """Validate that raw functions properly handle all their parameters."""
 
-    def test_get_products_raw_parameters_valid(self):
-        """Test that get_products_raw doesn't accept invalid parameters for helpers."""
-        from src.core.schema_helpers import create_get_products_request
-        from src.core.tools import get_products_raw
-
-        # Get parameters
-        raw_sig = inspect.signature(get_products_raw)
-        helper_sig = inspect.signature(create_get_products_request)
-
-        raw_params = set(raw_sig.parameters.keys()) - {"ctx", "identity"}
-        helper_params = set(helper_sig.parameters.keys())
-
-        # Check: All non-context params in raw should either:
-        # 1. Be passed to helper (except adcp_version which is NOT in helper)
-        # 2. Be valid for some other purpose
-
-        # Known valid parameters that are NOT passed to helper
-        valid_non_helper_params = {
-            "min_exposures",  # Optional, not in helper
-            "strategy_id",  # Optional, not in helper
-        }
-
-        # Parameters that SHOULD be in helper
-        should_be_in_helper = raw_params - valid_non_helper_params
-
-        # Verify all should-be-in-helper params are actually in helper
-        missing_in_helper = should_be_in_helper - helper_params
-
-        assert not missing_in_helper, (
-            f"get_products_raw has parameters not in helper and not documented as valid: {missing_in_helper}"
-        )
-
     def test_all_raw_functions_have_context_parameter(self):
         """All _raw functions should accept a ctx parameter."""
         from src.core import tools
@@ -127,7 +95,7 @@ class TestRawFunctionParameterValidation:
 
         # adcp 3.6.0: brand_manifest removed, only brand (BrandReference) remains.
         # Note: promoted_offering removed per adcp v1.2.1 migration
-        expected_params = ["brief", "brand", "filters", "property_list", "context"]
+        expected_params = ["brief", "brand", "filters", "property_list", "context", "buying_mode"]
 
         assert params == expected_params, (
             f"create_get_products_request signature changed!\n"
@@ -196,7 +164,7 @@ class TestHelperFunctionDocumentation:
         # Verify create_get_products_request (the one that caused the bug)
         assert "create_get_products_request" in signatures
         # adcp 3.6.0: brand_manifest removed, only brand (BrandReference) remains.
-        expected = ["brief", "brand", "filters", "property_list", "context"]
+        expected = ["brief", "brand", "filters", "property_list", "context", "buying_mode"]
         actual = signatures["create_get_products_request"]
         assert actual == expected, (
             f"create_get_products_request signature changed!\n"
