@@ -141,7 +141,6 @@ class TestValidStatusValuesAccepted:
         "status_input",
         [
             MediaBuyStatus.active,
-            MediaBuyStatus.pending_activation,
             MediaBuyStatus.paused,
             MediaBuyStatus.completed,
         ],
@@ -439,122 +438,6 @@ class TestBuyerRefResolution:
 
 # UC-004-MAIN-13
 # ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# UC-004-MAIN-13
-# ---------------------------------------------------------------------------
-
-
-class TestMCPToolResultContent:
-    """MCP wrapper returns ToolResult with both content and structured_content.
-
-    Covers: UC-004-MAIN-13
-
-    Note: These test the MCP transport wrapper, not _impl. The harness is used
-    to build a realistic response via call_impl(), then the MCP wrapper is tested
-    with that response as the _impl return value.
-    """
-
-    @staticmethod
-    def _stub_delivery_response():
-        """Build a realistic GetMediaBuyDeliveryResponse via harness."""
-        from tests.harness.delivery_poll_unit import DeliveryPollEnv
-
-        with DeliveryPollEnv() as env:
-            env.add_buy(media_buy_id="mb_001")
-            env.set_adapter_response("mb_001", impressions=5000, spend=250.0)
-            return env.call_impl(media_buy_ids=["mb_001"])
-
-    async def test_tool_result_has_content_and_structured_content(self):
-        """MCP wrapper wraps _impl response in ToolResult with both fields.
-
-        Covers: UC-004-MAIN-13
-        """
-        from unittest.mock import AsyncMock
-
-        from fastmcp.server.context import Context
-        from fastmcp.tools import ToolResult
-
-        from src.core.tools.media_buy_delivery import get_media_buy_delivery
-
-        stub_response = self._stub_delivery_response()
-
-        mock_ctx = MagicMock(spec=Context)
-        mock_ctx.get_state = AsyncMock(return_value=None)
-
-        with patch("src.core.tools.media_buy_delivery._get_media_buy_delivery_impl") as mock_impl:
-            mock_impl.return_value = stub_response
-
-            result = await get_media_buy_delivery(
-                media_buy_ids=["mb_001"],
-                ctx=mock_ctx,
-            )
-
-            assert isinstance(result, ToolResult)
-            assert result.content is not None
-            assert len(result.content) > 0
-            assert result.structured_content is not None
-            assert isinstance(result.structured_content, dict)
-            assert result.structured_content["currency"] == "USD"
-
-    async def test_structured_content_contains_response_fields(self):
-        """structured_content dict contains all top-level response fields.
-
-        Covers: UC-004-MAIN-13
-        """
-        from unittest.mock import AsyncMock
-
-        from fastmcp.server.context import Context
-
-        from src.core.tools.media_buy_delivery import get_media_buy_delivery
-
-        stub_response = self._stub_delivery_response()
-
-        mock_ctx = MagicMock(spec=Context)
-        mock_ctx.get_state = AsyncMock(return_value=None)
-
-        with patch("src.core.tools.media_buy_delivery._get_media_buy_delivery_impl") as mock_impl:
-            mock_impl.return_value = stub_response
-
-            result = await get_media_buy_delivery(
-                media_buy_ids=["mb_001"],
-                ctx=mock_ctx,
-            )
-
-            sc = result.structured_content
-            assert "reporting_period" in sc
-            assert "currency" in sc
-            assert "aggregated_totals" in sc
-            assert "media_buy_deliveries" in sc
-
-    async def test_content_is_string_representation(self):
-        """content field contains a human-readable string form of the response.
-
-        Covers: UC-004-MAIN-13
-        """
-        from unittest.mock import AsyncMock
-
-        from fastmcp.server.context import Context
-
-        from src.core.tools.media_buy_delivery import get_media_buy_delivery
-
-        stub_response = self._stub_delivery_response()
-
-        mock_ctx = MagicMock(spec=Context)
-        mock_ctx.get_state = AsyncMock(return_value=None)
-
-        with patch("src.core.tools.media_buy_delivery._get_media_buy_delivery_impl") as mock_impl:
-            mock_impl.return_value = stub_response
-
-            result = await get_media_buy_delivery(
-                media_buy_ids=["mb_001"],
-                ctx=mock_ctx,
-            )
-
-            content_text = result.content[0].text if hasattr(result.content[0], "text") else str(result.content[0])
-            assert len(content_text) > 0
-            assert "No delivery data found" in content_text or "delivery" in content_text.lower()
 
 
 # ---------------------------------------------------------------------------

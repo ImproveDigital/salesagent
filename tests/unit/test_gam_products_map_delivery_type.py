@@ -5,7 +5,7 @@ STANDARD instead of SPONSORSHIP because delivery_type was not included in
 products_map, causing is_guaranteed to always be False downstream.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, Mock, patch
 
 from src.adapters.google_ad_manager import GoogleAdManager
@@ -126,12 +126,15 @@ def test_products_map_includes_delivery_type():
     with patch("src.core.database.database_session.get_db_session") as mock_db:
         mock_db.return_value.__enter__.return_value = mock_session
 
+        # The flight must be in the future: create_media_buy rejects an already
+        # elapsed window with ``flight_window_elapsed`` before building line items.
+        now = datetime.now(UTC)
         GoogleAdManager.create_media_buy(
             mock_adapter,
             request=mock_request,
             packages=[mock_package],
-            start_time=datetime(2024, 1, 1, tzinfo=UTC),
-            end_time=datetime(2024, 12, 31, tzinfo=UTC),
+            start_time=now + timedelta(days=1),
+            end_time=now + timedelta(days=30),
             package_pricing_info=package_pricing_info,
         )
 
