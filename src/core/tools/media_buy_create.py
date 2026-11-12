@@ -2873,7 +2873,8 @@ async def _create_media_buy_impl(
                 computed_start_time = computed_start_time.replace(tzinfo=UTC)
 
             if computed_start_time < now:
-                error_msg = f"Invalid start time: {req.start_time}. Start time cannot be in the past."
+                start_iso = computed_start_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                error_msg = f"Invalid start time: {start_iso}. Start time cannot be in the past."
                 raise ValueError(error_msg)
 
         # Validate end_time
@@ -2887,7 +2888,10 @@ async def _create_media_buy_impl(
             computed_end_time = computed_end_time.replace(tzinfo=UTC)
 
         if computed_end_time <= computed_start_time:
-            error_msg = f"Invalid time range: end time ({req.end_time}) must be after start time ({req.start_time})."
+            iso_format = "%Y-%m-%dT%H:%M:%SZ"
+            start_iso = computed_start_time.astimezone(UTC).strftime(iso_format)
+            end_iso = computed_end_time.astimezone(UTC).strftime(iso_format)
+            error_msg = f"Invalid time range: end time ({end_iso}) must be after start time ({start_iso})."
             raise ValueError(error_msg)
 
         # Assign computed times to local variables for use throughout the function
