@@ -896,6 +896,25 @@ def _validate_creatives_before_adapter_call(
         )
 
 
+def _validate_creatives_for_booking(
+    packages: list[MediaPackage], tenant_id: str, tenant_context: Any, session: "Session | None"
+) -> None:
+    """Pre-adapter creative validation with the tenant's ad-server rules applied.
+
+    Both booking paths — immediate booking in ``create_media_buy`` and booking
+    after manual approval — go through here so they enforce the same rules.
+    The immediate path used to skip the Improve Digital click-through URL
+    requirement, booking campaigns whose creatives the platform then rejected
+    (FMS-2162).
+    """
+    _validate_creatives_before_adapter_call(
+        packages,
+        tenant_id,
+        session=session,
+        require_click_url=_tenant_uses_improve_digital(tenant_context),
+    )
+
+
 def _is_springserve_tag_mode(adapter: Any) -> bool:
     return str(getattr(adapter, "adapter_name", "") or "").lower() == "springserve" and (
         getattr(adapter, "demand_class", None) == "tag"
@@ -1588,12 +1607,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
             # PRE-VALIDATE: Check all creatives have required fields BEFORE calling adapter
             # This prevents GAM order creation when creatives are invalid (all-or-nothing approach)
-            _validate_creatives_before_adapter_call(
-                packages,
-                tenant_id,
-                session=session,
-                require_click_url=_tenant_uses_improve_digital(tenant_context),
-            )
+            _validate_creatives_for_booking(packages, tenant_id, tenant_context, session)
             if _tenant_uses_springserve(tenant_context):
                 adapter_for_preparation = get_adapter(
                     principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_context
@@ -4264,7 +4278,7 @@ async def _create_media_buy_impl(
             with MediaBuyUoW(tenant["tenant_id"]) as pre_validate_uow:
                 # FIXME(salesagent-9f2): creative validation should use a repository
                 assert pre_validate_uow.session is not None
-                _validate_creatives_before_adapter_call(packages, tenant["tenant_id"], session=pre_validate_uow.session)
+                _validate_creatives_for_booking(packages, tenant["tenant_id"], tenant, pre_validate_uow.session)
                 packages = _prepare_springserve_tag_mode_packages(
                     adapter,
                     packages,
