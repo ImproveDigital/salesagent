@@ -3,6 +3,22 @@
 from unittest.mock import MagicMock, patch
 
 
+def _count_by_table(counts: dict[str, int]):
+    """Build a ``session.scalar`` side effect that answers COUNT queries by table.
+
+    The checklist issues its count queries in an order that changes whenever a
+    task is added (e.g. the GAM advertiser-routing-rule count), so the mock
+    keys on the table each statement selects from instead of on call order.
+    Tables not listed count as 0.
+    """
+
+    def _scalar(stmt):
+        (table,) = stmt.get_final_froms()
+        return counts.get(table.name, 0)
+
+    return _scalar
+
+
 def test_inventory_sync_checks_gam_inventory_not_products():
     """Test that inventory sync status checks GAMInventory table, not Products."""
     from src.services.setup_checklist_service import SetupChecklistService
@@ -33,18 +49,17 @@ def test_inventory_sync_checks_gam_inventory_not_products():
         # Mock scalars().first() for tenant query
         mock_db.scalars.return_value.first.return_value = mock_tenant
 
-        # Mock scalar() calls for counts
-        # Order of calls: CurrencyLimit, AuthorizedProperty, Verified PublisherPartner, GAMInventory, Product, Principal, CurrencyLimit (budget)
-        mock_db.scalar.side_effect = [
-            1,  # CurrencyLimit count
-            1,  # AuthorizedProperty count
-            1,  # Verified PublisherPartner count (NEW - added in line 392 of setup_checklist_service.py)
-            100,  # GAMInventory count (inventory synced!)
-            0,  # Product count (no products yet)
-            0,  # Principal count
-            0,  # CurrencyLimit with budget controls count
-            1,  # CurrencyLimit count again for optional tasks
-        ]
+        # Mock scalar() count queries, keyed by table
+        mock_db.scalar.side_effect = _count_by_table(
+            {
+                "currency_limits": 1,
+                "advertiser_routing_rules": 1,
+                "publisher_partners": 1,
+                "authorized_properties": 1,
+                "gam_inventory": 100,  # inventory synced!
+                "products": 0,  # no products yet
+            }
+        )
 
         # Create service and get status
         with patch.dict("os.environ", {"GEMINI_API_KEY": "test_key"}):
@@ -94,18 +109,18 @@ def test_inventory_sync_incomplete_when_no_gam_inventory():
         # Mock scalars().first() for tenant query
         mock_db.scalars.return_value.first.return_value = mock_tenant
 
-        # Mock scalar() calls for counts - all zero (no inventory synced)
-        # Order of calls: CurrencyLimit, AuthorizedProperty, Verified PublisherPartner, GAMInventory, Product, Principal, CurrencyLimit (budget)
-        mock_db.scalar.side_effect = [
-            1,  # CurrencyLimit count
-            1,  # AuthorizedProperty count
-            1,  # Verified PublisherPartner count (NEW - added in line 392 of setup_checklist_service.py)
-            0,  # GAMInventory count (no inventory!)
-            0,  # Product count
-            0,  # Principal count
-            0,  # CurrencyLimit with budget controls count
-            1,  # CurrencyLimit count again for optional tasks
-        ]
+        # Mock scalar() count queries, keyed by table. Products exist but no
+        # GAM inventory does: the inventory task must follow gam_inventory only.
+        mock_db.scalar.side_effect = _count_by_table(
+            {
+                "currency_limits": 1,
+                "advertiser_routing_rules": 1,
+                "publisher_partners": 1,
+                "authorized_properties": 1,
+                "gam_inventory": 0,  # no inventory!
+                "products": 5,
+            }
+        )
 
         # Create service and get status
         with patch.dict("os.environ", {"GEMINI_API_KEY": "test_key"}):

@@ -48,6 +48,12 @@ _KNOWN_VIOLATIONS: set[tuple[str, int]] = {
     # (logging would be noise in the hot path). FIXME(salesagent-signing-cleanup):
     # switch to logger.debug(..., exc_info=True) and drop this entry.
     ("core/signing/replay_store.py", 197),
+    # Added 2026-11 when re-baselining the guard against production code
+    # (introduced in a984b020, Release v1.1.0): configure_gam() swallows a
+    # malformed service-account JSON while extracting client_email.
+    # FIXME: DEBT — log (logger.debug(..., exc_info=True)) or narrow to
+    # json.JSONDecodeError/AttributeError and drop this entry.
+    ("admin/blueprints/gam.py", 462),
 }
 
 

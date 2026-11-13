@@ -85,6 +85,32 @@ def _make_mock_media_buy(media_buy_id="mb_test", currency="USD", revision=1, sta
     return mb
 
 
+def _future(days: int) -> datetime:
+    """A tz-aware UTC datetime ``days`` from now.
+
+    ``_validate_update_submission`` rejects a newly-supplied concrete
+    start_time that is in the past (``invalid_start_time``), so date-update
+    tests must use dates relative to now rather than fixed calendar dates.
+    """
+    return datetime.now(UTC).replace(microsecond=0) + timedelta(days=days)
+
+
+def _wire_media_buy_dates(standard_mocks, media_buy_id, start_time, end_time):
+    """Make the repository return one media buy with the given flight dates.
+
+    A mutating update loads the buy with ``get_by_id_for_update`` (submission
+    validation) and re-reads it with ``get_by_id`` (apply path), so both must
+    return the same object.
+    """
+    mb = _make_mock_media_buy(media_buy_id)
+    mb.start_time = start_time
+    mb.end_time = end_time
+    repo = standard_mocks["uow_instance"].media_buys
+    repo.get_by_id_for_update.return_value = mb
+    repo.get_by_id.return_value = mb
+    return mb
+
+
 def _make_mock_currency_limit(max_daily=None):
     """Create a mock CurrencyLimit with proper numeric values."""
     cl = MagicMock()
@@ -309,18 +335,27 @@ def test_resume_derives_pre_pause_date_status_from_current_dates(standard_mocks)
 
 
 def test_package_pause_not_persisted_when_later_package_validation_fails(standard_mocks):
-    """A failed package update must not commit an earlier package pause."""
+    """A failed package update must not commit an earlier package pause.
+
+    The later failure used to be the min-package-budget check
+    (``budget_below_minimum``), but that validation is commented out in
+    production ("minimum package budget validation temporarily disabled",
+    99ad84c4), so the later failure is now the adapter rejecting the package
+    budget update. The atomicity contract under test is unchanged.
+    """
     current = _make_mock_media_buy("mb_pkg_pause", revision=1)
     standard_mocks["uow_instance"].media_buys.get_by_id.return_value = current
     standard_mocks["uow_instance"].media_buys.get_package.return_value = MagicMock(
         package_id="pkg_1",
         package_config={"paused": False},
     )
-    standard_mocks["uow_instance"].currency_limits.get_for_currency.return_value.min_package_budget = Decimal("10")
-    standard_mocks["adapter_instance"].update_media_buy.return_value = UpdateMediaBuySuccess(
-        media_buy_id="mb_pkg_pause",
-        affected_packages=[],
-    )
+
+    def _adapter_update(**kwargs):
+        if kwargs.get("action") == "update_package_budget":
+            return UpdateMediaBuyError(errors=[{"code": "budget_update_rejected", "message": "rejected by ad server"}])
+        return UpdateMediaBuySuccess(media_buy_id="mb_pkg_pause", affected_packages=[])
+
+    standard_mocks["adapter_instance"].update_media_buy.side_effect = _adapter_update
 
     identity = _make_identity()
     req = UpdateMediaBuyRequest(
@@ -332,7 +367,9 @@ def test_package_pause_not_persisted_when_later_package_validation_fails(standar
     result = _update_media_buy_impl(req=req, identity=identity)
 
     assert isinstance(result, UpdateMediaBuyError)
-    assert result.errors[0].code == "budget_below_minimum"
+    assert result.errors[0].code == "budget_update_rejected"
+    actions = [c.kwargs.get("action") for c in standard_mocks["adapter_instance"].update_media_buy.call_args_list]
+    assert actions == ["pause_package", "update_package_budget"]
     standard_mocks["uow_instance"].media_buys.update_package_config.assert_not_called()
 
 
@@ -557,24 +594,16 @@ class TestFlightDateValidationAndPersistence:
         """When start_time/end_time provided with valid range, persisted to DB."""
         mock_session = _setup_db_session(standard_mocks)
 
-        # Mock existing media buy for date update path
-        mock_existing_mb = MagicMock()
-        mock_existing_mb.start_time = datetime(2025, 1, 1, tzinfo=UTC)
-        mock_existing_mb.end_time = datetime(2025, 12, 31, tzinfo=UTC)
-
-        # Currency validation: media buy via repo (called twice: currency check + date path)
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_dates"),  # currency validation
-            mock_existing_mb,  # date validation
-        ]
+        # Existing media buy (not yet started) for the date update path
+        _wire_media_buy_dates(standard_mocks, "mb_dates", _future(10), _future(90))
         mock_scalars = MagicMock()
         mock_scalars.first.side_effect = [
             _make_mock_currency_limit(),  # currency limit (no max daily)
         ]
         mock_session.scalars.return_value = mock_scalars
 
-        start = datetime(2025, 6, 1, tzinfo=UTC)
-        end = datetime(2025, 12, 1, tzinfo=UTC)
+        start = _future(30)
+        end = _future(60)
 
         identity = _make_identity()
         req = UpdateMediaBuyRequest(
@@ -588,30 +617,25 @@ class TestFlightDateValidationAndPersistence:
         assert isinstance(result, UpdateMediaBuySuccess)
         assert result.media_buy_id == "mb_dates"
         # Date update should have been persisted via repository
-        standard_mocks["uow_instance"].media_buys.update_fields.assert_called()
+        persisted = standard_mocks["uow_instance"].media_buys.update_fields.call_args_list[0]
+        assert persisted.args == ("mb_dates",)
+        assert persisted.kwargs["start_time"] == start
+        assert persisted.kwargs["end_time"] == end
 
     def test_invalid_date_range_returns_error(self, standard_mocks):
         """When end_time <= start_time, returns code='invalid_date_range'."""
         mock_session = _setup_db_session(standard_mocks)
 
-        # Mock existing media buy
-        mock_existing_mb = MagicMock()
-        mock_existing_mb.start_time = datetime(2025, 1, 1, tzinfo=UTC)
-        mock_existing_mb.end_time = datetime(2025, 12, 31, tzinfo=UTC)
-
-        # Media buy via repo (called twice: currency check + date path)
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_dates_bad"),
-            mock_existing_mb,
-        ]
+        # Existing media buy (not yet started)
+        _wire_media_buy_dates(standard_mocks, "mb_dates_bad", _future(10), _future(90))
         mock_scalars = MagicMock()
         mock_currency_limit = _make_mock_currency_limit()
         mock_scalars.first.side_effect = repeat(mock_currency_limit)
         mock_session.scalars.return_value = mock_scalars
 
-        # end_time BEFORE start_time
-        start = datetime(2025, 6, 1, tzinfo=UTC)
-        end = datetime(2025, 3, 1, tzinfo=UTC)
+        # end_time BEFORE start_time (both in the future, so only the range is invalid)
+        start = _future(60)
+        end = _future(30)
 
         identity = _make_identity()
         req = UpdateMediaBuyRequest(
@@ -630,17 +654,9 @@ class TestFlightDateValidationAndPersistence:
         """When end_time == start_time, returns code='invalid_date_range'."""
         mock_session = _setup_db_session(standard_mocks)
 
-        same_time = datetime(2025, 6, 1, tzinfo=UTC)
+        same_time = _future(30)
 
-        mock_existing_mb = MagicMock()
-        mock_existing_mb.start_time = same_time
-        mock_existing_mb.end_time = same_time
-
-        # Media buy via repo (called twice: currency check + date path)
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_dates_equal"),
-            mock_existing_mb,
-        ]
+        _wire_media_buy_dates(standard_mocks, "mb_dates_equal", same_time, same_time)
         mock_scalars = MagicMock()
         mock_currency_limit = _make_mock_currency_limit()
         mock_scalars.first.side_effect = repeat(mock_currency_limit)
@@ -1146,15 +1162,7 @@ class TestTimezoneHandlingRegression:
         """
         mock_session = _setup_db_session(standard_mocks)
 
-        mock_existing_mb = MagicMock()
-        mock_existing_mb.start_time = datetime(2025, 1, 1, tzinfo=UTC)
-        mock_existing_mb.end_time = datetime(2025, 12, 31, tzinfo=UTC)
-
-        # Media buy via repo (called twice: currency check + date path)
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_tz_start"),
-            mock_existing_mb,
-        ]
+        _wire_media_buy_dates(standard_mocks, "mb_tz_start", _future(10), _future(90))
         mock_scalars = MagicMock()
         mock_scalars.first.side_effect = [
             _make_mock_currency_limit(),
@@ -1166,7 +1174,7 @@ class TestTimezoneHandlingRegression:
         req = UpdateMediaBuyRequest(
             **required_request_kwargs(),
             media_buy_id="mb_tz_start",
-            start_time=datetime(2025, 3, 1, tzinfo=UTC),  # Only start_time
+            start_time=_future(30),  # Only start_time (must be in the future)
         )
         result = _update_media_buy_impl(req=req, identity=identity)
 
@@ -1379,20 +1387,13 @@ class TestUC003UpdateTiming:
         """
         mock_session = _setup_db_session(standard_mocks)
 
-        mock_existing = MagicMock()
-        mock_existing.start_time = datetime(2025, 1, 1, tzinfo=UTC)
-        mock_existing.end_time = datetime(2025, 12, 31, tzinfo=UTC)
-
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_both_dates"),
-            mock_existing,
-        ]
+        _wire_media_buy_dates(standard_mocks, "mb_both_dates", _future(10), _future(90))
         mock_scalars = MagicMock()
         mock_scalars.first.return_value = _make_mock_currency_limit()
         mock_session.scalars.return_value = mock_scalars
 
-        start = datetime(2025, 3, 1, tzinfo=UTC)
-        end = datetime(2025, 9, 1, tzinfo=UTC)
+        start = _future(30)
+        end = _future(60)
 
         identity = _make_identity()
         req = UpdateMediaBuyRequest(
@@ -1402,10 +1403,9 @@ class TestUC003UpdateTiming:
 
         assert isinstance(result, UpdateMediaBuySuccess)
         # update_fields should have been called with both start_time and end_time
-        standard_mocks["uow_instance"].media_buys.update_fields.assert_called()
-        call_kwargs = standard_mocks["uow_instance"].media_buys.update_fields.call_args
-        assert "start_time" in call_kwargs[1]
-        assert "end_time" in call_kwargs[1]
+        call_kwargs = standard_mocks["uow_instance"].media_buys.update_fields.call_args_list[0]
+        assert call_kwargs[1]["start_time"] == start
+        assert call_kwargs[1]["end_time"] == end
 
     def test_timing_update_no_adapter_call(self, standard_mocks):
         """Timing changes are database-only; no adapter call is made (gap G35).
@@ -2401,16 +2401,9 @@ class TestUC003ExtE:
         Covers: UC-003-EXT-E-01
         """
         mock_session = _setup_db_session(standard_mocks)
-        same_time = datetime(2025, 3, 1, tzinfo=UTC)
+        same_time = _future(30)
 
-        mock_existing = MagicMock()
-        mock_existing.start_time = same_time
-        mock_existing.end_time = same_time
-
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_eq"),
-            mock_existing,
-        ]
+        _wire_media_buy_dates(standard_mocks, "mb_eq", same_time, same_time)
         mock_scalars = MagicMock()
         mock_scalars.first.return_value = _make_mock_currency_limit()
         mock_session.scalars.return_value = mock_scalars
@@ -2431,14 +2424,7 @@ class TestUC003ExtE:
         """
         mock_session = _setup_db_session(standard_mocks)
 
-        mock_existing = MagicMock()
-        mock_existing.start_time = datetime(2025, 3, 15, tzinfo=UTC)
-        mock_existing.end_time = datetime(2025, 12, 31, tzinfo=UTC)
-
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_end_before"),
-            mock_existing,
-        ]
+        _wire_media_buy_dates(standard_mocks, "mb_end_before", _future(15), _future(90))
         mock_scalars = MagicMock()
         mock_scalars.first.return_value = _make_mock_currency_limit()
         mock_session.scalars.return_value = mock_scalars
@@ -2448,7 +2434,7 @@ class TestUC003ExtE:
         req = UpdateMediaBuyRequest(
             **required_request_kwargs(),
             media_buy_id="mb_end_before",
-            end_time=datetime(2025, 3, 10, tzinfo=UTC),
+            end_time=_future(10),
         )
         result = _update_media_buy_impl(req=req, identity=identity)
 
@@ -2462,14 +2448,7 @@ class TestUC003ExtE:
         """
         mock_session = _setup_db_session(standard_mocks)
 
-        mock_existing = MagicMock()
-        mock_existing.start_time = datetime(2025, 1, 1, tzinfo=UTC)
-        mock_existing.end_time = datetime(2025, 3, 31, tzinfo=UTC)
-
-        standard_mocks["uow_instance"].media_buys.get_by_id.side_effect = [
-            _make_mock_media_buy("mb_start_after"),
-            mock_existing,
-        ]
+        _wire_media_buy_dates(standard_mocks, "mb_start_after", _future(10), _future(30))
         mock_scalars = MagicMock()
         mock_scalars.first.return_value = _make_mock_currency_limit()
         mock_session.scalars.return_value = mock_scalars
@@ -2479,7 +2458,7 @@ class TestUC003ExtE:
         req = UpdateMediaBuyRequest(
             **required_request_kwargs(),
             media_buy_id="mb_start_after",
-            start_time=datetime(2025, 4, 15, tzinfo=UTC),
+            start_time=_future(45),
         )
         result = _update_media_buy_impl(req=req, identity=identity)
 

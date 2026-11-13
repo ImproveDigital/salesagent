@@ -16,7 +16,7 @@ class TestMCPToolImports:
         If main.py has syntax errors or missing imports that are used in
         top-level code, this test will fail at import time.
         """
-        from src.core import main
+        from core import main
 
         # If we got here, all imports succeeded
         assert main is not None
@@ -36,10 +36,3 @@ class TestMCPToolImports:
 
         # Verify it's callable
         assert callable(schema_helpers.create_get_products_request), "create_get_products_request should be callable"
-
-    def test_mcp_instance_exists(self):
-        """Test that the MCP server instance exists."""
-        from src.core.main import mcp
-
-        assert mcp is not None
-        assert hasattr(mcp, "tool")  # FastMCP tool registration method

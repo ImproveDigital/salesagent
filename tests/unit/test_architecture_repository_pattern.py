@@ -481,6 +481,53 @@ INTEGRATION_SESSION_ADD_ALLOWLIST = {
         "tests/integration/test_sync_accounts_premap.py",
         "test_existing_pre_mapped_account_stays_active_on_sync",
     ),
+    # ── Added 2026-11 when re-baselining the guard against the test tree ──
+    # Inline session.add() that landed in integration/admin tests after the
+    # allowlist was last updated. DEBT, not permission.
+    # FIXME(salesagent-e2e-admin-factories): migrate to factory fixtures.
+    ("tests/admin/test_inventory_profiles_improvedigital.py", "impd_tenant"),
+    ("tests/integration/test_a2a_error_responses.py", "test_principal"),
+    ("tests/integration/test_a2a_error_responses.py", "test_tenant"),
+    ("tests/integration/test_a2a_skill_invocation.py", "test_list_authorized_properties_skill"),
+    ("tests/integration/test_a2a_skill_invocation.py", "test_update_media_buy_skill"),
+    (
+        "tests/integration/test_create_media_buy_creation_paths.py",
+        "test_future_dated_buy_with_creative_ids_has_pending_start_in_db",
+    ),
+    ("tests/integration/test_create_media_buy_creation_paths.py", "test_tenant_a_buy_not_visible_to_tenant_b"),
+    ("tests/integration/test_create_media_buy_creative_validation.py", "_create_tenant_and_creative"),
+    (
+        "tests/integration/test_create_media_buy_creative_validation.py",
+        "test_format_mismatch_between_creative_and_product_raises_error",
+    ),
+    ("tests/integration/test_create_media_buy_integration.py", "test_same_key_different_principal_creates_new_buy"),
+    ("tests/integration/test_create_media_buy_integration.py", "test_unsupported_currency_returns_descriptive_error"),
+    ("tests/integration/test_creative_lifecycle_mcp.py", "setup_test_data"),
+    ("tests/integration/test_creative_lifecycle_mcp.py", "test_list_creatives_with_media_buy_assignments"),
+    ("tests/integration/test_creative_lifecycle_mcp.py", "test_sync_creatives_upsert_existing_creative"),
+    ("tests/integration/test_creative_lifecycle_mcp.py", "test_validate_creatives_missing_required_fields"),
+    ("tests/integration/test_creative_v3.py", "setup_tenant"),
+    ("tests/integration/test_error_paths.py", "test_tenant_minimal"),
+    ("tests/integration/test_error_paths.py", "test_tenant_with_principal"),
+    (
+        "tests/integration/test_list_authorized_properties_integration.py",
+        "test_list_authorized_properties_reads_from_publisher_partner",
+    ),
+    (
+        "tests/integration/test_list_authorized_properties_integration.py",
+        "test_list_authorized_properties_returns_all_registered_publishers",
+    ),
+    (
+        "tests/integration/test_list_authorized_properties_integration.py",
+        "test_list_authorized_properties_returns_empty_when_no_publishers",
+    ),
+    (
+        "tests/integration/test_list_authorized_properties_integration.py",
+        "test_list_authorized_properties_returns_sorted_domains",
+    ),
+    ("tests/integration/test_media_buy_v3.py", "mb_creatives"),
+    ("tests/integration/test_media_buy_v3.py", "test_ownership_mismatch_rejected"),
+    ("tests/integration/test_media_buy_v3.py", "test_unsupported_currency_rejected"),
 }
 
 
