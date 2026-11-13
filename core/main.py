@@ -631,6 +631,10 @@ def build_router() -> LazyPlatformRouter:
         account=CapabilitiesAccount(supported_billing=["operator", "agent"]),
         media_buy=MediaBuy(
             supported_pricing_models=["cpm"],
+            # ``get_products`` serves ``buying_mode="wholesale"`` (the raw
+            # priced product feed). The SDK default is ``["brief"]``, and
+            # buyers treat an undeclared mode as unsupported.
+            buying_modes=["brief", "wholesale"],
             supports_proposals=True,
             # inline_creative_management: sync_creatives / list_creatives
             # tools land creatives synchronously without a separate review
