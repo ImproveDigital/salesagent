@@ -49,6 +49,10 @@ class _MediaBuyData:
     # for blocker / terminal states (pending_creatives, paused, rejected,
     # canceled) that no clock can resolve.
     status: str | None = None
+    # True for a buy awaiting manual approval that has no creatives assigned.
+    # ``_compute_status`` reports it as ``pending_creatives``, matching what
+    # ``create_media_buy`` returned for the same buy.
+    awaiting_creatives: bool = False
     # Pre-computed status for projected GAM buys (whose state comes from
     # GAM, not just flight dates). None means use the date-derived status.
     projected_status: object | None = None
@@ -382,7 +386,16 @@ def _fetch_target_media_buys(
         media_buy_ids=req.media_buy_ids,
     )
 
-    return [
+    # A buy awaiting manual approval is persisted as ``pending_approval`` whether
+    # or not it has creatives, so the missing-creatives blocker has to be read
+    # from the assignments.
+    approval_pending_ids = [buy.media_buy_id for buy in buys if (buy.status or "").lower() == _MANUAL_APPROVAL_STATUS]
+    ids_with_creatives = (
+        uow.media_buys.ids_with_creative_assignments(approval_pending_ids) if approval_pending_ids else set()
+    )
+    awaiting_creatives_ids = set(approval_pending_ids) - ids_with_creatives
+
+    target_buys = [
         _MediaBuyData(
             media_buy_id=buy.media_buy_id,
             currency=buy.currency,
@@ -398,10 +411,11 @@ def _fetch_target_media_buys(
             approved_at=buy.approved_at,
             confirmed_at=buy.confirmed_at,
             status=buy.status,
+            awaiting_creatives=buy.media_buy_id in awaiting_creatives_ids,
         )
         for buy in buys
-        if filter_statuses is None or _compute_status(buy, today) in filter_statuses
     ]
+    return [buy for buy in target_buys if filter_statuses is None or _compute_status(buy, today) in filter_statuses]
 
 
 def _resolve_status_filter(
@@ -439,9 +453,10 @@ _BLOCKER_STATUSES: frozenset[str] = frozenset(
 # resolve them to ``active``/``completed``. The wire enum has no approval
 # state — they surface as ``pending_start``, mirroring
 # ``_media_buy_status_for_create_replay``.
+_MANUAL_APPROVAL_STATUS = "pending_approval"
 _APPROVAL_PENDING_STATUSES: frozenset[str] = frozenset(
     {
-        "pending_approval",
+        _MANUAL_APPROVAL_STATUS,
         "pending_ad_server_approval",
     }
 )
@@ -489,7 +504,9 @@ def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatu
     3. Internal approval blockers (``pending_approval``,
        ``pending_ad_server_approval``) also win over date math — nothing is
        delivering until approval lands. They map to ``pending_start`` since
-       the wire enum has no approval state.
+       the wire enum has no approval state — except a manual-approval buy with
+       no creatives assigned, which reports ``pending_creatives`` like
+       ``create_media_buy`` does.
     4. Otherwise derive from flight dates: ``pending_start`` / ``active`` /
        ``completed``.
     """
@@ -500,6 +517,8 @@ def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatu
     if persisted in _BLOCKER_STATUSES:
         return MediaBuyStatus(persisted)
     if persisted in _APPROVAL_PENDING_STATUSES:
+        if isinstance(buy, _MediaBuyData) and buy.awaiting_creatives:
+            return MediaBuyStatus.pending_creatives
         return MediaBuyStatus.pending_start
 
     start = buy.start_time.date() if buy.start_time else cast(date, buy.start_date)

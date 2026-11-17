@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from src.core.database.models import Creative, GamAdvertiser, MediaBuy, MediaPackage, Product
+from src.core.database.models import Creative, CreativeAssignment, GamAdvertiser, MediaBuy, MediaPackage, Product
 
 
 class MediaBuyRepository:
@@ -155,6 +155,21 @@ class MediaBuyRepository:
         if statuses is not None:
             stmt = stmt.where(MediaBuy.status.in_(statuses))
         return list(self._session.scalars(stmt).all())
+
+    def ids_with_creative_assignments(self, media_buy_ids: list[str]) -> set[str]:
+        """Return which of the given media buys have at least one creative assigned."""
+        if not media_buy_ids:
+            return set()
+        return set(
+            self._session.scalars(
+                select(CreativeAssignment.media_buy_id)
+                .where(
+                    CreativeAssignment.tenant_id == self._tenant_id,
+                    CreativeAssignment.media_buy_id.in_(media_buy_ids),
+                )
+                .distinct()
+            ).all()
+        )
 
     def _assigned_gam_advertiser_ids(self, principal_id: str) -> set[str]:
         return set(
