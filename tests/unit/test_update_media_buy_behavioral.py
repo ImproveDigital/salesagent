@@ -1407,6 +1407,53 @@ class TestUC003UpdateTiming:
         assert call_kwargs[1]["start_time"] == start
         assert call_kwargs[1]["end_time"] == end
 
+    def test_timing_update_keeps_flight_dates_in_sync(self, standard_mocks):
+        """New start_time/end_time also move start_date/end_date.
+
+        The row stores the flight twice. Updating only the timestamps left the
+        date columns on the old flight, so the admin "Flight Dates" line and
+        the dashboard kept showing the pre-update window.
+        """
+        mock_session = _setup_db_session(standard_mocks)
+
+        _wire_media_buy_dates(standard_mocks, "mb_sync_dates", _future(10), _future(90))
+        mock_scalars = MagicMock()
+        mock_scalars.first.return_value = _make_mock_currency_limit()
+        mock_session.scalars.return_value = mock_scalars
+
+        start = _future(30)
+        end = _future(60)
+
+        req = UpdateMediaBuyRequest(
+            **required_request_kwargs(), media_buy_id="mb_sync_dates", start_time=start, end_time=end
+        )
+        result = _update_media_buy_impl(req=req, identity=_make_identity())
+
+        assert isinstance(result, UpdateMediaBuySuccess)
+        written = standard_mocks["uow_instance"].media_buys.update_fields.call_args_list[0][1]
+        assert written["start_date"] == start.date()
+        assert written["end_date"] == end.date()
+
+    def test_end_time_only_update_leaves_start_date_alone(self, standard_mocks):
+        """Only the date for the timestamp being changed is rewritten."""
+        mock_session = _setup_db_session(standard_mocks)
+
+        _wire_media_buy_dates(standard_mocks, "mb_sync_end", _future(10), _future(90))
+        mock_scalars = MagicMock()
+        mock_scalars.first.return_value = _make_mock_currency_limit()
+        mock_session.scalars.return_value = mock_scalars
+
+        end = _future(60)
+
+        req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_sync_end", end_time=end)
+        result = _update_media_buy_impl(req=req, identity=_make_identity())
+
+        assert isinstance(result, UpdateMediaBuySuccess)
+        written = standard_mocks["uow_instance"].media_buys.update_fields.call_args_list[0][1]
+        assert written["end_date"] == end.date()
+        assert "start_date" not in written
+        assert "start_time" not in written
+
     def test_timing_update_no_adapter_call(self, standard_mocks):
         """Timing changes are database-only; no adapter call is made (gap G35).
 

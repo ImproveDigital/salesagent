@@ -2090,6 +2090,12 @@ def _update_media_buy_impl(
                     )
                     return response_data
 
+                # The row stores the flight twice. Move the date columns with the
+                # timestamps (same derivation as create) so they cannot drift.
+                for time_field, date_field in (("start_time", "start_date"), ("end_time", "end_date")):
+                    if time_field in update_values:
+                        update_values[date_field] = update_values[time_field].date()
+
                 uow.media_buys.update_fields(req.media_buy_id, **update_values)
                 logger.info(
                     f"Updated MediaBuy {req.media_buy_id} dates in DB: "
