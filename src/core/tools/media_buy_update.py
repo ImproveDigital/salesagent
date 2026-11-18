@@ -1172,6 +1172,20 @@ def _update_media_buy_impl(
             # response context) is the spec-compliant minimum. Persisting
             # it would need a schema migration; tracked separately.
             uow.media_buys.update_fields(req.media_buy_id, status="canceled")
+
+            # Close the approval steps still open for this buy (its queued
+            # create, and any update queued behind it). Left open, the admin
+            # keeps offering Approve/Reject on a buy that can no longer run.
+            from src.core.database.repositories.workflow import WorkflowRepository
+
+            closed_step_ids = WorkflowRepository(session, tenant["tenant_id"]).close_pending_approvals_for_object(
+                "media_buy",
+                media_buy_id_to_use,
+                reason="Media buy canceled by the buyer before a decision was made",
+                exclude_step_id=step.step_id,
+            )
+            if closed_step_ids:
+                logger.info(f"[CANCEL] Closed pending approval steps for {media_buy_id_to_use}: {closed_step_ids}")
             response_revision = _increment_revision_for_response(
                 uow.media_buys,
                 req.media_buy_id,

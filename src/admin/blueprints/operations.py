@@ -32,6 +32,28 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
+# Stored statuses after which a media buy can no longer run. ``failed`` is the
+# internal status for a buy whose ad-server creation failed during approval.
+_CLOSED_MEDIA_BUY_STATUSES = frozenset({"canceled", "completed", "rejected", "failed"})
+
+
+def _closed_media_buy_decision_error(media_buy, action: str) -> str | None:
+    """Block an approve/reject decision on a media buy that can no longer run.
+
+    A canceled (or otherwise finished) buy can still have approval steps left
+    open. Without this guard the approve route marks such a step approved
+    while skipping every readiness check, because those only run for a buy
+    that is still ``pending_approval``.
+
+    Returns a human-readable error message, or ``None`` if a decision is still
+    meaningful. Pure function (no DB/Flask) so it can be unit-tested directly.
+    """
+    status = str(getattr(media_buy, "status", "") or "").lower()
+    if status in _CLOSED_MEDIA_BUY_STATUSES:
+        return f"Cannot {action}: this media buy is {status}, so there is no approval decision left to make."
+    return None
+
+
 def _validate_media_buy_approval(
     media_buy, assignments, creatives, now: datetime, require_click_url: bool = False
 ) -> str | None:
@@ -416,10 +438,12 @@ def media_buy_detail(tenant_id, media_buy_id):
             ctx_manager = ContextManager()
             workflow_steps = ctx_manager.get_object_lifecycle("media_buy", media_buy_id, tenant_id=tenant_id)
 
-            # Find if there's a pending approval step
+            # Find if there's a pending approval step. A closed buy (canceled,
+            # completed, ...) gets no Approve/Reject even if a step was left open.
             pending_approval_step = None
+            decision_open = _closed_media_buy_decision_error(media_buy, "approve") is None
             for step in workflow_steps:
-                if step.get("status") in ["requires_approval", "pending_approval"]:
+                if decision_open and step.get("status") in ["requires_approval", "pending_approval"]:
                     # Get the full workflow step for approval actions (tenant-scoped via Context join)
                     from src.core.database.models import Context as DBContext
 
@@ -548,6 +572,11 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
 
             approve_repo = MediaBuyRepository(db_session, tenant_id)
             media_buy = approve_repo.get_by_id(media_buy_id)
+
+            closed_error = _closed_media_buy_decision_error(media_buy, action or "approve")
+            if closed_error:
+                flash(closed_error, "error")
+                return redirect(url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id))
 
             # Extract media_buy data to dict to avoid detached instance errors after commit
             media_buy_data = None

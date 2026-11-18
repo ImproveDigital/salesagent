@@ -13,7 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from src.admin.app import create_app
-from src.admin.blueprints.operations import _validate_media_buy_approval
+from src.admin.blueprints.operations import _closed_media_buy_decision_error, _validate_media_buy_approval
 from src.admin.blueprints.workflows import _expired_media_buy_decision_error
 from src.admin.services.dashboard_service import DashboardService
 from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE, flight_end_utc, flight_has_ended
@@ -82,6 +82,30 @@ class TestApprovalGateFlightEndedFirst:
     def test_ended_flight_reported_before_missing_creatives(self):
         error = _validate_media_buy_approval(_buy(), [], [], NOW)
         assert error == FLIGHT_ENDED_DECISION_MESSAGE.format(action="approve")
+
+
+class TestDecisionBlockedOnClosedBuy:
+    """Approve/Reject must not be offered or accepted once a buy can no longer run.
+
+    Leftover approval steps on a canceled buy used to keep the buttons on the
+    media buy page, and the approve route skipped every check because the buy
+    was no longer ``pending_approval``.
+    """
+
+    @pytest.mark.parametrize("status", ["canceled", "completed", "rejected", "failed"])
+    @pytest.mark.parametrize("action", ["approve", "reject"])
+    def test_closed_buy_blocks_the_decision(self, status, action):
+        error = _closed_media_buy_decision_error(_buy(status=status), action)
+        assert error is not None
+        assert action in error
+        assert status in error
+
+    @pytest.mark.parametrize("status", ["pending_approval", "draft", "active", "paused", "pending_creatives"])
+    def test_open_buy_does_not_block(self, status):
+        assert _closed_media_buy_decision_error(_buy(status=status), "approve") is None
+
+    def test_missing_buy_does_not_block(self):
+        assert _closed_media_buy_decision_error(None, "approve") is None
 
 
 @pytest.fixture
