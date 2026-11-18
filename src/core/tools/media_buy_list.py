@@ -448,6 +448,12 @@ _BLOCKER_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+# Internal-only terminal status: the operator approved the buy but creating it
+# in the ad server failed. The admin has no retry for it, so nothing will ever
+# deliver. The wire enum has no ``failed``; it surfaces as ``rejected``, the
+# terminal state that tells the buyer to book again.
+_FAILED_STATUS = "failed"
+
 # Internal-only approval blockers (manual approval and GAM order approval).
 # Nothing is delivering while these are persisted, so date math must never
 # resolve them to ``active``/``completed``. The wire enum has no approval
@@ -507,7 +513,9 @@ def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatu
        the wire enum has no approval state — except a manual-approval buy with
        no creatives assigned, which reports ``pending_creatives`` like
        ``create_media_buy`` does.
-    4. Otherwise derive from flight dates: ``pending_start`` / ``active`` /
+    4. A buy whose ad-server creation failed during approval (``failed``) wins
+       over date math too and maps to ``rejected``.
+    5. Otherwise derive from flight dates: ``pending_start`` / ``active`` /
        ``completed``.
     """
     if isinstance(buy, _MediaBuyData) and buy.projected_status is not None:
@@ -520,6 +528,8 @@ def _compute_status(buy: MediaBuy | _MediaBuyData, today: date) -> MediaBuyStatu
         if isinstance(buy, _MediaBuyData) and buy.awaiting_creatives:
             return MediaBuyStatus.pending_creatives
         return MediaBuyStatus.pending_start
+    if persisted == _FAILED_STATUS:
+        return MediaBuyStatus.rejected
 
     start = buy.start_time.date() if buy.start_time else cast(date, buy.start_date)
     end = buy.end_time.date() if buy.end_time else cast(date, buy.end_date)
