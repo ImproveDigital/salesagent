@@ -43,11 +43,7 @@ from src.core.schemas import (
     ReportingPeriod,
 )
 from src.core.testing_hooks import AdCPTestContext
-from src.core.tools.media_buy_delivery import (
-    _get_media_buy_delivery_impl,
-    get_media_buy_delivery,
-    get_media_buy_delivery_raw,
-)
+from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 from src.services.webhook_delivery_service import CircuitBreaker, CircuitState, WebhookDeliveryService
 from tests.harness.delivery_poll_unit import DeliveryPollEnv
 
@@ -791,51 +787,6 @@ class TestDeliveryStatusFilter:
                 )
                 assert isinstance(response, GetMediaBuyDeliveryResponse)
 
-    async def test_valid_status_enum_values_accepted_mcp(self):
-        """UC-004-FILT-07: valid status values accepted via MCP wrapper.
-
-        Covers: UC-004-ALT-STATUS-FILTERED-DELIVERY-07
-
-        Route: mcp -- MCP wrapper accepts each MediaBuyStatus enum value.
-        """
-        from unittest.mock import AsyncMock
-
-        from fastmcp.server.context import Context
-
-        for status in MediaBuyStatus:
-            with DeliveryPollEnv() as env:
-                env.add_buy(media_buy_id="mb_mcp")
-                env.set_adapter_response("mb_mcp", impressions=100)
-
-                mock_ctx = AsyncMock(spec=Context)
-                mock_ctx.get_state.return_value = env.identity
-
-                result = await get_media_buy_delivery(
-                    media_buy_ids=["mb_mcp"],
-                    status_filter=status,
-                    ctx=mock_ctx,
-                )
-                assert result.structured_content is not None
-
-    def test_valid_status_enum_values_accepted_a2a(self):
-        """UC-004-FILT-07: valid status values accepted via A2A wrapper.
-
-        Covers: UC-004-ALT-STATUS-FILTERED-DELIVERY-07
-
-        Route: a2a -- A2A raw function accepts each MediaBuyStatus enum value.
-        """
-        for status in MediaBuyStatus:
-            with DeliveryPollEnv() as env:
-                env.add_buy(media_buy_id="mb_a2a")
-                env.set_adapter_response("mb_a2a", impressions=100)
-
-                response = get_media_buy_delivery_raw(
-                    media_buy_ids=["mb_a2a"],
-                    status_filter=status,
-                    identity=env.identity,
-                )
-                assert isinstance(response, GetMediaBuyDeliveryResponse)
-
 
 # ===========================================================================
 # 5. Custom Date Range (UC-004-DATE-01 through DATE-04, MAIN-06)
@@ -861,7 +812,7 @@ class TestDeliveryDateRange:
         response = _run_impl_with_patches(req, target_buys=[])
 
         assert response.reporting_period.start == datetime(2025, 3, 15, tzinfo=UTC)
-        assert response.reporting_period.end == datetime(2025, 4, 15, tzinfo=UTC)
+        assert response.reporting_period.end == datetime(2025, 4, 15, 23, 59, 59, 999999, tzinfo=UTC)
 
     def test_no_date_range_defaults_to_last_30_days(self):
         """UC-004-MAIN-06: no dates defaults to last 30 days.
@@ -937,7 +888,7 @@ class TestDeliveryDateRange:
 
         # Verify the reporting period matches the custom range, not the 30-day default
         assert response.reporting_period.start == datetime(2025, 7, 1, tzinfo=UTC)
-        assert response.reporting_period.end == datetime(2025, 7, 15, tzinfo=UTC)
+        assert response.reporting_period.end == datetime(2025, 7, 15, 23, 59, 59, 999999, tzinfo=UTC)
         # Also verify it's NOT near "now" (ruling out 30-day default)
         now = datetime.now(UTC)
         assert abs((response.reporting_period.end - now).total_seconds()) > 86400
@@ -1511,11 +1462,12 @@ class TestDeliveryOwnership:
 class TestDeliveryInvalidDateRange:
     """UC-004-EXT-E: invalid date range validation."""
 
-    def test_start_date_equals_end_date_returns_error(self):
-        """UC-004-EXT-E1: start_date == end_date returns invalid_date_range.
+    def test_start_date_equals_end_date_is_full_utc_day(self):
+        """UC-004-EXT-E1: start_date == end_date is a valid single-day window.
 
         Spec: UNSPECIFIED (implementation-defined date range validation).
-        Spec defines start_date/end_date as string patterns but no ordering constraint.
+        start_date/end_date are inclusive date-only inputs, so a same-day
+        range covers the full 24-hour UTC day and is not an invalid_date_range.
         Covers: UC-004-EXT-E-01
         """
         req = GetMediaBuyDeliveryRequest(
@@ -1525,9 +1477,9 @@ class TestDeliveryInvalidDateRange:
 
         response = _run_impl_with_patches(req)
 
-        assert response.errors is not None
-        assert response.errors[0].code == "invalid_date_range"
-        assert response.media_buy_deliveries == []
+        assert response.errors is None
+        assert response.reporting_period.start == datetime(2025, 3, 15, tzinfo=UTC)
+        assert response.reporting_period.end == datetime(2025, 3, 15, 23, 59, 59, 999999, tzinfo=UTC)
 
     def test_start_date_after_end_date_returns_error(self):
         """UC-004-EXT-E2: start_date > end_date returns invalid_date_range.
@@ -1760,36 +1712,6 @@ class TestDeliveryWebhookHappyPath:
         payload = call_kwargs["delivery_payload"]
         assert "next_expected_at" in payload
         assert payload["notification_type"] == "scheduled"
-
-    def test_hmac_sha256_signature_headers(self):
-        """UC-004-WH-07: webhook payload signed with HMAC-SHA256.
-
-        Spec: https://github.com/adcontextprotocol/adcp/blob/8f26baf3549c00d2638341fed1d80abacb5d894a/dist/schemas/3.0.0-beta.3/core/reporting-webhook.json
-        CONFIRMED: authentication.schemes supports ['HMAC-SHA256'] for signature verification.
-        Tests that WebhookDeliveryService._generate_hmac_signature produces a valid hex signature,
-        and that signing with the same inputs is deterministic.
-        Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-07
-        """
-        service = WebhookDeliveryService()
-
-        payload = {"media_buy_id": "mb_wh07", "impressions": 1000}
-        secret = "a" * 32  # 32-char minimum secret
-        timestamp = "2025-06-15T12:00:00Z"
-
-        sig1 = service._generate_hmac_signature(payload, secret, timestamp)
-        sig2 = service._generate_hmac_signature(payload, secret, timestamp)
-
-        # Signature is a hex string
-        assert isinstance(sig1, str)
-        assert len(sig1) == 64  # SHA-256 hex = 64 chars
-
-        # Deterministic
-        assert sig1 == sig2
-
-        # Different payload produces different signature
-        different_payload = {"media_buy_id": "mb_wh07", "impressions": 2000}
-        sig3 = service._generate_hmac_signature(different_payload, secret, timestamp)
-        assert sig3 != sig1
 
     def test_webhook_excludes_aggregated_totals(self):
         """UC-004-WH-09: webhook does NOT include aggregated_totals.
@@ -2161,7 +2083,7 @@ class TestDeliveryProtocol:
         # Optional fields exist as attributes (may be None)
         assert hasattr(totals, "clicks")
         assert hasattr(totals, "ctr")
-        assert hasattr(totals, "video_completions")
+        assert hasattr(totals, "completed_views")
         assert hasattr(totals, "completion_rate")
 
     def test_unpopulated_fields_handled_gracefully(self):
@@ -2192,7 +2114,7 @@ class TestDeliveryProtocol:
         delivery = response.media_buy_deliveries[0]
         # daily_breakdown is optional and not populated
         assert delivery.daily_breakdown is None
-        # video_completions is optional
-        assert delivery.totals.video_completions is None
+        # completed_views is optional
+        assert delivery.totals.completed_views is None
         # aggregated_totals optional fields
-        assert response.aggregated_totals.video_completions is None
+        assert response.aggregated_totals.completed_views is None

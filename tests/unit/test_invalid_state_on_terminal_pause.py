@@ -126,6 +126,51 @@ class TestPauseCanceledBuyGuard:
                 pass
 
 
+class TestManualApprovalDoesNotDeferPauseOfTerminalBuy:
+    """On tenants that route updates through manual approval, the terminal-state
+    guard must run before the update is deferred.
+
+    The guard used to sit only on the apply path, after the approval gate, so a
+    pause of a canceled buy was answered with a ``workflow_step_id`` and left a
+    task in the publisher's queue that could never be applied.
+    """
+
+    @staticmethod
+    def _update(status: str, paused: bool):
+        """Run a pause/resume on a manual-approval tenant; return (result or error, step statuses)."""
+        from tests.harness.media_buy_update import MediaBuyUpdateEnv
+
+        with MediaBuyUpdateEnv() as env:
+            env.set_media_buy(media_buy_id="mb-approval", status=status)
+            adapter = env.mock["adapter"].return_value
+            adapter.manual_approval_required = True
+            adapter.manual_approval_operations = ["update_media_buy"]
+            try:
+                outcome = env.call_impl(media_buy_id="mb-approval", paused=paused)
+            except AdCPInvalidStateError as exc:
+                outcome = exc
+            step_updates = env.mock["ctx_mgr"].return_value.update_workflow_step.call_args_list
+            return outcome, [call.kwargs.get("status") for call in step_updates]
+
+    @pytest.mark.parametrize("terminal_status", _TESTED_TERMINAL_STATES)
+    @pytest.mark.parametrize("paused_value", [True, False])
+    def test_pause_or_resume_of_terminal_buy_is_rejected_not_deferred(
+        self, terminal_status: str, paused_value: bool
+    ) -> None:
+        outcome, step_statuses = self._update(terminal_status, paused_value)
+
+        assert isinstance(outcome, AdCPInvalidStateError)
+        assert outcome.error_code == "INVALID_STATE"
+        assert terminal_status in str(outcome)
+        assert step_statuses == ["failed"]
+
+    def test_pause_of_active_buy_is_still_deferred_for_approval(self) -> None:
+        outcome, step_statuses = self._update("active", True)
+
+        assert outcome.workflow_step_id == "step_001"
+        assert step_statuses == ["requires_approval"]
+
+
 class TestCancelBranchAsymmetry:
     """The cancel branch (``update_media_buy(canceled=True)``) uses the
     narrower ``AdCPNotCancellableError`` wire code (NOT_CANCELLABLE) for

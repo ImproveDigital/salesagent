@@ -73,6 +73,20 @@ def canonicalize_format_ref(format_ref: Any) -> dict[str, Any]:
     return raw
 
 
+def product_validation_format_ids(product: Any) -> list[Any]:
+    """Return the formats a product accepts, for creative-format validation.
+
+    Products linked to an inventory profile advertise the profile's formats
+    (see ``Product.effective_format_ids``), so creatives must be validated
+    against those rather than the product's own, possibly stale, column.
+    """
+    if isinstance(getattr(product, "inventory_profile_id", None), int):
+        profile = getattr(product, "inventory_profile", None)
+        if profile is not None:
+            return list(profile.format_ids or [])
+    return list(product.format_ids or [])
+
+
 def canonicalize_creative_agent_url(agent_url: Any) -> str:
     """Canonicalize reference creative-agent aliases while preserving custom URLs."""
     raw_agent_url = str(agent_url)

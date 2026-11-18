@@ -91,6 +91,19 @@ def _keeps_manual_authorization(partner: PublisherPartner, status: PublisherPart
     return partner.aao_status_kind == MANUAL_AUTHORIZATION_KIND and status.status not in ("authorized", "unbound")
 
 
+def _record_manual_recheck(partner: PublisherPartner, fetch_error: str | None) -> None:
+    """Stamp an adagents.json re-check on a manually authorized partner.
+
+    The manual authorization itself is kept; only the check time and the
+    fetch outcome are recorded so the row stops showing a stale "Last
+    refreshed" and surfaces fetch failures."""
+    now = datetime.now(UTC)
+    partner.last_refreshed_at = now
+    partner.last_fetch_error = fetch_error
+    if fetch_error is None:
+        partner.last_synced_at = now
+
+
 def _partner_to_dict(partner: PublisherPartner) -> dict:
     """Serialize a PublisherPartner row for the JSON list endpoint."""
     aao_url = f"https://agenticadvertising.org/publisher/{partner.publisher_domain}"
@@ -551,6 +564,7 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
             for partner in partners:
                 ssrf_ok, ssrf_err = check_url_ssrf(f"https://{partner.publisher_domain}")
                 if not ssrf_ok and partner.aao_status_kind == MANUAL_AUTHORIZATION_KIND:
+                    _record_manual_recheck(partner, ssrf_err)
                     manual_kept += 1
                     continue
                 if not ssrf_ok:
@@ -585,6 +599,7 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
                 if status is None:
                     continue
                 if _keeps_manual_authorization(partner, status):
+                    _record_manual_recheck(partner, status.error if status.status == "unreachable" else None)
                     verified += 1
                     synced += 1
                     continue
@@ -694,11 +709,16 @@ def refresh_publisher_partner(tenant_id: str, partner_id: int) -> Response | tup
             finally:
                 loop.close()
 
-            if not _keeps_manual_authorization(partner, status):
+            if _keeps_manual_authorization(partner, status):
+                _record_manual_recheck(partner, status.error if status.status == "unreachable" else None)
+            else:
                 _persist_status(partner, status)
-                session.commit()
+            session.commit()
 
-            return jsonify(_partner_to_dict(partner))
+            # refresh_status: what adagents.json said this time (it differs
+            # from aao_status when a manual authorization is kept), so the UI
+            # can tell the operator what the refresh found.
+            return jsonify({**_partner_to_dict(partner), "refresh_status": status.status})
 
     except Exception as e:
         logger.error(f"Error refreshing publisher partner: {e}", exc_info=True)

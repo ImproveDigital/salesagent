@@ -16,7 +16,7 @@ beads: salesagent-4d4
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, asc, case, func, or_, select
@@ -379,6 +379,49 @@ class WorkflowRepository:
     # ------------------------------------------------------------------
     # WorkflowStep writes
     # ------------------------------------------------------------------
+
+    def close_pending_approvals_for_object(
+        self,
+        object_type: str,
+        object_id: str,
+        *,
+        reason: str,
+        exclude_step_id: str | None = None,
+    ) -> list[str]:
+        """Close every approval step still open for an object that can no longer proceed.
+
+        Marks each ``requires_approval`` / ``pending_approval`` step mapped to the
+        object as ``rejected`` with ``reason``, so nothing is left for an
+        operator to approve. ``exclude_step_id`` skips the caller's own step.
+
+        Returns the closed step ids. Does NOT commit — the caller handles that.
+        """
+        steps = self._session.scalars(
+            select(WorkflowStep)
+            .join(ObjectWorkflowMapping, ObjectWorkflowMapping.step_id == WorkflowStep.step_id)
+            .join(DBContext, WorkflowStep.context_id == DBContext.context_id)
+            .where(
+                ObjectWorkflowMapping.object_type == object_type,
+                ObjectWorkflowMapping.object_id == object_id,
+                DBContext.tenant_id == self._tenant_id,
+                WorkflowStep.status.in_(("requires_approval", "pending_approval")),
+            )
+        ).all()
+
+        closed_at = datetime.now(UTC)
+        closed: list[str] = []
+        for step in steps:
+            # A step mapped to the object more than once comes back once per mapping.
+            if step.step_id == exclude_step_id or step.step_id in closed:
+                continue
+            step.status = "rejected"
+            step.error_message = reason
+            step.completed_at = closed_at
+            closed.append(step.step_id)
+
+        if closed:
+            self._session.flush()
+        return closed
 
     def update_status(
         self,

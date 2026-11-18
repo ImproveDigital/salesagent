@@ -42,6 +42,64 @@ class ReadinessDetails(TypedDict):
     gam_line_items_ready: int  # Number of approved/active line items
 
 
+# Media Buys list filter chips (query value -> label), in display order.
+# "scheduled" is labelled "Ready": it is the state of a fully set-up buy
+# waiting for its start date.
+LIST_FILTERS: dict[str, str] = {
+    "needs_creatives": "Needs Creatives",
+    "needs_approval": "Needs Approval",
+    "pending_ad_server_approval": "Pending ad server",
+    "scheduled": "Ready",
+    "live": "Live",
+    "completed": "Completed",
+}
+# Legacy query values kept working for bookmarked links.
+LIST_FILTER_ALIASES: dict[str, str] = {"ready": "scheduled"}
+
+
+def normalize_list_filter(status_filter: str | None) -> str | None:
+    """Map a ``?status=`` value to a known list filter; unknown values mean "All" (None)."""
+    if not status_filter:
+        return None
+    status_filter = LIST_FILTER_ALIASES.get(status_filter, status_filter)
+    return status_filter if status_filter in LIST_FILTERS else None
+
+
+def has_missing_creatives(readiness: "ReadinessDetails") -> bool:
+    """True when creatives must still be supplied: unassigned packages, none uploaded, or rejected.
+
+    Creatives that are uploaded and only awaiting approval are not missing —
+    that buy needs an approval decision, not new creatives.
+    """
+    packages_total = readiness["packages_total"]
+    return (
+        readiness["packages_with_creatives"] < packages_total
+        or readiness["creatives_rejected"] > 0
+        or (packages_total > 0 and readiness["creatives_total"] == 0)
+    )
+
+
+def matches_list_filter(readiness: "ReadinessDetails", status_filter: str) -> bool:
+    """Whether a buy belongs under a list filter chip.
+
+    Filters match the readiness ``state`` shown in the badge, except
+    "Needs Creatives", which also includes buys whose state is driven by a
+    higher-priority status (e.g. awaiting approval) but still have missing
+    creatives — the same gaps the readiness column reports as "0/n packages
+    ready". Creatives merely awaiting approval do not pull such a buy in.
+
+    "Needs Approval" is the complement for awaiting-approval buys: one with
+    missing creatives can't be approved yet (the approval gate blocks it), so
+    it is listed only under "Needs Creatives" and the two chips never overlap.
+    """
+    state = readiness["state"]
+    if status_filter == "needs_creatives":
+        return state == "needs_creatives" or (state not in ("completed", "failed") and has_missing_creatives(readiness))
+    if status_filter == "needs_approval":
+        return state == "needs_approval" and not has_missing_creatives(readiness)
+    return state == status_filter
+
+
 class MediaBuyReadinessService:
     """Service to compute operational readiness of media buys."""
 

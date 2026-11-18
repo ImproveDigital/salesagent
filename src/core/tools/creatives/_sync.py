@@ -286,7 +286,7 @@ def _sync_creatives_impl(
                     continue
 
                 # Use savepoint for individual creative transaction isolation
-                with creative_repo.begin_nested():
+                with creative_repo.begin_nested() as savepoint:
                     # Check if creative already exists (always check for upsert/patch behavior)
                     # SECURITY: Must filter by principal_id to prevent cross-principal modification
                     existing_creative = None
@@ -321,6 +321,9 @@ def _sync_creatives_impl(
                             )
                             failed_count += 1
                             results.append(update_result)
+                            # Discard field changes made before the failure so a
+                            # rejected update leaves the stored creative untouched.
+                            savepoint.rollback()
                             continue
 
                         # Track counts

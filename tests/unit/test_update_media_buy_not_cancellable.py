@@ -31,6 +31,59 @@ from tests.unit._update_media_buy_helpers import (
 )
 
 # ---------------------------------------------------------------------------
+# Cancel closes the buy's pending approval steps
+# ---------------------------------------------------------------------------
+
+
+class TestCancelClosesPendingApprovals:
+    """Canceling a media buy must close the approval steps still open for it.
+
+    A buy queued for approval (and any update queued behind it) keeps a
+    ``requires_approval`` step. Cancel used to leave those open, so the admin
+    still offered Approve/Reject on a canceled buy.
+    """
+
+    @staticmethod
+    def _workflow_repo() -> MagicMock:
+        # The autouse fixture in tests/unit/conftest.py replaces the class.
+        from src.core.database.repositories import workflow
+
+        return workflow.WorkflowRepository.return_value
+
+    def test_cancel_closes_pending_approval_steps_for_the_buy(self) -> None:
+        existing_mb = MagicMock()
+        existing_mb.status = "pending_approval"
+        existing_mb.currency = "USD"
+
+        with UpdateMediaBuyImplFixture(existing_media_buy=existing_mb):
+            req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_queued", canceled=True)
+            result = _update_media_buy_impl(req=req, identity=make_identity())
+            close = self._workflow_repo().close_pending_approvals_for_object
+
+        assert result.media_buy_status == "canceled"
+        # The cancel's own step (step_001) is completed by the caller, never closed as rejected.
+        close.assert_called_once_with(
+            "media_buy",
+            "mb_queued",
+            reason="Media buy canceled by the buyer before a decision was made",
+            exclude_step_id="step_001",
+        )
+
+    def test_rejected_re_cancel_closes_nothing(self) -> None:
+        existing_mb = MagicMock()
+        existing_mb.status = "canceled"
+        existing_mb.currency = "USD"
+
+        with UpdateMediaBuyImplFixture(existing_media_buy=existing_mb):
+            req = UpdateMediaBuyRequest(**required_request_kwargs(), media_buy_id="mb_canceled", canceled=True)
+            with pytest.raises(AdCPNotCancellableError):
+                _update_media_buy_impl(req=req, identity=make_identity())
+            close = self._workflow_repo().close_pending_approvals_for_object
+
+        close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Layer 1: _impl raises AdCPNotCancellableError on re-cancel of canceled buy
 # ---------------------------------------------------------------------------
 

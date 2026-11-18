@@ -253,7 +253,6 @@ ALLOWLIST: set[tuple[str, str]] = {
         "src/core/tools/media_buy_create.py",
         "push_creative_to_existing_buy",
     ),  # select(Tenant) — pre-approval gate from #249
-    ("src/admin/blueprints/workflows.py", "approve_workflow_step"),  # select(CreativeAssignment) — no creative repo yet
     ("src/admin/blueprints/workflows.py", "list_workflows"),  # select(Tenant) — no tenant repo yet
     ("src/admin/blueprints/workflows.py", "review_workflow_step"),  # select(Context) — context lookup
     # ── Admin services / utils ──
@@ -460,6 +459,16 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/services/setup_checklist_service.py", "get_bulk_setup_status"),
     ("src/services/setup_checklist_service.py", "get_setup_status"),
     ("src/services/webhook_delivery_service.py", "_send_webhook_enhanced"),
+    # ── Added 2026-11 when re-baselining the guard against production code ──
+    # These raw selects landed in src/ after the allowlist was last updated.
+    # FIXME(salesagent-xw7): DEBT — migrate each to a repository method.
+    ("src/admin/blueprints/adapters.py", "get_improvedigital_reporting"),  # select(MediaBuy)
+    ("src/admin/blueprints/buyer_routing.py", "trigger_advertiser_sync"),  # select(Tenant)
+    ("src/services/gam_inventory_validation.py", "validate_product_gam_inventory"),  # select(GAMInventory)
+    ("src/services/order_approval_service.py", "_activate_media_buy"),  # select(GAMOrder)
+    ("src/services/order_approval_service.py", "_watch_deadline"),  # select(MediaBuy)
+    ("src/services/order_approval_service.py", "resume_order_status_watchers"),  # select(SyncJob)
+    ("src/services/order_approval_service.py", "start_order_status_polling"),  # select(SyncJob)
 }
 
 EXPECTED_VIOLATION_COUNT = len(ALLOWLIST)

@@ -841,13 +841,19 @@ def sync_gam_orders(tenant_id, **kwargs):
 @require_tenant_access()
 def media_buys_list(tenant_id):
     """List media buys with optional status filter."""
-    from src.admin.services.media_buy_readiness_service import MediaBuyReadinessService
+    from src.admin.services.media_buy_readiness_service import (
+        LIST_FILTERS,
+        MediaBuyReadinessService,
+        matches_list_filter,
+        normalize_list_filter,
+    )
     from src.core.database.models import Product
     from src.core.database.repositories import MediaBuyRepository
 
     try:
-        # Get status filter from query params
-        status_filter = request.args.get("status")
+        # Get status filter from query params (unknown values fall back to All)
+        status_filter = normalize_list_filter(request.args.get("status"))
+        filter_counts = dict.fromkeys(LIST_FILTERS, 0)
 
         with get_db_session() as db_session:
             # Get tenant
@@ -867,8 +873,12 @@ def media_buys_list(tenant_id):
                     media_buy.media_buy_id, tenant_id, session=db_session
                 )
 
+                for key in filter_counts:
+                    if matches_list_filter(readiness, key):
+                        filter_counts[key] += 1
+
                 # Apply status filter if specified
-                if status_filter and readiness["state"] != status_filter:
+                if status_filter and not matches_list_filter(readiness, status_filter):
                     continue
 
                 # Get principal name
@@ -907,6 +917,9 @@ def media_buys_list(tenant_id):
                 tenant_id=tenant_id,
                 media_buys=media_buys_with_state,
                 status_filter=status_filter,
+                list_filters=LIST_FILTERS,
+                filter_counts=filter_counts,
+                total_count=len(all_media_buys),
             )
 
     except Exception as e:

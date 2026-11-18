@@ -14,6 +14,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import Context
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.repositories import MediaBuyRepository
+from src.core.database.repositories.creative import CreativeAssignmentRepository
 from src.core.database.repositories.workflow import WorkflowRepository
 from src.core.tenant_currency import tenant_reporting_currency
 from src.services.protocol_webhook_service import build_request_scoped_config, send_create_media_buy_decision
@@ -22,6 +23,38 @@ logger = logging.getLogger(__name__)
 
 workflows_bp = Blueprint("workflows", __name__)
 workflows_bp.before_request(require_capability_blueprint("campaign_approval"))
+
+
+# Step statuses that are waiting for an operator decision.
+_AWAITING_DECISION_STEP_STATUSES = frozenset({"requires_approval", "pending_approval"})
+
+# Step statuses that count as handled for the "Completed Today" card.
+_HANDLED_STEP_STATUSES = frozenset({"completed", "approved", "rejected"})
+
+
+def _task_summary_counts(steps, now: datetime) -> dict[str, int]:
+    """Task counts for the Workflows page summary cards.
+
+    Approval steps are created as ``requires_approval``; counting only
+    ``pending_approval`` left the Pending Tasks card at 0 while tasks waited.
+    "Today" is the current UTC day; a naive ``completed_at`` is read as UTC.
+
+    Pure function (no DB/Flask) so it can be unit-tested directly.
+    """
+    today = now.astimezone(UTC).date()
+
+    def _finished_today(step) -> bool:
+        completed_at = step.completed_at
+        if completed_at is None or step.status not in _HANDLED_STEP_STATUSES:
+            return False
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=UTC)
+        return completed_at.astimezone(UTC).date() == today
+
+    return {
+        "pending_tasks": sum(1 for s in steps if s.status in _AWAITING_DECISION_STEP_STATUSES),
+        "completed_today": sum(1 for s in steps if _finished_today(s)),
+    }
 
 
 @workflows_bp.route("/<tenant_id>/workflows")
@@ -40,9 +73,6 @@ def list_workflows(tenant_id, **kwargs):
         workflow_repo = WorkflowRepository(db, tenant_id)
         all_steps = workflow_repo.get_all_steps()
 
-        # Separate pending approval steps for summary
-        pending_steps = [s for s in all_steps if s.status == "pending_approval"]
-
         # Get media buys for context
         media_buy_repo = MediaBuyRepository(db, tenant_id)
         media_buys = media_buy_repo.list_all_ordered_by_created()
@@ -53,8 +83,7 @@ def list_workflows(tenant_id, **kwargs):
         # Build summary stats
         summary = {
             "active_buys": len([mb for mb in media_buys if mb.status == "active"]),
-            "pending_tasks": len(pending_steps),
-            "completed_today": 0,  # TODO: Calculate from workflow history
+            **_task_summary_counts(all_steps, datetime.now(UTC)),
             "total_spend": sum(mb.budget or 0 for mb in media_buys if mb.status == "active"),
             "currency": primary_currency,
         }
@@ -247,6 +276,92 @@ def _replay_update_media_buy(step, tenant_id: str, db) -> tuple[bool, str | None
     return True, None
 
 
+def _expired_media_buy_decision_error(
+    workflow_repo: WorkflowRepository, media_buy_repo: MediaBuyRepository, step_id: str, action: str
+) -> str | None:
+    """Block approving/rejecting a pending media buy whose flight window has ended.
+
+    Approval would push an order that can no longer deliver to the ad server.
+    The buy stays pending; once the buyer moves the flight to a future window
+    the decision unblocks on its own.
+
+    Only the ``create_media_buy`` step is guarded: an ``update_media_buy``
+    step on the same buy may be exactly the reschedule that unblocks it.
+    """
+    from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE, flight_has_ended
+
+    step = workflow_repo.get_by_step_id(step_id)
+    if step is None or step.tool_name != "create_media_buy":
+        return None
+
+    for mapping in workflow_repo.get_mappings_for_step(step_id):
+        if mapping.object_type != "media_buy":
+            continue
+        media_buy = media_buy_repo.get_by_id(mapping.object_id)
+        if media_buy and media_buy.status == "pending_approval" and flight_has_ended(media_buy, datetime.now(UTC)):
+            return FLIGHT_ENDED_DECISION_MESSAGE.format(action=action)
+    return None
+
+
+# Step statuses that already carry a decision or an outcome. A step in one of
+# these is no longer waiting on the operator.
+_DECIDED_STEP_STATUSES = frozenset({"approved", "rejected", "completed", "failed"})
+
+# Creative statuses that count as ready to deliver (mirrors operations.approve_media_buy).
+_APPROVED_CREATIVE_STATUSES = ("approved", "active")
+
+
+def _decided_step_error(step, action: str) -> str | None:
+    """Block a second decision on a step that is no longer waiting for one.
+
+    Canceling a media buy closes its open approval steps as ``rejected``;
+    without this guard a later approve flipped such a step to ``approved``.
+
+    Pure function (no DB/Flask) so it can be unit-tested directly.
+    """
+    status = str(getattr(step, "status", "") or "").lower()
+    if status in _DECIDED_STEP_STATUSES:
+        return f"Cannot {action}: this workflow step is already {status}."
+    return None
+
+
+def _approve_blocked_error(step, media_buy, assignments) -> str | None:
+    """Block an approval the media buy page would also refuse.
+
+    This route used to mark the step approved before looking at the buy, so a
+    buy with no creatives was booked on the ad server and a canceled or failed
+    buy still accepted an approval. ``update_media_buy`` steps are exempt from
+    the creative rule: the update may be the change that attaches creatives.
+
+    Pure function (no DB/Flask) so it can be unit-tested directly.
+    """
+    if media_buy is None:
+        return None
+
+    from src.admin.blueprints.operations import _closed_media_buy_decision_error
+
+    closed_error = _closed_media_buy_decision_error(media_buy, "approve")
+    if closed_error:
+        return closed_error
+
+    if getattr(step, "tool_name", None) == "update_media_buy":
+        return None
+    if media_buy.status == "pending_approval" and not assignments:
+        return "Cannot approve: no creatives are assigned to this media buy. Assign and approve creatives first."
+    return None
+
+
+def _unapproved_creative_ids(creatives) -> list[str]:
+    """IDs of creatives that are not yet approved for delivery."""
+    return [c.creative_id for c in creatives if c.status not in _APPROVED_CREATIVE_STATUSES]
+
+
+def _step_media_buy(workflow_repo: WorkflowRepository, media_buy_repo: MediaBuyRepository, step_id: str):
+    """The media buy a workflow step is about, or ``None``."""
+    mapping = next((m for m in workflow_repo.get_mappings_for_step(step_id) if m.object_type == "media_buy"), None)
+    return media_buy_repo.get_by_id(mapping.object_id) if mapping else None
+
+
 @workflows_bp.route("/<tenant_id>/workflows/<workflow_id>/steps/<step_id>/approve", methods=["POST"])
 @require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
 @log_admin_action("approve_workflow_step")
@@ -260,9 +375,30 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
             user_info = session.get("user", {})
             user_email = user_info.get("email", "system") if isinstance(user_info, dict) else str(user_info)
 
+            expired_error = _expired_media_buy_decision_error(
+                workflow_repo, MediaBuyRepository(db, tenant_id), step_id, "approve"
+            )
+            if expired_error:
+                return jsonify({"success": False, "error": expired_error}), 409
+
+            # Refuse before the step is marked approved: nothing below can undo that.
+            media_buy_repo = MediaBuyRepository(db, tenant_id)
+            pending_step = workflow_repo.get_by_step_id(step_id)
+            assignments: list = []
+            if pending_step is not None:
+                pending_buy = _step_media_buy(workflow_repo, media_buy_repo, step_id)
+                if pending_buy is not None:
+                    assignments = CreativeAssignmentRepository(db, tenant_id).get_by_media_buy(pending_buy.media_buy_id)
+                blocked_error = _decided_step_error(pending_step, "approve") or _approve_blocked_error(
+                    pending_step, pending_buy, assignments
+                )
+                if blocked_error:
+                    return jsonify({"success": False, "error": blocked_error}), 409
+
             step = workflow_repo.update_status(
                 step_id,
                 status="approved",
+                completed_at=datetime.now(UTC),
             )
 
             if not step:
@@ -306,7 +442,6 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                 logger.info(f"[APPROVAL] Workflow step {step_id} approved for media buy {media_buy_id}")
 
                 # Get the media buy
-                media_buy_repo = MediaBuyRepository(db, tenant_id)
                 media_buy = media_buy_repo.get_by_id(media_buy_id)
 
                 logger.info(
@@ -314,21 +449,12 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                 )
 
                 if media_buy and media_buy.status == "pending_approval":
-                    # Check if all required creatives are approved before executing adapter creation
-                    from src.core.database.models import Creative as CreativeModel
-                    from src.core.database.models import CreativeAssignment
-
-                    stmt_assignments = select(CreativeAssignment).filter_by(media_buy_id=media_buy_id)
-                    assignments = db.scalars(stmt_assignments).all()
-
+                    # Check if all required creatives are approved before executing adapter creation.
+                    # Both lookups are tenant-scoped: creative IDs are chosen by buyers and
+                    # repeat across tenants.
                     if assignments:
-                        creative_ids = [a.creative_id for a in assignments]
-                        stmt_creatives = select(CreativeModel).filter(CreativeModel.creative_id.in_(creative_ids))
-                        creatives = db.scalars(stmt_creatives).all()
-
-                        unapproved_creatives = [
-                            c.creative_id for c in creatives if c.status not in ["approved", "active"]
-                        ]
+                        creatives = media_buy_repo.get_creatives_by_ids([a.creative_id for a in assignments])
+                        unapproved_creatives = _unapproved_creative_ids(creatives)
 
                         if unapproved_creatives:
                             logger.warning(
@@ -350,7 +476,11 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     success, error_msg = execute_approved_media_buy(media_buy_id, tenant_id)
 
                     if not success:
+                        # Mirror operations.approve_media_buy: the step is already approved,
+                        # so a buy left in pending_approval could never be decided again.
                         logger.error(f"[APPROVAL] Adapter creation failed for {media_buy_id}: {error_msg}")
+                        media_buy_repo.update_status(media_buy_id, "failed")
+                        db.commit()
                         flash(f"Workflow approved but media buy creation failed: {error_msg}", "error")
                         return jsonify({"success": False, "error": error_msg}), 500
 
@@ -406,9 +536,20 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
             user_info = session.get("user", {})
             user_email = user_info.get("email", "system") if isinstance(user_info, dict) else str(user_info)
 
+            expired_error = _expired_media_buy_decision_error(
+                workflow_repo, MediaBuyRepository(db, tenant_id), step_id, "reject"
+            )
+            if expired_error:
+                return jsonify({"success": False, "error": expired_error}), 409
+
+            decided_error = _decided_step_error(workflow_repo.get_by_step_id(step_id), "reject")
+            if decided_error:
+                return jsonify({"success": False, "error": decided_error}), 409
+
             step = workflow_repo.update_status(
                 step_id,
                 status="rejected",
+                completed_at=datetime.now(UTC),
                 error_message=reason,
             )
 

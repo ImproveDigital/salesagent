@@ -3,9 +3,10 @@
 import logging
 from typing import Any
 
+from src.core.canonical_formats import product_validation_format_ids
 from src.core.database.repositories.uow import CreativeUoW
 from src.core.exceptions import AdCPNotFoundError, AdCPValidationError
-from src.core.format_cache import canonical_format_identity
+from src.core.format_cache import canonical_format_identity, format_label, format_labels
 from src.core.schemas import SyncCreativeResult
 from src.core.tools.media_buy_create import _status_after_creative_attachment
 
@@ -113,14 +114,15 @@ def _process_assignments(
                         # Get product formats
                         product = assignment_repo.get_product_by_id(product_id)
 
-                        if product and product.format_ids:
+                        product_formats = product_validation_format_ids(product) if product else []
+                        if product and product_formats:
                             # Build set of supported canonical format identities.
                             # Older persisted products may still carry legacy
                             # reference-agent IDs like display_300x250; compare
                             # them as display_image + width/height so canonical
                             # migration does not collapse all display sizes.
                             supported_formats: set[tuple[str, str, int | None, int | None, int | None]] = set()
-                            for fmt in product.format_ids:
+                            for fmt in product_formats:
                                 if isinstance(fmt, dict):
                                     agent_url_val = fmt.get("agent_url")
                                     format_id_val = fmt.get("id") or fmt.get("format_id")
@@ -133,13 +135,12 @@ def _process_assignments(
                             format_parameters = getattr(db_creative_result, "format_parameters", None)
                             if not isinstance(format_parameters, dict):
                                 format_parameters = {}
-                            creative_identity = canonical_format_identity(
-                                {
-                                    "agent_url": creative_agent_url,
-                                    "id": creative_format_id,
-                                    **format_parameters,
-                                }
-                            )
+                            creative_format_ref = {
+                                "agent_url": creative_agent_url,
+                                "id": creative_format_id,
+                                **format_parameters,
+                            }
+                            creative_identity = canonical_format_identity(creative_format_ref)
                             is_supported = creative_identity in supported_formats
 
                             if not supported_formats:
@@ -148,21 +149,11 @@ def _process_assignments(
 
                             if not is_supported:
                                 # Creative format not supported by product
-                                creative_format_display = (
-                                    f"{creative_agent_url}/{creative_format_id}"
-                                    if creative_agent_url
-                                    else creative_format_id
-                                )
-                                supported_formats_display = ", ".join(
-                                    [
-                                        f"{url}/{fmt_id}" + (f" {width}x{height}" if width and height else "")
-                                        for url, fmt_id, width, height, _duration_ms in supported_formats
-                                    ]
-                                )
                                 error_msg = (
-                                    f"Creative {creative_id} format '{creative_format_display}' "
+                                    f"Creative {creative_id} format "
+                                    f"'{format_label(creative_format_ref, show_original_id=True)}' "
                                     f"is not supported by product '{product.name}' (package {package_id}). "
-                                    f"Supported formats: {supported_formats_display}"
+                                    f"Supported formats: {format_labels(product_formats, show_original_id=True)}"
                                 )
                                 assignment_errors_by_creative[creative_id][package_id] = error_msg
 

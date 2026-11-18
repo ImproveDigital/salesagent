@@ -36,6 +36,45 @@ def _find_matching_format(format_ref: Any, all_formats: list[Any]) -> Any | None
     return None
 
 
+def _declared_size_mismatch_result(
+    creative_id: str, format_info: Any, data: dict[str, Any]
+) -> SyncCreativeResult | None:
+    """Fail display creatives whose asset size differs from the declared format size.
+
+    The adapter traffics the asset's own width/height, while product validation
+    uses the declared format parameters. If the two disagree, a creative could
+    pass product validation and still serve at an unsupported size.
+    """
+    from src.core.helpers.creative_helpers import extract_media_url_and_dimensions
+
+    params = format_info["parameters"] or {}
+    declared_width, declared_height = params.get("width"), params.get("height")
+    if not str(format_info["format_id"]).startswith("display_") or not declared_width or not declared_height:
+        return None
+
+    _url, asset_width, asset_height = extract_media_url_and_dimensions(data, None)
+    if not asset_width or not asset_height:
+        return None
+    if (asset_width, asset_height) == (declared_width, declared_height):
+        return None
+
+    error_msg = (
+        f"Creative {creative_id} asset is {asset_width}x{asset_height} but its format_id declares "
+        f"{declared_width}x{declared_height}. Asset dimensions must match the declared format."
+    )
+    logger.error(f"[sync_creatives] {error_msg}")
+    return SyncCreativeResult(
+        creative_id=creative_id,
+        action="failed",
+        status=None,
+        platform_id=None,
+        errors=[Error(code="creative_dimension_mismatch", message=error_msg)],
+        review_feedback=None,
+        assigned_to=None,
+        assignment_errors=None,
+    )
+
+
 def _update_existing_creative(
     creative: CreativeAsset,
     existing_creative: Any,
@@ -73,6 +112,15 @@ def _update_existing_creative(
     """
 
     from typing import Literal
+
+    # Reject a declared-size/asset-size mismatch before mutating the stored creative
+    size_mismatch = _declared_size_mismatch_result(
+        existing_creative.creative_id,
+        _extract_format_info(format_value),
+        _build_creative_data(creative, _extract_url_from_assets(creative), context),
+    )
+    if size_mismatch:
+        return size_mismatch, False
 
     # Update updated_at timestamp
     now = datetime.now(UTC)
@@ -503,6 +551,10 @@ def _create_new_creative(
     # Prepare data field with all creative properties
     url = _extract_url_from_assets(creative)
     data = _build_creative_data(creative, url, context)
+
+    size_mismatch = _declared_size_mismatch_result(creative_id, _extract_format_info(format_value), data)
+    if size_mismatch:
+        return size_mismatch, False
 
     # Store user-provided assets for preservation check
     user_provided_assets = creative.assets

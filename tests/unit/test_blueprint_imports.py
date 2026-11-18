@@ -17,7 +17,9 @@ class TestBlueprintSQLAlchemyImports:
         """Validate api.py has required SQLAlchemy imports."""
         from src.admin.blueprints import api
 
-        assert hasattr(api, "func"), "Missing required import: func from sqlalchemy"
+        # api.py no longer uses func (the revenue aggregation that needed it was
+        # removed from this blueprint); it still runs select() and text() queries.
+        assert hasattr(api, "select"), "Missing required import: select from sqlalchemy"
         assert hasattr(api, "text"), "Missing required import: text from sqlalchemy"
 
     def test_core_blueprint_imports(self):

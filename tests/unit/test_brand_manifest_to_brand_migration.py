@@ -3,37 +3,15 @@
 After dropping brand_manifest backward compat (adcp v3.6.0 upgrade), tests and
 callers still passing brand_manifest instead of brand fail in multiple ways:
 
-1. get_products_raw(brand_manifest=...) → TypeError (unknown keyword)
-2. GetProductsRequest(brand_manifest=...) → ValidationError (extra forbidden)
-3. CreateMediaBuyRequest(brand_manifest=...) → ValidationError (brand required + extra forbidden)
-4. A2A handler with {"brand_manifest": ...} → "Either 'brief' or 'brand' parameter is required"
+1. GetProductsRequest(brand_manifest=...) → ValidationError (extra forbidden)
+2. CreateMediaBuyRequest(brand_manifest=...) → ValidationError (brand required + extra forbidden)
+3. A2A handler with {"brand_manifest": ...} → "Either 'brief' or 'brand' parameter is required"
 
 Bug: salesagent-k6cn
 """
 
 import pytest
 from pydantic import ValidationError
-
-
-class TestGetProductsRawRejectsBrandManifest:
-    """get_products_raw no longer accepts brand_manifest keyword."""
-
-    def test_brand_manifest_kwarg_raises_type_error(self):
-        """Calling get_products_raw with brand_manifest= raises TypeError.
-
-        This reproduces the failure in:
-        - tests/integration_v2/test_get_products_filters.py (8+ tests)
-        """
-        from src.core.tools.products import get_products_raw
-
-        with pytest.raises(TypeError, match="brand_manifest"):
-            # brand_manifest is not a valid parameter — brand is the new name.
-            # TypeError is raised at call time (before coroutine creation)
-            # because the function signature has no **kwargs.
-            get_products_raw(
-                brand_manifest={"name": "Test Brand"},
-                brief="",
-            )
 
 
 class TestGetProductsRequestRejectsBrandManifest:

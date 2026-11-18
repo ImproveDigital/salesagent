@@ -380,10 +380,13 @@ function syncAllPublishers() {
 
             loadPublishers();
 
-            if (data.results) {
-                const verified = data.results.filter((r) => r.is_verified).length;
-                const failed = data.results.filter((r) => !r.is_verified).length;
-                alert(`Verification complete: ${verified} verified, ${failed} not verified`);
+            if (data.message && data.total === undefined) {
+                notify(data.message, 'info');
+            } else if (data.total !== undefined) {
+                notify(
+                    `Refreshed ${data.total} publisher(s): ${data.verified} authorized, ${data.errors} with errors`,
+                    data.errors > 0 ? 'warning' : 'success'
+                );
             }
         })
         .catch((error) => {
@@ -442,6 +445,32 @@ function removeManualAuthorization(partnerId, domain) {
     });
 }
 
+// Toast when sa-toast.js is loaded, alert otherwise.
+function notify(message, type) {
+    if (typeof window.saToast === 'function') {
+        window.saToast(message, type);
+    } else {
+        alert(message);
+    }
+}
+
+// Tell the operator what a single refresh found in adagents.json.
+function notifyRefreshResult(partner) {
+    const domain = partner.publisher_domain;
+    if (partner.last_fetch_error) {
+        notify(`${domain}: could not fetch adagents.json — ${partner.last_fetch_error}`, 'error');
+        return;
+    }
+    if (partner.manual_authorization) {
+        notify(`${domain}: adagents.json checked, still not listing this agent. Manual authorization kept.`, 'info');
+        return;
+    }
+    const kind = partner.aao_status || 'stale';
+    const label = (AAO_STATUS_STYLES[kind] || AAO_STATUS_STYLES.stale).label;
+    const type = kind === 'authorized' || kind === 'unbound' ? 'success' : kind === 'no_properties' ? 'error' : 'warning';
+    notify(`${domain}: refreshed — ${label}`, type);
+}
+
 // Refresh a single publisher (forces fresh AAO fetch).
 function refreshPublisher(partnerId) {
     const row = document.querySelector(`tr[data-partner-id="${partnerId}"]`);
@@ -454,14 +483,15 @@ function refreshPublisher(partnerId) {
         .then((r) => r.json())
         .then((data) => {
             if (data.error) {
-                alert('Refresh failed: ' + data.error);
+                notify('Refresh failed: ' + data.error, 'error');
                 if (row) row.style.opacity = '1';
                 return;
             }
+            notifyRefreshResult(data);
             loadPublishers();
         })
         .catch((err) => {
-            alert('Refresh failed: ' + err.message);
+            notify('Refresh failed: ' + err.message, 'error');
             if (row) row.style.opacity = '1';
         });
 }

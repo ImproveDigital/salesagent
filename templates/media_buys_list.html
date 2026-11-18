@@ -35,31 +35,22 @@
     <!-- Status Filter -->
     <div class="row mb-4">
         <div class="col">
-            <div class="btn-group" role="group">
+            {% set chip_colors = {
+                'needs_creatives': 'warning', 'needs_approval': 'warning',
+                'pending_ad_server_approval': 'warning', 'scheduled': 'info',
+                'live': 'success', 'completed': 'secondary'} %}
+            <div class="btn-group flex-wrap" role="group">
                 <a href="{{ url_for('tenants.media_buys_list', tenant_id=tenant_id) }}"
                    class="btn btn-sm {{ 'btn-primary' if not status_filter else 'btn-outline-primary' }}">
-                    All
+                    All <span class="badge bg-light text-dark ms-1">{{ total_count }}</span>
                 </a>
-                <a href="{{ url_for('tenants.media_buys_list', tenant_id=tenant_id, status='needs_creatives') }}"
-                   class="btn btn-sm {{ 'btn-warning' if status_filter == 'needs_creatives' else 'btn-outline-warning' }}">
-                    Needs Creatives
+                {% for key, label in list_filters.items() %}
+                {% set color = chip_colors.get(key, 'secondary') %}
+                <a href="{{ url_for('tenants.media_buys_list', tenant_id=tenant_id, status=key) }}"
+                   class="btn btn-sm {{ 'btn-' ~ color if status_filter == key else 'btn-outline-' ~ color }}">
+                    {{ label }} <span class="badge bg-light text-dark ms-1">{{ filter_counts.get(key, 0) }}</span>
                 </a>
-                <a href="{{ url_for('tenants.media_buys_list', tenant_id=tenant_id, status='needs_approval') }}"
-                   class="btn btn-sm {{ 'btn-warning' if status_filter == 'needs_approval' else 'btn-outline-warning' }}">
-                    Needs Approval
-                </a>
-                <a href="{{ url_for('tenants.media_buys_list', tenant_id=tenant_id, status='ready') }}"
-                   class="btn btn-sm {{ 'btn-info' if status_filter == 'ready' else 'btn-outline-info' }}">
-                    Ready
-                </a>
-                <a href="{{ url_for('tenants.media_buys_list', tenant_id=tenant_id, status='live') }}"
-                   class="btn btn-sm {{ 'btn-success' if status_filter == 'live' else 'btn-outline-success' }}">
-                    Live
-                </a>
-                <a href="{{ url_for('tenants.media_buys_list', tenant_id=tenant_id, status='completed') }}"
-                   class="btn btn-sm {{ 'btn-secondary' if status_filter == 'completed' else 'btn-outline-secondary' }}">
-                    Completed
-                </a>
+                {% endfor %}
             </div>
         </div>
     </div>
@@ -72,7 +63,6 @@
                 <table class="table table-hover">
                     <thead>
                         <tr>
-                            <th>ID</th>
                             <th>Name</th>
                             <th>Principal</th>
                             <th>Products</th>
@@ -87,11 +77,11 @@
                         {% for item in media_buys %}
                         {% set mb = item.media_buy %}
                         <tr>
-                            <td>
-                                <code style="font-size: 0.85em;">{{ mb.media_buy_id[:12] }}...</code>
-                            </td>
-                            <td>
+                            <td class="mb-name">
                                 <strong>{{ mb.order_name or 'Untitled' }}</strong>
+                                {% if mb.order_name != mb.media_buy_id %}
+                                <code class="d-block" style="font-size: 0.8em;">{{ mb.media_buy_id }}</code>
+                                {% endif %}
                             </td>
                             <td>
                                 {{ item.principal_name }}
@@ -112,24 +102,25 @@
                             </td>
                             <td>
                                 {% if mb.start_date and mb.end_date %}
-                                    <small>{{ mb.start_date.strftime('%Y-%m-%d') }} to {{ mb.end_date.strftime('%Y-%m-%d') }}</small>
+                                    <small class="text-nowrap">{{ mb.start_date.strftime('%Y-%m-%d') }}</small>
+                                    <small class="d-block text-nowrap">to {{ mb.end_date.strftime('%Y-%m-%d') }}</small>
                                 {% else %}
                                     <span class="text-muted">-</span>
                                 {% endif %}
                             </td>
                             <td>
                                 <span class="badge bg-{{ 'success' if mb.status == 'active' else 'secondary' }}">
-                                    {{ mb.status }}
+                                    {{ mb.status | replace('_', ' ') }}
                                 </span>
                             </td>
                             <td>
                                 <span class="badge bg-{{
                                     'success' if item.readiness_state == 'live'
                                     else 'warning' if item.readiness_state in ['needs_creatives', 'needs_approval', 'pending_ad_server_approval']
-                                    else 'info' if item.readiness_state == 'ready'
+                                    else 'info' if item.readiness_state == 'scheduled'
                                     else 'secondary'
                                 }}">
-                                    {{ item.readiness_state }}
+                                    {{ item.readiness_state | replace('_', ' ') }}
                                 </span>
                                 {% if item.packages_total > 0 %}
                                 <small class="text-muted d-block">
@@ -137,7 +128,7 @@
                                 </small>
                                 {% endif %}
                             </td>
-                            <td>
+                            <td class="text-nowrap">
                                 <a href="{{ url_for('operations.media_buy_detail', tenant_id=tenant_id, media_buy_id=mb.media_buy_id) }}"
                                    class="btn btn-sm btn-outline-primary">
                                     View
@@ -146,7 +137,7 @@
                         </tr>
                         {% if item.blocking_issues %}
                         <tr>
-                            <td colspan="9" style="background: #fff3cd; padding: 0.5rem 1rem;">
+                            <td colspan="8" style="background: #fff3cd; padding: 0.5rem 1rem;">
                                 <small>
                                     <strong>⚠️ Issues:</strong> {{ item.blocking_issues | join(', ') }}
                                 </small>
@@ -161,7 +152,7 @@
             <div class="alert alert-info">
                 <p class="mb-0">
                     {% if status_filter %}
-                        No media buys found with status "{{ status_filter }}".
+                        No media buys found under "{{ list_filters[status_filter] }}".
                     {% else %}
                         No media buys found. Create one through the API to get started.
                     {% endif %}
@@ -186,12 +177,24 @@
 .btn-group .btn {
     margin-right: 0;
 }
+
+/* Keep the table inside the card: let long values wrap instead of scrolling */
+.table td .badge {
+    white-space: normal;
+    text-align: left;
+}
+
+.table td.mb-name {
+    overflow-wrap: anywhere;
+    min-width: 10rem;
+}
 </style>
 {% endblock %}
 
 {% block scripts %}
 <script>
-document.getElementById('sync-orders-form').addEventListener('submit', function(e) {
+const syncOrdersForm = document.getElementById('sync-orders-form');
+if (syncOrdersForm) syncOrdersForm.addEventListener('submit', function(e) {
     if (!confirm('Sync all GAM orders for this tenant? This may take a few seconds.')) {
         e.preventDefault();
         return;

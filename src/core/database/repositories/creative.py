@@ -397,6 +397,27 @@ class CreativeAssignmentRepository:
             ).all()
         )
 
+    def list_with_creatives_for_product(self, product_id: str) -> list[tuple[CreativeAssignment, Creative]]:
+        """Get (assignment, creative) pairs for every package booked against a product."""
+        rows = self._session.execute(
+            select(CreativeAssignment, Creative)
+            .join(
+                Creative,
+                (Creative.tenant_id == CreativeAssignment.tenant_id)
+                & (Creative.creative_id == CreativeAssignment.creative_id),
+            )
+            .join(
+                MediaPackage,
+                (MediaPackage.media_buy_id == CreativeAssignment.media_buy_id)
+                & (MediaPackage.package_id == CreativeAssignment.package_id),
+            )
+            .where(
+                CreativeAssignment.tenant_id == self._tenant_id,
+                MediaPackage.package_config["product_id"].as_string() == product_id,
+            )
+        ).all()
+        return [(assignment, creative) for assignment, creative in rows]
+
     def get_by_media_buy(self, media_buy_id: str) -> list[CreativeAssignment]:
         """Get all assignments for a media buy within the tenant."""
         return list(

@@ -251,6 +251,7 @@ from src.core.audit_logger import get_audit_logger
 from src.core.auth import (
     get_principal_object,
 )
+from src.core.canonical_formats import product_validation_format_ids
 from src.core.context_manager import get_context_manager
 from src.core.database.models import MediaBuy
 from src.core.database.models import Principal as ModelPrincipal
@@ -857,7 +858,7 @@ def _validate_creatives_before_adapter_call(
         # Build product_id -> accepted namespaced formats
         product_format_map: dict[str, list[Any]] = {}
         for product in products_list:
-            product_format_map[product.product_id] = list(product.format_ids or [])
+            product_format_map[product.product_id] = product_validation_format_ids(product)
 
         # Check each package's creatives against its product's accepted formats
         for package in packages:
@@ -893,6 +894,88 @@ def _validate_creatives_before_adapter_call(
         raise AdCPValidationError(
             error_msg, details={"error_code": "INVALID_CREATIVES", "creative_errors": validation_errors}
         )
+
+
+def _validate_creatives_for_booking(
+    packages: list[MediaPackage], tenant_id: str, tenant_context: Any, session: "Session | None"
+) -> None:
+    """Pre-adapter creative validation with the tenant's ad-server rules applied.
+
+    Both booking paths — immediate booking in ``create_media_buy`` and booking
+    after manual approval — go through here so they enforce the same rules.
+    The immediate path used to skip the Improve Digital click-through URL
+    requirement, booking campaigns whose creatives the platform then rejected
+    (FMS-2162).
+    """
+    _validate_creatives_before_adapter_call(
+        packages,
+        tenant_id,
+        session=session,
+        require_click_url=_tenant_uses_improve_digital(tenant_context),
+    )
+
+
+def _reject_unassignable_creatives(packages: Any, media_buys: Any, require_click_url: bool = False) -> None:
+    """Reject creatives a package cannot take, before the media buy is saved.
+
+    The manual-approval path saves the buy and its packages before it creates
+    creative assignments. Checking the creatives only at assignment time left
+    a saved media buy behind whenever that check failed, so this runs first.
+
+    ``require_click_url`` applies the Improve Digital rule that every creative
+    carries a click-through URL. The admin refuses to approve a buy without
+    one, so queueing it would strand the buy in pending approval.
+
+    Raises:
+        AdCPNotFoundError: A requested creative does not exist for the tenant.
+        AdCPValidationError: A creative's format is not accepted by its package's
+            product, or a required click-through URL is missing.
+    """
+    requested_ids = sorted(_creative_ids_for_packages(packages))
+    if not requested_ids:
+        return
+
+    creatives_by_id = {str(c.creative_id): c for c in media_buys.get_creatives_by_ids(requested_ids)}
+    missing_ids = set(requested_ids) - set(creatives_by_id)
+    if missing_ids:
+        error_msg, error = _build_creatives_not_found_error(missing_ids)
+        logger.error(error_msg)
+        raise error
+
+    from src.core.helpers import validate_creative_format_against_product
+
+    for package in packages:
+        pkg_creative_ids = _get_requested_creative_ids(package)
+        if not pkg_creative_ids or not package.product_id:
+            continue
+        product = media_buys.get_product_by_id(package.product_id)
+        if not product:
+            continue
+        for creative_id in pkg_creative_ids:
+            format_is_valid, format_error = validate_creative_format_against_product(
+                creative_format_id=_stored_creative_format_id(creatives_by_id[creative_id]),
+                product=product,
+            )
+            if not format_is_valid:
+                logger.warning(f"Creative {creative_id} rejected before saving media buy: {format_error}")
+                raise AdCPValidationError(
+                    format_error or "Creative format mismatch",
+                    details={"error_code": "CREATIVE_FORMAT_MISMATCH"},
+                )
+
+    if require_click_url:
+        without_click_url = [
+            creative_id
+            for creative_id in requested_ids
+            if not extract_click_url(creatives_by_id[creative_id].data or {}, None, apply_macro_substitution=False)
+        ]
+        if without_click_url:
+            error_msg = (
+                f"Cannot create media buy: creative(s) {', '.join(without_click_url)} have no click-through URL "
+                "asset (e.g. 'click_url' with url_type 'clickthrough'). The ad server requires one on every creative."
+            )
+            logger.warning(f"Rejected before saving media buy: {error_msg}")
+            raise AdCPValidationError(error_msg, details={"error_code": "INVALID_CREATIVES"})
 
 
 def _is_springserve_tag_mode(adapter: Any) -> bool:
@@ -1587,12 +1670,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
             # PRE-VALIDATE: Check all creatives have required fields BEFORE calling adapter
             # This prevents GAM order creation when creatives are invalid (all-or-nothing approach)
-            _validate_creatives_before_adapter_call(
-                packages,
-                tenant_id,
-                session=session,
-                require_click_url=_tenant_uses_improve_digital(tenant_context),
-            )
+            _validate_creatives_for_booking(packages, tenant_id, tenant_context, session)
             if _tenant_uses_springserve(tenant_context):
                 adapter_for_preparation = get_adapter(
                     principal, dry_run=False, testing_context=testing_ctx, tenant=tenant_context
@@ -2351,6 +2429,38 @@ def _derive_single_request_currency(package_pricing_info_by_index: dict[int, dic
     return currencies[0]
 
 
+def _validate_total_budget(req: CreateMediaBuyRequest, request_currency: str, package_budget_sum: float) -> None:
+    """Reject a total_budget that disagrees with the resolved buy currency or package budgets.
+
+    Per AdCP, total_budget.currency must match the selected pricing options'
+    currency, and in fixed allocation mode total_budget.amount MUST equal the
+    sum of package budgets. Seller-optimized buys draw from a shared total, so
+    the sum check does not apply there.
+    """
+    total_budget = getattr(req, "total_budget", None)
+    if total_budget is None:
+        return
+
+    if total_budget.currency != request_currency:
+        raise ValueError(
+            f"total_budget.currency {total_budget.currency} does not match the currency of the selected "
+            f"pricing options ({request_currency}). Send total_budget in {request_currency} or choose "
+            f"pricing options in {total_budget.currency}."
+        )
+
+    allocation = getattr(req, "budget_allocation", None)
+    allocation = getattr(allocation, "root", allocation)  # BudgetAllocation is a RootModel union
+    mode = getattr(allocation, "mode", None)
+    if getattr(mode, "value", mode) == "seller_optimized":
+        return
+
+    if abs(float(total_budget.amount) - package_budget_sum) > 0.005:
+        raise ValueError(
+            f"total_budget.amount {total_budget.amount} does not equal the sum of package budgets "
+            f"({package_budget_sum}). In fixed allocation mode these must match."
+        )
+
+
 def _derive_legacy_request_currency(req: CreateMediaBuyRequest) -> str | None:
     """Best-effort currency extraction for deprecated request shapes."""
     legacy_currency = getattr(req, "currency", None)
@@ -2840,7 +2950,8 @@ async def _create_media_buy_impl(
                 computed_start_time = computed_start_time.replace(tzinfo=UTC)
 
             if computed_start_time < now:
-                error_msg = f"Invalid start time: {req.start_time}. Start time cannot be in the past."
+                start_iso = computed_start_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                error_msg = f"Invalid start time: {start_iso}. Start time cannot be in the past."
                 raise ValueError(error_msg)
 
         # Validate end_time
@@ -2854,7 +2965,10 @@ async def _create_media_buy_impl(
             computed_end_time = computed_end_time.replace(tzinfo=UTC)
 
         if computed_end_time <= computed_start_time:
-            error_msg = f"Invalid time range: end time ({req.end_time}) must be after start time ({req.start_time})."
+            iso_format = "%Y-%m-%dT%H:%M:%SZ"
+            start_iso = computed_start_time.astimezone(UTC).strftime(iso_format)
+            end_iso = computed_end_time.astimezone(UTC).strftime(iso_format)
+            error_msg = f"Invalid time range: end time ({end_iso}) must be after start time ({start_iso})."
             raise ValueError(error_msg)
 
         # Assign computed times to local variables for use throughout the function
@@ -2993,6 +3107,8 @@ async def _create_media_buy_impl(
             request_currency = request_currency or legacy_request_currency
             if not request_currency:
                 request_currency = "USD"
+
+            _validate_total_budget(req, request_currency, total_budget)
 
             # Get currency limits for this tenant and currency
             currency_stmt = select(CurrencyLimit).where(
@@ -3311,6 +3427,18 @@ async def _create_media_buy_impl(
         if not testing_ctx.dry_run and manual_approval_required and "create_media_buy" in manual_approval_operations:
             # Type narrowing: step and persistent_ctx exist in non-dry_run mode
             assert step is not None and persistent_ctx is not None
+
+            # Reject unknown or wrong-format creatives before anything is saved or
+            # notified; the same checks at assignment time run after the buy exists.
+            if req.packages:
+                with MediaBuyUoW(tenant["tenant_id"]) as creative_gate_uow:
+                    assert creative_gate_uow.media_buys is not None
+                    _reject_unassignable_creatives(
+                        req.packages,
+                        creative_gate_uow.media_buys,
+                        require_click_url=_tenant_uses_improve_digital(tenant),
+                    )
+
             # Update existing workflow step to require approval
             ctx_manager.update_workflow_step(
                 step.step_id,
@@ -4225,7 +4353,7 @@ async def _create_media_buy_impl(
             with MediaBuyUoW(tenant["tenant_id"]) as pre_validate_uow:
                 # FIXME(salesagent-9f2): creative validation should use a repository
                 assert pre_validate_uow.session is not None
-                _validate_creatives_before_adapter_call(packages, tenant["tenant_id"], session=pre_validate_uow.session)
+                _validate_creatives_for_booking(packages, tenant["tenant_id"], tenant, pre_validate_uow.session)
                 packages = _prepare_springserve_tag_mode_packages(
                     adapter,
                     packages,

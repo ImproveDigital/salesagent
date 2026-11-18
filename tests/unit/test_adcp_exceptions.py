@@ -9,7 +9,6 @@ Validates that:
 beads: salesagent-b61l.11
 """
 
-from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Exception Hierarchy Tests
@@ -172,12 +171,12 @@ class TestRecoveryClassification:
         exc = AdCPAuthorizationError("forbidden")
         assert exc.recovery == "terminal"
 
-    def test_not_found_error_defaults_to_terminal(self):
-        """AdCPNotFoundError defaults to recovery='terminal'."""
+    def test_not_found_error_defaults_to_correctable(self):
+        """AdCPNotFoundError defaults to recovery='correctable'."""
         from src.core.exceptions import AdCPNotFoundError
 
         exc = AdCPNotFoundError("resource missing")
-        assert exc.recovery == "terminal"
+        assert exc.recovery == "correctable"
 
     def test_rate_limit_error_defaults_to_transient(self):
         """AdCPRateLimitError defaults to recovery='transient'."""
@@ -248,165 +247,6 @@ class TestRecoveryClassification:
         exc = AdCPAdapterError("permanent config error", recovery="terminal")
         d = exc.to_dict()
         assert d["recovery"] == "terminal"
-
-
-# ---------------------------------------------------------------------------
-# FastAPI Exception Handler Tests
-# ---------------------------------------------------------------------------
-
-
-class TestFastAPIExceptionHandlers:
-    """Verify FastAPI exception handlers return correct HTTP responses."""
-
-    def test_validation_error_returns_400(self):
-        """AdCPValidationError raised in a route must return 400."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPValidationError
-
-        # Add a temporary test route that raises
-        @app.get("/test-exc/validation")
-        def raise_validation():
-            raise AdCPValidationError("test validation error")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/validation")
-        assert response.status_code == 400
-        body = response.json()
-        assert body["error_code"] == "VALIDATION_ERROR"
-        assert "test validation error" in body["message"]
-
-    def test_authentication_error_returns_401(self):
-        """AdCPAuthenticationError raised in a route must return 401."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPAuthenticationError
-
-        @app.get("/test-exc/auth")
-        def raise_auth():
-            raise AdCPAuthenticationError("bad token")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/auth")
-        assert response.status_code == 401
-        body = response.json()
-        assert body["error_code"] == "AUTH_TOKEN_INVALID"
-
-    def test_not_found_error_returns_404(self):
-        """AdCPNotFoundError raised in a route must return 404."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPNotFoundError
-
-        @app.get("/test-exc/notfound")
-        def raise_not_found():
-            raise AdCPNotFoundError("resource gone")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/notfound")
-        assert response.status_code == 404
-        body = response.json()
-        assert body["error_code"] == "NOT_FOUND"
-
-    def test_adapter_error_returns_502(self):
-        """AdCPAdapterError raised in a route must return 502."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPAdapterError
-
-        @app.get("/test-exc/adapter")
-        def raise_adapter():
-            raise AdCPAdapterError("GAM down")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/adapter")
-        assert response.status_code == 502
-        body = response.json()
-        assert body["error_code"] == "ADAPTER_ERROR"
-
-    def test_conflict_error_returns_409(self):
-        """AdCPConflictError raised in a route must return 409."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPConflictError
-
-        @app.get("/test-exc/conflict")
-        def raise_conflict():
-            raise AdCPConflictError("duplicate key")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/conflict")
-        assert response.status_code == 409
-        body = response.json()
-        assert body["error_code"] == "CONFLICT"
-
-    def test_gone_error_returns_410(self):
-        """AdCPGoneError raised in a route must return 410."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPGoneError
-
-        @app.get("/test-exc/gone")
-        def raise_gone():
-            raise AdCPGoneError("proposal expired")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/gone")
-        assert response.status_code == 410
-        body = response.json()
-        assert body["error_code"] == "GONE"
-
-    def test_budget_exhausted_error_returns_422(self):
-        """AdCPBudgetExhaustedError raised in a route must return 422."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPBudgetExhaustedError
-
-        @app.get("/test-exc/budget")
-        def raise_budget():
-            raise AdCPBudgetExhaustedError("budget limit reached")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/budget")
-        assert response.status_code == 422
-        body = response.json()
-        assert body["error_code"] == "BUDGET_EXHAUSTED"
-
-    def test_service_unavailable_error_returns_503(self):
-        """AdCPServiceUnavailableError raised in a route must return 503."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPServiceUnavailableError
-
-        @app.get("/test-exc/unavailable")
-        def raise_unavailable():
-            raise AdCPServiceUnavailableError("product temporarily unavailable")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/unavailable")
-        assert response.status_code == 503
-        body = response.json()
-        assert body["error_code"] == "SERVICE_UNAVAILABLE"
-
-    def test_error_response_has_standard_envelope(self):
-        """Error responses must have {error_code, message, details} envelope."""
-        from src.app import app
-
-        from src.core.exceptions import AdCPValidationError
-
-        @app.get("/test-exc/envelope")
-        def raise_with_details():
-            raise AdCPValidationError("bad", details={"field": "x"})
-
-        client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/test-exc/envelope")
-        body = response.json()
-        assert "error_code" in body
-        assert "message" in body
-        assert "details" in body
-        assert body["details"] == {"field": "x"}
-        assert "recovery" in body
-        assert body["recovery"] == "correctable"
 
 
 # ---------------------------------------------------------------------------

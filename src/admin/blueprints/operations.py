@@ -32,6 +32,28 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
+# Stored statuses after which a media buy can no longer run. ``failed`` is the
+# internal status for a buy whose ad-server creation failed during approval.
+_CLOSED_MEDIA_BUY_STATUSES = frozenset({"canceled", "completed", "rejected", "failed"})
+
+
+def _closed_media_buy_decision_error(media_buy, action: str) -> str | None:
+    """Block an approve/reject decision on a media buy that can no longer run.
+
+    A canceled (or otherwise finished) buy can still have approval steps left
+    open. Without this guard the approve route marks such a step approved
+    while skipping every readiness check, because those only run for a buy
+    that is still ``pending_approval``.
+
+    Returns a human-readable error message, or ``None`` if a decision is still
+    meaningful. Pure function (no DB/Flask) so it can be unit-tested directly.
+    """
+    status = str(getattr(media_buy, "status", "") or "").lower()
+    if status in _CLOSED_MEDIA_BUY_STATUSES:
+        return f"Cannot {action}: this media buy is {status}, so there is no approval decision left to make."
+    return None
+
+
 def _validate_media_buy_approval(
     media_buy, assignments, creatives, now: datetime, require_click_url: bool = False
 ) -> str | None:
@@ -42,14 +64,23 @@ def _validate_media_buy_approval(
     unit-tested directly.
 
     Gates, in priority order:
-    1. At least one creative must be assigned.
-    2. No assigned creative may be rejected.
-    3. Every assigned creative must be approved.
-    4. (``require_click_url``) Every assigned creative must carry a
+    1. The flight window must not have already ended — nothing else can
+       make an expired buy approvable, so report this first.
+    2. At least one creative must be assigned.
+    3. No assigned creative may be rejected.
+    4. Every assigned creative must be approved.
+    5. (``require_click_url``) Every assigned creative must carry a
        click-through URL — Improve Digital derives the mandatory
        advertiser domain from it and rejects creatives without one.
-    5. The flight window must be consistent and not already ended.
+    6. The flight window must be consistent (end after start).
     """
+    start_time = _as_utc(getattr(media_buy, "start_time", None))
+    end_time = _as_utc(getattr(media_buy, "end_time", None))
+    if end_time and end_time <= now:
+        from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE
+
+        return FLIGHT_ENDED_DECISION_MESSAGE.format(action="approve")
+
     if not assignments:
         return "Cannot approve: no creatives are assigned to this media buy. Assign and approve creatives first."
 
@@ -90,10 +121,6 @@ def _validate_media_buy_approval(
                 "Improve Digital requires one on every creative."
             )
 
-    start_time = _as_utc(getattr(media_buy, "start_time", None))
-    end_time = _as_utc(getattr(media_buy, "end_time", None))
-    if end_time and end_time <= now:
-        return "Cannot approve: the flight window has already ended."
     if start_time and end_time and end_time <= start_time:
         return "Cannot approve: the flight end time must be after the start time."
 
@@ -387,15 +414,23 @@ def media_buy_detail(tenant_id, media_buy_id):
             assignment_results = db_session.execute(stmt).all()
 
             # Group assignments by package_id
+            from src.core.helpers.creative_helpers import stored_creative_format_mismatch
+
+            product_by_package_id = {item["package"].package_id: item["product"] for item in packages}
             creative_assignments_by_package = {}
             for assignment, creative in assignment_results:
                 pkg_id = assignment.package_id
                 if pkg_id not in creative_assignments_by_package:
                     creative_assignments_by_package[pkg_id] = []
+                package_product = product_by_package_id.get(pkg_id)
                 creative_assignments_by_package[pkg_id].append(
                     {
                         "assignment": assignment,
                         "creative": creative,
+                        # Flag creatives whose format the package's product does not accept
+                        "format_mismatch": (
+                            stored_creative_format_mismatch(creative, package_product) if package_product else None
+                        ),
                     }
                 )
 
@@ -403,10 +438,12 @@ def media_buy_detail(tenant_id, media_buy_id):
             ctx_manager = ContextManager()
             workflow_steps = ctx_manager.get_object_lifecycle("media_buy", media_buy_id, tenant_id=tenant_id)
 
-            # Find if there's a pending approval step
+            # Find if there's a pending approval step. A closed buy (canceled,
+            # completed, ...) gets no Approve/Reject even if a step was left open.
             pending_approval_step = None
+            decision_open = _closed_media_buy_decision_error(media_buy, "approve") is None
             for step in workflow_steps:
-                if step.get("status") in ["requires_approval", "pending_approval"]:
+                if decision_open and step.get("status") in ["requires_approval", "pending_approval"]:
                     # Get the full workflow step for approval actions (tenant-scoped via Context join)
                     from src.core.database.models import Context as DBContext
 
@@ -423,6 +460,10 @@ def media_buy_detail(tenant_id, media_buy_id):
 
             readiness = MediaBuyReadinessService.get_readiness_state(media_buy_id, tenant_id, db_session)
             computed_state = readiness["state"]
+
+            from src.core.helpers.media_buy_flight import flight_has_ended
+
+            flight_ended = flight_has_ended(media_buy, datetime.now(UTC))
 
             # Determine status message
             status_message = None
@@ -469,6 +510,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                 computed_state=computed_state,
                 readiness=readiness,
                 webhook_deliveries=webhook_deliveries,
+                flight_ended=flight_ended,
             )
     except Exception as e:
         logger.error(f"Error viewing media buy: {e}", exc_info=True)
@@ -531,6 +573,11 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
             approve_repo = MediaBuyRepository(db_session, tenant_id)
             media_buy = approve_repo.get_by_id(media_buy_id)
 
+            closed_error = _closed_media_buy_decision_error(media_buy, action or "approve")
+            if closed_error:
+                flash(closed_error, "error")
+                return redirect(url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id))
+
             # Extract media_buy data to dict to avoid detached instance errors after commit
             media_buy_data = None
             if media_buy:
@@ -582,6 +629,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
 
                 step.status = "approved"
                 step.updated_at = datetime.now(UTC)
+                step.completed_at = datetime.now(UTC)
 
                 if not step.comments:
                     step.comments = []
@@ -726,9 +774,25 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                     flash("Media buy approved successfully", "success")
 
             elif action == "reject":
+                # Expired buys stay pending until the buyer reschedules the
+                # flight; rejecting is blocked like approving.
+                from src.core.helpers.media_buy_flight import FLIGHT_ENDED_DECISION_MESSAGE, flight_has_ended
+
+                if (
+                    step_data["tool_name"] != "update_media_buy"
+                    and media_buy
+                    and media_buy.status == "pending_approval"
+                    and flight_has_ended(media_buy, datetime.now(UTC))
+                ):
+                    flash(FLIGHT_ENDED_DECISION_MESSAGE.format(action="reject"), "error")
+                    return redirect(
+                        url_for("operations.media_buy_detail", tenant_id=tenant_id, media_buy_id=media_buy_id)
+                    )
+
                 step.status = "rejected"
                 step.error_message = reason or "Rejected by administrator"
                 step.updated_at = datetime.now(UTC)
+                step.completed_at = datetime.now(UTC)
 
                 if not step.comments:
                     step.comments = []

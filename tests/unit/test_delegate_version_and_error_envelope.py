@@ -101,9 +101,11 @@ class TestRequestedVersionResolution:
     def test_omitted_version_defaults_to_legacy_3_0(self) -> None:
         assert _resolve_requested_version({}) == "3.0"
 
-    def test_explicit_3_1_beta_is_preserved(self) -> None:
+    def test_explicit_3_1_is_preserved(self) -> None:
+        # adcp 8.0.0 (GA) advertises the release-precision "3.1" rather than a
+        # "3.1-beta.N" pre-release, so the explicit version is the GA string.
         version = explicit_adcp_version()
-        assert version.startswith("3.1-")
+        assert version == "3.1"
         assert _resolve_requested_version({"adcp_version": version}) == version
 
     def test_current_js_sdk_beta_is_accepted_as_wire_compatible(self) -> None:

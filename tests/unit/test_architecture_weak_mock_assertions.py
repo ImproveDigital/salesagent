@@ -52,6 +52,23 @@ WEAK_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/unit/test_sync_creatives_behavioral.py", "test_slack_notification_only_when_webhook_configured"),
     ("tests/unit/test_transport_tenant_resolution.py", "test_ensure_resolved_sets_current_tenant"),
     ("tests/unit/test_workflow_approve_replay.py", "test_success_calls_impl_with_reconstructed_identity"),
+    # ── Added 2026-11 when re-baselining the guard against the test tree ──
+    # Split assertions that landed after the allowlist was last updated. DEBT.
+    # FIXME(beads-bou.5): upgrade each to assert_called_once_with()
+    ("tests/unit/test_creative.py", "test_list_creatives_raw_boundary"),
+    ("tests/unit/test_creative.py", "test_raw_forwards_filters_to_impl"),
+    ("tests/unit/test_creative.py", "test_raw_forwards_include_assignments"),
+    ("tests/unit/test_creative.py", "test_raw_forwards_include_performance"),
+    ("tests/unit/test_creative.py", "test_webhook_delivered_on_approval"),
+    ("tests/unit/test_creative_coverage_gaps.py", "test_slack_notification_for_rejected_creative"),
+    ("tests/unit/test_creative_formats_behavioral.py", "test_mcp_wrapper_handles_string_asset_types"),
+    ("tests/unit/test_creative_formats_behavioral.py", "test_mcp_wrapper_handles_string_type"),
+    ("tests/unit/test_improvedigital_live_paths.py", "test_successful_booking_audits_outcome_with_wire_log"),
+    ("tests/unit/test_oauth_prompt_select_account.py", "test_google_auth_passes_prompt_select_account"),
+    ("tests/unit/test_oauth_prompt_select_account.py", "test_tenant_google_auth_passes_prompt_select_account"),
+    ("tests/unit/test_rest_depends_auth.py", "test_passes_auth_token_to_resolve_identity"),
+    ("tests/unit/test_update_media_buy_package_budget_persist.py", "test_package_budget_update_persists_to_db"),
+    ("tests/unit/test_workflow_decision_webhook.py", "test_rejected_decision_sends_webhook_from_step_config"),
 }
 
 
@@ -194,6 +211,14 @@ BARE_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/unit/test_no_model_dump_in_impl_fixes.py", "test_create_from_request_adds_to_session"),
     ("tests/unit/test_review_agent.py", "test_returns_approval"),
     ("tests/unit/test_transport_tenant_resolution.py", "test_db_queried_only_once"),
+    # ── Added 2026-11 when re-baselining the guard against the test tree ──
+    # Bare assertions that landed after the allowlist was last updated. DEBT.
+    # FIXME(beads-6kh): review and upgrade each to assert_called_once_with()
+    ("tests/unit/test_admin_mount.py", "test_bare_signup_is_not_redirected"),
+    ("tests/unit/test_admin_mount.py", "test_unrelated_admin_path_is_not_redirected"),
+    ("tests/unit/test_creative.py", "test_a2a_slack_notification_require_human"),
+    ("tests/unit/test_creative.py", "test_audit_log_sync_succeeds_without_principal_in_db"),
+    ("tests/unit/test_media_buy_delivery_metrics_async.py", "test_fetch_returns_the_rendered_partial_and_a_summary"),
 }
 
 

@@ -44,10 +44,12 @@ from src.core.audit_logger import get_audit_logger
 from src.core.auth import (
     get_principal_object,
 )
+from src.core.canonical_formats import product_validation_format_ids
 from src.core.context_manager import get_context_manager
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
-from src.core.format_cache import canonical_format_satisfies
+from src.core.format_cache import canonical_format_satisfies, format_label, format_labels
 from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.creative_helpers import stored_creative_format_mismatch
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AffectedPackage,
@@ -92,6 +94,34 @@ def _is_terminal_media_buy_state(status: str | None) -> bool:
     if status is None:
         return False
     return status in MEDIA_BUY_TRANSITIONS and not MEDIA_BUY_TRANSITIONS[status]
+
+
+def _reject_pause_of_terminal_buy(req: UpdateMediaBuyRequest, current_media_buy: Any | None) -> None:
+    """Reject pause/resume of a media buy that is in a terminal state.
+
+    A terminal buy (per :func:`_is_terminal_media_buy_state`) has no legal next
+    state, so pause/resume violates the AdCP state machine and is answered with
+    the spec-canonical ``INVALID_STATE`` (storyboard
+    ``media_buy_state_machine/pause_canceled_buy``). Cancel-of-canceled keeps
+    its narrower ``NOT_CANCELLABLE`` code and is handled by the cancel branch.
+
+    Called twice: before an update is deferred for manual approval, so a doomed
+    pause is not queued for a publisher to approve, and on the apply path
+    before adapter dispatch, which also covers approval replay.
+
+    Raises:
+        AdCPInvalidStateError: ``req.paused`` is set and the buy is terminal.
+    """
+    if req.paused is None:
+        return
+    current_status = str(current_media_buy.status) if current_media_buy else None
+    if not _is_terminal_media_buy_state(current_status):
+        return
+    action_name = "pause" if req.paused else "resume"
+    raise AdCPInvalidStateError(
+        f"media_buy_id={req.media_buy_id!r} is in terminal state {current_status!r} — "
+        f"cannot {action_name} a {current_status} buy"
+    )
 
 
 def _safe_media_buy_revision(media_buy_obj: Any | None) -> int:
@@ -509,6 +539,45 @@ def _validate_update_submission(
     return None
 
 
+def _reject_mismatched_creative_formats(
+    req: UpdateMediaBuyRequest, media_buy_id: str, media_buys: MediaBuyRepository
+) -> None:
+    """Reject creative assignments whose format the package's product does not accept.
+
+    Runs before an update is deferred for manual approval. The per-package
+    checks on the apply path sit *after* that gate, so on tenants that route
+    updates through manual approval a mismatched assignment was accepted as a
+    deferred ``requires_approval`` and only failed on approval replay
+    (FMS-2162). Updates that apply immediately are validated by the apply
+    path, which also owns the "creative not found" error.
+    """
+    errors: list[str] = []
+    for pkg_update in req.packages or []:
+        creative_ids = [
+            *(pkg_update.creative_ids or []),
+            *(assignment.creative_id for assignment in pkg_update.creative_assignments or []),
+        ]
+        if not pkg_update.package_id or not creative_ids:
+            continue
+        package = media_buys.get_package(media_buy_id, pkg_update.package_id)
+        product_id = package.package_config.get("product_id") if package and package.package_config else None
+        product = media_buys.get_product_by_id(product_id) if product_id else None
+        if product is None:
+            continue
+        for creative in media_buys.get_creatives_by_ids(list(dict.fromkeys(creative_ids))):
+            mismatch = stored_creative_format_mismatch(creative, product)
+            if mismatch:
+                errors.append(f"Creative {creative.creative_id} (package {pkg_update.package_id}): {mismatch}")
+
+    if errors:
+        error_msg = (
+            "Cannot update media buy with invalid creatives. "
+            "The following creatives cannot be assigned:\n" + "\n".join(f"  • {err}" for err in errors)
+        )
+        logger.error(f"[UPDATE] {error_msg}")
+        raise AdCPValidationError(error_msg, details={"error_code": "INVALID_CREATIVES", "creative_errors": errors})
+
+
 def _verify_principal(media_buy_id: str, context: "ResolvedIdentity", repo: MediaBuyRepository) -> None:
     """Verify that the principal from context owns the media buy.
 
@@ -906,6 +975,17 @@ def _update_media_buy_impl(
             and not bypass_manual_approval
             and not cancel_requested
         ):
+            # The apply path validates the buy's state and creative formats, but
+            # it only runs after this deferral. Reject a pause of a terminal buy
+            # or a mismatched assignment now rather than queueing an update
+            # that can only fail on approval replay.
+            try:
+                _reject_pause_of_terminal_buy(req, current_media_buy)
+                _reject_mismatched_creative_formats(req, media_buy_id_to_use, uow.media_buys)
+            except (AdCPInvalidStateError, AdCPValidationError) as exc:
+                ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=exc.message)
+                raise
+
             # Store the original request alongside the response so the approval
             # execution path can re-execute the update after human approval.
             # This mirrors create_media_buy's raw_request pattern.
@@ -1092,6 +1172,20 @@ def _update_media_buy_impl(
             # response context) is the spec-compliant minimum. Persisting
             # it would need a schema migration; tracked separately.
             uow.media_buys.update_fields(req.media_buy_id, status="canceled")
+
+            # Close the approval steps still open for this buy (its queued
+            # create, and any update queued behind it). Left open, the admin
+            # keeps offering Approve/Reject on a buy that can no longer run.
+            from src.core.database.repositories.workflow import WorkflowRepository
+
+            closed_step_ids = WorkflowRepository(session, tenant["tenant_id"]).close_pending_approvals_for_object(
+                "media_buy",
+                media_buy_id_to_use,
+                reason="Media buy canceled by the buyer before a decision was made",
+                exclude_step_id=step.step_id,
+            )
+            if closed_step_ids:
+                logger.info(f"[CANCEL] Closed pending approval steps for {media_buy_id_to_use}: {closed_step_ids}")
             response_revision = _increment_revision_for_response(
                 uow.media_buys,
                 req.media_buy_id,
@@ -1122,39 +1216,14 @@ def _update_media_buy_impl(
 
         # Handle campaign-level updates
         if req.paused is not None:
-            # Pre-validation: pause/resume on a terminal-state buy violates the
-            # AdCP state machine. The cancel branch (above) already guards
-            # cancel-of-canceled with the narrower AdCPNotCancellableError;
-            # the broader pause/resume case raises AdCPInvalidStateError so
-            # buyers see the spec-canonical INVALID_STATE wire code on
-            # ``/adcp_error/code`` (storyboard
-            # ``media_buy_state_machine/pause_canceled_buy``). Runs BEFORE
-            # adapter dispatch so the rejection is idempotency-spec friendly
-            # — same payload yields the same wire code on retry regardless
-            # of which adapter would have handled the transition.
-            #
-            # The "is this state terminal?" predicate reads the upstream
-            # AdCP graph (:data:`MEDIA_BUY_TRANSITIONS`) so a future spec
-            # addition of a new terminal state (e.g. ``rejected``, already
-            # there since adcp 5.3) is picked up by construction. The
-            # earlier hand-rolled tuple ``("canceled", "completed")`` had
-            # already drifted: ``rejected`` is terminal per spec but was
-            # not in the tuple, so pause/resume of a rejected buy would
-            # fall through to the adapter and return a less-typed error.
+            # Backstop for updates that apply immediately and for approval
+            # replay; runs before adapter dispatch.
             current_mb = current_media_buy
-            current_status = str(current_mb.status) if current_mb else None
-            if _is_terminal_media_buy_state(current_status):
-                action_name = "pause" if req.paused else "resume"
-                error_msg = (
-                    f"media_buy_id={req.media_buy_id!r} is in terminal state {current_status!r} — "
-                    f"cannot {action_name} a {current_status} buy"
-                )
-                ctx_manager.update_workflow_step(
-                    step.step_id,
-                    status="failed",
-                    error_message=f"terminal state: {current_status}",
-                )
-                raise AdCPInvalidStateError(error_msg)
+            try:
+                _reject_pause_of_terminal_buy(req, current_mb)
+            except AdCPInvalidStateError as exc:
+                ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=exc.message)
+                raise
 
             # adcp 2.12.0+: paused=True means pause, paused=False means resume
             action = "pause_media_buy" if req.paused else "resume_media_buy"
@@ -1448,7 +1517,8 @@ def _update_media_buy_impl(
                         )
                         product = session.scalars(product_stmt).first()
 
-                        if product and product.format_ids:
+                        product_formats = product_validation_format_ids(product) if product else []
+                        if product and product_formats:
                             # Check each creative's format
                             for creative in creatives_list:
                                 format_parameters = (
@@ -1461,27 +1531,15 @@ def _update_media_buy_impl(
                                 }
                                 is_supported = any(
                                     canonical_format_satisfies(creative_format_ref, supported_format)
-                                    for supported_format in product.format_ids
+                                    for supported_format in product_formats
                                 )
 
                                 if not is_supported:
-                                    creative_format_display = (
-                                        f"{creative.agent_url}/{creative.format}"
-                                        if creative.agent_url
-                                        else creative.format
-                                    )
-                                    supported_formats_display = ", ".join(
-                                        [
-                                            f"{fmt.get('agent_url')}/{fmt.get('id') or fmt.get('format_id')}"
-                                            if isinstance(fmt, dict)
-                                            else str(fmt)
-                                            for fmt in product.format_ids
-                                        ]
-                                    )
                                     validation_errors.append(
-                                        f"Creative {creative.creative_id} format '{creative_format_display}' "
+                                        f"Creative {creative.creative_id} format "
+                                        f"'{format_label(creative_format_ref, show_original_id=True)}' "
                                         f"is not supported by product '{product.name}'. "
-                                        f"Supported formats: {supported_formats_display}"
+                                        f"Supported formats: {format_labels(product_formats, show_original_id=True)}"
                                     )
 
                     if validation_errors:
@@ -1689,6 +1747,62 @@ def _update_media_buy_impl(
                                     context=req.context,
                                 )
                                 return response_data
+
+                    # Validate creative formats against the package's product formats,
+                    # same contract as the creative_ids handler above.
+                    format_pkg = uow.media_buys.get_package(actual_media_buy_id, pkg_update.package_id)
+                    format_product_id = (
+                        format_pkg.package_config.get("product_id")
+                        if format_pkg and format_pkg.package_config
+                        else None
+                    )
+                    format_product = uow.media_buys.get_product_by_id(format_product_id) if format_product_id else None
+                    format_product_formats = product_validation_format_ids(format_product) if format_product else []
+                    assigned_creative_ids = [ca.creative_id for ca in pkg_update.creative_assignments]
+                    assigned_creatives = uow.media_buys.get_creatives_by_ids(assigned_creative_ids)
+                    missing_creative_ids = sorted(
+                        set(assigned_creative_ids) - {creative.creative_id for creative in assigned_creatives}
+                    )
+                    if missing_creative_ids:
+                        error_msg = f"Creative IDs not found: {', '.join(missing_creative_ids)}"
+                        logger.error(f"[UPDATE] {error_msg}")
+                        return UpdateMediaBuyError(
+                            errors=[Error(code="creatives_not_found", message=error_msg)],
+                            context=req.context,
+                        )
+                    if format_product and format_product_formats:
+                        format_errors = []
+                        for assigned_creative in assigned_creatives:
+                            assigned_params = (
+                                assigned_creative.format_parameters
+                                if isinstance(assigned_creative.format_parameters, dict)
+                                else {}
+                            )
+                            assigned_format_ref = {
+                                "agent_url": assigned_creative.agent_url,
+                                "id": assigned_creative.format,
+                                **assigned_params,
+                            }
+                            if not any(
+                                canonical_format_satisfies(assigned_format_ref, supported_format)
+                                for supported_format in format_product_formats
+                            ):
+                                format_errors.append(
+                                    f"Creative {assigned_creative.creative_id} format "
+                                    f"'{assigned_creative.agent_url}/{assigned_creative.format}' "
+                                    f"is not supported by product '{format_product.name}'"
+                                )
+                        if format_errors:
+                            error_msg = (
+                                "Cannot update media buy with invalid creatives. "
+                                "The following creatives cannot be assigned:\n"
+                                + "\n".join(f"  • {err}" for err in format_errors)
+                            )
+                            logger.error(f"[UPDATE] {error_msg}")
+                            raise AdCPValidationError(
+                                error_msg,
+                                details={"error_code": "INVALID_CREATIVES", "creative_errors": format_errors},
+                            )
 
                     updated_assignments = []
                     new_assignments_created = []
@@ -1989,6 +2103,12 @@ def _update_media_buy_impl(
                         error_message=error_msg,
                     )
                     return response_data
+
+                # The row stores the flight twice. Move the date columns with the
+                # timestamps (same derivation as create) so they cannot drift.
+                for time_field, date_field in (("start_time", "start_date"), ("end_time", "end_date")):
+                    if time_field in update_values:
+                        update_values[date_field] = update_values[time_field].date()
 
                 uow.media_buys.update_fields(req.media_buy_id, **update_values)
                 logger.info(

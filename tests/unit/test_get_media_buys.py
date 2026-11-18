@@ -222,6 +222,24 @@ class TestComputeStatusPersistedPrecedence:
         assert _compute_status(buy_active, self.TODAY) == MediaBuyStatus.active
         assert _compute_status(buy_none, self.TODAY) == MediaBuyStatus.pending_start
 
+    @pytest.mark.parametrize(
+        ("start_date", "end_date"),
+        [
+            (date(2099, 1, 1), date(2099, 12, 31)),
+            (date(2025, 1, 1), date(2025, 12, 31)),
+            (date(2020, 1, 1), date(2020, 12, 31)),
+        ],
+        ids=["before_flight", "in_flight", "after_flight"],
+    )
+    def test_persisted_failed_reads_as_rejected_regardless_of_dates(self, start_date, end_date):
+        """A buy whose ad-server creation failed during approval is persisted as
+        ``failed``. It never reached the ad server and cannot be approved again,
+        so it must not be date-derived to ``pending_start`` / ``active`` /
+        ``completed``. The wire enum has no ``failed``; ``rejected`` is the
+        terminal state that tells the buyer it will not deliver."""
+        buy = make_media_buy(start_date=start_date, end_date=end_date, status="failed")
+        assert _compute_status(buy, self.TODAY) == MediaBuyStatus.rejected
+
 
 class TestComputeStatusApprovalPending:
     """Approval-pending buys must never be reported as ``active``.
@@ -406,6 +424,22 @@ class TestFetchTargetMediaBuys:
         req = GetMediaBuysRequest()
         result = self._run(req, [active, completed])
         assert [b.media_buy_id for b in result] == ["buy_active"]
+
+    @pytest.mark.parametrize(
+        ("status_filter", "expected"),
+        [
+            (MediaBuyStatus.rejected, ["buy_failed"]),
+            (MediaBuyStatus.active, []),
+        ],
+        ids=["rejected_matches", "active_does_not"],
+    )
+    def test_failed_buy_is_filtered_as_rejected(self, status_filter, expected):
+        """The filter agrees with the reported status: an in-flight ``failed``
+        buy is listed under ``rejected``, not under ``active``."""
+        failed = make_media_buy("buy_failed", start_date=date(2025, 1, 1), end_date=date(2025, 12, 31), status="failed")
+        req = GetMediaBuysRequest(status_filter=status_filter)
+        result = self._run(req, [failed])
+        assert [b.media_buy_id for b in result] == expected
 
 
 class TestMapCreativeStatus:
