@@ -915,16 +915,21 @@ def _validate_creatives_for_booking(
     )
 
 
-def _reject_unassignable_creatives(packages: Any, media_buys: Any) -> None:
+def _reject_unassignable_creatives(packages: Any, media_buys: Any, require_click_url: bool = False) -> None:
     """Reject creatives a package cannot take, before the media buy is saved.
 
     The manual-approval path saves the buy and its packages before it creates
     creative assignments. Checking the creatives only at assignment time left
     a saved media buy behind whenever that check failed, so this runs first.
 
+    ``require_click_url`` applies the Improve Digital rule that every creative
+    carries a click-through URL. The admin refuses to approve a buy without
+    one, so queueing it would strand the buy in pending approval.
+
     Raises:
         AdCPNotFoundError: A requested creative does not exist for the tenant.
-        AdCPValidationError: A creative's format is not accepted by its package's product.
+        AdCPValidationError: A creative's format is not accepted by its package's
+            product, or a required click-through URL is missing.
     """
     requested_ids = sorted(_creative_ids_for_packages(packages))
     if not requested_ids:
@@ -957,6 +962,20 @@ def _reject_unassignable_creatives(packages: Any, media_buys: Any) -> None:
                     format_error or "Creative format mismatch",
                     details={"error_code": "CREATIVE_FORMAT_MISMATCH"},
                 )
+
+    if require_click_url:
+        without_click_url = [
+            creative_id
+            for creative_id in requested_ids
+            if not extract_click_url(creatives_by_id[creative_id].data or {}, None, apply_macro_substitution=False)
+        ]
+        if without_click_url:
+            error_msg = (
+                f"Cannot create media buy: creative(s) {', '.join(without_click_url)} have no click-through URL "
+                "asset (e.g. 'click_url' with url_type 'clickthrough'). The ad server requires one on every creative."
+            )
+            logger.warning(f"Rejected before saving media buy: {error_msg}")
+            raise AdCPValidationError(error_msg, details={"error_code": "INVALID_CREATIVES"})
 
 
 def _is_springserve_tag_mode(adapter: Any) -> bool:
@@ -3414,7 +3433,11 @@ async def _create_media_buy_impl(
             if req.packages:
                 with MediaBuyUoW(tenant["tenant_id"]) as creative_gate_uow:
                     assert creative_gate_uow.media_buys is not None
-                    _reject_unassignable_creatives(req.packages, creative_gate_uow.media_buys)
+                    _reject_unassignable_creatives(
+                        req.packages,
+                        creative_gate_uow.media_buys,
+                        require_click_url=_tenant_uses_improve_digital(tenant),
+                    )
 
             # Update existing workflow step to require approval
             ctx_manager.update_workflow_step(

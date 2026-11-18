@@ -11,6 +11,10 @@ Two gaps let a wrong creative reach a live buy:
 A third gap left a buy behind: when ``create_media_buy`` queued a buy for manual
 approval, the creative checks ran after the buy and its packages were saved, so
 a rejected request still created a media buy.
+
+A fourth gap stranded a buy: that same path did not require a click-through URL
+at submission, so an Improve Digital buy was queued that the admin then refused
+to approve.
 """
 
 from types import SimpleNamespace
@@ -239,3 +243,37 @@ class TestCreateRejectsUnassignableCreativesBeforeSaving:
 
         repo.get_creatives_by_ids.assert_not_called()
         repo.get_product_by_id.assert_not_called()
+
+    @staticmethod
+    def _creative_with_assets(creative_id: str, assets: dict):
+        creative = _creative(creative_id, 300, 250)
+        creative.data = {"assets": assets}
+        return creative
+
+    IMAGE = {"url": "https://cdn.example.com/300x250.jpg", "width": 300, "height": 250, "asset_type": "image"}
+    CLICK = {"url": "https://example.com", "url_type": "clickthrough", "asset_type": "url"}
+
+    def test_creative_without_click_url_is_rejected_when_required(self):
+        """Improve Digital needs a click-through URL; the admin refuses to approve
+        a buy without one, so accepting it at submission strands the buy."""
+        creative = self._creative_with_assets("cr_no_click", {"image": self.IMAGE})
+        repo = _repo([_fmt(300, 250)], [creative])
+
+        with pytest.raises(AdCPValidationError) as exc_info:
+            _reject_unassignable_creatives([self._package(["cr_no_click"])], repo, require_click_url=True)
+
+        assert exc_info.value.details["error_code"] == "INVALID_CREATIVES"
+        assert "cr_no_click" in exc_info.value.message
+        assert "click-through URL" in exc_info.value.message
+
+    def test_creative_with_click_url_is_accepted_when_required(self):
+        creative = self._creative_with_assets("cr_click", {"image": self.IMAGE, "click_url": self.CLICK})
+        repo = _repo([_fmt(300, 250)], [creative])
+
+        _reject_unassignable_creatives([self._package(["cr_click"])], repo, require_click_url=True)
+
+    def test_click_url_is_not_required_by_default(self):
+        creative = self._creative_with_assets("cr_no_click", {"image": self.IMAGE})
+        repo = _repo([_fmt(300, 250)], [creative])
+
+        _reject_unassignable_creatives([self._package(["cr_no_click"])], repo)

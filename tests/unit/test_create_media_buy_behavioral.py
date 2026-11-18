@@ -3436,3 +3436,68 @@ class TestManualApprovalRejectsBadCreativesBeforeSaving:
             mock_slack.return_value.notify_media_buy_event.assert_not_called()
             step_statuses = [c.kwargs.get("status") for c in pc.ctx_manager.update_workflow_step.call_args_list]
             assert step_statuses == ["failed"]
+
+    @pytest.mark.asyncio
+    async def test_creative_without_click_url_is_rejected_on_improve_digital(self):
+        """The admin will not approve an Improve Digital buy whose creative has no
+        click-through URL, so the request must be rejected instead of queued."""
+        from types import SimpleNamespace
+
+        from src.core.database import repositories
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+
+        agent_url = "https://creative.adcontextprotocol.org"
+        req = _make_request(
+            packages=[
+                {
+                    "product_id": "prod_1",
+                    "budget": 5000.0,
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "creative_ids": ["cr_no_click"],
+                }
+            ]
+        )
+
+        with _PatchContext(products=[_mock_product("prod_1")], human_review_required=False) as pc:
+            pc.identity.tenant["ad_server"] = "improvedigital"
+            media_buys = repositories.MediaBuyUoW.return_value.media_buys
+            media_buys.get_creatives_by_ids.return_value = [
+                SimpleNamespace(
+                    creative_id="cr_no_click",
+                    agent_url=agent_url,
+                    format="display_image",
+                    format_parameters={"width": 300, "height": 250},
+                    data={"assets": {"image": {"url": "https://cdn.example.com/300x250.jpg", "asset_type": "image"}}},
+                )
+            ]
+            media_buys.get_product_by_id.return_value = SimpleNamespace(
+                product_id="prod_1",
+                name="Medium Rectangle",
+                format_ids=[{"agent_url": agent_url, "id": "display_image", "width": 300, "height": 250}],
+                inventory_profile_id=None,
+                inventory_profile=None,
+            )
+
+            with (
+                patch("src.core.tools.media_buy_create.process_and_upload_package_creatives") as mock_upload,
+                patch("src.core.tools.media_buy_create.get_adapter") as mock_adapter_fn,
+                patch("src.core.tools.media_buy_create.get_slack_notifier") as mock_slack,
+                patch("src.core.tools.media_buy_create.activity_feed"),
+                patch("src.core.tools.media_buy_create.get_audit_logger"),
+            ):
+                mock_upload.return_value = (req.packages, {})
+                mock_adapter = MagicMock()
+                mock_adapter.manual_approval_required = True
+                mock_adapter.manual_approval_operations = ["create_media_buy"]
+                mock_adapter_fn.return_value = mock_adapter
+
+                with pytest.raises(AdCPValidationError) as exc_info:
+                    await _create_media_buy_impl(req=req, identity=pc.identity)
+
+            assert exc_info.value.details["error_code"] == "INVALID_CREATIVES"
+            assert "cr_no_click" in exc_info.value.message
+            assert "click-through URL" in exc_info.value.message
+            media_buys.create_from_request.assert_not_called()
+            mock_slack.return_value.notify_media_buy_event.assert_not_called()
+            step_statuses = [c.kwargs.get("status") for c in pc.ctx_manager.update_workflow_step.call_args_list]
+            assert step_statuses == ["failed"]
