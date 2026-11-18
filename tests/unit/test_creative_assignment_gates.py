@@ -7,6 +7,10 @@ Two gaps let a wrong creative reach a live buy:
   as a deferred ``requires_approval``.
 - ``create_media_buy`` only required a click-through URL (Improve Digital) when
   a buy was booked after manual approval; a buy booked immediately skipped it.
+
+A third gap left a buy behind: when ``create_media_buy`` queued a buy for manual
+approval, the creative checks ran after the buy and its packages were saved, so
+a rejected request still created a media buy.
 """
 
 from types import SimpleNamespace
@@ -14,9 +18,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.exceptions import AdCPValidationError
+from src.core.exceptions import AdCPNotFoundError, AdCPValidationError
 from src.core.schemas import UpdateMediaBuyRequest
-from src.core.tools.media_buy_create import _validate_creatives_for_booking
+from src.core.tools.media_buy_create import _reject_unassignable_creatives, _validate_creatives_for_booking
 from src.core.tools.media_buy_update import _reject_mismatched_creative_formats
 from tests.factories.spec_required_kwargs import required_request_kwargs
 
@@ -191,3 +195,47 @@ class TestClickUrlRequiredOnEveryBookingPath:
 
     def test_other_ad_servers_do_not_require_click_url(self):
         self._validate(self.NO_CLICK_URL, {"tenant_id": "t1", "ad_server": "google_ad_manager"})
+
+
+class TestCreateRejectsUnassignableCreativesBeforeSaving:
+    """``_reject_unassignable_creatives`` gates the manual-approval create path before any write."""
+
+    @staticmethod
+    def _package(creative_ids: list[str]):
+        return SimpleNamespace(product_id="prod_1", creative_ids=creative_ids, creative_assignments=None)
+
+    def test_mismatched_creative_is_rejected_with_supported_sizes(self):
+        repo = _repo([_fmt(300, 250), _fmt(400, 300)], [_creative("cr_300x600", 300, 600)])
+
+        with pytest.raises(AdCPValidationError) as exc_info:
+            _reject_unassignable_creatives([self._package(["cr_300x600"])], repo)
+
+        assert exc_info.value.details["error_code"] == "CREATIVE_FORMAT_MISMATCH"
+        message = exc_info.value.message
+        assert "300x600" in message
+        assert "Automotive" in message
+        supported = message.split("Supported formats:")[1]
+        assert supported.count("300x250") == 1
+        assert supported.count("400x300") == 1
+
+    def test_unknown_creative_is_rejected(self):
+        repo = _repo([_fmt(300, 250)], [])
+
+        with pytest.raises(AdCPNotFoundError) as exc_info:
+            _reject_unassignable_creatives([self._package(["cr_missing"])], repo)
+
+        assert exc_info.value.details["error_code"] == "CREATIVES_NOT_FOUND"
+        assert "cr_missing" in exc_info.value.message
+
+    def test_matching_creative_is_accepted(self):
+        repo = _repo([_fmt(300, 250)], [_creative("cr_300x250", 300, 250)])
+
+        _reject_unassignable_creatives([self._package(["cr_300x250"])], repo)
+
+    def test_packages_without_creatives_do_no_lookups(self):
+        repo = _repo([_fmt(300, 250)], [])
+
+        _reject_unassignable_creatives([self._package([])], repo)
+
+        repo.get_creatives_by_ids.assert_not_called()
+        repo.get_product_by_id.assert_not_called()

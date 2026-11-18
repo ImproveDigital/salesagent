@@ -915,6 +915,50 @@ def _validate_creatives_for_booking(
     )
 
 
+def _reject_unassignable_creatives(packages: Any, media_buys: Any) -> None:
+    """Reject creatives a package cannot take, before the media buy is saved.
+
+    The manual-approval path saves the buy and its packages before it creates
+    creative assignments. Checking the creatives only at assignment time left
+    a saved media buy behind whenever that check failed, so this runs first.
+
+    Raises:
+        AdCPNotFoundError: A requested creative does not exist for the tenant.
+        AdCPValidationError: A creative's format is not accepted by its package's product.
+    """
+    requested_ids = sorted(_creative_ids_for_packages(packages))
+    if not requested_ids:
+        return
+
+    creatives_by_id = {str(c.creative_id): c for c in media_buys.get_creatives_by_ids(requested_ids)}
+    missing_ids = set(requested_ids) - set(creatives_by_id)
+    if missing_ids:
+        error_msg, error = _build_creatives_not_found_error(missing_ids)
+        logger.error(error_msg)
+        raise error
+
+    from src.core.helpers import validate_creative_format_against_product
+
+    for package in packages:
+        pkg_creative_ids = _get_requested_creative_ids(package)
+        if not pkg_creative_ids or not package.product_id:
+            continue
+        product = media_buys.get_product_by_id(package.product_id)
+        if not product:
+            continue
+        for creative_id in pkg_creative_ids:
+            format_is_valid, format_error = validate_creative_format_against_product(
+                creative_format_id=_stored_creative_format_id(creatives_by_id[creative_id]),
+                product=product,
+            )
+            if not format_is_valid:
+                logger.warning(f"Creative {creative_id} rejected before saving media buy: {format_error}")
+                raise AdCPValidationError(
+                    format_error or "Creative format mismatch",
+                    details={"error_code": "CREATIVE_FORMAT_MISMATCH"},
+                )
+
+
 def _is_springserve_tag_mode(adapter: Any) -> bool:
     return str(getattr(adapter, "adapter_name", "") or "").lower() == "springserve" and (
         getattr(adapter, "demand_class", None) == "tag"
@@ -3364,6 +3408,14 @@ async def _create_media_buy_impl(
         if not testing_ctx.dry_run and manual_approval_required and "create_media_buy" in manual_approval_operations:
             # Type narrowing: step and persistent_ctx exist in non-dry_run mode
             assert step is not None and persistent_ctx is not None
+
+            # Reject unknown or wrong-format creatives before anything is saved or
+            # notified; the same checks at assignment time run after the buy exists.
+            if req.packages:
+                with MediaBuyUoW(tenant["tenant_id"]) as creative_gate_uow:
+                    assert creative_gate_uow.media_buys is not None
+                    _reject_unassignable_creatives(req.packages, creative_gate_uow.media_buys)
+
             # Update existing workflow step to require approval
             ctx_manager.update_workflow_step(
                 step.step_id,
