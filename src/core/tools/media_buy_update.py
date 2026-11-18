@@ -96,6 +96,34 @@ def _is_terminal_media_buy_state(status: str | None) -> bool:
     return status in MEDIA_BUY_TRANSITIONS and not MEDIA_BUY_TRANSITIONS[status]
 
 
+def _reject_pause_of_terminal_buy(req: UpdateMediaBuyRequest, current_media_buy: Any | None) -> None:
+    """Reject pause/resume of a media buy that is in a terminal state.
+
+    A terminal buy (per :func:`_is_terminal_media_buy_state`) has no legal next
+    state, so pause/resume violates the AdCP state machine and is answered with
+    the spec-canonical ``INVALID_STATE`` (storyboard
+    ``media_buy_state_machine/pause_canceled_buy``). Cancel-of-canceled keeps
+    its narrower ``NOT_CANCELLABLE`` code and is handled by the cancel branch.
+
+    Called twice: before an update is deferred for manual approval, so a doomed
+    pause is not queued for a publisher to approve, and on the apply path
+    before adapter dispatch, which also covers approval replay.
+
+    Raises:
+        AdCPInvalidStateError: ``req.paused`` is set and the buy is terminal.
+    """
+    if req.paused is None:
+        return
+    current_status = str(current_media_buy.status) if current_media_buy else None
+    if not _is_terminal_media_buy_state(current_status):
+        return
+    action_name = "pause" if req.paused else "resume"
+    raise AdCPInvalidStateError(
+        f"media_buy_id={req.media_buy_id!r} is in terminal state {current_status!r} — "
+        f"cannot {action_name} a {current_status} buy"
+    )
+
+
 def _safe_media_buy_revision(media_buy_obj: Any | None) -> int:
     """Read a media-buy revision defensively from ORM rows and unit-test mocks."""
     revision = getattr(media_buy_obj, "revision", 1)
@@ -947,12 +975,14 @@ def _update_media_buy_impl(
             and not bypass_manual_approval
             and not cancel_requested
         ):
-            # The apply path validates creative formats, but it only runs after
-            # this deferral. Reject a mismatched assignment now rather than
-            # queueing an update that can only fail on approval replay.
+            # The apply path validates the buy's state and creative formats, but
+            # it only runs after this deferral. Reject a pause of a terminal buy
+            # or a mismatched assignment now rather than queueing an update
+            # that can only fail on approval replay.
             try:
+                _reject_pause_of_terminal_buy(req, current_media_buy)
                 _reject_mismatched_creative_formats(req, media_buy_id_to_use, uow.media_buys)
-            except AdCPValidationError as exc:
+            except (AdCPInvalidStateError, AdCPValidationError) as exc:
                 ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=exc.message)
                 raise
 
@@ -1172,39 +1202,14 @@ def _update_media_buy_impl(
 
         # Handle campaign-level updates
         if req.paused is not None:
-            # Pre-validation: pause/resume on a terminal-state buy violates the
-            # AdCP state machine. The cancel branch (above) already guards
-            # cancel-of-canceled with the narrower AdCPNotCancellableError;
-            # the broader pause/resume case raises AdCPInvalidStateError so
-            # buyers see the spec-canonical INVALID_STATE wire code on
-            # ``/adcp_error/code`` (storyboard
-            # ``media_buy_state_machine/pause_canceled_buy``). Runs BEFORE
-            # adapter dispatch so the rejection is idempotency-spec friendly
-            # — same payload yields the same wire code on retry regardless
-            # of which adapter would have handled the transition.
-            #
-            # The "is this state terminal?" predicate reads the upstream
-            # AdCP graph (:data:`MEDIA_BUY_TRANSITIONS`) so a future spec
-            # addition of a new terminal state (e.g. ``rejected``, already
-            # there since adcp 5.3) is picked up by construction. The
-            # earlier hand-rolled tuple ``("canceled", "completed")`` had
-            # already drifted: ``rejected`` is terminal per spec but was
-            # not in the tuple, so pause/resume of a rejected buy would
-            # fall through to the adapter and return a less-typed error.
+            # Backstop for updates that apply immediately and for approval
+            # replay; runs before adapter dispatch.
             current_mb = current_media_buy
-            current_status = str(current_mb.status) if current_mb else None
-            if _is_terminal_media_buy_state(current_status):
-                action_name = "pause" if req.paused else "resume"
-                error_msg = (
-                    f"media_buy_id={req.media_buy_id!r} is in terminal state {current_status!r} — "
-                    f"cannot {action_name} a {current_status} buy"
-                )
-                ctx_manager.update_workflow_step(
-                    step.step_id,
-                    status="failed",
-                    error_message=f"terminal state: {current_status}",
-                )
-                raise AdCPInvalidStateError(error_msg)
+            try:
+                _reject_pause_of_terminal_buy(req, current_mb)
+            except AdCPInvalidStateError as exc:
+                ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=exc.message)
+                raise
 
             # adcp 2.12.0+: paused=True means pause, paused=False means resume
             action = "pause_media_buy" if req.paused else "resume_media_buy"
