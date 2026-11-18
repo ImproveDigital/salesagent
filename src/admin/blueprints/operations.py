@@ -629,6 +629,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
 
                 step.status = "approved"
                 step.updated_at = datetime.now(UTC)
+                step.completed_at = datetime.now(UTC)
 
                 if not step.comments:
                     step.comments = []
@@ -791,6 +792,7 @@ def approve_media_buy(tenant_id, media_buy_id, **kwargs):
                 step.status = "rejected"
                 step.error_message = reason or "Rejected by administrator"
                 step.updated_at = datetime.now(UTC)
+                step.completed_at = datetime.now(UTC)
 
                 if not step.comments:
                     step.comments = []

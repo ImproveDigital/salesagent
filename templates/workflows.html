@@ -457,7 +457,7 @@ function filterTasks() {
 
         if (filter === 'all') {
             show = true;
-        } else if (filter === 'pending' && (status === 'pending' || status === 'pending_approval' || status === 'in_progress')) {
+        } else if (filter === 'pending' && (status === 'pending' || status === 'pending_approval' || status === 'requires_approval' || status === 'in_progress')) {
             show = true;
         } else if (filter === 'completed' && status === 'completed') {
             show = true;

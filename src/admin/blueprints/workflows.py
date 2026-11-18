@@ -25,6 +25,38 @@ workflows_bp = Blueprint("workflows", __name__)
 workflows_bp.before_request(require_capability_blueprint("campaign_approval"))
 
 
+# Step statuses that are waiting for an operator decision.
+_AWAITING_DECISION_STEP_STATUSES = frozenset({"requires_approval", "pending_approval"})
+
+# Step statuses that count as handled for the "Completed Today" card.
+_HANDLED_STEP_STATUSES = frozenset({"completed", "approved", "rejected"})
+
+
+def _task_summary_counts(steps, now: datetime) -> dict[str, int]:
+    """Task counts for the Workflows page summary cards.
+
+    Approval steps are created as ``requires_approval``; counting only
+    ``pending_approval`` left the Pending Tasks card at 0 while tasks waited.
+    "Today" is the current UTC day; a naive ``completed_at`` is read as UTC.
+
+    Pure function (no DB/Flask) so it can be unit-tested directly.
+    """
+    today = now.astimezone(UTC).date()
+
+    def _finished_today(step) -> bool:
+        completed_at = step.completed_at
+        if completed_at is None or step.status not in _HANDLED_STEP_STATUSES:
+            return False
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=UTC)
+        return completed_at.astimezone(UTC).date() == today
+
+    return {
+        "pending_tasks": sum(1 for s in steps if s.status in _AWAITING_DECISION_STEP_STATUSES),
+        "completed_today": sum(1 for s in steps if _finished_today(s)),
+    }
+
+
 @workflows_bp.route("/<tenant_id>/workflows")
 @require_tenant_access()
 def list_workflows(tenant_id, **kwargs):
@@ -41,9 +73,6 @@ def list_workflows(tenant_id, **kwargs):
         workflow_repo = WorkflowRepository(db, tenant_id)
         all_steps = workflow_repo.get_all_steps()
 
-        # Separate pending approval steps for summary
-        pending_steps = [s for s in all_steps if s.status == "pending_approval"]
-
         # Get media buys for context
         media_buy_repo = MediaBuyRepository(db, tenant_id)
         media_buys = media_buy_repo.list_all_ordered_by_created()
@@ -54,8 +83,7 @@ def list_workflows(tenant_id, **kwargs):
         # Build summary stats
         summary = {
             "active_buys": len([mb for mb in media_buys if mb.status == "active"]),
-            "pending_tasks": len(pending_steps),
-            "completed_today": 0,  # TODO: Calculate from workflow history
+            **_task_summary_counts(all_steps, datetime.now(UTC)),
             "total_spend": sum(mb.budget or 0 for mb in media_buys if mb.status == "active"),
             "currency": primary_currency,
         }
@@ -370,6 +398,7 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
             step = workflow_repo.update_status(
                 step_id,
                 status="approved",
+                completed_at=datetime.now(UTC),
             )
 
             if not step:
@@ -520,6 +549,7 @@ def reject_workflow_step(tenant_id, workflow_id, step_id):
             step = workflow_repo.update_status(
                 step_id,
                 status="rejected",
+                completed_at=datetime.now(UTC),
                 error_message=reason,
             )
 
