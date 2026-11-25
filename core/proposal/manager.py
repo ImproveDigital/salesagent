@@ -138,7 +138,10 @@ class SalesAgentProposalManager:
             return cast(
                 GetProductsResponse,
                 canonicalize_wire_response(
-                    "get_products", _to_wire(mark_compose_disabled(response)), tenant_id=identity.tenant_id
+                    "get_products",
+                    _to_wire(mark_compose_disabled(response)),
+                    tenant_id=identity.tenant_id,
+                    tenant=identity.tenant,
                 ),
             )
 
@@ -161,7 +164,9 @@ class SalesAgentProposalManager:
         # a dict here and expects canonical creative identity (adcp 7).
         return cast(
             GetProductsResponse,
-            canonicalize_wire_response("get_products", _to_wire(response), tenant_id=identity.tenant_id),
+            canonicalize_wire_response(
+                "get_products", _to_wire(response), tenant_id=identity.tenant_id, tenant=identity.tenant
+            ),
         )
 
     @translate_adcp_errors
@@ -209,7 +214,9 @@ class SalesAgentProposalManager:
         # a dict here and expects canonical creative identity (adcp 7).
         return cast(
             GetProductsResponse,
-            canonicalize_wire_response("get_products", _to_wire(response), tenant_id=identity.tenant_id),
+            canonicalize_wire_response(
+                "get_products", _to_wire(response), tenant_id=identity.tenant_id, tenant=identity.tenant
+            ),
         )
 
 

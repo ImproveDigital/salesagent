@@ -746,7 +746,59 @@ def _declaration_wire(declaration: CanonicalFormat) -> dict[str, Any]:
     return declaration.model_dump(mode="json", exclude_none=True)
 
 
-def _canonicalize_product(product: Any) -> Any:
+# Buyers that measure delivery themselves only buy a format whose declaration
+# has a slot for their impression pixel. The reference display formats already
+# accept an optional ``impression_tracker`` asset, but only these ad servers
+# attach it to the trafficked creative, so only their tenants declare the slot.
+_IMPRESSION_TRACKER_AD_SERVERS = frozenset({"google_ad_manager"})
+# ``url`` rather than AdCP's preferred ``pixel_tracker``: Apostra's certification
+# asks display formats for a "URL impression-tracker slot" and accepts both types
+# only on hosted video/audio. Either asset shape is trafficked the same way.
+_IMPRESSION_TRACKER_SLOT: dict[str, Any] = {
+    "asset_group_id": "impression_tracker",
+    "asset_type": "url",
+    "required": False,
+}
+
+
+def _default_slots(format_kind: str) -> list[dict[str, Any]] | None:
+    """The SDK's default slot list for a display kind (``slots`` replaces it, so it is restated)."""
+    from adcp.types.generated_poc.formats.canonical.display_tag import CanonicalFormatDisplayTag
+    from adcp.types.generated_poc.formats.canonical.html5 import CanonicalFormatHtml5Banner
+    from adcp.types.generated_poc.formats.canonical.image import CanonicalFormatImage
+
+    models: dict[str, type[BaseModel]] = {
+        "display_tag": CanonicalFormatDisplayTag,
+        "html5": CanonicalFormatHtml5Banner,
+        "image": CanonicalFormatImage,
+    }
+    model = models.get(format_kind)
+    if model is None:
+        return None
+    default = model.model_fields["slots"].default
+    return [dict(slot) for slot in default] if isinstance(default, list) else None
+
+
+def _tenant_ad_server(tenant: Any) -> str | None:
+    """The ad server named on a tenant context (dict or ``TenantContext``), if any."""
+    ad_server = tenant.get("ad_server") if isinstance(tenant, Mapping) else getattr(tenant, "ad_server", None)
+    return ad_server if isinstance(ad_server, str) else None
+
+
+def _with_impression_tracker_slot(option: dict[str, Any], ad_server: str | None) -> dict[str, Any]:
+    """Declare the impression-tracker slot on a display format option, when the ad server fires it."""
+    if ad_server not in _IMPRESSION_TRACKER_AD_SERVERS:
+        return option
+    params = option.get("params")
+    if not isinstance(params, dict) or params.get("slots"):
+        return option
+    slots = _default_slots(str(option.get("format_kind")))
+    if slots is None:
+        return option
+    return {**option, "params": {**params, "slots": [*slots, dict(_IMPRESSION_TRACKER_SLOT)]}}
+
+
+def _canonicalize_product(product: Any, *, ad_server: str | None = None) -> Any:
     if not isinstance(product, Mapping):
         return product
     body = dict(product)
@@ -755,13 +807,15 @@ def _canonicalize_product(product: Any) -> Any:
     if isinstance(format_ids, list) and format_ids and not body.get("format_options"):
         declarations = [declaration_for_legacy_ref(fid, product_id=product_id) for fid in format_ids]
         if all(d is not None for d in declarations):
-            body["format_options"] = [_declaration_wire(d) for d in declarations if d is not None]
+            body["format_options"] = [
+                _with_impression_tracker_slot(_declaration_wire(d), ad_server) for d in declarations if d is not None
+            ]
             body.pop("format_ids", None)
         # else: at least one named format has no canonical projection — the
         # spec says the product then ships legacy-only, so keep ``format_ids``.
     placements = body.get("placements")
     if isinstance(placements, list):
-        body["placements"] = [_canonicalize_product(p) for p in placements]
+        body["placements"] = [_canonicalize_product(p, ad_server=ad_server) for p in placements]
     return body
 
 
@@ -812,19 +866,24 @@ def _canonicalize_creative(creative: Any, *, publisher_domain: str) -> Any:
     return body
 
 
-def canonicalize_wire_response(tool_name: str, wire: dict[str, Any], *, tenant_id: str | None = None) -> dict[str, Any]:
+def canonicalize_wire_response(
+    tool_name: str, wire: dict[str, Any], *, tenant_id: str | None = None, tenant: Any = None
+) -> dict[str, Any]:
     """Rewrite legacy format identity in an impl's wire dict to canonical shape.
 
     Applied at the platform boundary for every creative-boundary tool. Only
     the identity fields change; unknown / unprojectable formats keep their
     legacy shape so the SDK's legacy projection can still serve 3.0 buyers.
+    ``tenant`` (the resolved identity's tenant context) decides which product
+    format options declare an impression-tracker slot.
     """
     if not isinstance(wire, dict):
         return wire
     out = dict(wire)
     for key in _PRODUCT_COLLECTIONS:
         if isinstance(out.get(key), list):
-            out[key] = [_canonicalize_product(p) for p in out[key]]
+            ad_server = _tenant_ad_server(tenant)
+            out[key] = [_canonicalize_product(p, ad_server=ad_server) for p in out[key]]
     for key in _PACKAGE_COLLECTIONS:
         if isinstance(out.get(key), list):
             out[key] = [_canonicalize_package(p) for p in out[key]]

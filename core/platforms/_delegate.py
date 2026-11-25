@@ -655,7 +655,9 @@ async def _delegate_get_products(req: GetProductsRequest, ctx: RequestContext[An
     req_model = _coerce_to_request_model(_legacy_request_body("get_products", req), GetProductsRequest)
     identity = _enrich_resolved_account_identity(_build_identity(ctx), getattr(req_model, "account", None))
     response = await _get_products_impl(req_model, identity)
-    return canonicalize_wire_response("get_products", _to_wire(response), tenant_id=identity.tenant_id)
+    return canonicalize_wire_response(
+        "get_products", _to_wire(response), tenant_id=identity.tenant_id, tenant=identity.tenant
+    )
 
 
 @translate_adcp_errors
