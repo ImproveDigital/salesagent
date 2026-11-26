@@ -56,6 +56,9 @@ from adcp.decisioning.capabilities import (
     SupportedProtocol,
     WebhookSigning,
 )
+from adcp.decisioning.capabilities import (
+    Creative as CapabilitiesCreative,
+)
 from adcp.server import (
     BearerTokenAuth,
     CallableSubdomainTenantRouter,
@@ -650,6 +653,13 @@ def build_router() -> LazyPlatformRouter:
             features=CanonicalCreativeFeatures(inline_creative_management=True),
         ),
         signals=Signals(discovery_modes=["brief", "wholesale"], features=SignalsFeatures(catalog_signals=True)),
+        # ``sync_creatives`` / ``list_creatives`` keep a per-account creative
+        # library that media buys reference by ``creative_id``. Buyers that
+        # sync creatives before booking read this flag, and treat a listed
+        # ``sync_creatives`` tool without it as "no library". The ``creative``
+        # protocol itself is not claimed in ``supported_protocols``: we are
+        # not a creative agent (no ``build_creative`` / ``preview_creative``).
+        creative=CapabilitiesCreative(has_creative_library=True),
         webhook_signing=WebhookSigning(supported=False, legacy_hmac_fallback=True),
         supported_protocols=[SupportedProtocol.media_buy, SupportedProtocol.signals],
     )
