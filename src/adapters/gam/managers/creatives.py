@@ -189,7 +189,9 @@ class GAMCreativesManager:
                     logger.error(f"Creative {asset['creative_id']} failed GAM validation:")
                     for issue in validation_issues:
                         logger.error(f"  - {issue}")
-                created_asset_statuses.append(AssetStatus(creative_id=asset["creative_id"], status="failed"))
+                created_asset_statuses.append(
+                    AssetStatus(creative_id=asset["creative_id"], status="failed", message="; ".join(validation_issues))
+                )
                 continue
 
             # Determine creative type using AdCP v1.3+ logic
@@ -218,7 +220,13 @@ class GAMCreativesManager:
                 creative = self._create_gam_creative(asset, creative_type, asset_placeholders)
                 if not creative:
                     logger.warning(f"Skipping unsupported creative {asset['creative_id']} with type: {creative_type}")
-                    created_asset_statuses.append(AssetStatus(creative_id=asset["creative_id"], status="failed"))
+                    created_asset_statuses.append(
+                        AssetStatus(
+                            creative_id=asset["creative_id"],
+                            status="failed",
+                            message=f"Unsupported creative type: {creative_type}",
+                        )
+                    )
                     continue
 
                 # Create the creative in GAM
@@ -233,7 +241,13 @@ class GAMCreativesManager:
                     created_creatives = creative_service.createCreatives([creative])
                     if not created_creatives:
                         logger.error(f"Failed to create creative {asset['creative_id']} - no creatives returned")
-                        created_asset_statuses.append(AssetStatus(creative_id=asset["creative_id"], status="failed"))
+                        created_asset_statuses.append(
+                            AssetStatus(
+                                creative_id=asset["creative_id"],
+                                status="failed",
+                                message="Ad server returned no creative",
+                            )
+                        )
                         continue
 
                     gam_creative_id = created_creatives[0]["id"]
@@ -252,7 +266,9 @@ class GAMCreativesManager:
 
             except Exception as e:
                 logger.error(f"Error creating creative {asset['creative_id']}: {str(e)}")
-                created_asset_statuses.append(AssetStatus(creative_id=asset["creative_id"], status="failed"))
+                created_asset_statuses.append(
+                    AssetStatus(creative_id=asset["creative_id"], status="failed", message=str(e))
+                )
 
         return created_asset_statuses
 

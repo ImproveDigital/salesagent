@@ -788,6 +788,7 @@ MEDIA_ASSET_FALLBACK_IDS = {
     "billboard_image",
     "icon",
     "main_image",
+    "image_main",  # canonical ``image`` slot
     "product_image",
     "screen_image",
     "thumbnail",
@@ -819,6 +820,7 @@ CLICKTHROUGH_ASSET_IDS = {
     "clickthrough",
     "click",
     "landing_page",
+    "landing_page_url",  # canonical ``image`` / ``html5`` slot
     "landing_url",
     "destination_url",
 }
