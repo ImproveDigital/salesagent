@@ -734,6 +734,93 @@ def _load_creatives_by_id(session: "Session", tenant_id: str, creative_ids: set[
     return {str(creative.creative_id): creative for creative in session.scalars(stmt).all()}
 
 
+def _creative_booking_errors(creative: Any, require_click_url: bool) -> list[str]:
+    """Reasons one stored creative cannot be trafficked (empty when it can)."""
+    creative_data = creative.data or {}
+
+    # BR-RULE-026: Reject creatives in terminal error states
+    if hasattr(creative, "status") and creative.status in ("error", "rejected"):
+        return [f"Creative {creative.creative_id} has status '{creative.status}' and cannot be used in a media buy"]
+
+    # Get format specification from creative agent (uses in-memory cache with 30min TTL)
+    format_spec = _get_format_spec_sync(creative.agent_url, str(creative.format)) if creative.format else None
+
+    # Fail validation if format spec not found (no skipping!)
+    if not format_spec:
+        return [
+            f"Creative {creative.creative_id} has unknown format '{creative.format}' "
+            f"from agent {creative.agent_url}. Format must be registered with the creative agent."
+        ]
+
+    # Skip validation for generative formats - they need conversion first
+    # Generative formats have output_format_ids (they generate reference formats)
+    if format_spec.output_format_ids:
+        logger.info(
+            f"Skipping validation for generative creative {creative.creative_id} "
+            f"(format={creative.format}) - will be converted to reference format"
+        )
+        return []
+
+    # Only validate reference creatives (formats we can directly use)
+    # Extract URL and dimensions using shared helper
+    errors: list[str] = []
+    url, width, height = extract_media_url_and_dimensions(creative_data, format_spec)
+    format_id = str(creative.format or "")
+    format_type = str(getattr(format_spec, "type", "") or "").lower()
+    requires_dimensions = format_type not in {"audio"} and "vast" not in format_id.lower()
+
+    if not url:
+        errors.append(
+            f"Reference creative {creative.creative_id} (format={creative.format}) missing required URL field in assets"
+        )
+    if requires_dimensions and (not width or not height):
+        errors.append(f"Reference creative {creative.creative_id} missing dimensions (width={width}, height={height})")
+    if require_click_url and not extract_click_url(creative_data, format_spec, apply_macro_substitution=False):
+        errors.append(
+            f"Reference creative {creative.creative_id} (format={creative.format}) "
+            "missing a click-through URL asset (e.g. 'click_url' with url_type 'clickthrough'); "
+            "the ad server derives the required advertiser domain from it"
+        )
+    return errors
+
+
+def _invalid_creatives_error(validation_errors: list[str]) -> AdCPValidationError:
+    error_msg = (
+        "Cannot create media buy with invalid creatives. "
+        "The following creatives have validation errors:\n"
+        + "\n".join(f"  • {err}" for err in validation_errors)
+        + "\n\nReference creatives must have dimensions (width/height) and a content URL "
+        "matching their format specification. "
+        + "Creative formats must match the product's accepted formats. "
+        + "Generative creatives will be converted to reference formats during campaign creation. "
+        + "Please ensure reference creatives are properly synced before creating media buys."
+    )
+    logger.error(f"[PRE-VALIDATION] {error_msg}")
+    return AdCPValidationError(
+        error_msg, details={"error_code": "INVALID_CREATIVES", "creative_errors": validation_errors}
+    )
+
+
+def _reject_untraffickable_creatives(packages: Any, media_buys: Any, require_click_url: bool = False) -> None:
+    """Reject creatives the ad server upload cannot use, before the media buy is saved.
+
+    The manual-approval path books only after an operator approves. Leaving the
+    media URL and dimension checks to booking let a buy be queued and approved
+    before failing on a creative that could never be uploaded.
+
+    Raises:
+        AdCPValidationError: A creative has no readable media URL or dimensions.
+    """
+    requested_ids = sorted(_creative_ids_for_packages(packages))
+    if not requested_ids:
+        return
+    validation_errors: list[str] = []
+    for creative in media_buys.get_creatives_by_ids(requested_ids):
+        validation_errors.extend(_creative_booking_errors(creative, require_click_url))
+    if validation_errors:
+        raise _invalid_creatives_error(validation_errors)
+
+
 def _validate_creatives_before_adapter_call(
     packages: list[MediaPackage],
     tenant_id: str,
@@ -772,61 +859,9 @@ def _validate_creatives_before_adapter_call(
     creatives_list = list(creatives_by_id.values())
 
     # Validate each creative has required fields
-    validation_errors = []
+    validation_errors: list[str] = []
     for creative in creatives_list:
-        creative_data = creative.data or {}
-
-        # BR-RULE-026: Reject creatives in terminal error states
-        if hasattr(creative, "status") and creative.status in ("error", "rejected"):
-            validation_errors.append(
-                f"Creative {creative.creative_id} has status '{creative.status}' and cannot be used in a media buy"
-            )
-            continue
-
-        # Get format specification from creative agent (uses in-memory cache with 30min TTL)
-        format_spec = None
-        if creative.format:
-            format_spec = _get_format_spec_sync(creative.agent_url, str(creative.format))
-
-        # Fail validation if format spec not found (no skipping!)
-        if not format_spec:
-            validation_errors.append(
-                f"Creative {creative.creative_id} has unknown format '{creative.format}' "
-                f"from agent {creative.agent_url}. Format must be registered with the creative agent."
-            )
-            continue
-
-        # Skip validation for generative formats - they need conversion first
-        # Generative formats have output_format_ids (they generate reference formats)
-        if format_spec.output_format_ids:
-            logger.info(
-                f"Skipping validation for generative creative {creative.creative_id} "
-                f"(format={creative.format}) - will be converted to reference format"
-            )
-            continue
-
-        # Only validate reference creatives (formats we can directly use)
-        # Extract URL and dimensions using shared helper
-        url, width, height = extract_media_url_and_dimensions(creative_data, format_spec)
-        format_id = str(creative.format or "")
-        format_type = str(getattr(format_spec, "type", "") or "").lower()
-        requires_dimensions = format_type not in {"audio"} and "vast" not in format_id.lower()
-
-        if not url:
-            validation_errors.append(
-                f"Reference creative {creative.creative_id} (format={creative.format}) "
-                f"missing required URL field in assets"
-            )
-        if requires_dimensions and (not width or not height):
-            validation_errors.append(
-                f"Reference creative {creative.creative_id} missing dimensions (width={width}, height={height})"
-            )
-        if require_click_url and not extract_click_url(creative_data, format_spec, apply_macro_substitution=False):
-            validation_errors.append(
-                f"Reference creative {creative.creative_id} (format={creative.format}) "
-                "missing a click-through URL asset (e.g. 'click_url' with url_type 'clickthrough'); "
-                "the ad server derives the required advertiser domain from it"
-            )
+        validation_errors.extend(_creative_booking_errors(creative, require_click_url))
 
     # --- Format compatibility check: creative format vs product accepted formats ---
     # Build creative_id -> namespaced format mapping from fetched creatives
@@ -880,20 +915,7 @@ def _validate_creatives_before_adapter_call(
                     )
 
     if validation_errors:
-        error_msg = (
-            "Cannot create media buy with invalid creatives. "
-            "The following creatives have validation errors:\n"
-            + "\n".join(f"  • {err}" for err in validation_errors)
-            + "\n\nReference creatives must have dimensions (width/height) and a content URL "
-            "matching their format specification. "
-            + "Creative formats must match the product's accepted formats. "
-            + "Generative creatives will be converted to reference formats during campaign creation. "
-            + "Please ensure reference creatives are properly synced before creating media buys."
-        )
-        logger.error(f"[PRE-VALIDATION] {error_msg}")
-        raise AdCPValidationError(
-            error_msg, details={"error_code": "INVALID_CREATIVES", "creative_errors": validation_errors}
-        )
+        raise _invalid_creatives_error(validation_errors)
 
 
 def _validate_creatives_for_booking(
@@ -1906,12 +1928,17 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                             )
                             logger.info(f"[APPROVAL] Creative upload completed: {len(asset_statuses)} assets processed")
 
-                            # Log any failures
-                            for status in asset_statuses:
-                                if status.status == "failed":
-                                    logger.error(
-                                        f"[APPROVAL] Failed to upload creative {status.creative_id}: {status.message}"
-                                    )
+                            # A rejected creative fails the approval — a booked order
+                            # with no creative attached must not report success.
+                            upload_errors = [
+                                f"{status.creative_id}: {status.message}"
+                                for status in asset_statuses
+                                if status.status == "failed"
+                            ]
+                            if upload_errors:
+                                error_msg = "Ad server rejected creative(s): " + "; ".join(upload_errors)
+                                logger.error(f"[APPROVAL] {error_msg}")
+                                return False, error_msg
                         elif gam_order_id and not hasattr(adapter, "creatives_manager"):
                             # Non-GAM adapters (e.g. Improve Digital) implement
                             # add_creative_assets directly on the adapter. GAM
@@ -3434,6 +3461,11 @@ async def _create_media_buy_impl(
                 with MediaBuyUoW(tenant["tenant_id"]) as creative_gate_uow:
                     assert creative_gate_uow.media_buys is not None
                     _reject_unassignable_creatives(
+                        req.packages,
+                        creative_gate_uow.media_buys,
+                        require_click_url=_tenant_uses_improve_digital(tenant),
+                    )
+                    _reject_untraffickable_creatives(
                         req.packages,
                         creative_gate_uow.media_buys,
                         require_click_url=_tenant_uses_improve_digital(tenant),
