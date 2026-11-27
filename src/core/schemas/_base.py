@@ -1693,6 +1693,10 @@ class MediaPackage(SalesAgentBaseModel):
     budget: float | None = None  # Budget allocation in the currency specified by the pricing option
     creative_ids: list[str] | None = None  # Creative IDs to assign to this package
     implementation_config: dict[str, Any] | None = Field(default=None, exclude=True)
+    # The package's own flight, when the buyer gave one. None means the
+    # package runs for the media buy's whole flight.
+    start_time: datetime | None = None
+    end_time: datetime | None = None
 
 
 class PackagePerformance(SalesAgentBaseModel):

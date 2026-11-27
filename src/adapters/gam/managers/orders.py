@@ -462,13 +462,20 @@ class GAMOrdersManager:
             line_item_name_template = "{product_name}"
 
         created_line_item_ids: list[str] = []
-        # Calendar days covered by the flight. ceil() because flights end at
-        # 23:59:59 — a 10-day flight is 9.99… days and must count as 10, not
-        # the 9 that timedelta.days truncation would give (it inflated DAILY
-        # goals by a full day's worth).
-        flight_duration_days = math.ceil((end_time - start_time).total_seconds() / 86400)
+        used_line_item_names: set[str] = set()
+        order_start_time, order_end_time = start_time, end_time
 
         for package_index, package in enumerate(packages, start=1):
+            # A package with its own flight runs inside the order's flight;
+            # every date-derived value below is per line item.
+            start_time = getattr(package, "start_time", None) or order_start_time
+            end_time = getattr(package, "end_time", None) or order_end_time
+            # Calendar days covered by the flight. ceil() because flights end at
+            # 23:59:59 — a 10-day flight is 9.99… days and must count as 10, not
+            # the 9 that timedelta.days truncation would give (it inflated DAILY
+            # goals by a full day's worth).
+            flight_duration_days = math.ceil((end_time - start_time).total_seconds() / 86400)
+
             # Get product-specific configuration
             product = products_map.get(package.package_id)
             impl_config = product.get("implementation_config", {}) if product else {}
@@ -751,6 +758,11 @@ class GAMOrdersManager:
                 package_index=package_index,
             )
             full_line_item_name = apply_naming_template(line_item_name_template, line_item_name_context)
+            # GAM line item names are unique within an order; two packages on
+            # the same product would otherwise share one.
+            if full_line_item_name in used_line_item_names:
+                full_line_item_name = f"{full_line_item_name} #{package_index}"
+            used_line_item_names.add(full_line_item_name)
 
             # Truncate to GAM's 255-character limit
             line_item_name = truncate_name_with_suffix(

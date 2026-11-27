@@ -714,6 +714,83 @@ def _detect_overbook_warnings(
     ]
 
 
+def _as_aware_utc(value: Any) -> datetime | None:
+    """A stored or requested package date as an aware datetime (None when absent)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _duplicate_product_ids(packages: Any) -> list[str]:
+    """Product ids booked by more than one package with the same flight.
+
+    A product may back several packages in one media buy when each has its own
+    flight (e.g. two back-to-back flights of the same inventory). Two packages
+    on the same product with the same flight, or with no flight of their own,
+    are the accidental duplicate this rule has always refused.
+    """
+    counts: dict[tuple[str, datetime | None, datetime | None], int] = {}
+    for package in packages:
+        if package.product_id:
+            key = (
+                package.product_id,
+                _as_aware_utc(getattr(package, "start_time", None)),
+                _as_aware_utc(getattr(package, "end_time", None)),
+            )
+            counts[key] = counts.get(key, 0) + 1
+    duplicates: list[str] = []
+    for (product_id, _start, _end), count in counts.items():
+        if count > 1 and product_id not in duplicates:
+            duplicates.append(product_id)
+    return duplicates
+
+
+def _own_package_flight(
+    package: Any, buy_start: datetime, buy_end: datetime
+) -> tuple[datetime | None, datetime | None]:
+    """A package's own flight inside the media buy's flight, or ``(None, None)``.
+
+    A package that names neither date runs for the whole buy. A start before
+    the buy's start is moved up to it (a buyer sending "now" on an ``asap``
+    buy is always a moment behind). A package may not outlast the buy.
+
+    Raises:
+        ValueError: The package ends after the buy, or does not end after it starts.
+    """
+    requested_start = _as_aware_utc(getattr(package, "start_time", None))
+    requested_end = _as_aware_utc(getattr(package, "end_time", None))
+    if requested_start is None and requested_end is None:
+        return None, None
+
+    iso_format = "%Y-%m-%dT%H:%M:%SZ"
+    start = max(requested_start or buy_start, buy_start)
+    end = requested_end or buy_end
+    label = f"package for product {getattr(package, 'product_id', None)}"
+    if end > buy_end:
+        raise ValueError(
+            f"Invalid package flight: {label} ends at {end.astimezone(UTC).strftime(iso_format)}, "
+            f"after the media buy ends ({buy_end.astimezone(UTC).strftime(iso_format)})."
+        )
+    if end <= start:
+        raise ValueError(
+            f"Invalid package flight: {label} must end ({end.astimezone(UTC).strftime(iso_format)}) "
+            f"after it starts ({start.astimezone(UTC).strftime(iso_format)})."
+        )
+    return start, end
+
+
+def _package_flight_config(package: Any, buy_start: datetime, buy_end: datetime) -> dict[str, str]:
+    """``package_config`` entries for a package's own flight (empty when it has none)."""
+    start, end = _own_package_flight(package, buy_start, buy_end)
+    if start is None or end is None:
+        return {}
+    return {"start_time": start.isoformat(), "end_time": end.isoformat()}
+
+
 def _creative_ids_for_packages(packages: list[MediaPackage]) -> set[str]:
     all_creative_ids: set[str] = set()
     for package in packages:
@@ -1620,6 +1697,8 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         budget=budget,
                         creative_ids=package_config.get("creative_ids"),
                         implementation_config=product_implementation_config,
+                        start_time=_as_aware_utc(package_config.get("start_time")),
+                        end_time=_as_aware_utc(package_config.get("end_time")),
                     )
                     packages.append(media_package)
 
@@ -3024,16 +3103,15 @@ async def _create_media_buy_impl(
                     error_msg = "Package must specify product_id."
                     raise ValueError(error_msg)
 
-            # Check for duplicate product_ids across packages
-            product_id_counts: dict[str, int] = {}
-            for package in req.packages:
-                if package.product_id:
-                    product_id_counts[package.product_id] = product_id_counts.get(package.product_id, 0) + 1
-
-            duplicate_products = [pid for pid, count in product_id_counts.items() if count > 1]
+            # A product may appear in several packages only when each has its own flight.
+            duplicate_products = _duplicate_product_ids(req.packages)
             if duplicate_products:
                 error_msg = f"Duplicate product_id(s) found in packages: {', '.join(duplicate_products)}. Each product can only be used once per media buy."
                 raise ValueError(error_msg)
+
+            # Reject a package flight that does not fit inside the buy before anything is saved.
+            for package in req.packages:
+                _own_package_flight(package, start_time, end_time)
 
         # 4. Currency-specific budget validation
         from decimal import Decimal
@@ -3719,6 +3797,7 @@ async def _create_media_buy_impl(
                                     ),  # Store impressions for display (legacy field)
                                 }
                             )
+                            package_config.update(_package_flight_config(req_pkg, start_time, end_time))
                             break
 
                     # Extract pricing fields for dual-write
@@ -4315,6 +4394,10 @@ async def _create_media_buy_impl(
                 Literal["guaranteed", "non_guaranteed"], delivery_type_str
             )
 
+            package_start_time, package_end_time = (
+                _own_package_flight(matching_package, start_time, end_time) if matching_package else (None, None)
+            )
+
             packages.append(
                 MediaPackage(
                     package_id=package_id,
@@ -4340,6 +4423,8 @@ async def _create_media_buy_impl(
                         _get_requested_creative_ids(matching_package) if matching_package else None
                     ),  # Include creative_ids from uploaded creatives
                     implementation_config=effective_configs.get(pkg_product.product_id),
+                    start_time=package_start_time,
+                    end_time=package_end_time,
                 )
             )
 
@@ -4649,6 +4734,8 @@ async def _create_media_buy_impl(
                         "pricing_info": pricing_info_for_package,  # Store pricing info for UI display
                         "impressions": impressions,  # Store impressions for display
                     }
+                    if request_pkg is not None:
+                        package_config.update(_package_flight_config(request_pkg, start_time, end_time))
 
                     # Extract pricing fields for dual-write from adapter response
                     from decimal import Decimal
